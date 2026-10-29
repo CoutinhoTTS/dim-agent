@@ -75,7 +75,12 @@ pub(crate) async fn import(
             let result=async {
                 let job=source.job(terminal,&id)?;let digest=fingerprint(&job)?;
                 let key=format!("migration/schedule/{}",fingerprint(&source_id)?);
-                if let Some(previous)=target.document(&key)? {return Ok(if previous["digest"]==digest {Outcome::AlreadyImported}else{Outcome::Conflict});}
+                if let Some(previous)=target.document(&key)? {
+                    if previous["digest"]!=digest {return Ok(Outcome::Conflict);}
+                    let document=target.settings("schedule",&owner.stopping).await?;
+                    let jobs=document["jobs"].as_array().ok_or_else(||Error::Object("Invalid native schedule document is preserved".into()))?;
+                    return Ok(if jobs.iter().any(|job|job["id"]==source_id) {Outcome::AlreadyImported}else{Outcome::Deleted});
+                }
                 let schedule=recurrence(&job)?;
                 if job.prompt.len()>32768 || job.prompt.is_empty()||job.name.is_empty()||job.cwd.is_empty(){return Err(Error::Object("Legacy schedule fields are invalid".into()));}
                 let mut native=json!({"id":source_id,"name":job.name,"schedule":schedule,"prompt":job.prompt,"cwd":job.cwd,"model":job.model,"mode":if job.session_mode=="new"{"create"}else{"reuse"},"max_run_minutes":60,"enabled":job.enabled,"policy_cap":{"preset":"read-only","allowedTools":[],"disallowedTools":[]},"created_by":"user","revision":1});

@@ -4,7 +4,10 @@ use crate::{
 };
 use dim_agent_capabilities::host::{AwsCredentials, ModelNetwork};
 use dim_app_server::{
-    model_catalog::{MAX_MODEL_TOKENS, ModelEntry, NewApiEndpoint},
+    model_catalog::{
+        BundledCatalog, MAX_MODEL_TOKENS, ModelEntry, ModelSource, ModelStatus, NewApiEndpoint,
+        ProviderProjection,
+    },
     provider::{CredentialAuthority, ModelPreferences, ProviderSecret, StaticAuth},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, types::ValueRef};
@@ -801,7 +804,13 @@ fn validate_static_record(
                         let valid = if name == "endpointType" {
                             serde_json::from_value::<Option<NewApiEndpoint>>(value.clone()).is_ok()
                         } else {
-                            serde_json::from_value::<Option<Vec<String>>>(value.clone()).is_ok()
+                            serde_json::from_value::<Option<Vec<String>>>(value.clone()).is_ok_and(
+                                |values| {
+                                    values.is_none_or(|values| {
+                                        values.iter().all(|value| !value.trim().is_empty())
+                                    })
+                                },
+                            )
                         };
                         if !valid {
                             return Err("Incompatible native route metadata".into());
@@ -916,6 +925,107 @@ fn omitted_fields(source: &SourceRow) -> Result<Vec<String>, String> {
     Ok(omitted)
 }
 
+fn chat_route(record: &StaticProviderRecord, model: &ModelEntry) -> bool {
+    if record.driver_kind != "new-api-router" {
+        return true;
+    }
+    let source = record
+        .models
+        .iter()
+        .chain(&record.user_models)
+        .find(|source| source.model_id == model.model_id)
+        .expect("selected model belongs to the imported provider");
+    let model = record
+        .model_config_overrides
+        .iter()
+        .find(|entry| entry.model_id == model.model_id)
+        .unwrap_or(source);
+    let chat = |endpoint: NewApiEndpoint| {
+        matches!(
+            endpoint,
+            NewApiEndpoint::Openai
+                | NewApiEndpoint::OpenaiResponse
+                | NewApiEndpoint::Anthropic
+                | NewApiEndpoint::Gemini
+        )
+    };
+    let field = |name: &str, alias: &str| {
+        model
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.raw.get(name).or_else(|| metadata.raw.get(alias)))
+    };
+    let explicit = record
+        .endpoint_overrides
+        .get(&model.model_id)
+        .copied()
+        .or_else(|| {
+            field("endpointType", "endpoint_type")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .or_else(|| record.endpoint_types.get(&model.model_id).copied())
+        });
+    if let Some(endpoint) = explicit {
+        return chat(endpoint);
+    }
+    let candidates = field("selectableEndpointTypes", "selectable_endpoint_types")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .or_else(|| {
+            field("supportedEndpointTypes", "supported_endpoint_types")
+                .and_then(Value::as_array)
+                .filter(|values| !values.is_empty())
+        })
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| serde_json::from_value::<NewApiEndpoint>(value.clone()).ok())
+                .fold(Vec::new(), |mut values, endpoint| {
+                    if !values.contains(&endpoint) {
+                        values.push(endpoint);
+                    }
+                    values
+                })
+        });
+    let hint = format!(
+        "{} {} {}",
+        model.model_id,
+        field("ownedBy", "owned_by")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        field("capabilityProviderId", "capability_provider_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    for (endpoint, words) in [
+        (NewApiEndpoint::Anthropic, &["anthropic", "claude"][..]),
+        (NewApiEndpoint::Gemini, &["google", "gemini"][..]),
+        (
+            NewApiEndpoint::OpenaiResponse,
+            &["response", "responses"][..],
+        ),
+    ] {
+        if candidates
+            .as_ref()
+            .is_none_or(|values| values.contains(&endpoint))
+            && hint
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| words.contains(&word))
+        {
+            return true;
+        }
+    }
+    if let Some(endpoint) =
+        field("type", "type").and_then(|value| serde_json::from_value(value.clone()).ok())
+    {
+        return chat(endpoint);
+    }
+    candidates.is_none_or(|values| {
+        values.iter().filter(|endpoint| chat(**endpoint)).count() == 1
+            || values.contains(&NewApiEndpoint::Openai)
+    })
+}
+
 pub(crate) async fn import(
     owner: &Migration,
     task: &TaskState,
@@ -927,6 +1037,8 @@ pub(crate) async fn import(
     }
     let snapshot = read_source(source.snapshot.clone(), &owner.stopping)
         .map_err(|_| Error::Object("Legacy provider schema is unsupported".into()))?;
+    let bundled = BundledCatalog::load().map_err(crate::native::failure)?;
+    let mut imported = HashSet::new();
     for (kind, rows) in [
         ("provider", snapshot.providers),
         ("selection", snapshot.selections),
@@ -1124,6 +1236,68 @@ pub(crate) async fn import(
                     let model = row.fields["modelId"].as_str().ok_or_else(|| {
                         Error::Object("Implicit model selection is retained in source".into())
                     })?;
+                    if !imported.contains(provider) {
+                        return Err(Error::Object(
+                            "Selected provider was not imported; selection retained in source"
+                                .into(),
+                        ));
+                    }
+                    let body: String = tx
+                        .query_row(
+                            "SELECT record FROM providers WHERE provider_id=?1",
+                            [provider],
+                            |r| r.get(0),
+                        )
+                        .map_err(crate::native::failure)?;
+                    let record: StaticProviderRecord =
+                        serde_json::from_str(&body).map_err(crate::native::failure)?;
+                    let models: Vec<_> = record
+                        .models
+                        .iter()
+                        .chain(&record.user_models)
+                        .cloned()
+                        .collect();
+                    let available = record.enabled
+                        && !record.disabled_model_ids.iter().any(|id| id == model)
+                        && models.iter().any(|source| source.model_id == model)
+                        && bundled
+                            .effective_models(
+                                &ProviderProjection {
+                                    provider_id: provider.into(),
+                                    source: Some(if record.kind == StaticRecordKind::Builtin {
+                                        ModelSource::Builtin
+                                    } else {
+                                        ModelSource::Custom
+                                    }),
+                                    models: models.clone(),
+                                    ..Default::default()
+                                },
+                                &models,
+                                &record.model_config_overrides,
+                            )
+                            .iter()
+                            .any(|entry| {
+                                entry.model_id == model
+                                    && entry.status != ModelStatus::Unavailable
+                                    && entry
+                                        .capabilities
+                                        .modalities
+                                        .iter()
+                                        .any(|kind| kind == "text")
+                                    && chat_route(&record, entry)
+                                    && (record.driver_kind == "new-api-router"
+                                        || entry
+                                            .metadata
+                                            .as_ref()
+                                            .and_then(|metadata| metadata.raw.get("type"))
+                                            .and_then(Value::as_str)
+                                            .is_none_or(|kind| kind == "chat"))
+                            });
+                    if !available {
+                        return Err(Error::Object(
+                            "Selected model is unavailable; selection retained in source".into(),
+                        ));
+                    }
                     tx.execute(
                         "INSERT INTO provider_selections VALUES (?1,1,?2,?3)",
                         params![scope, provider, model],
@@ -1143,6 +1317,10 @@ pub(crate) async fn import(
                 Err(Error::Object(reason)) => (Outcome::Unsupported, Some(reason)),
                 Err(e) => return Err(e),
             };
+            if kind == "provider" && matches!(outcome, Outcome::Imported | Outcome::AlreadyImported)
+            {
+                imported.insert(row.id.clone());
+            }
             owner
                 .ledger
                 .object(

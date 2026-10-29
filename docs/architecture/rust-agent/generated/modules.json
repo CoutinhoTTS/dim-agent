@@ -29606,12 +29606,25 @@
       "from": "dim_migration::providers",
       "to": "dim_app_server::model_catalog",
       "references": [
+        "path BundledCatalog::load",
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
+        "path ModelSource::Builtin",
+        "path ModelSource::Custom",
+        "path ModelStatus::Unavailable",
         "path NewApiEndpoint",
+        "path NewApiEndpoint::Anthropic",
+        "path NewApiEndpoint::Gemini",
+        "path NewApiEndpoint::Openai",
+        "path NewApiEndpoint::OpenaiResponse",
+        "path ProviderProjection",
+        "use dim_app_server::model_catalog::BundledCatalog",
         "use dim_app_server::model_catalog::MAX_MODEL_TOKENS",
         "use dim_app_server::model_catalog::ModelEntry",
-        "use dim_app_server::model_catalog::NewApiEndpoint"
+        "use dim_app_server::model_catalog::ModelSource",
+        "use dim_app_server::model_catalog::ModelStatus",
+        "use dim_app_server::model_catalog::NewApiEndpoint",
+        "use dim_app_server::model_catalog::ProviderProjection"
       ]
     },
     {
@@ -29711,6 +29724,7 @@
         "path Outcome::AlreadyImported",
         "path Outcome::Conflict",
         "path Outcome::Deferred",
+        "path Outcome::Deleted",
         "path Outcome::Failed",
         "path Outcome::Imported",
         "path Outcome::Unsupported",

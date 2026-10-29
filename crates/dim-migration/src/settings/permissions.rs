@@ -125,6 +125,13 @@ pub(super) async fn import(
         if prefix {
             words.pop();
         }
+        if words.iter().any(|word| word.contains('*')) {
+            return unsupported(
+                "permissions.json".into(),
+                "Legacy wildcard precedence has no equivalent native rule; no command rules are applied",
+            )
+            .await;
+        }
         patterns.push(Pattern {
             id: format!("permission.rule:{}", fingerprint(&raw)?),
             words,

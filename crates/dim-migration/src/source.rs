@@ -1,6 +1,6 @@
 use crate::{Error, Result};
 use dim_agent_capabilities::file_storage::{
-    DirectoryEntry, FilePath, FileStorage, FileStorageError,
+    DirectoryEntry, FileLease, FilePath, FileStorage, FileStorageError,
 };
 use dim_agent_types::{Message, MessageContent, MessagePart, ModelId, Role};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -98,6 +98,7 @@ pub(crate) struct Source {
     directory: FilePath,
     db: Mutex<Option<Connection>>,
     terminal: Mutex<Option<Connection>>,
+    _lease: FileLease,
 }
 
 #[derive(Deserialize)]
@@ -231,6 +232,23 @@ impl Source {
     ) -> Result<Self> {
         let target = files.root_path(target_root)?;
         let home = validate_source_home(&home, &target)?;
+        let lease = files
+            .lock(&files.path(target_root, "migration/snapshot-run")?, cancel)
+            .await?;
+        for entry in files
+            .list(&files.path(target_root, "migration/snapshots")?, cancel)
+            .await?
+        {
+            files
+                .remove(
+                    &files.path(
+                        target_root,
+                        Path::new("migration/snapshots").join(entry.name),
+                    )?,
+                    cancel,
+                )
+                .await?;
+        }
         let root = files.register_root(home.clone(), cancel).await?;
         let names: Vec<_> = ["dimcode.sqlite", "dimglobal.sqlite"]
             .into_iter()
@@ -397,6 +415,7 @@ impl Source {
                 directory: directory.clone(),
                 db: Mutex::new(Some(db)),
                 terminal: Mutex::new(terminal),
+                _lease: lease,
             })
         }
         .await;
@@ -557,37 +576,32 @@ impl Source {
         let mut context_error = None;
         let mut cursor = None;
         let mut summaries = Vec::new();
-        if let Some((anchor, segments)) = compaction.filter(|_| revert.is_none()) {
+        if let Some((anchor, segments)) = compaction {
             let segments: Vec<Segment> = serde_json::from_str(&segments)
                 .map_err(|_| Error::Object("Legacy compaction state is invalid".into()))?;
-            if let Some(anchor) = anchor {
-                match rows.iter().find(|row| row.0 == anchor) {
-                    Some(row) if revert.is_none_or(|cut| row.4.as_str() < cut) => {
-                        cursor = Some((row.4.clone(), row.0.clone()))
-                    }
-                    _ => {
-                        context_error = Some(
-                            "Legacy compaction cursor is absent or beyond the reverted boundary"
-                                .into(),
-                        )
-                    }
-                }
+            if segments.iter().any(|segment| {
+                !segment.raw_items.is_empty() || segment.summary == "[remote-compacted]"
+            }) {
+                return Err(Error::Deferred(
+                    "The current Provider input cannot replay legacy remote compaction items"
+                        .into(),
+                ));
             }
-            for segment in segments {
-                let covered = rows.iter().find(|row| row.0 == segment.end_message_id);
-                if covered.is_none_or(|row| revert.is_some_and(|cut| row.4.as_str() >= cut)) {
-                    context_error = Some(
-                        "Legacy summary coverage cannot be retained at the reverted boundary"
-                            .into(),
-                    );
+            if revert.is_none() {
+                if let Some(anchor) = anchor {
+                    match rows.iter().find(|row| row.0 == anchor) {
+                        Some(row) => cursor = Some((row.4.clone(), row.0.clone())),
+                        _ => context_error = Some("Legacy compaction cursor is absent".into()),
+                    }
                 }
-                if !segment.raw_items.is_empty() || segment.summary == "[remote-compacted]" {
-                    context_error = Some(
-                        "The current Provider input cannot replay legacy remote compaction items"
-                            .into(),
-                    );
-                } else if !segment.summary.is_empty() {
-                    summaries.push(segment.summary);
+                for segment in segments {
+                    let covered = rows.iter().find(|row| row.0 == segment.end_message_id);
+                    if covered.is_none() {
+                        context_error = Some("Legacy summary coverage cannot be retained".into());
+                    }
+                    if !segment.summary.is_empty() {
+                        summaries.push(segment.summary);
+                    }
                 }
             }
         }
@@ -1004,7 +1018,9 @@ impl Source {
                 };
                 self.files
                     .read_limited(
-                        &self.files.path(self.root, relative)?,
+                        &self.files.path(self.root, relative).map_err(|_| {
+                            Error::Object("Legacy attachment is outside its authorized root".into())
+                        })?,
                         16 * 1024 * 1024,
                         cancel,
                     )

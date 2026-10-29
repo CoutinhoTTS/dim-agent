@@ -444,6 +444,10 @@ impl Native {
         let mut config = SessionConfig {
             cwd: data.cwd.clone(),
             tools: None,
+            permission_policy: PermissionPolicy {
+                preset: PermissionPreset::WorkspaceWrite,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let profile: String = tx

@@ -1,5 +1,5 @@
 use crate::{
-    Error, Migration, ObjectResult, Outcome, Result, TaskState,
+    Migration, ObjectResult, Outcome, Result, TaskState,
     engine::{check, document},
     source::Source,
 };
@@ -77,10 +77,16 @@ pub(crate) async fn inspect(owner: &Migration, task: &TaskState, source: &Source
     }
     for entry in source.entries("data/plugins", &owner.stopping).await? {
         check(owner, &task.id).await?;
-        let plugin = entry
-            .name
-            .to_str()
-            .ok_or_else(|| Error::Object("Legacy plugin name is not UTF-8".into()))?;
+        let Some(plugin) = entry.name.to_str() else {
+            retained(
+                owner,
+                task,
+                "data/plugins".into(),
+                "Legacy plugin name is not UTF-8; source is preserved",
+            )
+            .await?;
+            continue;
+        };
         if entry.kind != EntryKind::Directory {
             retained(
                 owner,

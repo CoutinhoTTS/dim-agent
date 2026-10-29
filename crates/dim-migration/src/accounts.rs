@@ -78,11 +78,48 @@ pub(crate) async fn import(
                     })
                     || !tokens["expires"]
                         .as_u64()
-                        .is_some_and(|n| n <= dim_agent_types::JS_MAX_SAFE_INTEGER)
+                        .is_some_and(|n| n > 0 && n <= dim_agent_types::JS_MAX_SAFE_INTEGER)
                 {
                     return Err(Error::Object(
                         "Legacy OAuth tokens are invalid; source preserved".into(),
                     ));
+                }
+                if key == "nextApiOauth" {
+                    let http_url = |value: &Value| {
+                        value.as_str().is_some_and(|raw| {
+                            reqwest::Url::parse(raw).is_ok_and(|url| {
+                                matches!(url.scheme(), "http" | "https")
+                                    && url.username().is_empty()
+                                    && url.password().is_none()
+                                    && url.fragment().is_none_or(str::is_empty)
+                            })
+                        })
+                    };
+                    if !tokens["clientId"]
+                        .as_str()
+                        .is_some_and(|id| !id.trim().is_empty())
+                        || !["issuer", "tokenEndpoint", "relayBaseUrl"]
+                            .iter()
+                            .all(|key| http_url(&tokens[*key]))
+                        || [
+                            "authorizationEndpoint",
+                            "deviceAuthorizationEndpoint",
+                            "deviceTokenEndpoint",
+                        ]
+                        .iter()
+                        .any(|key| {
+                            tokens
+                                .get(*key)
+                                .is_some_and(|value| !value.is_null() && !http_url(value))
+                        })
+                        || tokens
+                            .get("scope")
+                            .is_some_and(|value| !matches!(value, Value::Null | Value::String(_)))
+                    {
+                        return Err(Error::Object(
+                            "Legacy Dim OAuth tokens are incompatible; source preserved".into(),
+                        ));
+                    }
                 }
                 let mut fields = Map::new();
                 fields.insert(key.into(), tokens.clone());

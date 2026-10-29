@@ -92,6 +92,10 @@ and inspection do not open that database. Disposal drains accepted work before
 exit. There is no persistent Migration selection or automatic trigger. Imported
 business configuration takes effect through normal feature loading.
 
+Open imported Global data with `dim --home ~/.dim`; the ordinary default home
+does not switch to Global. `dima` uses the same migration destinations, so pass
+`--home ~/.dimcode-alpha` explicitly to import into the alpha home instead.
+
 ```text
 $ ./dev migration
 Source: /Users/me/.dim/v2

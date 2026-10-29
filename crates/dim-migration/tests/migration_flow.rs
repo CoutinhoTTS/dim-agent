@@ -146,6 +146,155 @@ fn snapshot(home: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_retains_unsafe_objects_and_cleans_interrupted_snapshots() {
+    #[cfg(target_os = "linux")]
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let db = fixture(&source);
+    db.execute(
+        "UPDATE messages SET role='user' WHERE sessionId='broken'",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO session_blobs VALUES ('bad-ref','broken','text','../../outside','text/plain',1,NULL)", []).unwrap();
+    std::fs::write(source.join("permissions.json"), json!({"version":1,"execCommandPermissions":{"rules":{"git * --force":"deny","git *":"allow"}}}).to_string()).unwrap();
+    #[cfg(target_os = "linux")]
+    let plugin_dir = source
+        .join("data/plugins")
+        .join(OsString::from_vec(vec![0xff]));
+    #[cfg(target_os = "linux")]
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    let target = directory.path().join("target");
+    let stale = target.join("migration/snapshots/interrupted");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("legacy.sqlite"), b"private snapshot").unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let migration = root.get::<Migration>().unwrap();
+    migration.inspect(source.clone(), true).await.unwrap();
+    assert!(!stale.exists());
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("legacy.sqlite"), b"private snapshot").unwrap();
+    let before = snapshot(&source);
+    let report = migration.run(source.clone(), true, None).await.unwrap();
+    assert_eq!(report.task.status, TaskStatus::Partial, "{report:?}");
+    for (id, outcome) in [
+        ("permissions.json", Outcome::Unsupported),
+        ("broken", Outcome::Failed),
+        ("old", Outcome::Imported),
+    ] {
+        assert!(
+            report
+                .objects
+                .iter()
+                .any(|item| item.id == id && item.outcome == outcome),
+            "{report:?}"
+        );
+    }
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    assert_eq!(
+        native
+            .query_row(
+                "SELECT count(*) FROM settings_documents WHERE source='user/permission'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert!(!stale.exists());
+    assert_eq!(snapshot(&source), before);
+    #[cfg(target_os = "linux")]
+    {
+        assert!(plugin_dir.is_dir());
+        assert!(
+            report
+                .objects
+                .iter()
+                .any(|item| item.id == "data/plugins" && item.outcome == Outcome::Deferred),
+            "{report:?}"
+        );
+    }
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_validates_dim_account_tokens_before_writing_the_account_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    for field in [
+        "valid",
+        "clientId",
+        "issuer",
+        "tokenEndpoint",
+        "relayBaseUrl",
+        "authorizationEndpoint",
+        "deviceAuthorizationEndpoint",
+        "deviceTokenEndpoint",
+        "scope",
+        "expires",
+    ] {
+        let mut tokens = json!({"type":"oauth","access":"private-access","refresh":"private-refresh","expires":4102444800000u64,"clientId":"test-client","issuer":"https://auth.example.test","tokenEndpoint":"https://auth.example.test/token","relayBaseUrl":"https://api.example.test"});
+        match field {
+            "valid" => {}
+            "clientId" => {
+                tokens.as_object_mut().unwrap().remove(field);
+            }
+            "scope" => tokens[field] = json!(1),
+            "expires" => tokens[field] = json!(0),
+            _ => tokens[field] = json!("file:///private/invalid"),
+        }
+        std::fs::write(
+            source.join("auth.json"),
+            json!({"nextApiOauth":tokens}).to_string(),
+        )
+        .unwrap();
+        let before = snapshot(&source);
+        let target = directory.path().join(field);
+        std::fs::create_dir_all(&target).unwrap();
+        let root = rutis::Ctx::root().unwrap();
+        let plugin = root.plugin(MigrationPlugin::new(
+            target.clone(),
+            "rust".into(),
+            vec!["system".into()],
+        ));
+        (&plugin).await.unwrap();
+        let report = root
+            .get::<Migration>()
+            .unwrap()
+            .run(source.clone(), true, None)
+            .await
+            .unwrap();
+        let account = report
+            .objects
+            .iter()
+            .find(|item| item.kind == "account" && item.id == "dimcode-api-oauth")
+            .unwrap();
+        if field == "valid" {
+            assert_eq!(account.outcome, Outcome::Imported, "{report:?}");
+            let auth: Value =
+                serde_json::from_slice(&std::fs::read(target.join("auth.json")).unwrap()).unwrap();
+            assert_eq!(auth["nextApiOauth"], tokens);
+        } else {
+            assert_eq!(account.outcome, Outcome::Unsupported, "{field}: {report:?}");
+            assert!(!target.join("auth.json").exists());
+        }
+        assert_eq!(snapshot(&source), before);
+        plugin.dispose().await.unwrap();
+        root.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_keeps_large_images_as_files_without_rejecting_session_history() {
     use base64::Engine;
     use dim_agent_types::{ContextCompactionResult, MessageContent, MessagePart};
@@ -380,6 +529,10 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         .restore_session(id.clone())
         .await
         .expect("Native restore must accept imported data");
+    assert_eq!(
+        session.config().permission_policy.preset,
+        dim_agent_types::PermissionPreset::WorkspaceWrite
+    );
     client
         .rpc("session.attach", json!({"sessionId":id}))
         .await
@@ -499,6 +652,30 @@ async fn migration_defers_remote_compaction_without_sealing_a_future_incremental
     );
     drop(native);
     db.execute(
+        "UPDATE session_states SET settings=?1 WHERE sessionId='old'",
+        [json!({"__revertState__":{"anchorOrderKey":"b"}}).to_string()],
+    )
+    .unwrap();
+    let report = migration
+        .run(source.clone(), true, Some(report.task.id))
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|item| item.id == "old" && item.outcome == Outcome::Deferred),
+        "{report:?}"
+    );
+    assert_eq!(
+        Connection::open(target.join("rust/dimcode.sqlite"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM agent_sessions", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    db.execute(
         "UPDATE compaction_states SET compactionSegments=?1 WHERE sessionId='old'",
         [
             json!([{"endMessageId":"first","summary":"compatible summary","rawItems":[]}])
@@ -534,9 +711,30 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     let source = directory.path().join("source");
     let db = fixture(&source);
     db.execute_batch("CREATE TABLE providers (providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT, defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT, accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER, retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT, activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT, metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER); CREATE TABLE provider_selections (selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT, createdAt TEXT, updatedAt TEXT, version INTEGER);").unwrap();
-    let models = json!([{"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()}]);
-    db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,accountUsageSettings,models,modelsSource,metadata,enabled,version) VALUES ('legacy-provider','custom','Legacy','openai-responses','https://model.example/v1',?1,?2,?3,?4,'remote','{}',0,1)",params![json!({"type":"bearer"}).to_string(),json!({"type":"bearer","token":"private-provider-secret"}).to_string(),json!({"unsupported":"private-unused-secret"}).to_string(),models.to_string()]).unwrap();
+    let models = json!([
+        {"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()},
+        {"modelId":"disabled-model","displayName":"Disabled model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()},
+        {"modelId":"unavailable-model","displayName":"Unavailable model","status":"unavailable","capabilities":dim_agent_types::ModelCapabilities::default()}
+    ]);
+    db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,accountUsageSettings,models,modelsSource,metadata,enabled,version) VALUES ('legacy-provider','custom','Legacy','openai-responses','https://model.example/v1',?1,?2,?3,?4,'remote',?5,1,1)",params![json!({"type":"bearer"}).to_string(),json!({"type":"bearer","token":"private-provider-secret"}).to_string(),json!({"unsupported":"private-unused-secret"}).to_string(),models.to_string(),json!({"disabledModelIds":["disabled-model"]}).to_string()]).unwrap();
     db.execute("INSERT INTO provider_selections (selectionId,scope,providerId,modelId,version) VALUES ('chosen','global','legacy-provider','legacy-model',1)",[]).unwrap();
+    let router_models = json!([
+        {"modelId":"image-route","displayName":"Image route","status":"active","capabilities":dim_agent_types::ModelCapabilities::default(),"metadata":{"raw":{"endpointType":"image-generation"}}},
+        {"modelId":"ambiguous-route","displayName":"Ambiguous route","status":"active","capabilities":dim_agent_types::ModelCapabilities::default(),"metadata":{"raw":{"selectable_endpoint_types":["anthropic","gemini"]}}},
+        {"modelId":"claude-route","displayName":"Chat route","status":"active","capabilities":dim_agent_types::ModelCapabilities::default(),"metadata":{"raw":{"selectableEndpointTypes":["anthropic","gemini"]}}}
+    ]);
+    db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,metadata,enabled,version) SELECT 'router',source,displayName,'new-api-router',baseUrl,auth,credential,?1,modelsSource,'{}',enabled,version FROM providers WHERE providerId='legacy-provider'", [router_models.to_string()]).unwrap();
+    for (id, provider, model) in [
+        ("missing-provider", "openai-codex", "legacy-model"),
+        ("missing-model", "legacy-provider", "missing"),
+        ("disabled-model", "legacy-provider", "disabled-model"),
+        ("unavailable-model", "legacy-provider", "unavailable-model"),
+        ("image-route", "router", "image-route"),
+        ("ambiguous-route", "router", "ambiguous-route"),
+        ("router-valid", "router", "claude-route"),
+    ] {
+        db.execute("INSERT INTO provider_selections (selectionId,scope,cwd,providerId,modelId,version) VALUES (?1,'workspace',?2,?3,?4,1)",params![id,source.join(id).to_str().unwrap(),provider,model]).unwrap();
+    }
     let tokens = json!({"type":"oauth","refresh":"private-refresh","access":"private-access","expires":4102444800000u64,"issuer":"https://auth.openai.com","tokenEndpoint":"https://auth.openai.com/oauth/token","clientId":"app_EMoamEEZ73f0CkXaXp7hrann","scope":"openid profile email offline_access api.connectors.read api.connectors.invoke","relayBaseUrl":"https://chatgpt.com/backend-api/codex"});
     let digest = format!("{:x}", Sha256::digest(serde_jcs::to_vec(&tokens).unwrap()));
     std::fs::write(source.join("auth.json"),json!({"openaiCodex":tokens,"openaiCodexAccountState":{"schemaVersion":1,"generation":"0b6f9a52-7e4b-4a59-9d0c-9a0c1c2f7e11","credentialRevision":1,"tokenDigest":digest}}).to_string()).unwrap();
@@ -581,6 +779,21 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
         .unwrap();
     assert_eq!(provider.outcome, Outcome::Imported, "{report:?}");
     assert!(provider.omitted.contains(&"accountUsageSettings".into()));
+    for id in [
+        "missing-provider",
+        "missing-model",
+        "disabled-model",
+        "unavailable-model",
+        "image-route",
+        "ambiguous-route",
+    ] {
+        assert!(
+            report.objects.iter().any(|item| item.kind == "selection"
+                && item.id == id
+                && item.outcome == Outcome::Unsupported),
+            "{report:?}"
+        );
+    }
     assert!(
         report
             .objects
@@ -603,6 +816,14 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
             && !safe.contains("private-unused-secret")
     );
     let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    assert_eq!(
+        native
+            .query_row("SELECT count(*) FROM provider_selections", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        2,
+        "{report:?}"
+    );
     let schedule: String = native
         .query_row(
             "SELECT document FROM settings_documents WHERE source='user/schedule'",
@@ -613,6 +834,25 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     let schedule: Value = serde_json::from_str(&schedule).unwrap();
     assert_eq!(schedule["jobs"][0]["enabled"], false);
     assert_eq!(schedule["jobs"][0]["schedule"]["cron"], "15 9 * * *");
+    native
+        .execute(
+            "UPDATE settings_documents SET document=?1 WHERE source='user/schedule'",
+            [json!({"jobs":[],"max_concurrent_runs":4}).to_string()],
+        )
+        .unwrap();
+    let retried = migration
+        .run(source.clone(), true, Some(report.task.id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        retried
+            .objects
+            .iter()
+            .any(|item| item.kind == "scheduled_job"
+                && item.id == "legacy-desktop:paused"
+                && item.outcome == Outcome::Deleted),
+        "{retried:?}"
+    );
     let config: Value =
         serde_json::from_slice(&std::fs::read(target.join("config.json")).unwrap()).unwrap();
     assert!(config["locale"].is_null());
