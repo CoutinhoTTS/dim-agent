@@ -122,6 +122,13 @@ fn ran(mut result: ToolResult, command: &str, exit: Option<ExitStatus>) -> ToolR
     result
 }
 
+/// A call cancelled after its command started: the command ran and the tool
+/// stopped it, so the caller declares it with no exit status (session
+/// boundary A.6).
+fn cancelled_result() -> ToolResult {
+    ToolResult::error("Tool execution cancelled.")
+}
+
 fn object(value: Value) -> JsonObject {
     let Value::Object(map) = value else {
         unreachable!("literal object")
@@ -1281,7 +1288,6 @@ async fn run_process(
     timeout: Option<u64>,
     cancel: CancellationToken,
 ) -> Result<(ToolResult, Option<ExitStatus>), HostError> {
-    let cancelled = || HostError::Cancelled("Tool execution cancelled.".into());
     tree.hold(temporary);
     let output = Arc::new(Output {
         capture: Mutex::new(Capture {
@@ -1316,7 +1322,7 @@ async fn run_process(
         if let Err(result) = process.abandon().await {
             return Ok((*result, None));
         }
-        return Err(cancelled());
+        return Ok((cancelled_result(), None));
     }
     if background {
         return hand_off(branch, call, context, request, process, true, &cancel).await;
@@ -1341,7 +1347,10 @@ async fn run_process(
             if let Some(failure) = &settled.failure {
                 return Ok((offload_failed(failure), None));
             }
-            return Err(HostError::Cancelled(settled_content(&settled, Some("Command cancelled."))));
+            return Ok((
+                ToolResult::error(settled_content(&settled, Some("Command cancelled."))),
+                None,
+            ));
         }
         _ = handoff => None,
     };
@@ -1483,7 +1492,7 @@ async fn hand_off(
         if let Err(result) = process.abandon().await {
             return Ok((*result, None));
         }
-        return Err(HostError::Cancelled("Tool execution cancelled.".into()));
+        return Ok((cancelled_result(), None));
     }
     let background = match branch.service::<BackgroundExec>() {
         Ok(background) => background,
