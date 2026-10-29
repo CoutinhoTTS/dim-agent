@@ -1,4 +1,4 @@
-use dim_agent_runtime::{AgentError, Result};
+use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
@@ -434,8 +434,11 @@ impl SqliteStorage {
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
             match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
                 Ok(result) => result,
-                Err(_) => {
-                    let failure = storage("SQLite operation panicked");
+                Err(panic) => {
+                    let failure = storage(format!(
+                        "SQLite operation panicked: {}",
+                        panic_message(panic)
+                    ));
                     if !connection.is_autocommit()
                         && let Err(cleanup) = connection.execute_batch("ROLLBACK")
                     {

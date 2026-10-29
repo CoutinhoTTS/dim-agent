@@ -263,7 +263,7 @@ async fn panicking_before_keeps_the_original_fact_and_the_branch_usable() {
         vec![],
         store,
     );
-    let hook = timeline
+    let _hook = timeline
         .before(&ctx, "panicking-before", &["input/message"], |_| {
             panic!("injected before panic")
         })
@@ -275,8 +275,13 @@ async fn panicking_before_keeps_the_original_fact_and_the_branch_usable() {
         serde_json::to_value(original.kind).unwrap()
     );
     assert_eq!(first.sequence, 1);
-    drop(hook);
-    assert_eq!(timeline.append(input("after panic")).unwrap().sequence, 2);
+    let next = input("after panic");
+    let second = timeline.append(next.clone()).unwrap();
+    assert_eq!(second.sequence, 2);
+    assert_eq!(
+        serde_json::to_value(second.kind.clone()).unwrap(),
+        serde_json::to_value(next.kind).unwrap()
+    );
     assert_eq!(timeline.local(..).await.unwrap().len(), 2);
     dim_agent_runtime::core::close_timeline(&timeline)
         .await

@@ -20423,7 +20423,8 @@
         "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
-        "use dim_agent_runtime::Result"
+        "use dim_agent_runtime::Result",
+        "use dim_agent_runtime::panic_message"
       ]
     },
     {
@@ -20476,7 +20477,8 @@
         "path AgentError::InvalidInput",
         "path Result",
         "use dim_agent_runtime::AgentError",
-        "use dim_agent_runtime::Result"
+        "use dim_agent_runtime::Result",
+        "use dim_agent_runtime::panic_message"
       ]
     },
     {

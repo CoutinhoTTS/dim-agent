@@ -11,7 +11,7 @@ use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineStore, TimelineTrace,
+    StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
@@ -38,13 +38,15 @@ struct Pending {
     key: TimelineKey,
     events: Vec<StoredEvent>,
     publish: Option<PublishCallback>,
+    #[cfg(test)]
+    fault: Option<fn(&str)>,
 }
 impl Pending {
     fn publish(&mut self, result: Result<()>) {
         if let Some(publish) = self.publish.take()
-            && catch_unwind(AssertUnwindSafe(|| publish(result))).is_err()
+            && let Err(panic) = catch_unwind(AssertUnwindSafe(|| publish(result)))
         {
-            tracing::error!("Timeline publication callback panicked");
+            tracing::error!(session_id = %self.key.session_id, branch_id = %self.key.branch_id, panic = %panic_message(panic), "Timeline publication callback panicked");
         }
     }
 }
@@ -62,6 +64,8 @@ enum Command {
     Rollback {
         session_id: String,
         done: tokio::sync::oneshot::Sender<Result<()>>,
+        #[cfg(test)]
+        fault: Option<fn()>,
     },
     Close,
     #[cfg(test)]
@@ -165,12 +169,15 @@ impl SqliteTimelineStore {
     #[cfg(feature = "testing")]
     pub fn writer_memo_requests(&self, session: &str) -> usize {
         self.memo.as_ref().map_or(0, |memo| {
-            memo.lock().unwrap().get(session).map_or(0, |branches| {
-                branches
-                    .values()
-                    .filter(|entry| entry.request.strong_count() > 0)
-                    .count()
-            })
+            memo.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(session)
+                .map_or(0, |branches| {
+                    branches
+                        .values()
+                        .filter(|entry| entry.request.strong_count() > 0)
+                        .count()
+                })
         })
     }
     fn start(
@@ -208,14 +215,26 @@ impl SqliteTimelineStore {
                 };
                 let first = match command {
                     Command::Append(first) => first,
-                    Command::Rollback { session_id, done } => {
+                    Command::Rollback {
+                        session_id,
+                        done,
+                        #[cfg(test)]
+                        fault,
+                    } => {
                         let Some(store) = weak.upgrade() else { break };
-                        let _ = done.send(store.rollback_creation(&session_id));
+                        let result = writer_operation(|| {
+                            store.rollback_creation(
+                                &session_id,
+                                #[cfg(test)]
+                                fault,
+                            )
+                        });
+                        let _ = done.send(result);
                         continue;
                     }
                     Command::Close => break,
                     #[cfg(test)]
-                    Command::Panic => panic!("injected Timeline writer panic"),
+                    Command::Panic => panic!("injected unexpected Timeline writer exit"),
                 };
                 let outputs = |batch: &Pending| {
                     batch
@@ -285,7 +304,7 @@ impl SqliteTimelineStore {
             let failure = self
                 .admission
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .failures
                 .get(&batch.key.session_id)
                 .cloned();
@@ -300,7 +319,7 @@ impl SqliteTimelineStore {
         }
         let mut prepared = BTreeMap::new();
         for (session, batches) in sessions {
-            match self.prepare(&session, &batches) {
+            match writer_operation(|| self.prepare(&session, &batches)) {
                 Ok(encoding) => {
                     prepared.insert(session, (batches, encoding));
                 }
@@ -314,10 +333,12 @@ impl SqliteTimelineStore {
             self.commit_prepared(prepared);
         }
         if let Some(memo) = &self.memo {
-            memo.lock().unwrap().retain(|_, branches| {
-                branches.retain(|_, entry| entry.request.strong_count() > 0);
-                !branches.is_empty()
-            });
+            memo.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, branches| {
+                    branches.retain(|_, entry| entry.request.strong_count() > 0);
+                    !branches.is_empty()
+                });
         }
     }
     fn commit_prepared(&self, prepared: BTreeMap<String, (Vec<Pending>, Prepared)>) {
@@ -352,7 +373,7 @@ impl SqliteTimelineStore {
             let existing = self
                 .admission
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .failures
                 .get(&session)
                 .cloned();
@@ -376,7 +397,7 @@ impl SqliteTimelineStore {
                     self.forget(&session);
                     self.admission
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .failures
                         .insert(session, failure.clone());
                 }
@@ -396,7 +417,7 @@ impl SqliteTimelineStore {
         self.forget(&session);
         self.admission
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .failures
             .insert(session, failure.clone());
         for mut batch in batches {
@@ -406,7 +427,9 @@ impl SqliteTimelineStore {
     /// Records the last request of each branch a commit wrote.
     fn remember(&self, session: &str, encoding: Prepared) {
         let Some(memo) = &self.memo else { return };
-        let mut memo = memo.lock().unwrap();
+        let mut memo = memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let branches = memo.entry(session.to_owned()).or_default();
         for (branch, (sequence, request, refs)) in encoding.last {
             branches.insert(
@@ -421,7 +444,9 @@ impl SqliteTimelineStore {
     }
     fn forget(&self, session: &str) {
         if let Some(memo) = &self.memo {
-            memo.lock().unwrap().remove(session);
+            memo.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(session);
         }
     }
     /// Runs `step` with `reader` in connection holds of at most
@@ -461,6 +486,10 @@ impl SqliteTimelineStore {
         };
         let result = (|| {
             for batch in batches {
+                #[cfg(test)]
+                if let Some(fault) = batch.fault {
+                    fault("prepare");
+                }
                 let branch = &batch.key.branch_id;
                 let mut lists = Vec::with_capacity(batch.events.len());
                 for record in &batch.events {
@@ -679,7 +708,7 @@ impl SqliteTimelineStore {
             }
         }
     }
-    fn rollback_creation(&self, session_id: &str) -> Result<()> {
+    fn rollback_creation(&self, session_id: &str, #[cfg(test)] fault: Option<fn()>) -> Result<()> {
         self.forget(session_id);
         let mut guard = self
             .db
@@ -709,11 +738,19 @@ impl SqliteTimelineStore {
             )
             .map_err(error)?;
         }
+        #[cfg(test)]
+        if let Some(fault) = fault {
+            fault();
+        }
         tx.commit().map_err(error)?;
         if released > 0 {
             self.sweep_files.notify_one();
         }
-        self.admission.lock().unwrap().failures.remove(session_id);
+        self.admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failures
+            .remove(session_id);
         Ok(())
     }
     pub async fn close(self: &Arc<Self>) -> Result<()> {
@@ -722,7 +759,10 @@ impl SqliteTimelineStore {
             closing
                 .get_or_insert_with(|| {
                     let (sender, receiver) = tokio::sync::watch::channel(None);
-                    let mut admission = self.admission.lock().unwrap();
+                    let mut admission = self
+                        .admission
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     admission.closed = true;
                     let requested = admission.sender.send(Command::Close).map_err(error);
                     let worker = self.worker.lock().unwrap().take();
@@ -1232,32 +1272,41 @@ fn insert_branch(connection: &Connection, session: &str, info: &BranchRecord) ->
         .map_err(error)?;
     Ok(())
 }
+fn writer_operation<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    catch_unwind(AssertUnwindSafe(operation)).unwrap_or_else(|panic| {
+        Err(error(format!(
+            "Timeline writer operation panicked: {}",
+            panic_message(panic)
+        )))
+    })
+}
 /// Writes each Session's prepared content rows, then its batches.
 fn transaction<'a>(
     connection: &mut Connection,
     path: &std::path::Path,
     mut sessions: impl Iterator<Item = (&'a [Pending], &'a Prepared)>,
 ) -> Result<()> {
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|failure| {
+    writer_operation(|| {
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|failure| {
         tracing::error!(db_path = %path.display(), adapter = "rust", phase = "BEGIN", pid = std::process::id(), sqlite_code = ?failure.sqlite_error_code(), %failure, "storage.transaction");
         error(failure)
     })?;
-    let written = sessions.try_for_each(|(batches, prepared)| {
-        let mut insert = tx
-            .prepare_cached("INSERT OR IGNORE INTO timeline_content VALUES (?1, ?2, ?3, ?4)")
-            .map_err(error)?;
-        let session = &batches[0].key.session_id;
-        for row in &prepared.content {
-            insert
-                .execute(params![session, row.hash, row.kind, row.body])
+        let written = sessions.try_for_each(|(batches, prepared)| {
+            let mut insert = tx
+                .prepare_cached("INSERT OR IGNORE INTO timeline_content VALUES (?1, ?2, ?3, ?4)")
                 .map_err(error)?;
-        }
-        batches
-            .iter()
-            .zip(&prepared.lists)
-            .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists))
-    });
-    match written {
+            let session = &batches[0].key.session_id;
+            for row in &prepared.content {
+                insert
+                    .execute(params![session, row.hash, row.kind, row.body])
+                    .map_err(error)?;
+            }
+            batches
+                .iter()
+                .zip(&prepared.lists)
+                .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists))
+        });
+        match written {
         Ok(()) => tx.commit().map_err(|failure| {
             tracing::error!(db_path = %path.display(), adapter = "rust", phase = "COMMIT", pid = std::process::id(), sqlite_code = ?failure.sqlite_error_code(), %failure, "storage.transaction");
             error(failure)
@@ -1271,6 +1320,7 @@ fn transaction<'a>(
             Err(failure)
         }
     }
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1324,6 +1374,10 @@ fn write_batch(
     batch: &Pending,
     lists: &[Vec<Option<ListReferences>>],
 ) -> Result<()> {
+    #[cfg(test)]
+    if let Some(fault) = batch.fault {
+        fault("write");
+    }
     let mut sequence = head(connection, &batch.key)?;
     for (record, lists) in batch.events.iter().zip(lists) {
         if record.event.sequence != sequence + 1 {
@@ -1739,7 +1793,10 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             let (done, wait) = tokio::sync::oneshot::channel();
             {
-                let admission = self.admission.lock().unwrap();
+                let admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if admission.closed {
                     return Err(error("Timeline storage is closed"));
                 }
@@ -1748,6 +1805,8 @@ impl TimelineStore for SqliteTimelineStore {
                     .send(Command::Rollback {
                         session_id: session_id.into(),
                         done,
+                        #[cfg(test)]
+                        fault: None,
                     })
                     .map_err(error)?;
             }
@@ -1797,7 +1856,10 @@ impl TimelineStore for SqliteTimelineStore {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()> {
-        let admission = self.admission.lock().unwrap();
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if admission.closed {
             return Err(error("Timeline storage is closed"));
         }
@@ -1808,8 +1870,9 @@ impl TimelineStore for SqliteTimelineStore {
             key,
             events,
             publish: Some(publish),
+            #[cfg(test)]
+            fault: None,
         }));
-        drop(admission);
         requested.map_err(|failure| {
             if let Command::Append(mut pending) = failure.0 {
                 pending.publish.take();
@@ -2189,10 +2252,10 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
             connection.execute_batch("BEGIN IMMEDIATE; INSERT INTO settings_documents VALUES ('panic',1,'{}','test')").unwrap();
             panic!("injected SQLite operation panic");
         }).await;
-        assert!(matches!(failed, Err(AgentError::Storage(message)) if message.contains("SQLite operation panicked")));
+        assert!(matches!(failed, Err(AgentError::Storage(message)) if message.contains("SQLite operation panicked: injected SQLite operation panic")));
         assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM settings_documents", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 0);
         let store = SqliteTimelineStore::new(db.clone());
-        for session in ["healthy", "first", "failed", "queued"] {
+        for session in ["healthy", "prepare", "write", "rollback"] {
             store.create_session(session, &SessionConfig::default()).await.unwrap();
         }
         let key = |session: &str| TimelineKey { session_id: session.into(), branch_id: "main".into() };
@@ -2216,11 +2279,63 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
         publication.await.unwrap().unwrap();
         assert_eq!(store.head(&key("healthy")).await.unwrap(), 2);
 
+        for (index, phase) in ["prepare", "write"].into_iter().enumerate() {
+            let (failed, failure) = tokio::sync::oneshot::channel();
+            let (healthy, publication) = tokio::sync::oneshot::channel();
+            let fault: fn(&str) = if phase == "prepare" {
+                |phase| { if phase == "prepare" { panic!("injected preparation panic"); } }
+            } else {
+                |phase| { if phase == "write" { panic!("injected transaction panic"); } }
+            };
+            {
+                let _connection = db.connection.lock().unwrap();
+                let (done, _) = tokio::sync::oneshot::channel();
+                let admission = store.admission.lock().unwrap();
+                admission.sender.send(Command::Rollback { session_id: "barrier".into(), done, fault: None }).unwrap();
+                admission.sender.send(Command::Append(Pending {
+                    key: key(phase), events: vec![record(1)],
+                    publish: Some(Box::new(move |result| { let _ = failed.send(result); })),
+                    fault: Some(fault),
+                })).unwrap();
+                drop(admission);
+                store.append(key("healthy"), vec![record(index as u64 + 3)], Box::new(move |result| { let _ = healthy.send(result); })).unwrap();
+            }
+            let failure = failure.await.unwrap().unwrap_err();
+            assert!(matches!(failure, AgentError::Storage(message) if message.contains("injected") && message.contains("panic")));
+            publication.await.unwrap().unwrap();
+            assert_eq!(store.head(&key(phase)).await.unwrap(), 0, "a panicking write must leave no durable prefix");
+            assert_eq!(store.head(&key("healthy")).await.unwrap(), index as u64 + 3);
+            let (unexpected, unaccepted) = tokio::sync::oneshot::channel();
+            assert!(store.append(key(phase), vec![record(1)], Box::new(move |_| { let _ = unexpected.send(()); })).is_err());
+            assert!(unaccepted.await.is_err(), "a rejected append must not invoke its callback");
+        }
+        let (done, rollback) = tokio::sync::oneshot::channel();
+        store.admission.lock().unwrap().sender.send(Command::Rollback {
+            session_id: "rollback".into(), done,
+            fault: Some(|| panic!("injected rollback panic")),
+        }).unwrap();
+        assert!(matches!(rollback.await.unwrap(), Err(AgentError::Storage(message)) if message.contains("injected rollback panic")));
+        assert!(store.session_config("rollback").await.unwrap().is_some());
+        let (recovered, publication) = tokio::sync::oneshot::channel();
+        store.append(key("rollback"), vec![record(1)], Box::new(move |result| { let _ = recovered.send(result); })).unwrap();
+        publication.await.unwrap().unwrap();
+        store.rollback_session("rollback").await.unwrap();
+        assert!(store.session_config("rollback").await.unwrap().is_none());
+        let (healthy, publication) = tokio::sync::oneshot::channel();
+        store.append(key("healthy"), vec![record(5)], Box::new(move |result| { let _ = healthy.send(result); })).unwrap();
+        publication.await.unwrap().unwrap();
+        assert_eq!(store.head(&key("healthy")).await.unwrap(), 5);
+        store.close().await.unwrap();
+        assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM timeline_events", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 5);
+        let store = SqliteTimelineStore::new(db.clone());
+        for session in ["first", "failed", "queued"] {
+            store.create_session(session, &SessionConfig::default()).await.unwrap();
+        }
         let timeline = Timeline::new(Ctx::root().unwrap(), key("failed"), vec![], store.clone());
         let (first, committed) = tokio::sync::oneshot::channel();
         let (queued, rejected) = tokio::sync::oneshot::channel();
         {
-            let _connection = db.connection.lock().unwrap();
+            let _connection = db.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             store.append(key("first"), vec![record(1)], Box::new(move |result| { let _ = first.send(result); })).unwrap();
             assert!(store.admission.lock().unwrap().sender.send(Command::Panic).is_ok());
             timeline.append(EventDraft::new(EventKind::InputMessage(InputMessageData::text("pending", None)))).unwrap();
@@ -2233,7 +2348,7 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
         assert!(store.append(key("queued"), vec![record(1)], Box::new(move |_| { let _ = unexpected.send(()); })).is_err());
         assert!(unaccepted.await.is_err(), "a rejected append must not invoke its callback");
         assert!(store.close().await.is_err());
-        assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM timeline_events", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 3);
+        assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM timeline_events", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 6);
         db.close().await.unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }).await.expect("panic recovery and close must not hang");
