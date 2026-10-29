@@ -414,12 +414,12 @@ ProjectionCheckpoint = {
 - **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为 `CHECK (version = 22)`。
   - 每个 Session 至多一行，从创建起与 `agent_sessions` 一一对应；写入、回滚与删除见下面的规则。
   - `updated_at_ms` 是该 Session `main` 上最后一次提交的最后一个事件的 `create_at`。
-  - `preview` 是该 Session `main` 上前 256 个事件里第一条带用户部分的 `input/message` 的文字：各文本块以换行连接，超过 120 个字符时截到 120 个字符并以 `…` 结尾。该消息的文字为空（例如只有图片）时为 NULL，之后的消息不再填它；前 256 个事件里没有这样的消息时也为 NULL。决定一旦做出，包括决定为 NULL，就不再改变。
+  - `preview` 是窗口里第一条带用户部分的 `input/message` 的文字：各文本块以换行连接，超过 120 个字符时截到 120 个字符并以 `…` 结尾。窗口是 `main` 上起始于前 256 个事件内的各个批次，与今天的读取一样按批次完整——承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。该消息的文字为空（例如只有图片）时为 NULL，之后的消息不再填它；窗口里没有这样的消息时也为 NULL。决定一旦做出，包括决定为 NULL，就不再改变。
   - `cwd` 是 `agent_sessions.config` 的工作目录。目录查询按工作区过滤并回复它，所以不必为每个 Session 解码配置 JSON。
   - `session_catalog_by_activity` 服务按活动时间的键集分页；`session_catalog_with_preview` 服务只要非空预览的读取，因此前面有多少没有预览的行都不影响那条读取的代价。
 - **创建即写行**：`session.create` 在写 `agent_sessions` 的同一事务里写下这一行：`updated_at_ms` 为 `created_at_ms`，`preview` 为 NULL，`cwd` 取自创建的配置。因此新 Session 从创建那一刻起就按目录列出，与今天的 `session.summaries` 相同：创建时间、没有预览。
-- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。`updated_at_ms` 跟着批次走；`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息的 `main` 序号在前 256 个事件内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件，读取不超过 256 个事件，且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
-- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内按它复制的事件写新行，写出的值与按同一规则回填这些事件相同：`updated_at_ms` 是被复制的最后一个事件的 `create_at`，`preview` 是被复制事件（同样限于前 256 个事件）里第一条用户输入的文字或 NULL，在 `0` 处分叉时为创建时间与 NULL。
+- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。`updated_at_ms` 跟着批次走；`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息在上面按批次完整的窗口内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件——读取的批次止于第 256 个事件所在的批次，本批次不足 256 个事件时止于本批次——且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
+- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内写新行，与按 F 的事件回填逐列相同：`updated_at_ms` 是该事务写入的最后一个事件的 `create_at`——`0` 以外的分叉就是 `at + 1` 处那条 `session/forked`，其 `create_at` 是分叉当时的时刻；`0` 处分叉不写事件，取创建时间——`preview` 是同一按批次完整的窗口里第一条用户输入的文字或 NULL，`0` 处分叉为 NULL。
 - **不记分类**：本步不记录子 Session 或创建来源。[#557](https://github.com/arcships/dim/issues/557) 的分类字段连同它自己的格式决定一起加入，与上文不记分叉来源相同。
 - **不能留在 v21**：启动要求精确的 SQL 结构，v21 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
 - **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
@@ -428,17 +428,17 @@ ProjectionCheckpoint = {
   - 标记相符的 v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为 v22。
   - 恰为 v22 的库直接打开。
   - 其他库（标记不符的 v21 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
-- **回填的一次性代价**：回填为每个 Session 读一次 `main`：最后一个已提交批次给出 `updated_at_ms`，从起点起的前 256 个事件里找第一条用户输入作为 `preview`。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。
+- **回填的一次性代价**：回填为每个 Session 读一次 `main`：最后一个已提交批次给出 `updated_at_ms`，起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`；没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL 预览，与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。
 - **单向**：不做备份，与之前各步相同。旧守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝升级后的库。
 - **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：
-  - 用 v21 结构和完整记录示例构建一次性 v21 库，升级后核对结构恰为 v22、标记为 22、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致。
+  - 用 v21 结构和完整记录示例构建一次性 v21 库，升级后核对结构恰为 v22、标记为 22、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致，没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL。
   - v20、v19、v18、v17、v16、v15、v13 库一次升级到 v22。
   - 标记不符或升级到一半的结构被拒绝并保留。
   - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最后一个事件走，`preview` 不被覆盖。
-  - 预览的上限与最终性：第一条用户消息在 256 个 `main` 事件之后才到达的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
+  - 预览的窗口与最终性：承载第 256 个事件的批次里紧接 256 之后的用户输入升级后即为预览；第一条用户消息在起始于 256 之后的批次里的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
   - `session.create` 写下的一行有创建时间与 NULL 预览，创建回滚后没有这一行。
-  - 删除与分叉在各自的事务内维护这一行，`0` 处分叉的一行为创建时间与 NULL。
+  - 删除与分叉在各自的事务内维护这一行；非零处分叉的一行以该事务最后写入的 `session/forked` 的 `create_at` 为 `updated_at_ms`，`0` 处分叉的一行为创建时间与 NULL。
   - `withPreview` 的读取按 `EXPLAIN QUERY PLAN` 使用 `session_catalog_with_preview`，前面有多少无预览的行都不改变它的代价。
   - 从不打开用户已有的库。
 
