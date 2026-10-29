@@ -377,6 +377,10 @@ pub struct Options {
     /// Skills' factory configuration: the text replacing the built-in
     /// instructions.
     pub instructions: Option<Arc<str>>,
+    /// Register the Skills parts in the profile without installing the
+    /// capability, as a host whose profile takes them by name does: the
+    /// catalog plugin registers them either way.
+    pub require_without_install: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -388,6 +392,7 @@ impl Default for Options {
             hold: None,
             probe: None,
             instructions: None,
+            require_without_install: false,
         }
     }
 }
@@ -428,7 +433,11 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(move || today.lock().unwrap().clone()),
         std::time::Duration::from_millis(10),
     );
-    if let Some(instructions) = options.instructions {
+    if options.require_without_install {
+        for part in ["Skills", "SkillsBranch"] {
+            builder.require_part(part);
+        }
+    } else if let Some(instructions) = options.instructions {
         skills::install_with_config(
             &mut builder,
             skills::SkillsConfig {

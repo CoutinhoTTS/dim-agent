@@ -87,6 +87,10 @@ pub fn install(builder: &mut AgentBuilder) {
 /// sets none, so the built-in descriptions stay in force.
 pub fn install_with_config(builder: &mut AgentBuilder, config: CollaborationConfig) {
     crate::register_names(builder.catalog_mut());
+    dim_agent_runtime::names::register::<CollaborationConfig>(
+        builder.catalog_mut(),
+        Some(dim_agent_runtime::SESSION_GROUP),
+    );
     builder.session_value(Arc::new(config));
     builder
         .require_part("CollaborationSession")
@@ -2367,11 +2371,12 @@ struct CollaborationSessionPlugin {
     tools: Key<ToolRegistry>,
     guide: Key<GuideEntries>,
     service: Key<CollaborationSession>,
-    /// The assembly's [`CollaborationConfig`]. Absent when the assembly was
-    /// served without [`install`]: `serve` registers the parts for every
-    /// assembly, while only the install calls provide this value; the
-    /// built-in descriptions are in force then.
-    factory: Key<CollaborationConfig>,
+    /// The assembly's [`CollaborationConfig`], when the assembly installed
+    /// the capability: [`install_with_config`] registers the name and
+    /// provides the value. `serve` registers the parts for every assembly,
+    /// so a profile that requires them without an install has no name to
+    /// declare and keeps the built-in descriptions.
+    factory: Option<Key<CollaborationConfig>>,
 }
 impl CollaborationSessionPlugin {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -2384,7 +2389,10 @@ impl CollaborationSessionPlugin {
             tools: names.key()?,
             guide: names.key()?,
             service: names.key()?,
-            factory: names.key()?,
+            factory: names
+                .registered::<CollaborationConfig>()
+                .then(|| names.key::<CollaborationConfig>())
+                .transpose()?,
         })
     }
 }
@@ -2393,7 +2401,7 @@ impl DynPlugin for CollaborationSessionPlugin {
         "CollaborationSession"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
+        let mut keys = vec![
             self.collaboration.erase(),
             self.identity.erase(),
             self.config.erase(),
@@ -2401,8 +2409,9 @@ impl DynPlugin for CollaborationSessionPlugin {
             self.lifecycle.erase(),
             self.tools.erase(),
             self.guide.erase(),
-            self.factory.erase(),
-        ]
+        ];
+        keys.extend(self.factory.iter().map(Key::erase));
+        keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -2413,7 +2422,10 @@ impl DynPlugin for CollaborationSessionPlugin {
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let tools = ctx.require_at(&self.tools)?;
             let guide = ctx.require_at(&self.guide)?;
-            let factory = ctx.get_at(&self.factory).unwrap_or_default();
+            let factory: Arc<CollaborationConfig> = match &self.factory {
+                Some(key) => ctx.require_at(key)?,
+                None => Arc::default(),
+            };
             for (marker, order, text) in [
                 ("dim-agent-report", 20, AGENT_REPORT_ENTRY),
                 ("dim-agent-message", 30, AGENT_MESSAGE_ENTRY),

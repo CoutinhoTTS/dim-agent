@@ -6115,8 +6115,7 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::skills",
       "references": [
-        "mod skills",
-        "path skills::SkillsConfig"
+        "mod skills"
       ]
     },
     {
@@ -9727,6 +9726,13 @@
     },
     {
       "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities",
+      "references": [
+        "path crate::register_names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path crate::context_block::text"
@@ -9786,7 +9792,15 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
+        "path dim_agent_runtime::SESSION_GROUP",
         "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::register"
       ]
     },
     {
@@ -13722,7 +13736,6 @@
         "mod collaboration",
         "path CollaborationPlugin::new",
         "path collaboration::Collaboration",
-        "path collaboration::CollaborationConfig",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
         "path collaboration::CollaborationSession",
@@ -15262,6 +15275,7 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
+        "path dim_agent_runtime::SESSION_GROUP",
         "use dim_agent_runtime::AgentBuilder"
       ]
     },
@@ -15325,6 +15339,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
+        "path dim_agent_runtime::names::register",
         "use dim_agent_runtime::Names"
       ]
     },

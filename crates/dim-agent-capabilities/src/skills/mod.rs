@@ -41,6 +41,11 @@ pub fn install(builder: &mut AgentBuilder) {
 /// registers deliver the configured instructions instead of the built-in
 /// text.
 pub fn install_with_config(builder: &mut AgentBuilder, config: SkillsConfig) {
+    crate::register_names(builder);
+    dim_agent_runtime::names::register::<SkillsConfig>(
+        builder.catalog_mut(),
+        Some(dim_agent_runtime::SESSION_GROUP),
+    );
     builder.session_value(Arc::new(config));
     builder.session_extension_part::<content::ContentConfig>(
         content::GROUP,

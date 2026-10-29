@@ -130,12 +130,13 @@ pub struct SkillsPlugin {
     prompts: Key<PromptRegistry>,
     tools: Key<ToolRegistry>,
     skills: Key<SessionSkills>,
-    /// The assembly's [`super::SkillsConfig`]. Absent when the assembly
-    /// registered the Skills parts without [`super::install`]: the app
-    /// server registers them from its catalog plugin for every assembly with
-    /// a home, and not every such assembly installs the capability; the
-    /// built-in [`super::INSTRUCTIONS`] are in force then.
-    factory: Key<super::SkillsConfig>,
+    /// The assembly's [`super::SkillsConfig`], when the assembly installed
+    /// the capability ([`super::install_with_config`]): the install call
+    /// registers the name and provides the value. The app server registers
+    /// the parts from its catalog plugin for every assembly with a home and
+    /// not every such assembly installs the capability, so a part with no
+    /// name to declare keeps the built-in [`super::INSTRUCTIONS`].
+    factory: Option<Key<super::SkillsConfig>>,
 }
 impl SkillsPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, Error> {
@@ -148,7 +149,10 @@ impl SkillsPlugin {
             prompts: names.key()?,
             tools: names.key()?,
             skills: names.key()?,
-            factory: names.key()?,
+            factory: names
+                .registered::<super::SkillsConfig>()
+                .then(|| names.key::<super::SkillsConfig>())
+                .transpose()?,
         })
     }
 }
@@ -157,15 +161,16 @@ impl DynPlugin for SkillsPlugin {
         "Skills"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
+        let mut keys = vec![
             self.catalog.erase(),
             self.config.erase(),
             self.loader.erase(),
             self.lifecycle.erase(),
             self.prompts.erase(),
             self.tools.erase(),
-            self.factory.erase(),
-        ]
+        ];
+        keys.extend(self.factory.iter().map(Key::erase));
+        keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -215,10 +220,14 @@ impl DynPlugin for SkillsPlugin {
                 .await?;
             // The factory configuration's text replaces the built-in
             // instructions ([`super::SkillsConfig`]).
-            let instructions: Arc<str> = ctx
-                .get_at(&self.factory)
-                .and_then(|config| config.instructions.clone())
-                .unwrap_or_else(|| super::INSTRUCTIONS.into());
+            let instructions: Arc<str> = match &self.factory {
+                Some(key) => ctx
+                    .require_at(key)?
+                    .instructions
+                    .clone()
+                    .unwrap_or_else(|| super::INSTRUCTIONS.into()),
+                None => super::INSTRUCTIONS.into(),
+            };
             let skills = Arc::new(SessionSkills::new(initial, instructions));
             let owner = skills.clone();
             let stopped = lifecycle.clone();

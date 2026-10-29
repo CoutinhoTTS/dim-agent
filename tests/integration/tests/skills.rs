@@ -201,6 +201,36 @@ async fn the_configured_instructions_replace_the_builtin_text() {
     env.agent.close().await.unwrap();
 }
 
+/// A profile that requires the Skills parts, registered by the catalog
+/// plugin, without installing the capability creates its Session, and the
+/// built-in instructions are in force: the factory configuration is only
+/// declared and read where an install provides one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parts_required_without_install_keep_the_builtin_instructions() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    let env = env(
+        &dirs,
+        Options {
+            require_without_install: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    let session = tokio::time::timeout(std::time::Duration::from_secs(20), env.session(&cwd, ""))
+        .await
+        .expect("the Session is created within the wait")
+        .unwrap();
+    run(&session, "first").await;
+    let request = requests(&session).await.remove(0);
+    let system = system_text(request.system.as_deref().unwrap());
+    assert!(
+        system.contains("A skill is a local instruction bundle"),
+        "{system}"
+    );
+    env.agent.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_returns_the_body_as_a_plain_tool_result() {
     let dirs = Dirs::new();

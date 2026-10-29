@@ -68,7 +68,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<prompt_guide::GuideEntries>(catalog, session);
     register::<prompt_registry::PromptRegistry>(catalog, session);
     register::<skills::SessionSkills>(catalog, session);
-    register::<skills::SkillsConfig>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);
     register::<host::PrepareContextHost>(catalog, session);
     register::<host::ContextModelHost>(catalog, session);

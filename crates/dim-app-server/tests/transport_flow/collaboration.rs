@@ -4180,3 +4180,39 @@ async fn configured_agent_descriptions_replace_the_builtin_text() {
         server.join().await.unwrap();
     }
 }
+
+/// A profile that requires Collaboration's registered parts by name without
+/// calling [`dim_app_server::collaboration::install`] creates its Session,
+/// and the parts keep the built-in descriptions (Collaboration §3): the
+/// factory configuration is only declared and read where an install
+/// provides one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parts_required_without_install_keep_the_builtin_descriptions() {
+    let server = launch_inner(
+        Arc::new(MockTools),
+        ServerConfig::default(),
+        |builder| {
+            builder
+                .require_part("CollaborationSession")
+                .require_part("CollaborationTimeline");
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = tokio::time::timeout(Duration::from_secs(20), leader(&mut client, allowed()))
+        .await
+        .expect("the Session is created within the wait");
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(&mut client, &lead, "hello".into(), "queue").await;
+    idle(&mut client, &lead).await;
+    let description = agent_description(&lead_session).await;
+    assert!(
+        description.contains("Work with other agents as a team you lead."),
+        "{description}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}

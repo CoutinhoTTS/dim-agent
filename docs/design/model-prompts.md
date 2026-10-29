@@ -174,7 +174,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 - It lists its model-facing texts on its own design page, each marked protocol or policy, sentence by sentence where mixed. This document does not restate them, as [Timeline branches §12.1](timeline-branches.md#121-context-mapping) does for its own.
 - It contributes the guide entry for each marker it writes, and its own flow asserts that a request carrying the marker carries the entry (§6.3).
-- It exposes its policy texts at its factory configuration, so a candidate can run through the shipped assembly (§8.1).
+- It exposes its policy texts at its factory configuration, so a candidate can run through the shipped assembly (§8.1). The install call registers the configuration's name and provides the value, and a part the profile places without that call declares and reads none, keeping the built-in text.
 - It ships a protocol change with the behaviour, the flow test and the compatibility of histories resumed under the older form (§4).
 
 ### 9.3 ToolRegistry and ToolBinding

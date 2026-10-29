@@ -559,7 +559,10 @@ change is judged against the current text ([model-facing prompts §8](design/mod
 Where your plugin ships a policy text, make it an optional field of the row's
 `code.config`; when the field is absent the plugin uses its built-in text from
 code, byte for byte, so a candidate replaces it through the shipped assembly
-without an evaluation-only path.
+without an evaluation-only path. A built-in Rust part follows the same rule from
+its side: the install call that installs the capability registers the
+configuration's name and provides the value, and a profile that places the part
+without that call declares and reads none, keeping the built-in text.
 
 ### Markers and the input guide
 

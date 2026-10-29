@@ -34,6 +34,8 @@ A Session that loads Collaboration always loads the registrar, so a request carr
 
 The `agent` tool's coordination text is policy in the sentences §1 marks: the guidance in the two descriptions. Each description is one factory member of the plugin's configuration, `leader_description` and `member_description`, and the product sets neither, so the built-in texts are in force. A member holds one whole description, and the flow tests pin the protocol sentences inside it: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)).
 
+**How the configuration reaches the part.** `install_with_config` registers the configuration's Session name and provides the value; the part declares and reads that key only then, as [rutis usage A.2](../rutis-usage.md#a2-the-binding) has a configuration-enabled dependency. `serve` registers the parts for every assembly, so a profile that requires them without an install has no name to declare and keeps the built-in descriptions, rather than waiting for a configuration nobody provides; the flow tests cover both paths.
+
 ## 4. Rule check
 
 Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §3, §4 rules 1–9 and §5, [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
