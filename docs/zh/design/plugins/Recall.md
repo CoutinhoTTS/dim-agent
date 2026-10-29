@@ -224,6 +224,19 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 列表没有总字符上限。每行按其格式最长 600 个字符（§3.4），所以一页 20 个条目不超过 13,000 个字符。轮次索引和检索用 `before=<id>` 往前翻；一轮和一件事用 `offset` 续读，单位随视图：一轮按条目（0 为第一条），一件事按字符。字符按 Unicode 标量值计，所以 CJK 文本不会在字符中间被截断。一轮的行只会在末尾增长，所以返回过的 offset 始终指向同一行。
 
+### 5.4 面向模型的文本
+
+声明的标注属于 [#549](https://github.com/arcships/dim/issues/549)。工具结果是 protocol（[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)）：
+
+| 文本 | 类别 |
+| --- | --- |
+| 一行的时刻与其事件 id，以及被缩短的输入末尾的 `[input <id>]` 句柄 | Protocol：模型据此打开或翻页的句柄（§4） |
+| 一页中的 `before=<id>` 与 `offset` 框架 | Protocol：分页句柄（§5.3） |
+| 「No turn or line has id …」「Turn … has … lines.」「… has … characters.」 | Protocol：结果的形状；模型按页面上给出的其他句柄重取 |
+| 一行的叙事文本 | 会话自己的话与运行时的话，作为 material 承载 |
+
+Recall 不写标记、不贡献 guide 条目。
+
 ## 6. 模型看到什么
 
 文本是普通的行，不带外层包装标签。`structuredContent` 只用于 UI 和持久化：`{level: "turns" | "turn" | "search" | "full", ids: [...], next?: {...}}`。
