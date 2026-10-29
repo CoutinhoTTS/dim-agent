@@ -268,6 +268,12 @@ export interface Message {
   role: 'user' | 'assistant' | 'tool_result';
   content: string | MessagePart[];
 }
+/** What a tool's call did, declared on the result it returns (session boundary
+ * A.6). The vocabulary is closed: a kind or a field outside it is refused when
+ * the bridge decodes the result. */
+export type ToolEffect =
+  { kind: 'fileWritten'; path: string } |
+  { kind: 'commandRun'; command: string; exitCode?: number; signal?: string };
 export interface ToolResult {
   content: ToolContent;
   structuredContent?: JsonObject;
@@ -275,6 +281,7 @@ export interface ToolResult {
   blobRefs?: BlobRef[];
   backgroundTask?: BackgroundTaskInfo;
   contextMessages?: Message[];
+  effects?: ToolEffect[];
 }
 /** How a registered tool runs a call; `cancelled` settles when the call is cancelled. */
 export type ToolExecute = (call: ToolCall, cancelled: Promise<void>) => Promise<ToolResult>;

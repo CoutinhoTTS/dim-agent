@@ -1,6 +1,8 @@
 //! exec, BackgroundExec and wait flows on a real Unix shell
 //! (`docs/architecture/rust-agent/plugins/{BackgroundExec,WaitBranch}.md`).
 #![cfg(unix)]
+#[path = "local_support/compaction.rs"]
+mod compaction_support;
 #[path = "local_support/process.rs"]
 mod process_support;
 use dim_agent_capabilities::{
@@ -268,20 +270,37 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
 }
 
 impl Harness {
-    async fn new(mut platform: HostPlatform, hook: Hook) -> Self {
+    async fn new(platform: HostPlatform, hook: Hook) -> Self {
+        Self::with_context(platform, hook, false).await
+    }
+    /// The same assembly with a context model and a strategy bound, so a flow
+    /// test can compact (`local_support/compaction.rs`).
+    async fn new_compacting(platform: HostPlatform, hook: Hook) -> Self {
+        Self::with_context(platform, hook, true).await
+    }
+    async fn with_context(mut platform: HostPlatform, hook: Hook, compacting: bool) -> Self {
         let cwd = scratch("cwd");
         platform.home = cwd.clone();
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        Self::with_platform(root, view, hook, cwd).await
+        Self::with_platform_context(root, view, hook, cwd, compacting).await
     }
     async fn with_platform(
         root: Ctx,
         view: rutis::host::FiberView,
         hook: Hook,
         cwd: PathBuf,
+    ) -> Self {
+        Self::with_platform_context(root, view, hook, cwd, false).await
+    }
+    async fn with_platform_context(
+        root: Ctx,
+        view: rutis::host::FiberView,
+        hook: Hook,
+        cwd: PathBuf,
+        compacting: bool,
     ) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
         let output_root = scratch("output");
@@ -301,14 +320,35 @@ impl Harness {
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-            .session_value(Arc::new(ContextModelHost(None)))
-            .session_value(Arc::new(CompactionStrategyHost(None)))
+            .session_value(Arc::new(ContextModelHost(compacting.then(|| {
+                Arc::new(compaction_support::Window) as Arc<dyn ResolveContextModel>
+            }))))
+            .session_value(Arc::new(CompactionStrategyHost(compacting.then(|| {
+                Arc::new(compaction_support::Window) as Arc<dyn CompactionStrategy>
+            }))))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
                     Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
-        dim_agent_capabilities::defaults::install(&mut builder);
+        if compacting {
+            dim_agent_capabilities::defaults::install_with_prompt(
+                &mut builder,
+                Arc::new(EmptyPromptHost),
+                Some(ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(ModelSelection {
+                        provider_id: "mock".into(),
+                        model_id: "window".into(),
+                        capability_snapshot: None,
+                        config: None,
+                        metadata: None,
+                    }),
+                }),
+            );
+        } else {
+            dim_agent_capabilities::defaults::install(&mut builder);
+        }
         workspace_tools::install(
             &mut builder,
             WorkspaceToolsConfig {
@@ -1860,16 +1900,11 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
     let pid_file = harness.cwd.join("timeout.pid");
+    let command = format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display());
     harness
         .run(
             &session,
-            &[(
-                "exec",
-                json!({
-                    "command": format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display()),
-                    "timeoutMs": 1000
-                }),
-            )],
+            &[("exec", json!({ "command": command, "timeoutMs": 1000 }))],
         )
         .await;
     let pid = pid_in(&pid_file).await;
@@ -1881,24 +1916,161 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
         "{}",
         text(result)
     );
+    assert_eq!(
+        result.effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: command.clone(),
+            exit_code: None,
+            signal: None,
+        }]),
+        "the tool stopped the command and observed no exit"
+    );
     assert!(gone(&pid).await);
 
     session.idle("main").await.unwrap();
     let pid_file = harness.cwd.join("cancel.pid");
+    let command = format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display());
     harness
-        .run(
-            &session,
-            &[(
-                "exec",
-                json!({"command": format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display())}),
-            )],
-        )
+        .run(&session, &[("exec", json!({"command": command}))])
         .await;
     let pid = pid_in(&pid_file).await;
     session.stop("main", "user stop".into()).await.unwrap();
     let events = until(&session, "cancel", |events| tool_results(events) == 2).await;
     assert!(!alive(&pid) || gone(&pid).await);
     assert!(text(&results(&events)[1]).contains("Command cancelled."));
+    assert_eq!(
+        results(&events)[1].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: command.clone(),
+            exit_code: None,
+            signal: None,
+        }]),
+        "a command that started is declared however it ended"
+    );
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// A command cancelled after it started is declared with no exit status, and
+/// the digest of a later compaction lists it (ContextCompaction §5.10,
+/// acceptance 18(a)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_command_reaches_the_digest_without_an_exit_status() {
+    let harness = Harness::new_compacting(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let started = harness.cwd.join("cancel-started");
+    let command = format!(
+        "awk 'BEGIN {{ for (i = 0; i < 4000; i++) printf \"y\" }}'; echo started > {}; sleep 100",
+        started.display()
+    );
+    harness
+        .run(&session, &[("exec", json!({"command": command}))])
+        .await;
+    for _ in 0..500 {
+        if started.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(started.exists(), "the command started before the stop");
+    session.stop("main", "user stop".into()).await.unwrap();
+    let events = until(&session, "cancel", |events| tool_results(events) == 1).await;
+    let declared = ToolEffect::CommandRun {
+        command: command.clone(),
+        exit_code: None,
+        signal: None,
+    };
+    assert!(text(&results(&events)[0]).contains("Command cancelled."));
+    assert_eq!(results(&events)[0].effects, Some(vec![declared.clone()]));
+
+    // A later turn gives the compaction a cut that replaces the cancelled
+    // call.
+    session
+        .submit("x".repeat(8_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let (compaction, events) = compaction_support::compact_now(&session).await;
+    let (entries, replacement) = compaction_support::digest(&events, compaction);
+    let entries = entries.expect("the digest lists the cancelled command");
+    assert!(!entries.dropped);
+    assert_eq!(entries.entries.len(), 1, "{:?}", entries.entries);
+    let ToolEffect::CommandRun {
+        command: listed,
+        exit_code,
+        signal,
+    } = &entries.entries[0]
+    else {
+        panic!("a command entry: {:?}", entries.entries[0])
+    };
+    assert!(
+        listed.starts_with(&command[..200]) && listed.ends_with('…'),
+        "{listed}"
+    );
+    assert_eq!(
+        (exit_code, signal),
+        (&None, &None),
+        "no exit status was seen"
+    );
+    let rendered = compaction_support::message_text(&replacement[1]);
+    assert!(
+        rendered.contains("ran exit not observed: awk 'BEGIN {"),
+        "{rendered}"
+    );
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exec_results_declare_the_command_they_started() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[
+                ("exec", json!({ "command": "echo declared" })),
+                ("exec", json!({ "command": "exit 7" })),
+            ],
+        )
+        .await;
+    let events = until(&session, "effects", |events| tool_results(events) == 1).await;
+    let declared = results(&events);
+    assert_eq!(
+        declared[0].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: "echo declared".into(),
+            exit_code: Some(0),
+            signal: None,
+        }])
+    );
+    assert_eq!(
+        declared[1].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: "exit 7".into(),
+            exit_code: Some(7),
+            signal: None,
+        }]),
+        "a non-zero exit is an error result that still declares the exit"
+    );
+    assert_eq!(declared[1].is_error, Some(true));
+
+    harness
+        .run(
+            &session,
+            &[("exec", json!({ "command": "sleep 1 & wait" }))],
+        )
+        .await;
+    let events = until(&session, "refused", |events| tool_results(events) == 2).await;
+    let refused = &results(&events)[2];
+    assert_eq!(
+        refused.structured_content.as_ref().unwrap()["code"],
+        "exec_invalid_request"
+    );
+    assert_eq!(
+        refused.effects, None,
+        "a command that never started declares nothing"
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }
@@ -1907,15 +2079,14 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
 async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
+    let command =
+        "sleep 1; awk 'BEGIN { for (i=0; i<200000; i++) printf \"z\" }'; echo tail-marker";
     harness
         .run(
             &session,
             &[(
                 "exec",
-                json!({
-                    "command": "sleep 1; awk 'BEGIN { for (i=0; i<200000; i++) printf \"z\" }'; echo tail-marker",
-                    "runInBackground": true
-                }),
+                json!({ "command": command, "runInBackground": true }),
             )],
         )
         .await;
@@ -1935,6 +2106,15 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
         .unwrap()
         .sequence;
     assert!(*started_at < result_at);
+    assert_eq!(
+        results(&events)[0].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: command.into(),
+            exit_code: None,
+            signal: None,
+        }]),
+        "the handoff observed that the command started and nothing more"
+    );
     let running = text(&results(&events)[0]).to_owned();
     assert!(running.starts_with("Command started in background.\nTask ID: "));
     assert!(running.contains(&format!("Task ID: {}", data.task_id)));

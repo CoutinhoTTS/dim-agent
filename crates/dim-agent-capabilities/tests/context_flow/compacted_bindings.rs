@@ -480,10 +480,12 @@ async fn a_compaction_that_cuts_a_written_binding_refuses_the_next_write() {
     let files = Files::new(Cut::After("Wrote")).await;
     let session = files.session().await;
     std::fs::write(files.dir.join("new.txt"), "alpha\n").unwrap();
+    // The first turn is long enough that replacing it shrinks the request with
+    // the digest's planned share in the resident parts.
     files
         .turn(
             &session,
-            "read and overwrite",
+            &filler(),
             vec![
                 Step::Calls(vec![("read", json!({ "path": "new.txt" }))]),
                 Step::Calls(vec![("write", write("new.txt", "written\n"))]),

@@ -243,13 +243,15 @@ failures before any model work.
 `outcome` is one of:
 
 - `completed {retain_from, replacement: Message[], strategy: string, diagnostics,
-  context_baseline, replacement_parts?, pinned_inputs?}`. `retain_from` (a Timeline event id)
-  replaces the renderer-level `cursor`, `replacement` replaces `summary: String`, and `strategy`
-  names the producer, for example `"summary"`. `replacement_parts` (`{strategy, digest}`
-  message counts) locates the parts of `replacement`; absent means one part, the strategy's
-  messages (§4.3). `pinned_inputs` is the `input/message` id of each message of the pinned part,
-  in order, so consecutive equal ids are one input; absent reads as no ids, which every record
-  written before this field did (§5.9).
+  context_baseline, replacement_parts?, pinned_inputs?, digest_entries?}`. `retain_from` (a
+  Timeline event id) replaces the renderer-level `cursor`, `replacement` replaces
+  `summary: String`, and `strategy` names the producer, for example `"summary"`.
+  `replacement_parts` (`{strategy, digest}` message counts) locates the parts of `replacement`;
+  absent means one part, the strategy's messages (§4.3). `pinned_inputs` is the
+  `input/message` id of each message of the pinned part, in order, so consecutive equal ids are
+  one input; absent reads as no ids, which every record written before this field did (§5.9).
+  `digest_entries` (`{entries, dropped}`) holds the digest's entries as data, written exactly
+  when there is a digest message and absent from every earlier record (§4.3, §5.10).
 - `skipped {reason, diagnostics}`.
 - `failed {error, diagnostics?}`; the diagnostics are present whenever the strategy ran (§4.2).
 - `cancelled {reason}` (new), so every manual step ends with exactly one fact.
@@ -317,9 +319,9 @@ Cuts fall only on event boundaries.
 three parts, in this order:
 
 1. The strategy's messages (the summary, class 3b).
-2. The digest (class 3a), when it has content (§5.10). It is empty until a tool declares
-   effects through ToolRegistry's generic means
-   ([requirements §7.4](../compaction-quality.md#74-toolregistry-the-tool-contract)).
+2. The digest (class 3a) when it has entries (§5.10): the effect declarations of the events
+   being replaced, carried forward from the previous record's digest entries
+   ([session boundary A.6](../contracts/session-boundary.md#a6-tool-effects)).
 3. The pinned inputs of the running turn (class 2(a), §5.9), in event order.
 
 The summary comes first because it accounts for the whole replaced range; the digest follows
@@ -330,14 +332,25 @@ reads `replacement` as one list, so the parts need no rule of their own on reloa
 cache.
 
 The completed outcome records `replacement_parts: {strategy, digest}` — the counts of its
-leading messages; the rest are the pinned inputs. A record without it reads as one part, the
-strategy's messages. That is how a later compaction finds the previous summary, digest and pins
-without parsing any content (§5.2, §5.10); replay is unaffected, and a reader that ignores the
-field projects the same messages. `pinned_inputs`, when written, names those pins' own
-`input/message` ids in the same order, so a later compaction can carry a pin it must truncate
-together with the handle that still opens the input it came from (§5.9). It is absent when the
-writer could not name every pinned message: a record written before the field, or one carrying
-pins from such a record. Such a pin still travels; it just cannot be named if it must shrink.
+leading messages, where `digest` is `1` or `0`; the rest are the pinned inputs. It is written
+whenever the replacement has a digest or pinned inputs; a record without it reads as one part,
+the strategy's messages. That is how a later compaction finds the previous summary, digest and
+pins without parsing any content (§5.2, §5.10); replay is unaffected, and a reader that ignores
+the field projects the same messages.
+
+The completed outcome carries the digest's entries as data too: `digest_entries
+{entries, dropped}` is written exactly when `replacement_parts.digest` is `1`, holding the
+entries in order, each the A.6 declaration object, and `dropped`, whether the bound dropped an
+earlier entry (§5.10). The digest message is rendered from that field, the next compaction's
+roll-forward reads it, and a record without it contributes no entries. Like A.6's `effects`, it
+is a persisted field that a v20 daemon cannot decode, so A.6's storage format decision advances
+the native store to v21, and that one step covers both fields.
+
+`pinned_inputs`, when written, names those pins' own `input/message` ids in the same order, so
+a later compaction can carry a pin it must truncate together with the handle that still opens
+the input it came from (§5.9). It is absent when the writer could not name every pinned
+message: a record written before the field, or one carrying pins from such a record. Such a pin
+still travels; it just cannot be named if it must shrink.
 
 **Snapshot anchoring without business content (#130).** Today, Timeline core and both stores
 read the content of `context/compaction` to anchor projection snapshots:
@@ -447,7 +460,8 @@ pub enum ContextCompactionResult {
                 diagnostics: Box<CompactionDiagnosticsRecord>,
                 context_baseline: Vec<ContextBaselineEntry>,
                 replacement_parts: Option<ReplacementParts>,
-                pinned_inputs: Option<Vec<String>> },
+                pinned_inputs: Option<Vec<String>>,
+                digest_entries: Option<DigestEntries> },
     Skipped { .. }, Failed { .. }, Cancelled { reason: String } }
 
 // dim-agent-capabilities/src/host.rs
@@ -467,6 +481,9 @@ pub struct CompactionCheckpoint { pub retain_from: String, pub replacement: Arc<
                                   pub replacement_parts: Option<ReplacementParts>,
                                   pub context_baseline: Arc<[ContextBaselineEntry]> }
 pub struct ReplacementParts { pub strategy: usize, pub digest: usize }  // leading message counts
+pub struct DigestEntries { pub entries: Vec<ToolEffect>, pub dropped: bool }  // A.6 objects, in order
+// ToolEffect is A.6's declaration object ("fileWritten" | "commandRun"),
+// the type of ToolResult.effects.
 
 // dim-agent-capabilities/src/context_policy.rs (crate-internal)
 impl ContextPolicy { async fn compact_step(&self, step: CompactionStep, cancel: CancellationToken)
@@ -541,7 +558,7 @@ through a constant of its own.
    `input.checkpoint`, located by `replacement_parts`; §4.3) plus the entries placed by events
    before `retain_from`, and nothing earlier: the fixed context begins at the previous cut, so
    one compaction's reads and cost do not depend on how long the session has run. The previous
-   digest part is not sent: the digest rolls forward as data (§5.10).
+   digest message is not sent: its entries roll forward as data (§5.10).
 3. **Result.** It returns `Completed {retain_from, replacement: [summary_message(summary)],
    strategy: "summary", diagnostics}`. The existing `summary_message` wrapper, which marks the
    text as data and escapes it, is applied once here and stored in the record. That
@@ -628,7 +645,7 @@ How the summary is produced:
      preparation appended beyond the history;
    - the keyed baseline at the cut;
    - the pinned inputs of the running turn before the cut (§5.9), at that cut's own size;
-   - the digest at its bound; it has no content today, so its bound is zero (§5.10);
+   - the digest at its bound, `0.05 × B` (§5.10);
    - the strategy's replacement at `replacement_size(model)` (§4.2); a re-plan measures the
      replacement the first pass actually produced instead (step 4).
 
@@ -665,7 +682,7 @@ How the summary is produced:
    `cuts` and `trigger`. If it is cancelled before the strategy returns, it appends the
    `cancelled` result for the start and returns `Cancelled`; a `Failed` outcome is written as a
    `failed` result with its diagnostics. It then composes the record's replacement — the
-   strategy's messages, the digest when it has content (§5.10), and the pinned inputs (§5.9),
+   strategy's messages, the digest when it has entries (§5.10), and the pinned inputs (§5.9),
    in that order — and records `replacement_parts` (§4.3).
 4. **Validation and the one re-plan.** For any strategy, it checks that:
    - `retain_from` is an event of the fixed context and passes the event-based validity rule
@@ -684,7 +701,8 @@ How the summary is produced:
 
    - It recomputes the retention limit over the entries from the first result's `retain_from`
      on, with `replacement_size` set to the size the first replacement's strategy part actually
-     has.
+     has; the digest stays planned at its bound, because the second cut's entries are not known
+     yet (§5.10).
    - Only a limit that is a cut later than the first result's in event order is a re-plan. With
      no such cut the overshoot cannot be cured by cutting later, the first result is kept, and
      step 5 marks it when the parts it cannot shrink exceed the bound.
@@ -710,12 +728,13 @@ How the summary is produced:
    mark exactly when its total — the projected request's size, which the record reports as
    `estimatedOutputTokens` — exceeds `0.5 × B`. The excess is that total minus `0.5 × B`, and
    the mark names the resident parts — the parts of step 1, measured on the result, with the
-   summary at the size it actually has — each with its `count_tokens` size, from the parts named
-   `systemPrompt`, `tools`, `appendedMessages`, `keyedBaseline`, `pinnedInputs`, `digest` and
-   `summary`, the largest first until their sizes cover the excess. The kept tail is never
-   named: it is not one of the mark's parts. The resident parts cover the excess whenever the
-   kept tail fits the rule's budget, which is every cut the retention limit allows
-   (`tail ≤ 0.5 × B − resident`); a fallback cut that keeps more names every part. Wherever the
+   summary and the digest at the sizes they actually have — each with its `count_tokens` size,
+   from the parts named `systemPrompt`, `tools`, `appendedMessages`, `keyedBaseline`,
+   `pinnedInputs`, `digest` and `summary`, the largest first until their sizes cover the
+   excess. The kept tail is never named: it is not one of the mark's parts. The resident parts
+   cover the excess whenever the kept tail fits the rule's budget, which is every cut the
+   retention limit allows (`tail ≤ 0.5 × B − resident`); a fallback cut that keeps more names
+   every part. Wherever the
    parts alone exceed the bound there is no kept tail, so the rule reduces to naming them; it
    also covers a summary beyond its planned size whose re-planned result is still above the
    bound (step 4), where the summary is normally the largest part. The mark is a field of the
@@ -990,18 +1009,102 @@ rest of the replaced range. The replacement carries them verbatim.
 The digest is the deterministic account of what tools did: the files they wrote, the commands they
 ran with their exit status, and nothing else.
 
-- **Generated by the mechanism, from facts.** ContextPolicy builds it from the declarations in the
-  events it replaces and rolls it forward from the previous replacement's digest part
-  (`input.checkpoint.replacement_parts`, §4.3), which the policy owns and reads directly; the model
-  neither writes nor chooses it, and the part is never sent to the summarizer. It reads no tool's
-  input schema: a tool's effects reach it only through the declaration its owner provides.
-- **In the replacement.** One message, wrapped as data like the summary, after the strategy's
-  messages and before the pinned inputs (§4.3).
-- **Empty until the declaration exists.** No tool declares effects today; the means is
-  [ToolRegistry's](../compaction-quality.md#74-toolregistry-the-tool-contract), and the
-  requirements raise it there. Until it exists the digest has no content and the replacement
-  carries no digest message. A tool's result text in the class 3b summary is not the digest, and
-  nothing derives one from tool output or from a tool's schema.
+- **From the results the model was handed, and nothing else.** Its entries are the effect
+  declarations of the tool contract
+  ([session boundary A.6](../contracts/session-boundary.md#a6-tool-effects)) carried by the
+  `step/tool-result` events in the replaced range, in event order: `fileWritten` with its path,
+  and `commandRun` with its command and, when the tool observed it, its exit status — a code or
+  a signal. The policy reads no other fact and no tool's input schema, name, argument or output
+  text: a tool's effects reach it only through the declaration its owner provides, and a tool
+  that declares nothing contributes nothing. A command handed to the background is listed from
+  its handoff result, without an exit status; its later outcome reaches the model through
+  BackgroundExec's wake notification, which is history like any other input — summarized (class
+  3b) or Recall-reachable — and not digested. A command cancelled after it started is listed from
+  the result its tool returns for that call, without an exit status unless the tool observed one.
+- **Rejected: also reading `exec/ended` and the progress copies.** The model is never handed
+  `exec/ended`, and its context holds only events it was handed (principles §4 rule 6); some
+  ends never wake, so the digest would list an end the model was never told about; it has a
+  second writer, the persistent shell; and A.6 could not name such a carrier, so a generic
+  reader could not find a contributed tool's background work. `step/tool-completed` only copies
+  what `step/tool-result` already records, so reading it adds deduplication and no entry.
+- **Carried as data, never parsed from the message.** The completed outcome carries the entries
+  as data: `digest_entries {entries, dropped}` next to `replacement_parts` (§4.3), each entry the
+  A.6 object, in order, and `dropped` set once the bound dropped an earlier entry. The message
+  below is rendered from that field; the next compaction reads the field, never the rendered
+  text. The rendering is therefore presentation only: unambiguous to the model, and never read
+  back. A record without the field contributes no entries, and once `dropped` is true every later
+  digest carries it, because those entries cannot come back.
+- **Rolled forward.** The `digest_entries` of the latest completed compaction in the fixed context
+  supplies the entries declared before that compaction's cut, copied from the committed record as
+  the pins are (§5.9), so the roll-forward reads no event before the previous cut and parses no
+  content. The scan of the events since that cut starts at the first event the fixed context carries
+  at or after it: a cut that places no entry of its own resolves to the next event the replay
+  carries. A cut the view can place neither as an event it carries nor as the cut of the compaction
+  it applies records no digest. The previous digest message is never sent to the summarizer
+  (§5.2): only the strategy's part is the carried summary. The model neither writes nor chooses the
+  digest, and no strategy can drop or change it, because the policy composes it after the strategy
+  returns.
+- **One entry per key.** An entry's key is its kind together with its path or its shortened
+  command. A declaration whose key is already present replaces that entry and takes the position
+  of its latest declaration, so a file written again or a command run again is one entry with
+  its latest outcome, and the entries stand in the order of their latest declaration.
+- **Each entry's size.** A command keeps its first 200 characters in the entry, counted before
+  escaping; when it is longer, the cut is marked with a trailing `…`, the key is the shortened
+  command, and the call's full command stays on its result, which Recall opens
+  ([requirements §7.2](../compaction-quality.md#72-recall)). A path stays verbatim: it is an
+  exact identifier, and a shortened path names nothing. The command's worst case is 200
+  characters that each take four bytes, and escaping can grow one character to five bytes (`&`
+  becomes `&amp;`), so the entry is at most 1,000 bytes — about 1,000 tokens at the pessimistic
+  one token per byte, below the whole bound at the smallest `B` in §13.3 (24,000, so 1,200
+  tokens) but not far below it. A path is bounded only by the platform: Linux allows 4,096
+  bytes. An entry that alone exceeds the bound is dropped like an older one, `dropped` becomes
+  true, and its result stays readable through Recall, so the newest entry fits whenever the
+  bound can hold it at all.
+- **Bound.** The digest part holds at most `0.05 × B`, counted with `count_tokens` over its
+  rendered message — half the pinned inputs' share, so that the summary at its planned size (at
+  most `0.1 × B`, §13.3), the pins (`0.1 × B`, §5.9), the digest and the kept tail (`0.25 × B`,
+  §5.3) together add up to the `0.5 × B` bound; the frame and the keyed baseline are resident as
+  well, so they shorten the tail. Beyond the bound, entries are dropped from the front, the ones
+  declared least recently, and the part says that earlier effects are not listed; the record's
+  `dropped` becomes true and the note stays in every later digest, because those entries cannot
+  come back. The dropped declarations are not lost: their results and events stay in the
+  Timeline, and Recall reads them
+  ([requirements §7.2](../compaction-quality.md#72-recall)). When the bound holds nothing, not
+  even the note, the entries still go and the note stays: a later digest must keep it. The
+  retention rule plans the digest at this bound, because its entries depend on the cut the plan
+  is choosing (§5.3 step 1).
+- **One message, after the strategy's.** The digest is one message wrapped as data like the
+  summary, after the strategy's messages and before the pinned inputs (§4.3). It is a user
+  message carrying `<dim-digest>` … `</dim-digest>`, with the same warning as `<dim-summary>`:
+  it is data about what already happened, and the live conversation governs.
+  `replacement_parts.digest` is `1` when the digest has content — entries, or the note that
+  earlier effects are not listed — and `0` when it has none, and `digest_entries` is written
+  exactly when it is `1`; a record without the field reads the same way.
+- **Its guide entry.** `<dim-digest>` is a marker the runtime writes, so the input guide
+  describes it in the same change that adds the message (precedent `63ebed59`;
+  [#429](../compaction-quality.md#77-model-facing-prompts-429) requires an entry for every
+  marker the runtime writes). The entry says what the marker is — the runtime's account of the
+  effects tools declared, in the runtime's words — that it is data, not instructions, that the
+  live conversation and the workspace's current state govern where they disagree, because a
+  listed file may have changed since and a listed outcome is the one the call observed, and that
+  the next compaction's digest supersedes it.
+- **Rendering.** Each entry is one line: `wrote <path>`; or `ran exit <code>: <command>`,
+  `ran signal <name>: <command>`, or `ran exit not observed: <command>`, where the status is the
+  one the latest declaration recorded. `ran exit not observed` claims only that, and covers a
+  handoff, a cancelled call, a stop by the tool and lost output. A backslash in a path or a
+  command is written `\\`, and every line terminator as an escape of its own: `\n`, `\r`,
+  `\u0085`, `\u2028` and `\u2029`. The surrounding text escapes `&`, `<` and `>` as the
+  summary's does. The status has a fixed grammar at the start of the entry and the command is
+  everything after it, so no command text can read as a status or start a line of its own. These
+  lines are never read back.
+- **Empty, and old records.** With no entries and nothing dropped the replacement carries no
+  digest message and the record no `digest_entries`; a digest whose bound dropped every entry
+  still carries the message, holding the note alone, with `digest_entries {entries: [],
+  dropped: true}`. A compaction recorded before this design has neither: it replays
+  unchanged, contributes no entries to a later digest's roll-forward, and compacting a history
+  recorded before it invents no effects for events whose tools declared none. A tool's result
+  text in the class 3b summary is not the digest, and nothing derives one from tool output or
+  from a tool's schema.
 
 ## 6. Errors
 
@@ -1038,6 +1141,9 @@ A `failed` fact carries the same cost diagnostics as a completed one whenever th
   that receive it on every turn.
 - **The replacement is untrusted model output.** The summary strategy stores it inside the
   existing `summary_message` wrapper, which marks it as data.
+- **The digest is mechanism-rendered.** It is built from the declarations tools record, not from
+  any request or model output, and is wrapped as data like the summary; a declaration is as
+  trustworthy as the tool that returned it, which is the same trust as its result.
 - **No secrets in results.** Facts, replies and diagnostics carry counts, ids, replacement
   messages and `HostError` text, which contains no credential values. No request or summary
   content goes to tracing.
@@ -1075,12 +1181,12 @@ A `failed` fact carries the same cost diagnostics as a completed one whenever th
 | §4 rule 1 (command events) | The client asks the owner of progression with `context/compact`. The Loop decides when to serve it, and the result is one `context/compaction` that references the command. |
 | §4 rule 2 (handoff) | Model requests are handed over with `context/prepare` as today. A manual step hands nothing over. |
 | §4 rule 3 (before callback; handlers) | No before callback. Loop handlers register the step task and return. |
-| §4 rule 4 (no business meaning in core) | Timeline, Dispatcher and facades unchanged. |
+| §4 rule 4 (no business meaning in core) | Timeline, Dispatcher and facades unchanged. The digest is composed by ContextPolicy from the declarations on `step/tool-result` facts; no core part names an effect kind. |
 | §4 rule 5 (atomic batch) | Each new write is one event. |
 | §4 rule 6 (context only from handed-off events) | The replacement reaches the model only through the projection of a completed fact. Pending inputs are not consumed by a step (AGENTS rule 10). |
 | §4 rule 7 (public events and services) | `TreeCommands`, `Branch::service` on `PublicService`s, `ProviderConnectionResolver`, `ModelHost`, `sessionMethods`. |
 | §4 rule 8 (infrastructure unchanged) | Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. There is one infrastructure change (#130): snapshot anchoring in Timeline and both stores drops its knowledge of `context/compaction` and keeps only structural checks, and the owner's decode callback receives the anchor event. The requirement comes from Timeline itself: it must not know event content (principles §4 rule 4; Timeline checks only the envelope and reserved core domains, ADR 001). It closes within Timeline's own contract: a snapshot is a cache with a structural anchor. Valid snapshots behave the same, and an invalid one is a cache miss. |
-| §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. `context/compaction-start` and the visible result are facts by the maintainer's decision, for two reasons. First, they do not only drive a state machine: they are content that users and other state machines need in order to read the history (a UI connecting at any time must see that a compaction is running or how it ended). Second, reload settlement uses them: an unmatched start means a compaction was in flight. The Loop and ContextPreparation rebuild from start/result pairs, which is more precise than commands alone because it tells a running compaction from a pending one and covers automatic compaction. Usage writes nothing. The completed result's `modelUsage` and `insufficientSpace` are descriptive fields of that required fact: the trigger reads the latest start's `through`, recovery reads the budget, and only a client reads the cost and the mark. |
+| §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. `context/compaction-start` and the visible result are facts by the maintainer's decision, for two reasons. First, they do not only drive a state machine: they are content that users and other state machines need in order to read the history (a UI connecting at any time must see that a compaction is running or how it ended). Second, reload settlement uses them: an unmatched start means a compaction was in flight. The Loop and ContextPreparation rebuild from start/result pairs, which is more precise than commands alone because it tells a running compaction from a pending one and covers automatic compaction. Usage writes nothing. The completed result's `modelUsage` and `insufficientSpace` are descriptive fields of that required fact: the trigger reads the latest start's `through`, recovery reads the budget, and only a client reads the cost and the mark. The digest adds no fact: it is composed into the existing replacement from declarations the `step/tool-result` facts already carry. The next compaction's roll-forward is why the completed result stores the entries as data (`digest_entries`): that decision reads the field, never the rendered message, and the field is an optional part of a fact the projection already reads. |
 | ADR 002 D1 (scope) | Window facts, strategy and methods: Session. Command, step and slot: branch, in the Loop. The pinning, the digest, the retention rule and the mark are branch-scope ContextPolicy work: they read the branch's events and compose its record. |
 | ADR 002 D2 (no wiring modules) | ContextMethods exposes owners' operations through `sessionMethods`. |
 | ADR 002 D3 (dependencies) | Hard dependencies on core only. A Provider or Aimux reload propagates to the strategy part (accepted cost). |
@@ -1147,7 +1253,7 @@ Internal Rust changes:
 | Regrowth | Automatic threshold compaction needs `0.25 × B` of entries after the latest compaction attempt's `through`, decided in the context's branch-aware order: `through` maps to the writing branch's last committed event at or before it, so a forked child regrows from its own history; recovery is exempt and runs once per request (§5.6, §5.3) |
 | Recovery failure | A request still over `B` after its recovery compaction fails with an error naming what keeps it there — the resident parts, or the entries the last event placed — and is not compacted again (§5.3, §6) |
 | Class 2(a) pinning | In ContextPolicy, not the strategy: the running turn's inputs before the cut, keyed blocks excluded, at most `0.1 × B` (provisional, #428), head and tail with the `input/message` id; a compaction later in the same turn carries the previous result's pinned part as-is, merged with the inputs consumed at or after its cut under the same share, and reads both from committed facts so a missing snapshot changes nothing (§5.9) |
-| Class 3a digest | One data message in the replacement, after the strategy's messages and before the pinned inputs; empty until ToolRegistry declares effects (§5.10) |
+| Class 3a digest | The tool contract's effect declarations ([session boundary A.6](../contracts/session-boundary.md#a6-tool-effects)) from the `step/tool-result` events of the replaced range, and from no other fact, folded into one data message in the replacement, after the strategy's messages and before the pinned inputs; one entry per path or command with its latest outcome, a command shortened to its first 200 characters with the cut marked; the entries are stored as data on the record (`digest_entries`) and rolled forward from it, never parsed from the rendering; at most `0.05 × B` (provisional, #428), dropping the least recently declared beyond it, with Recall reading their events; the input guide gains the `<dim-digest>` entry with the message (§5.10) |
 | Summarizer work | At most `chunkCount + 8` requests per compaction, each counted when sent, over both passes of a re-plan; `modelCallCount` and `durationMs` report them, and `modelUsage` sums their usage (§5.2, §4.3) |
 | Substantive summary | Non-empty is enforced on every reply, so a committed summary is never empty; the parts are checked when [#429's prompt](../compaction-quality.md#77-model-facing-prompts-429) declares them, added with it (§5.2) |
 
@@ -1260,8 +1366,9 @@ window, and the same App Server on a `--models` file whose entry declares a smal
     its `input/message` id; a cut at the turn's start or in an earlier turn pins nothing.
 14. **Linear rolling.** A compaction over a history several times the window sends summarizer
     requests that carry the previous replacement's summary and pinned parts and the newly cut
-    entries only: no entry placed before the previous cut appears, and the previous digest part
-    is not sent but rolled forward into the new replacement.
+    entries only: no entry placed before the previous cut appears, and the previous digest
+    message is not sent — its entries roll forward from the record's `digest_entries` into the
+    new replacement.
 15. **Bounded work.** A summarizer that cuts off every reply records `failed` after at most
     `chunks + 8` requests, and one that cuts off once per chunk completes with one request per
     chunk plus its retries. A summarizer that fails before any stream has its retries counted by
@@ -1278,8 +1385,30 @@ window, and the same App Server on a `--models` file whose entry declares a smal
     the fact is `failed`, the reply is `compaction_failed`, and nothing is applied. The folded
     summary is the last reply, so it is never empty; the parts are checked when the prompt that
     declares them lands.
-18. **The digest.** A completed replacement carries no digest message while no tool declares
-    effects, and a record written before the digest exists still replays unchanged.
+18. **The digest.** (a) A `write`, `edit` or `exec` result carries its declarations in
+    `step/tool-result`, as does the persistent shell's `execute` result for its command, a `read`
+    result carries none, and a failed call carries only what it completed. A cancelled call
+    carries the declaration its tool returned for it: a command that started is listed with no
+    exit status, and `write` and `edit` declare nothing. (b) A completed compaction whose
+    replaced events declared effects carries one `<dim-digest>` message after the strategy's
+    messages and before the pinned inputs, with
+    `replacement_parts.digest = 1` and `digest_entries` holding the same entries as data; it
+    holds one entry per path or command with its latest outcome, in the order of the latest
+    declaration, the same messages project after a reload and on a branch forked after it, and a
+    request carrying the message also carries its `<dim-digest>` guide entry. (c) A second
+    compaction over more history reads the first record's `digest_entries` and adds the new
+    declarations without re-reading any event before the first cut and without parsing the first
+    message; its summarizer request carries the previous summary part and not the previous
+    digest part. (d) With more declarations than `0.05 × B` holds, entries are dropped from the
+    front, `dropped` is set, the part says earlier effects are not listed, every dropped
+    declaration's event is readable through Recall, an entry that alone exceeds the bound is
+    dropped the same way — when that leaves no entry the message holds the note alone, with
+    `digest_entries {entries: [], dropped: true}`, and a later compaction with nothing new still
+    carries it — and a command longer than 200 characters appears shortened with the
+    cut marked while its result still holds the full text. (e) A
+    compaction with no entries and nothing dropped carries no digest message,
+    `replacement_parts.digest = 0` and no `digest_entries`, and a record written before the
+    digest existed replays unchanged and contributes no entries.
 19. **Pins across the compactions of one turn.** A turn that compacts twice pins its input in
     both replacements, and the two runs — one saving the projection snapshot, one with snapshot
     encoding disabled — produce identical replacements: the pins come from the committed record,
@@ -1425,8 +1554,9 @@ sentence applies to every fold, so the carried summary stays bounded while chunk
 - `α × O` leaves `(1 − α) × O` of the allowance for thinking and for overshoot, so a summary that
   follows the instruction does not reach `max_tokens`.
 - `β × B` bounds what the replacement takes from every later request. After a compaction the
-  context is about `S` plus the retained tail (at most `0.25 × B`, §5.3), so `β = 0.10` keeps it
-  near `0.35 × B`, well below the trigger.
+  context is about `S` plus the digest (at most `0.05 × B`, §5.10), the pinned inputs (at most
+  `0.1 × B`, §5.9) and the retained tail (at most `0.25 × B`, §5.3), so `β = 0.10` keeps it within
+  `0.5 × B` (§5.3), below the trigger.
 - S is a soft instruction. `maxTokens` stays `O`: a hard limit at S would turn every overshoot into
   a cut-off reply, which is halved and retried (#169).
 
@@ -1769,8 +1899,6 @@ the sections that own each rule; this section is the map and states no rule of i
 | The class 3a digest | §5.10, §4.3 composition |
 | The stale §1 sentence | §1 |
 
-**Requirements raised to mechanism owners:** none. The digest depends on the tool-effect
-declaration that
-[requirements §7.4](../compaction-quality.md#74-toolregistry-the-tool-contract) raises to
-ToolRegistry; this design reads no tool's schema, and the digest stays empty until that means
-exists.
+**Requirements raised to mechanism owners:** none. The digest reads the effect declarations of the
+tool contract ([session boundary A.6](../contracts/session-boundary.md#a6-tool-effects)); it reads
+no tool's schema, and a tool that declares nothing contributes nothing.

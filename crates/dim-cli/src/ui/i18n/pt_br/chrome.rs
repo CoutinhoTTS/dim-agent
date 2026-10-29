@@ -171,6 +171,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "Resultado: {result}",
         "Controlled by the leader" => "Controlado pelo líder",
         "› Open member conversation" => "› Abrir conversa do membro",
+        "Not started" => "Não iniciado",
+        "Reason: {reason}" => "Motivo: {reason}",
         "Copied to clipboard" => "Copiado",
         "Opened link" => "Link aberto",
         "Link: {url}" => "Link: {url}",
@@ -465,6 +467,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "compactar o contexto da linha exibida",
         "Kept verbatim" => "Mantido literalmente",
+        "Tool effects" => "Ações das ferramentas",
         "insufficient space: {parts}" => "espaço insuficiente: {parts}",
         "system prompt" => "prompt do sistema",
         "tools" => "ferramentas",

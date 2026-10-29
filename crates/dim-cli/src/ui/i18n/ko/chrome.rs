@@ -153,6 +153,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "결과: {result}",
         "Controlled by the leader" => "리더가 제어",
         "› Open member conversation" => "› 멤버 대화 열기",
+        "Not started" => "시작 안 함",
+        "Reason: {reason}" => "이유: {reason}",
         "Copied to clipboard" => "클립보드에 복사됨",
         "Opened link" => "링크 열림",
         "Link: {url}" => "링크: {url}",
@@ -425,6 +427,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "표시된 라인의 컨텍스트 압축",
         "Kept verbatim" => "원문 그대로 유지",
+        "Tool effects" => "도구 작업 기록",
         "insufficient space: {parts}" => "공간 부족: {parts}",
         "system prompt" => "시스템 프롬프트",
         "tools" => "도구",

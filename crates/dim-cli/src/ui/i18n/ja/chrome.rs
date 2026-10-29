@@ -159,6 +159,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "結果：{result}",
         "Controlled by the leader" => "リーダーが管理",
         "› Open member conversation" => "› メンバーの会話を開く",
+        "Not started" => "未開始",
+        "Reason: {reason}" => "理由：{reason}",
         "Copied to clipboard" => "コピーしました",
         "Opened link" => "リンクを開きました",
         "Link: {url}" => "リンク：{url}",
@@ -437,6 +439,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "表示中のラインのコンテキストを圧縮",
         "Kept verbatim" => "原文のまま保持",
+        "Tool effects" => "ツール操作の記録",
         "insufficient space: {parts}" => "空き不足：{parts}",
         "system prompt" => "システムプロンプト",
         "tools" => "ツール",

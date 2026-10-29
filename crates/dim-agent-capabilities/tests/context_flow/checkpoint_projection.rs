@@ -154,6 +154,7 @@ pub(crate) fn completed(
             context_baseline,
             replacement_parts: None,
             pinned_inputs: None,
+            digest_entries: None,
         },
     })
 }
@@ -174,16 +175,22 @@ fn a_record_without_replacement_parts_deserializes_and_replays() {
         json["outcome"].get("replacementParts").is_none(),
         "the field is absent, as a record written before it has it"
     );
+    assert!(
+        json["outcome"].get("digest_entries").is_none(),
+        "a record written before the digest has no entries"
+    );
     let data: ContextCompactionData = serde_json::from_value(json).unwrap();
     let ContextCompactionResult::Completed {
         replacement,
         replacement_parts,
+        digest_entries,
         ..
     } = &data.outcome
     else {
         panic!("a completed record")
     };
     assert_eq!(*replacement_parts, None);
+    assert_eq!(*digest_entries, None);
     assert_eq!(replacement, &vec![summary_message("recorded")]);
     let context = fixed(vec![
         EventKind::InputMessage(InputMessageData::text("first", None)),
