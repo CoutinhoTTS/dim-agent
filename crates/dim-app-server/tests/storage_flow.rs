@@ -1947,16 +1947,17 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_orphan() {
     tokio::time::timeout(Duration::from_secs(10), async {
+        for reopen in [false, true] {
         let database = Database::new();
-        let db = SqliteStorage::open(database.0.clone()).unwrap();
-        let store = SqliteTimelineStore::new(db.clone());
+        let mut db = SqliteStorage::open(database.0.clone()).unwrap();
+        let mut store = SqliteTimelineStore::new(db.clone());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let mut agent = builder.build();
         let bad = agent.create_session(SessionConfig::default()).await.unwrap();
-        let good = agent.create_session(SessionConfig::default()).await.unwrap();
+        let mut good = agent.create_session(SessionConfig::default()).await.unwrap();
         let bad_id = bad.id().to_owned();
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_output BEFORE INSERT ON timeline_events WHEN NEW.kind = 'step/text' AND NEW.session_id = (SELECT session_id FROM injected_session) BEGIN SELECT RAISE(ABORT, 'injected output commit failure'); END; CREATE TABLE injected_session(session_id TEXT)").unwrap();
@@ -1980,7 +1981,29 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         assert!(bad.submit("late".into(), InputMode::Queue, "main").await.unwrap_err().to_string().contains("injected output commit failure"));
         assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
         connection.execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session").unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_restore BEFORE INSERT ON timeline_events WHEN NEW.session_id = (SELECT session_id FROM restore_failure) BEGIN SELECT RAISE(ABORT, 'injected restore settlement failure'); END; CREATE TABLE restore_failure(session_id TEXT)").unwrap();
+        connection.execute("INSERT INTO restore_failure VALUES (?1)", [&bad_id]).unwrap();
+        let head = store.head(&key(&bad_id, "main")).await.unwrap();
+        let failed_restore = agent.restore_session(bad_id.clone()).await.err().expect("a failed settlement must reject restore");
+        assert!(failed_restore.to_string().contains("injected restore settlement failure"), "{failed_restore}");
+        assert!(agent.get_session(&bad_id).is_none());
+        assert_eq!(store.head(&key(&bad_id, "main")).await.unwrap(), head);
+        connection.execute_batch("DROP TRIGGER fail_restore; DROP TABLE restore_failure").unwrap();
         drop(connection);
+        if reopen {
+            let good_id = good.id().to_owned();
+            agent.close().await.unwrap();
+            store.close().await.unwrap();
+            db.close().await.unwrap();
+            db = SqliteStorage::open(database.0.clone()).unwrap();
+            store = SqliteTimelineStore::new(db.clone());
+            let mut builder = AgentBuilder::new(AgentConfig::default());
+            dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+            dim_agent_capabilities::defaults::install(&mut builder);
+            builder.timeline_store(store.clone());
+            agent = builder.build();
+            good = agent.restore_session(good_id).await.unwrap();
+        }
         let session = agent.restore_session(bad_id).await.unwrap();
         assert!(bad.submit("old generation".into(), InputMode::Queue, "main").await.is_err());
         good.submit("still healthy".into(), InputMode::Queue, "main").await.unwrap();
@@ -2002,6 +2025,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         agent.close().await.unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
+        }
     }).await.expect("Session failure and recovery completed");
 }
 
@@ -3218,9 +3242,12 @@ async fn concurrent_and_cancelled_close_waits_for_the_same_durable_round() {
             .await
             .is_err()
     );
+    store.release_session("session").await.unwrap();
     transaction.commit().unwrap();
     close.await.unwrap();
     receiver.await.unwrap().unwrap();
+    store.release_session("session").await.unwrap();
+    store.release_session("session").await.unwrap();
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 2);
     db.close().await.unwrap();
 }
