@@ -5991,7 +5991,21 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.event(13, "tool-use", json!({"turn_id":"t","request_id":"r2","call":{"id":"call-2","name":"agent","input":{"action":"request","prompt":"Survey the crates\nand report","agentId":"reviewer"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-1","sequence":14,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r2","call_id":"call-2","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Survey the crates\nand report"}}}));
         wire.event(15, "tool-result", json!({"turn_id":"t","request_id":"r2","results":[{"call_id":"call-2","result":{"content":"{\"status\":\"accepted\"}"}}]}));
-        let stop = wire.read("session.exec.stop");
+        let past_observations = |wire: &mut Wire, method: &str| loop {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("session.attach") => {}
+                Some("agent.list") => wire.reply(
+                    &request,
+                    json!([{"agentId":"reviewer","name":"reviewer"},{"agentId":"writer","name":"writer"}]),
+                ),
+                _ => {
+                    assert_eq!(request["method"], method);
+                    break request;
+                }
+            }
+        };
+        let stop = past_observations(wire, "session.exec.stop");
         assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"task-1"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-2","sequence":16,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"task-1","status":"cancelled","result":{"content":"stopped by the user"}}}}));
@@ -6001,13 +6015,6 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-failed","sequence":19,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-failed","status":"error","error":"agent_not_found"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
-        let past_observations = |wire: &mut Wire, method: &str| loop {
-            let request = wire.read_any();
-            if request["method"] != "session.attach" {
-                assert_eq!(request["method"], method);
-                break request;
-            }
-        };
         let stop = past_observations(wire, "session.stop");
         assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
