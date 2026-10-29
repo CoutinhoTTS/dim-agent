@@ -401,7 +401,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 | 流程 | 结果 |
 | --- | --- |
-| 隔离 | 不同 Session、不同分支的同类服务与事件互不可见；越界读取不可解析；无实例键提供作用域服务时发布失败 |
+| 隔离 | 不同 Session、不同分支的同类服务与事件互不可见；越界读取不可解析；无实例键提供作用域服务时发布照常，由 `Agent::check_assembly()` 报告 |
 | 启动与回滚 | 任一必需 Plugin 或监听器失败时不发布服务；已取得的 socket、文件、任务和 Session 全部清理，原始失败可见 |
 | 无 Session 的管理请求 | Provider/OAuth 管理经进程服务执行；不创建隐藏 Session，后续 Session 使用同一状态 |
 | 多连接与 Session | 断连不终止已受理工作；同一 Session 可重新 attach |
