@@ -1359,7 +1359,7 @@ async fn judge_export(
             }
         }
     };
-    let Some(judged) = parse_judgements(&reply) else {
+    let Some(judged) = parse_judgements(&reply).ok() else {
         return (
             unparsed(scenario),
             Some(format!("the judge answered with no verdict list: {reply}")),
