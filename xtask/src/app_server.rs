@@ -2,13 +2,12 @@
 //! records its process plugins in `generated/app-server/`.
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
-    context_methods::ContextMethodsPlugin,
     context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
-    host::{ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
-    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
+    summary_strategy::ProductSummaryStrategyConfig,
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
@@ -22,6 +21,23 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// The candidate texts that replace their factory configuration members in
+/// the assembly [`serve_home`] builds (model-prompts §8.1). The product never
+/// sets a member here.
+#[derive(Clone, Debug, Default)]
+pub struct Overrides {
+    /// The summary strategy's system prompt in place of its built-in
+    /// `SYSTEM` (ContextCompaction §13.5).
+    pub summary_prompt: Option<Arc<str>>,
+}
+
+/// What one run adds to the product assembly: the overrides above. The
+/// product path leaves them empty.
+#[derive(Clone, Default)]
+pub struct RunSettings {
+    pub overrides: Overrides,
+}
 
 /// A scratch directory for one profile, removed by the caller.
 pub fn scratch(label: &str) -> Result<PathBuf> {
@@ -37,15 +53,24 @@ pub async fn serve_product(
     dir: &Path,
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
-    serve_home(&dir.join("home"), dir, dir.join("command-output"), observe).await
+    serve_home(
+        &dir.join("home"),
+        dir,
+        dir.join("command-output"),
+        RunSettings::default(),
+        observe,
+    )
+    .await
 }
 
 /// [`serve_product`] on an existing product home: its native store stays at
-/// `home/rust`, the layout `dimcode` starts the daemon with.
+/// `home/rust`, the layout `dimcode` starts the daemon with. `run` carries the
+/// overrides a run adds; the product path passes [`RunSettings::default`].
 pub async fn serve_home(
     home: &Path,
     cwd: &Path,
     output_root: PathBuf,
+    run: RunSettings,
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
     let home = home.to_path_buf();
@@ -56,6 +81,10 @@ pub async fn serve_home(
         ..Default::default()
     };
     config.session_defaults.cwd = cwd.to_string_lossy().into_owned();
+    let summary = ProductSummaryStrategyConfig {
+        system_prompt: run.overrides.summary_prompt.clone(),
+        ..Default::default()
+    };
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install_local_execution(
         &mut builder,
@@ -65,27 +94,13 @@ pub async fn serve_home(
     dim_app_server::permission_rules::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-        .session_value(Arc::new(ContextModelHost(Some(Arc::new(
-            ProductContextModel,
-        )))))
-        .require_feature(
-            Feature::new("ContextCompaction")
-                .session("ProductSummaryStrategy", |names| {
-                    Ok(Box::new(ProductSummaryStrategyPlugin::new(
-                        names,
-                        ProductSummaryStrategyConfig::default(),
-                    )?))
-                })
-                .session("ContextMethods", |names| {
-                    Ok(Box::new(ContextMethodsPlugin::new(names)?))
-                }),
-        )
-        .require_feature(
-            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
-            }),
-        );
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
+    defaults::install_compaction(&mut builder, Arc::new(ProductContextModel), summary);
+    builder.require_feature(
+        Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+            Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+        }),
+    );
     dim_app_server::collaboration::install(&mut builder);
     dim_agent_questions::install(&mut builder);
     observe(&mut builder);

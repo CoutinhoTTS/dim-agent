@@ -103,7 +103,11 @@ fn configured_agent()
             ..Default::default()
         });
         dim_agent_capabilities::defaults::install_with_process_model(&mut builder);
-        dim_agent_capabilities::defaults::install_compaction(&mut builder, models.clone());
+        dim_agent_capabilities::defaults::install_compaction(
+            &mut builder,
+            models.clone(),
+            dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig::default(),
+        );
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))

@@ -14,6 +14,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::{IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
+    summary_strategy::ProductSummaryStrategyConfig,
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
@@ -305,10 +306,18 @@ pub fn run_with(
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
             if let Some(models) = &models {
-                defaults::install_compaction(&mut builder, models.clone());
+                defaults::install_compaction(
+                    &mut builder,
+                    models.clone(),
+                    ProductSummaryStrategyConfig::default(),
+                );
                 dim_agent_aimux::install(&mut builder);
             } else {
-                defaults::install_compaction(&mut builder, Arc::new(ProductContextModel));
+                defaults::install_compaction(
+                    &mut builder,
+                    Arc::new(ProductContextModel),
+                    ProductSummaryStrategyConfig::default(),
+                );
                 builder.require_feature(
                     dim_agent_runtime::Feature::new("PrepareModelHost")
                         .session("PrepareModelHost", |names| {

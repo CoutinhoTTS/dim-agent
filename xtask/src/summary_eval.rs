@@ -54,8 +54,14 @@ pub async fn run() -> Result<()> {
     let cases = read_cases(&cases_directory())?;
     std::fs::create_dir_all(&options.out)?;
     let cancel = CancellationToken::new();
-    let server =
-        app_server::serve_home(&home, &home, options.out.join("command-output"), |_| {}).await?;
+    let server = app_server::serve_home(
+        &home,
+        &home,
+        options.out.join("command-output"),
+        app_server::RunSettings::default(),
+        |_| {},
+    )
+    .await?;
     let providers = server
         .service::<ProviderService>()
         .ok_or("the product profile serves no provider catalog")?;
