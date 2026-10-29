@@ -165,6 +165,9 @@ jobs:
           export DIM_TEST_PYTHON="$PWD/runtime/.venv/bin/python"
           cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow node_ -- --ignored
           cargo test --locked -p dim-migration --test migration_flow node_ -- --ignored
+          # The scenario runner serves the default plugins, so its own flows
+          # run where those plugins' packages are installed.
+          cargo test --locked -p xtask node_ -- --ignored
   acp-registry:
     needs: changes
     if: github.event_name != 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.scripts == 'true')
