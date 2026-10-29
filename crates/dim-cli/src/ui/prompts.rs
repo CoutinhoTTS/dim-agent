@@ -934,21 +934,21 @@ impl AskUserPrompt {
         }
         let (full, compact) = if self.on_confirm_tab() {
             (
-                "Enter submit · 1-9 edit · Tab/←→ back · Esc decline",
-                "Enter submit · Tab edit · Esc decline",
+                "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline",
+                "Enter submit · Tab edit · / commands · Esc decline",
             )
         } else if self
             .question()
             .is_some_and(|question| question.multi_select)
         {
             (
-                "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline",
-                "Space toggle · Tab next · Esc decline",
+                "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline",
+                "Space toggle · Tab next · / commands · Esc decline",
             )
         } else {
             (
-                "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline",
-                "1-9 select · Tab next · Esc decline",
+                "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline",
+                "1-9 select · Tab next · / commands · Esc decline",
             )
         };
         if visible_width(t(full)) <= width {
@@ -1553,15 +1553,22 @@ mod tests {
         assert!(text[6].contains("        Takes longer"));
         assert!(text[7].contains("  2 [ ] Ramen"));
         assert!(text[9].contains("  4 [ ] Type your own answer"));
+        assert!(text.last().unwrap().ends_with(
+            "─ ↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline ─╯"
+        ));
+        let narrow = ask.render(56, 18, &theme.palette);
         assert!(
-            text.last().unwrap().ends_with(
-                "─ ↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline ─╯"
-            )
+            strip(narrow.last().unwrap())
+                .contains("Space toggle · Tab next · / commands · Esc decline")
         );
-        let narrow = ask.render(48, 18, &theme.palette);
-        assert!(strip(narrow.last().unwrap()).contains("Space toggle · Tab next · Esc decline"));
         assert!(
             narrow
+                .iter()
+                .all(|row| crate::ui::text::display_width(&strip(row)) <= 56)
+        );
+        let tight = ask.render(48, 18, &theme.palette);
+        assert!(
+            tight
                 .iter()
                 .all(|row| crate::ui::text::display_width(&strip(row)) <= 48)
         );
