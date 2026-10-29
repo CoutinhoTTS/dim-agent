@@ -6,8 +6,13 @@
 //! holds its Session (`SessionLifecycle::take_hold`) until its `exec/ended` is
 //! appended, so an idle unload never ends it (idle unload §5, R2).
 use super::exec::{ExecProcess, Output, recovered_result};
-use crate::context_block;
-use dim_agent_runtime::{AgentError, Delivery, Dispatcher, Names, SessionLifecycle, Timeline};
+use crate::{
+    context_block,
+    prompt_guide::{GuideEntries, GuideEntry, GuideScope},
+};
+use dim_agent_runtime::{
+    AgentError, Delivery, Dispatcher, Names, SessionLifecycle, Timeline, TimelineIdentity,
+};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -432,11 +437,17 @@ pub(crate) fn wakes(data: &ExecEndedData) -> bool {
     data.status != ExecStatus::Cancelled
 }
 
+/// `<dim-notification>`: work the model started has finished, failed or
+/// been cancelled.
+const EXEC_ENTRY: &str = r#"<dim-notification source="exec" task="exec-7f2">: something you started has finished, failed or been cancelled, such as a background command. It is information, not a new request. The output preview belongs to that command. Use the read tool with its output path to read the full result. If the work it belongs to is no longer wanted, note the result and do not restart that work."#;
+
 pub struct BackgroundExecPlugin {
     exec: Key<BackgroundExec>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     session: Key<SessionLifecycle>,
+    guide: Key<GuideEntries>,
+    identity: Key<TimelineIdentity>,
 }
 impl BackgroundExecPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -445,6 +456,8 @@ impl BackgroundExecPlugin {
             timeline: names.key()?,
             dispatcher: names.key()?,
             session: names.key()?,
+            guide: names.key()?,
+            identity: names.key()?,
         })
     }
 }
@@ -457,6 +470,8 @@ impl DynPlugin for BackgroundExecPlugin {
             self.timeline.erase(),
             self.dispatcher.erase(),
             self.session.erase(),
+            self.guide.erase(),
+            self.identity.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -464,6 +479,17 @@ impl DynPlugin for BackgroundExecPlugin {
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let session = ctx.require_at(&self.session)?;
+            let guide = ctx.require_at(&self.guide)?;
+            let identity = ctx.require_at(&self.identity)?;
+            guide.register(
+                ctx,
+                GuideScope::Branch(identity.branch_id.clone()),
+                GuideEntry {
+                    markers: vec!["dim-notification".into()],
+                    order: 10,
+                    text: EXEC_ENTRY.into(),
+                },
+            )?;
             let service = Arc::new(BackgroundExec {
                 timeline,
                 session,
