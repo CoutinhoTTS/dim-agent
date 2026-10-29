@@ -13722,6 +13722,7 @@
         "mod collaboration",
         "path CollaborationPlugin::new",
         "path collaboration::Collaboration",
+        "path collaboration::CollaborationConfig",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
         "path collaboration::CollaborationSession",

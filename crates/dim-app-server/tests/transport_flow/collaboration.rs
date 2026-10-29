@@ -4095,3 +4095,82 @@ fn agent_message(data: &InputMessageData) -> Option<&str> {
         .1
         .strip_suffix("\n</dim-agent-message>")
 }
+
+/// The `agent` description of the request the Session made.
+async fn agent_description(session: &Session) -> String {
+    events(session)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.as_deref().and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|tool| tool.name == "agent")
+                    .map(|tool| tool.description.clone())
+            }),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// The two `agent` descriptions as Collaboration's factory configuration: a
+/// candidate replaces the built-in text in the request's declaration, and
+/// unset, the built-in text stays in force.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_agent_descriptions_replace_the_builtin_text() {
+    const LEADER: &str = "Lead the candidate team. This text replaces the built-in description.";
+    const MEMBER: &str = "Join as a candidate member. This text replaces the built-in description.";
+    for configured in [true, false] {
+        let collaboration = if configured {
+            dim_app_server::collaboration::CollaborationConfig {
+                leader_description: Some(LEADER.into()),
+                member_description: Some(MEMBER.into()),
+            }
+        } else {
+            dim_app_server::collaboration::CollaborationConfig::default()
+        };
+        let (server, agent) =
+            launch_with_collaboration(Arc::new(MockTools), ServerConfig::default(), collaboration)
+                .await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let lead = leader(&mut client, allowed()).await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        say(&mut client, &lead, "hello".into(), "queue").await;
+        idle(&mut client, &lead).await;
+        let description = agent_description(&lead_session).await;
+        if configured {
+            assert_eq!(description, LEADER);
+            assert!(!description.contains("Work with other agents as a team you lead."));
+        } else {
+            assert!(description.contains("Work with other agents as a team you lead."));
+        }
+
+        let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        say(
+            &mut client,
+            &lead,
+            tool(json!({"action":"request","agentId":default_agent,"prompt":"hello"})),
+            "queue",
+        )
+        .await;
+        returned(&mut client, &lead, &lead_session, 1).await;
+        let timeline = events(&lead_session).await;
+        let (_, first) = results(&timeline)[0].clone();
+        let first: Value = serde_json::from_str(&first).unwrap();
+        let member = agent
+            .get_session(first["sessionId"].as_str().unwrap())
+            .unwrap();
+        let description = agent_description(&member).await;
+        if configured {
+            assert_eq!(description, MEMBER);
+            assert!(!description.contains("You are a member of a team."));
+        } else {
+            assert!(description.contains("You are a member of a team."));
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
