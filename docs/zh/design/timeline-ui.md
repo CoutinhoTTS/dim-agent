@@ -156,7 +156,7 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 
 ### 4.8 模型还没读到的消息
 
-用户消息先写入、再由 InputQueue 采用、最后由 Loop 消费。客户端从 `input/applied` 起画出它，行显示模型是否已经读到：
+用户消息先写入、再由 InputQueue 采用、最后由 Loop 消费。客户端从 `input/message` 起画出这一行；被队列压住的消息从 `input/applied` 起画。行显示模型是否已经读到：
 
 | 状态 | 事实 | 模型读到了吗 | 画成 |
 | --- | --- | --- | --- |
@@ -164,7 +164,7 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 | applied | `input/applied`，等 Loop 的下一个请求 | 否 | 虚化的消息行 |
 | consumed | `input/consumed`，已进入携带它的那次请求 | 是 | 正常的用户消息行 |
 
-虚化的行保留文本和切点，用 faint 颜色画、不加底色条。fullscreen 里消息在它被说出的位置就提交，`input/consumed` 时原地重画这一块。scrollback 只能追加，所以那里会变的行留在 live tail 里（与流式回答、运行中的工具组同一规则），结算时才以用户色进入 scrollback。于是排在下一个请求里的消息，读起来永远不会像模型已经回答过：
+虚化的行保留文本和切点，用 faint 颜色画、不加底色条。fullscreen 里消息在它被说出的位置就提交，`input/consumed` 时原地重画这一块。scrollback 只能追加，所以那里会变的行留在 live tail 里（与流式回答、运行中的工具组同一规则），结算时才以用户色进入 scrollback。tail 画在所有已提交的行之后，所以待消费行只在它是最新一行时留在那里：如果后面的行先结算（例如跨过一次 stop 的 applied 输入），这条消息按 Timeline 顺序以用户色提交，已提交的行收不回这个提示。于是只要绘制还能改，等下一个请求的消息就读作未读：
 
 ```
  › how do we fix this deadlock                       模型已读到

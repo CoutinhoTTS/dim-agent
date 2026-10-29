@@ -3412,7 +3412,8 @@ impl App {
         let mut live_text: Vec<TextBlock> = Vec::new();
         let mut live_items: Vec<LiveItem> = Vec::new();
         let mut settled_assistant: Vec<TextBlock> = Vec::new();
-        let mut settled_ids: Vec<String> = Vec::new();
+        let mut settled: Vec<(usize, String)> = Vec::new();
+        let mut pending_messages: Vec<(usize, String)> = Vec::new();
         let mut held = false;
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < floor || held {
@@ -3450,6 +3451,7 @@ impl App {
                 }
                 RowKind::UserMessage if row.pending && !self.fullscreen => {
                     live_items.push(LiveItem::Row(index));
+                    pending_messages.push((index, row.row_id.clone()));
                 }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
@@ -3465,13 +3467,28 @@ impl App {
                             id: &row.row_id,
                             text,
                         });
-                        settled_ids.push(row.row_id.clone());
+                        settled.push((index, row.row_id.clone()));
                     }
                 },
                 RowKind::Status if text == INTERRUPT_REASON => {}
-                _ => settled_ids.push(row.row_id.clone()),
+                _ => settled.push((index, row.row_id.clone())),
             }
         }
+
+        // The live tail is drawn after everything committed, so it can hold
+        // only the newest rows. A pending message with a settled row after it
+        // is committed in Timeline order instead, in its final colour: a
+        // committed row cannot take the hint back (timeline UI §4.8).
+        let mut forced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        if let Some(last) = settled.last().map(|(index, _)| *index) {
+            for (index, id) in pending_messages.iter().filter(|(index, _)| *index < last) {
+                live_items.retain(|item| !matches!(item, LiveItem::Row(at) if at == index));
+                settled.push((*index, id.clone()));
+                forced.insert(*index);
+            }
+        }
+        settled.sort_by_key(|(index, _)| *index);
+        let settled_ids: Vec<String> = settled.into_iter().map(|(_, id)| id).collect();
 
         let markdown = &self.markdown;
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
@@ -3518,7 +3535,12 @@ impl App {
                 }
                 (RowKind::AssistantMessage, Some(batch)) => streamed(batch),
                 _ => {
-                    let block = project_row(&snapshot.rows, index, detail_of(index));
+                    let mut block = project_row(&snapshot.rows, index, detail_of(index));
+                    if forced.contains(&index)
+                        && let Block::User { pending, .. } = &mut block
+                    {
+                        *pending = false;
+                    }
                     let lines = render_block(&block, width, p, markdown);
                     if lines.is_empty() {
                         return (String::new(), None);
@@ -5647,31 +5669,61 @@ mod tests {
         drawn.draw();
     }
 
-    /// Draws one user message, in the state `pending` gives it.
-    fn show_message(drawn: &mut Drawn, pending: bool) {
+    /// The user message the transcript tests draw, in the state `pending`
+    /// gives it.
+    fn message(pending: bool) -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            row_id: "u1".into(),
+            kind: RowKind::UserMessage,
+            text: "find the leak".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    /// The status row a cancelled turn settles after a stop.
+    fn stopped() -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            row_id: "stopped-1".into(),
+            kind: RowKind::Status,
+            text: "stopped".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending: false,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    fn show(drawn: &mut Drawn, rows: Vec<std::sync::Arc<ViewRow>>) {
         drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
-            rows: vec![std::sync::Arc::new(ViewRow {
-                row_id: "u1".into(),
-                kind: RowKind::UserMessage,
-                text: "find the leak".into(),
-                streaming: false,
-                elapsed_ms: None,
-                tone: None,
-                tool_name: None,
-                tool_input: None,
-                batch: None,
-                pending,
-                parked: false,
-                result_text: None,
-                result_is_error: false,
-                diff: None,
-                exit_code: None,
-                member: None,
-                cut: None,
-                line: None,
-                compaction: None,
-            })],
+            rows,
             focus: "main".into(),
             history_complete: true,
             ..ViewSnapshot::default()
@@ -5690,7 +5742,7 @@ mod tests {
     #[test]
     fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
         let mut drawn = attached();
-        show_message(&mut drawn, true);
+        show(&mut drawn, vec![message(true)]);
         assert!(
             drawn.transcript().contains("find the leak"),
             "a pending message is drawn"
@@ -5703,7 +5755,7 @@ mod tests {
                 .any(|block| matches!(block, Block::User { .. })),
             "scrollback prints a message only once it has settled"
         );
-        show_message(&mut drawn, false);
+        show(&mut drawn, vec![message(false)]);
         assert!(
             drawn
                 .app
@@ -5715,10 +5767,49 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_settles_a_pending_message_before_rows_that_came_after_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true), stopped()]);
+        let text = drawn.transcript();
+        assert!(
+            text.find("find the leak") < text.find("stopped"),
+            "the message stays where it was said, above the stop: {text}"
+        );
+        let user = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .expect("the message is committed");
+        let stop = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::Status { text, .. } if text == "stopped"))
+            .expect("the stop is committed");
+        assert!(user < stop, "the message is committed before the stop");
+        assert!(
+            matches!(drawn.app.history[user], Block::User { pending: false, .. }),
+            "a committed row cannot keep the pending hint"
+        );
+        show(&mut drawn, vec![message(false), stopped()]);
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "consuming the message does not commit a second copy"
+        );
+    }
+
+    #[test]
     fn fullscreen_settles_a_committed_message_in_place() {
         let mut drawn = attached();
         drawn.app.fullscreen = true;
-        show_message(&mut drawn, true);
+        show(&mut drawn, vec![message(true)]);
         assert!(
             drawn.app.history.iter().any(|block| matches!(
                 block,
@@ -5726,7 +5817,7 @@ mod tests {
             )),
             "fullscreen commits the message where it was said"
         );
-        show_message(&mut drawn, false);
+        show(&mut drawn, vec![message(false)]);
         assert!(
             drawn.app.history.iter().any(|block| matches!(
                 block,
