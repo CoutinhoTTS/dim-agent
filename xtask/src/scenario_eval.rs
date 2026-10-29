@@ -15,8 +15,8 @@
 //! each run's exported Timeline, and the report applies the relative rule of
 //! model-prompts §8.1: every probe's pass rate is at least the current arm's
 //! minus 0.05, the candidate's violations, failed runs and unjudged runs are
-//! no higher, and a probe with no judged run in an arm fails the comparison
-//! by name. There is no absolute pass line.
+//! no higher, and every probe has at least one judged run in each arm. There
+//! is no absolute pass line.
 //!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
@@ -639,6 +639,12 @@ impl RunRecord {
     /// else failed the run. Such a run enters none of its arm's metrics.
     fn unjudged(&self) -> bool {
         !self.failed && self.judge_outcome == JudgeOutcome::Unreadable
+    }
+    /// Whether the run is judged (model-prompts §8.1): it raised no error and
+    /// the judge answered every call with usable verdicts. Only such a run
+    /// counts toward its arm's and each of its probes' judged runs.
+    fn judged(&self) -> bool {
+        self.error.is_none() && self.judge_outcome == JudgeOutcome::Judged
     }
 }
 #[derive(Clone, serde::Serialize)]
@@ -1527,12 +1533,21 @@ fn verdicts(scenario: &Scenario, reply: &str) -> std::result::Result<Vec<ProbeRe
         .collect())
 }
 
+/// One probe's runs in one arm: every run that counts toward its pass rate,
+/// and how many of them are judged.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ProbeCounts {
+    passed: u32,
+    runs: u32,
+    judged: u32,
+}
+
 /// The arm's metrics over its scenarios and runs (model-prompts §8.1). An
 /// unjudged run adds nothing to them; the arm counts it apart.
 #[derive(Default)]
 struct Metrics {
-    /// `(scenario, probe)` → `(passed runs, runs)`.
-    probes: BTreeMap<(String, String), (u32, u32)>,
+    /// `(scenario, probe)` → its counted and judged runs.
+    probes: BTreeMap<(String, String), ProbeCounts>,
     violations: u32,
     failed: u32,
     /// Runs whose probes a judge answered.
@@ -1548,7 +1563,7 @@ impl Metrics {
             return;
         }
         self.failed += u32::from(record.failed);
-        let judged = record.error.is_none() && record.judge_outcome == JudgeOutcome::Judged;
+        let judged = record.judged();
         self.judged += u32::from(judged);
         for probe in &scenario.probes {
             let verdict = record
@@ -1572,24 +1587,25 @@ impl Metrics {
                 .probes
                 .entry((scenario.id.clone(), probe.id.clone()))
                 .or_default();
-            counts.1 += 1;
-            counts.0 += u32::from(passed);
+            counts.runs += 1;
+            counts.passed += u32::from(passed);
+            counts.judged += u32::from(judged);
         }
     }
-    /// The probe's `(passed runs, runs)`.
-    fn counts(&self, key: &(String, String)) -> Option<(u32, u32)> {
+    /// The probe's counted and judged runs.
+    fn counts(&self, key: &(String, String)) -> Option<ProbeCounts> {
         self.probes.get(key).copied()
     }
     fn rate(&self, key: &(String, String)) -> Option<f64> {
-        let (passed, total) = self.counts(key)?;
-        (total > 0).then(|| passed as f64 / total as f64)
+        let counts = self.counts(key)?;
+        (counts.runs > 0).then(|| counts.passed as f64 / counts.runs as f64)
     }
 }
 
 /// The §8.1 rule of a candidate arm against the current one: every probe's
-/// pass rate at least `current − δ`, and violations, failed runs and unjudged
-/// runs no higher. A probe with no judged run in one arm fails the comparison
-/// by name. There is no absolute pass line.
+/// pass rate at least `current − δ`, violations, failed runs and unjudged runs
+/// no higher, and every probe has at least one judged run in each arm. There
+/// is no absolute pass line.
 struct Rule {
     passes: bool,
     failures: Vec<String>,
@@ -1606,22 +1622,21 @@ fn rule(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Rule 
             let key = (scenario.id.clone(), probe.id.clone());
             let current_counts = current.counts(&key);
             let candidate_counts = candidate.counts(&key);
-            for (arm, counts) in [
-                ("current", &current_counts),
-                ("candidate", &candidate_counts),
-            ] {
-                if counts.is_none() {
+            for (arm, counts) in [("current", current_counts), ("candidate", candidate_counts)] {
+                if counts.is_none_or(|counts| counts.judged == 0) {
                     failures.push(format!(
                         "{}/{} has no judged run in the {arm} arm",
                         scenario.id, probe.id
                     ));
                 }
             }
-            let (Some((current_passed, current_runs)), Some((candidate_passed, candidate_runs))) =
-                (current_counts, candidate_counts)
+            let (Some(current_counts), Some(candidate_counts)) = (current_counts, candidate_counts)
             else {
                 continue;
             };
+            let (current_passed, current_runs) = (current_counts.passed, current_counts.runs);
+            let (candidate_passed, candidate_runs) =
+                (candidate_counts.passed, candidate_counts.runs);
             // §8.1 in integers (δ = 1/20): kp/kn ≥ cp/cn − 1/20
             // ⇔ 20·kp·cn + cn·kn ≥ 20·cp·kn.
             let (numerator, denominator) = DELTA;
@@ -2271,6 +2286,108 @@ mod tests {
             "a missing judged run never reads as a fall: {:?}",
             verdict.failures
         );
+    }
+
+    /// A probe needs a judged run in each arm, not merely a counted one
+    /// (model-prompts §8.1, issue #642): a run whose judge call failed still
+    /// counts toward the probe's rate, so a probe whose every run in an arm
+    /// ended that way has no judged run there, and the rule names it. One
+    /// judged run in the arm satisfies the floor.
+    #[test]
+    fn a_probe_needs_a_judged_run_in_each_arm() {
+        let case = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut other = scenario(vec![probe("fine", ProbeKind::MustShow)]);
+        other.id = "other".into();
+        let scenarios = [case, other];
+        let (case, other) = (&scenarios[0], &scenarios[1]);
+        // One arm: of the probe's runs, the judge answered `judged` of them
+        // with a verdict that fails it and its calls failed for the rest; one
+        // judged run of `other` keeps the arm itself off the arm-level
+        // message.
+        let arm = |arm: &'static str, judged: usize, call_failed: usize, with_other: bool| {
+            let mut metrics = Metrics::default();
+            for _ in 0..judged {
+                metrics.add(
+                    case,
+                    &record(
+                        arm,
+                        case,
+                        &[("reports", ProbeVerdict::Absent)],
+                        JudgeOutcome::Judged,
+                    ),
+                );
+            }
+            for _ in 0..call_failed {
+                metrics.add(
+                    case,
+                    &record(
+                        arm,
+                        case,
+                        &[("reports", ProbeVerdict::Unparsed)],
+                        JudgeOutcome::CallFailed,
+                    ),
+                );
+            }
+            if with_other {
+                metrics.add(
+                    other,
+                    &record(
+                        arm,
+                        other,
+                        &[("fine", ProbeVerdict::Present)],
+                        JudgeOutcome::Judged,
+                    ),
+                );
+            }
+            metrics
+        };
+        // Every one of the probe's runs in the candidate arm ended in a
+        // failed judge call, while the arm has a judged run elsewhere: the
+        // rule names the probe in the candidate arm alone.
+        let verdict = rule(
+            &arm("current", 1, 2, true),
+            &arm("candidate", 0, 2, true),
+            &scenarios,
+        );
+        assert!(!verdict.passes);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "case/reports has no judged run in the candidate arm"),
+            "{:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "case/reports has no judged run in the current arm"),
+            "{:?}",
+            verdict.failures
+        );
+        // An arm with no judged run at all still gets the arm-level message
+        // beside the probe's.
+        let verdict = rule(
+            &arm("current", 1, 2, true),
+            &arm("candidate", 0, 2, false),
+            &scenarios,
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "the candidate arm has no judged run"),
+            "{:?}",
+            verdict.failures
+        );
+        // One judged run in the arm satisfies the probe's floor.
+        let verdict = rule(
+            &arm("current", 1, 2, true),
+            &arm("candidate", 1, 2, true),
+            &scenarios,
+        );
+        assert!(verdict.passes, "{:?}", verdict.failures);
     }
 
     /// A run that stopped on its wall-clock budget is a failed run, scored as
