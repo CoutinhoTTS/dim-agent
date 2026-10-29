@@ -17807,6 +17807,7 @@
         "path ModelSource::Custom",
         "path NewApiEndpoint",
         "path ProviderProjection",
+        "path crate::model_catalog::model_kind",
         "use crate::model_catalog::BundledCatalog",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
