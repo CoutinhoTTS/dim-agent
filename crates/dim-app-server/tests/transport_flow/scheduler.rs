@@ -6,6 +6,9 @@ use rutis::host::CtxHost;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+/// The `dim-scheduler` entry (Scheduler §5.2), byte for byte.
+const SCHEDULER_ENTRY: &str = r#"<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request."#;
+
 struct AppliedInputGate {
     held: Arc<AtomicBool>,
     entered: tokio::sync::mpsc::UnboundedSender<(String, String)>,
@@ -820,6 +823,13 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
     )
     .await;
     assert_eq!(run["state"], "completed", "{run}");
+    // The run Session's request carries the scheduled-run marker and, from the
+    // same Session part, the dim-scheduler entry.
+    let run_session = agent
+        .get_session(run["session_id"].as_str().unwrap())
+        .unwrap();
+    let system = super::reload::last_system(&run_session, "main").await;
+    assert!(system.contains(SCHEDULER_ENTRY), "{system}");
     let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -871,6 +881,18 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
     assert_eq!(request["messages"][1]["content"], first);
     release.send("Scheduled review".into()).unwrap();
     session_title::titled(&mut client, starter.id(), "Scheduled review", "auto").await;
+    // The request that consumed the report carries its entry, registered at
+    // session scope by the Scheduler Session part that wrote the marker.
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let system = super::reload::last_system(&starter, "main").await;
+    assert!(system.contains(SCHEDULER_ENTRY), "{system}");
     server.shutdown();
     server.join().await.unwrap();
     http.abort();

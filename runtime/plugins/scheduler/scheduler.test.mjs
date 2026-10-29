@@ -164,7 +164,8 @@ async function host(t, initial = {}) {
   h.owner = await load(processPlugin, { services, config: {} })
   const toolRegistry = { async register(declaration, execute) { h.contribution = { declaration, execute } } }
   assert.equal(h.part.scope, 'session')
-  h.session = await load(h.part.definition, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
+  const guideEntries = { entries: [], async register(scope, entry) { this.entries.push({ scope, entry: copy(entry) }) } }
+  h.session = await load(h.part.definition, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry, guideEntries } })
   h.call = async (name, params = {}) => {
     const reply = await h.methods({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
     assert.equal(reply.kind, 'value', JSON.stringify(reply))
@@ -191,7 +192,8 @@ async function host(t, initial = {}) {
     await h.close()
     pending = Promise.withResolvers()
     h.owner = await load(processPlugin, { services, config: {} })
-    h.session = await load(h.part.definition, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
+    const guideEntries = { entries: [], async register(scope, entry) { this.entries.push({ scope, entry: copy(entry) }) } }
+  h.session = await load(h.part.definition, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry, guideEntries } })
     await flush()
   }
   t.after(async () => {
@@ -270,7 +272,7 @@ test('retiring a Session handler rejects retained and in-flight calls without cl
     const gate = Promise.withResolvers(), entered = Promise.withResolvers()
     let calls = 0
     let tool
-    const session = await load(sessionPlugin, { services: { toolRegistry: { async register(declaration, execute) { tool = { declaration, execute } } }, scheduleJobs: { async call() {
+    const session = await load(sessionPlugin(), { services: { guideEntries: { async register() {} }, toolRegistry: { async register(declaration, execute) { tool = { declaration, execute } } }, scheduleJobs: { async call() {
       calls++; entered.resolve(); await gate.promise
       if (rejects) throw new Error('owner retired')
       return { content: 'saved', records: { saved: true } }
