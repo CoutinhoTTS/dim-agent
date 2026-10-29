@@ -91,6 +91,7 @@
       "parent": "dim_acp",
       "file": "crates/dim-acp/src/lody.rs",
       "unexpandedMacros": [
+        "format",
         "json",
         "matches"
       ]
@@ -2451,6 +2452,16 @@
       ]
     },
     {
+      "id": "dim_cli::client::isolation_policy_file_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::client::web_assets_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::client",
@@ -3412,6 +3423,27 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::isolation",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/isolation.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::isolation::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::isolation",
+      "file": "crates/dim-cli/src/ui/isolation.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::ui::keys",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -3818,6 +3850,16 @@
         "format",
         "matches",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::settings_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::settings_panel",
+      "file": "crates/dim-cli/src/ui/settings_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -4940,6 +4982,14 @@
         "path CollaborationOutcome::Failed",
         "use dim_agent_types::CollaborationDelivery",
         "use dim_agent_types::CollaborationOutcome"
+      ]
+    },
+    {
+      "from": "dim_acp::lody",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPreset"
       ]
     },
     {
@@ -20578,6 +20628,7 @@
         "mod client",
         "path client",
         "path client::connect_inner",
+        "path client::isolation_policy_file",
         "path client::shutdown",
         "path client::stop"
       ]
@@ -20925,6 +20976,13 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_cli::client::isolation_policy_file_tests",
+      "references": [
+        "mod isolation_policy_file_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
@@ -20949,6 +21007,21 @@
         "use dim_client::RpcError",
         "use dim_client::Server",
         "use dim_client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::client::isolation_policy_file_tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options::parse",
+        "use super::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::client::isolation_policy_file_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::isolation_policy_file"
       ]
     },
     {
@@ -21411,6 +21484,13 @@
         "path UiIdentity",
         "use crate::args::Options",
         "use crate::args::UiIdentity"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::isolation_policy_file"
       ]
     },
     {
@@ -23266,6 +23346,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::isolation",
+      "references": [
+        "mod isolation"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::keys",
       "references": [
         "mod keys"
@@ -24552,6 +24639,20 @@
       "references": [
         "mod providers",
         "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::isolation",
+      "to": "dim_cli::ui::isolation::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::isolation::tests",
+      "to": "dim_cli::ui::isolation",
+      "references": [
+        "path set_enabled"
       ]
     },
     {
@@ -26152,9 +26253,7 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
-        "path gutter_width",
-        "use crate::ui::text::display_width",
-        "use crate::ui::text::gutter_width"
+        "use crate::ui::text::display_width"
       ]
     },
     {
@@ -26626,6 +26725,7 @@
         "path Event::None",
         "path Event::Pick",
         "path Event::Refresh",
+        "path Item::heading",
         "path Item::new",
         "path ListPanel",
         "path ListPanel::new",
@@ -26647,6 +26747,13 @@
     },
     {
       "from": "dim_cli::ui::settings_panel",
+      "to": "dim_cli::ui::settings_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyEvent",
@@ -26660,6 +26767,44 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::settings_panel",
+      "references": [
+        "path Setting::Isolation",
+        "path Setting::Theme",
+        "path SettingsPanel::new",
+        "path Values"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
@@ -28391,6 +28536,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::isolation",
+      "references": [
+        "path crate::ui::isolation::enabled",
+        "path crate::ui::isolation::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::keys",
       "references": [
         "path crate::ui::keys::report"
@@ -28610,6 +28763,7 @@
       "references": [
         "path Setting",
         "path Setting::Approvals",
+        "path Setting::Isolation",
         "path Setting::Language",
         "path Setting::Model",
         "path Setting::Mouse",
@@ -31103,6 +31257,10 @@
     {
       "module": "dim_cli::ui::composer",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::ui::isolation::tests",
+      "path": "AtomicU64::new"
     },
     {
       "module": "dim_cli::ui::lines_panel::tests",
