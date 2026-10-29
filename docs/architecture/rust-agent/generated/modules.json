@@ -23491,6 +23491,7 @@
         "path ModelPolicyUpdate::Conflict",
         "path ModelPolicyUpdate::Failed",
         "path ModelPolicyUpdate::Read",
+        "path NeedsLimitsProvider",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -23552,6 +23553,7 @@
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
+        "use crate::model::session::NeedsLimitsProvider",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
         "use crate::model::session::PluginItem",
@@ -25842,6 +25844,7 @@
         "path ModelPolicyUpdate::Conflict",
         "path ModelPolicyUpdate::Failed",
         "path ModelPolicyUpdate::Read",
+        "path NeedsLimitsProvider",
         "path SubagentModelPolicy",
         "path SubagentModelPolicy::Agent",
         "path SubagentModelPolicy::Fixed",
@@ -25851,6 +25854,7 @@
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
+        "use crate::model::session::NeedsLimitsProvider",
         "use crate::model::session::SubagentModelPolicy"
       ]
     },

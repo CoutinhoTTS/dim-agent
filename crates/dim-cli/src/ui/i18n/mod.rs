@@ -315,6 +315,14 @@ mod tests {
                     "{provider}: {count} models disabled · dimcode models {id}",
                     &["{provider}", "{count}", "{id}"][..],
                 ),
+                (
+                    "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{id}"][..],
+                ),
+                (
+                    "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{count}", "{id}"][..],
+                ),
             ] {
                 let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
                 for placeholder in placeholders {

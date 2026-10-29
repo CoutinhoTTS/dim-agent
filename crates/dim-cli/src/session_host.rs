@@ -22,9 +22,9 @@ use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
     Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
-    ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply,
-    ProviderAction, ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update,
+    ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
+    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
+    SubagentModelPolicy, SwitchKind, Update,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -2197,6 +2197,8 @@ impl Worker {
             name: String,
             unavailable_reason: Option<String>,
             #[serde(default)]
+            missing_limits: Vec<String>,
+            #[serde(default)]
             capabilities: dim_agent_types::CatalogCapabilities,
             #[serde(default)]
             metadata: Option<CatalogReasoning>,
@@ -2245,6 +2247,7 @@ impl Worker {
         }
         let mut models = Vec::new();
         let mut empty = Vec::new();
+        let mut limits = Vec::new();
         for (provider_id, provider_name, listable) in usable {
             let snapshot = self
                 .client
@@ -2283,6 +2286,11 @@ impl Worker {
             };
             let preferences = self.saved_preferences(&provider_id).await;
             let total = catalog.models.len();
+            let undeclared = catalog
+                .models
+                .iter()
+                .filter(|model| !model.missing_limits.is_empty())
+                .count();
             let unavailable = catalog
                 .models
                 .iter()
@@ -2332,6 +2340,13 @@ impl Worker {
                         }
                     }),
             );
+            if undeclared > 0 {
+                limits.push(NeedsLimitsProvider {
+                    provider_id: provider_id.clone(),
+                    provider_name: provider_name.clone(),
+                    count: undeclared,
+                });
+            }
             if models.len() == before {
                 let reason = if total == 0 {
                     EmptyReason::NoModels { listable }
@@ -2360,6 +2375,7 @@ impl Worker {
             models,
             current,
             empty,
+            limits,
         })
     }
 
