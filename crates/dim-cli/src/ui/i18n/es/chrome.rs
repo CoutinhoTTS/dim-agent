@@ -429,6 +429,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: catálogo ilegible · dimcode models {id}"
         }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Un modelo cuyos límites no están declarados no se puede seleccionar; decláralos con dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Decláralos con dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
+        }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "Sin catálogo en caché. Inicia sesión y ejecuta models PROVIDER --refresh."
         }

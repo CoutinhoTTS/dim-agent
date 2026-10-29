@@ -21447,8 +21447,10 @@
       "to": "dim_cli::session_host",
       "references": [
         "mod session_host",
+        "path session_host::LimitTarget::Missing",
+        "path session_host::LimitTarget::Model",
         "path session_host::clear_saved_model_preferences",
-        "path session_host::model_adoption_error",
+        "path session_host::declare_model_limits",
         "path session_host::saved_model_preferences"
       ]
     },
@@ -21525,6 +21527,13 @@
       "references": [
         "path client::Client",
         "path client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
       ]
     },
     {
@@ -23164,6 +23173,7 @@
       "to": "dim_cli",
       "references": [
         "path Result",
+        "path crate::model_adoption_error",
         "use crate::Result"
       ]
     },
@@ -23276,7 +23286,6 @@
       "from": "dim_cli::session",
       "to": "dim_cli::session_host",
       "references": [
-        "path crate::session_host::model_adoption_error",
         "path crate::session_host::saved_model_preferences"
       ]
     },
@@ -23346,7 +23355,8 @@
       "to": "dim_cli",
       "references": [
         "path crate::Error",
-        "path crate::Result"
+        "path crate::Result",
+        "path crate::model_adoption_error"
       ]
     },
     {

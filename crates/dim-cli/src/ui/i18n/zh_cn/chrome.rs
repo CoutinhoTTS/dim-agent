@@ -353,6 +353,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}：无法读取 catalog · dimcode models {id}"
         }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限未声明的模型无法选择；用 dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N 声明。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "用 dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N 声明。"
+        }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "没有缓存的 catalog。请登录并运行 models PROVIDER --refresh。"
         }

@@ -19,7 +19,9 @@ Commands:\n\
   login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
-  models PROVIDER [--refresh | --clear-preferences MODEL]\n\
+  models PROVIDER [--refresh | --clear-preferences MODEL\n\
+                  | --set-limits MODEL --context-window N --max-output-tokens N\n\
+                  | --set-missing-limits --context-window N --max-output-tokens N]\n\
   mcp list                         List MCP servers and their enablement\n\
   mcp login ID [--no-browser] [--client-secret]\n\
                                    Sign in; secrets use hidden terminal input\n\
@@ -181,6 +183,12 @@ pub struct Options {
     pub fullscreen: Option<bool>,
     pub refresh: bool,
     pub clear_preferences: Option<String>,
+    /// The model whose limits `models --set-limits` declares.
+    pub set_limits: Option<String>,
+    /// Declare both limits for every model whose limits are undeclared.
+    pub set_missing_limits: bool,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
     pub redirect_uri: String,
     pub no_browser: bool,
     pub client_secret: bool,
@@ -210,6 +218,10 @@ impl Options {
             fullscreen: None,
             refresh: false,
             clear_preferences: None,
+            set_limits: None,
+            set_missing_limits: false,
+            context_window: None,
+            max_output_tokens: None,
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
@@ -317,6 +329,24 @@ impl Options {
                     }
                 }
                 "--refresh" => options.refresh = true,
+                "--set-limits" => {
+                    if options.set_limits.replace(value(&mut args)?).is_some() {
+                        return Err("Supply the model to set limits for only once".into());
+                    }
+                }
+                "--set-missing-limits" => options.set_missing_limits = true,
+                "--context-window" => {
+                    let limit = parse_limit("--context-window", &value(&mut args)?)?;
+                    if options.context_window.replace(limit).is_some() {
+                        return Err("Supply --context-window only once".into());
+                    }
+                }
+                "--max-output-tokens" => {
+                    let limit = parse_limit("--max-output-tokens", &value(&mut args)?)?;
+                    if options.max_output_tokens.replace(limit).is_some() {
+                        return Err("Supply --max-output-tokens only once".into());
+                    }
+                }
                 "--clear-preferences" => {
                     if options
                         .clear_preferences
@@ -542,6 +572,26 @@ impl Options {
         if options.refresh && !matches!(options.action, Action::Models(_)) {
             return Err("--refresh requires the models command".into());
         }
+        if options.set_limits.is_some() && options.set_missing_limits {
+            return Err("Use --set-limits MODEL or --set-missing-limits, not both".into());
+        }
+        if (options.set_limits.is_some() || options.set_missing_limits)
+            && (!matches!(options.action, Action::Models(_))
+                || options.refresh
+                || options.clear_preferences.is_some())
+        {
+            return Err("--set-limits and --set-missing-limits require models PROVIDER and cannot be combined with --refresh or --clear-preferences".into());
+        }
+        if options.set_limits.is_some() || options.set_missing_limits {
+            if options.context_window.is_none() || options.max_output_tokens.is_none() {
+                return Err("--set-limits and --set-missing-limits require --context-window and --max-output-tokens".into());
+            }
+        } else if options.context_window.is_some() || options.max_output_tokens.is_some() {
+            return Err(
+                "--context-window and --max-output-tokens require --set-limits or --set-missing-limits"
+                    .into(),
+            );
+        }
         if (options.no_browser || options.client_secret)
             && !matches!(options.action, Action::McpLogin(_))
         {
@@ -571,6 +621,20 @@ impl Options {
         }
         Ok(options)
     }
+}
+
+/// A model limit as `--set-limits` and `--set-missing-limits` take it: a
+/// positive integer a listed model's capacity can hold as a JSON number.
+fn parse_limit(flag: &str, value: &str) -> Result<u64> {
+    let limit: u64 = value
+        .parse()
+        .map_err(|_| format!("{flag} must be a positive integer"))?;
+    if limit == 0 || limit > dim_agent_types::JS_MAX_SAFE_INTEGER {
+        return Err(
+            format!("{flag} must be a positive integer of at most 9007199254740991").into(),
+        );
+    }
+    Ok(limit)
 }
 
 /// The product home: `DIMCODE_HOME`, else `~/.dimcode-alpha` for an alpha

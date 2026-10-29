@@ -580,6 +580,7 @@ impl Worker {
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
         let mut preferences = None;
+        let mut target = None;
         if let (Some(provider), Some(model)) =
             (self.options.provider.clone(), self.options.model.clone())
         {
@@ -588,12 +589,20 @@ impl Worker {
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
+            target = Some((provider, model));
         }
-        let created: Created = self
-            .client
-            .typed("session.create", params)
-            .await
-            .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
+        let created: Created = match self.client.typed("session.create", params).await {
+            Ok(created) => created,
+            Err(error) => {
+                return Err(crate::model_adoption_error(
+                    &mut self.client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await);
+            }
+        };
         self.enter(
             created.session_id,
             Some(created.model),
@@ -609,6 +618,7 @@ impl Worker {
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
         let mut preferences = None;
+        let mut target = None;
         let result = async {
             if let Some(model) = &self.model {
                 params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
@@ -617,11 +627,18 @@ impl Worker {
                 if let Some(preferences) = &preferences {
                     params["modelPreferences"] = preferences.clone();
                 }
+                target = Some((provider, model));
             }
-            self.client
-                .typed::<Created>("session.create", params)
-                .await
-                .map_err(|error| model_adoption_error(error, preferences.as_ref()))
+            match self.client.typed::<Created>("session.create", params).await {
+                Ok(created) => Ok(created),
+                Err(error) => Err(crate::model_adoption_error(
+                    &mut self.client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await),
+            }
         }
         .await;
         match result {
@@ -2477,15 +2494,23 @@ impl Worker {
             self.send(features);
             model
         } else {
+            let target = (provider_id.clone(), model_id.clone());
             let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
-            let updated: Updated = self
-                .client
-                .typed("session.model.update", params)
-                .await
-                .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
+            let updated: Updated = match self.client.typed("session.model.update", params).await {
+                Ok(updated) => updated,
+                Err(error) => {
+                    return Err(crate::model_adoption_error(
+                        &mut self.client,
+                        Some((target.0.as_str(), target.1.as_str())),
+                        error,
+                        preferences.as_ref(),
+                    )
+                    .await);
+                }
+            };
             let features = self.model_features(&updated.model).await;
             self.send(Update::Ready {
                 provider: updated.model.provider_id.clone(),
@@ -3315,21 +3340,101 @@ pub(crate) async fn clear_saved_model_preferences(
     clear_model_preferences(client, provider_id, model_id, version).await
 }
 
+/// The models `dimcode models PROVIDER --set-limits` declares limits for.
+pub(crate) enum LimitTarget {
+    /// The one model the command names.
+    Model(String),
+    /// Every model whose catalog entry reports missing limits.
+    Missing,
+}
+
+/// Declares a context window and maximum output for the target models
+/// through `provider.models.edit`, each write at the version the previous
+/// reply returned. A conflict stops the run and keeps the server's reread
+/// requirement.
+pub(crate) async fn declare_model_limits(
+    client: &mut Client,
+    provider_id: &str,
+    target: LimitTarget,
+    context_window: u64,
+    max_output_tokens: u64,
+) -> crate::Result<()> {
+    let snapshot: ProviderManagement = client
+        .typed("provider.management", json!({"providerId": provider_id}))
+        .await?;
+    let mut version = snapshot
+        .providers
+        .into_iter()
+        .next()
+        .ok_or("Provider management entry is missing")?
+        .version
+        .ok_or("Provider catalog must be refreshed before declaring model limits")?;
+    let targets = match target {
+        LimitTarget::Model(model) => vec![model],
+        LimitTarget::Missing => {
+            #[derive(Deserialize)]
+            struct Snapshot {
+                catalog: Option<Catalog>,
+            }
+            #[derive(Deserialize)]
+            struct Catalog {
+                models: Vec<CatalogModel>,
+            }
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct CatalogModel {
+                id: String,
+                #[serde(default)]
+                missing_limits: Vec<String>,
+            }
+            let snapshot: Snapshot = client
+                .typed("provider.catalog", json!({"providerId": provider_id}))
+                .await?;
+            snapshot
+                .catalog
+                .map(|catalog| {
+                    catalog
+                        .models
+                        .into_iter()
+                        .filter(|model| !model.missing_limits.is_empty())
+                        .map(|model| model.id)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
+    for model_id in targets {
+        #[derive(Deserialize)]
+        struct Edited {
+            version: u32,
+        }
+        let edited: Edited = client
+            .typed(
+                "provider.models.edit",
+                json!({
+                    "providerId": provider_id,
+                    "expectedVersion": version,
+                    "modelId": model_id,
+                    "edit": {"contextWindow": context_window, "maxOutputTokens": max_output_tokens},
+                }),
+            )
+            .await
+            .map_err(|error| match client::app_error(&error) {
+                Some("provider_conflict") if !error.to_string().contains("reread") => {
+                    format!("{error}; reread before retrying").into()
+                }
+                _ => error,
+            })?;
+        version = edited.version;
+    }
+    Ok(())
+}
+
 /// The notice when no Session could be started.
 fn no_session(error: &crate::Error) -> String {
     match error.downcast_ref::<client::RpcError>().and_then(app_error) {
         Some("provider_failed") => NO_SESSION.to_owned(),
         _ => format!("{error}. {NO_SESSION}"),
-    }
-}
-
-pub(crate) fn model_adoption_error(
-    error: crate::Error,
-    preferences: Option<&serde_json::Value>,
-) -> crate::Error {
-    match preferences {
-        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Clear them with Ctrl+X in /models or dimcode models PROVIDER --clear-preferences MODEL; saved preferences were kept.").into(),
-        None => error,
     }
 }
 

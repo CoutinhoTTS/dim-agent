@@ -308,6 +308,315 @@ fn model_catalog_refresh_names_an_empty_listing() {
     );
 }
 
+/// A model no source declares limits for is marked `undeclared` and the
+/// list names the command that declares them, instead of hiding it among
+/// the unavailable models.
+#[test]
+fn model_catalog_marks_undeclared_limits_and_names_the_declaring_command() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tundeclared\nready\tReady\tavailable\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models fixture --set-missing-limits --context-window N --max-output-tokens N.\n"
+    );
+}
+
+/// A model refused for its undeclared limits names the command that
+/// declares them, with its provider and model, when the explicit start
+/// model cannot be adopted.
+#[test]
+fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let create = wire.read("session.create");
+        assert_eq!(
+            create["params"]["model"],
+            json!({"provider":"fixture","modelId":"narrow"})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Explicit model is unavailable","data":{"appError":"provider_invalid_config"}}}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "--provider",
+            "fixture",
+            "--model",
+            "narrow",
+            "--prompt",
+            "hello",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot create session: "), "{stderr}");
+    assert!(
+        stderr.contains("Declare them with dimcode models fixture --set-limits narrow --context-window N --max-output-tokens N."),
+        "{stderr}"
+    );
+}
+
+/// `--set-limits` declares both limits of the named model at the record
+/// version, then prints the catalog the way `models PROVIDER` does.
+#[test]
+fn model_catalog_declares_limits_for_one_model() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let management = wire.read("provider.management");
+        assert_eq!(management["params"], json!({"providerId":"fixture"}));
+        wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{}}],"errors":[]}));
+        let edit = wire.read("provider.models.edit");
+        assert_eq!(
+            edit["params"],
+            json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&edit, json!({"version":2,"disabledModelIds":[],"models":[
+            {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
+        ]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":2,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "models",
+            "fixture",
+            "--set-limits",
+            "narrow",
+            "--context-window",
+            "64000",
+            "--max-output-tokens",
+            "8000",
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tavailable\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+/// `--set-missing-limits` reads the catalog, declares both limits of every
+/// model it reports as missing them, and chains each reply's version into
+/// the next write.
+#[test]
+fn model_catalog_declares_missing_limits_for_every_model() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let management = wire.read("provider.management");
+        wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{}}],"errors":[]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
+                {"id":"wide","name":"Wide","unavailableReason":"limits_undeclared","missingLimits":["maxOutputTokens"]}
+            ]}}),
+        );
+        let first = wire.read("provider.models.edit");
+        assert_eq!(
+            first["params"],
+            json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&first, json!({"version":2,"disabledModelIds":[],"models":[]}));
+        let second = wire.read("provider.models.edit");
+        assert_eq!(
+            second["params"],
+            json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":3,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
+                {"id":"wide","name":"Wide","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "models",
+            "fixture",
+            "--set-missing-limits",
+            "--context-window",
+            "64000",
+            "--max-output-tokens",
+            "8000",
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tavailable\nready\tReady\tavailable\nwide\tWide\tavailable\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+/// The declaration flags require the models command, one form and both
+/// values, and fail before the CLI connects to a daemon.
+#[test]
+fn model_limit_declaration_flags_are_validated_before_connecting() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    for (args, reason) in [
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "64000",
+            ],
+            "--max-output-tokens",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "0",
+                "--max-output-tokens",
+                "8000",
+            ],
+            "positive integer",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--set-missing-limits",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "not both",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--refresh",
+                "--set-missing-limits",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "cannot be combined",
+        ),
+        (
+            vec!["models", "fixture", "--context-window", "1"],
+            "--set-limits or --set-missing-limits",
+        ),
+        (
+            vec![
+                "exec",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "models PROVIDER",
+        ),
+    ] {
+        let output = home
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!home.0.join("rust").exists(), "{args:?}");
+    }
+}
+
 #[test]
 fn daemon_stop_without_an_endpoint_never_creates_state_or_spawns_a_server() {
     let home = Home::new();
