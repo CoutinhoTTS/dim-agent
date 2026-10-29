@@ -423,8 +423,9 @@ declaration, and the model learns it the way it learns any other later input.
 
 **Failure and cancellation.** A declaration states what the call did, not what it was asked to do. A
 tool that returns its own error result declares the effects it completed before the error. A call
-the executor settles without a tool result — a host error, a panic, a cancellation — carries no
-declarations.
+the executor settles without a tool result — a host error, a panic, a cancellation before the tool
+returned one — carries no declarations; a tool that started work returns its own result so that it
+declares, a call it ended by cancellation included.
 
 **Who declares.** Any tool: a host tool, a tool a part registers in Rust, or a tool a part of another
 language registers through the bridge, which decodes `effects` with the rest of `ToolResult` and
