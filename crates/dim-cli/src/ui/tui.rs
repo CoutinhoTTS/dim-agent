@@ -38,7 +38,9 @@ use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
 use crate::ui::status::{Reporter, Runs, Status};
 use crate::ui::tasks_panel::TasksPanel;
-use crate::ui::terminal::{InputEvent, KeyCode, Modifiers, Terminal, TerminalError, Wait};
+use crate::ui::terminal::{
+    InputEvent, KeyCode, KeyEvent, Modifiers, Terminal, TerminalError, Wait,
+};
 use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
@@ -714,6 +716,10 @@ struct App {
     palette: Palette,
     /// The modal prompt on top of the composer, if any.
     prompt: Option<Prompt>,
+    /// The question a panel took the screen from: it comes back, with its
+    /// selections and drafts, once that panel closes and the Session still
+    /// asks it.
+    question_stash: Option<AskUserPrompt>,
     /// Requests already answered here: the projection keeps listing them
     /// until the daemon's confirmation arrives.
     answered: HashSet<String>,
@@ -929,6 +935,7 @@ impl App {
             markdown,
             palette,
             prompt: None,
+            question_stash: None,
             answered: HashSet::new(),
             notice: None,
             exit_armed_until: None,
@@ -1037,6 +1044,50 @@ impl App {
         self.prompt.is_none() && !self.composer.palette_open() && !self.composer.mention_open()
     }
 
+    /// The command palette is open over a pending question that is not
+    /// being edited: it owns the keys and takes the panel's place until it
+    /// closes.
+    fn question_palette(&self) -> bool {
+        self.composer.palette_open()
+            && matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing)
+    }
+
+    /// Opens the command palette on the draft it replaces; the draft comes
+    /// back when the palette closes ([`Self::handle`]).
+    fn open_palette(&mut self) {
+        if !self.composer.is_empty() {
+            self.palette_stash = Some(self.composer.text().to_owned());
+        }
+        self.composer.set_draft("/");
+    }
+
+    /// Shows `prompt` in the prompt slot, keeping a pending question aside
+    /// so the panel gives the question back with its answers when it closes.
+    fn open_prompt(&mut self, prompt: Prompt) {
+        if let Some(Prompt::Ask(question)) = self.prompt.take() {
+            self.question_stash = Some(question);
+        }
+        self.prompt = Some(prompt);
+    }
+
+    /// Puts the question a panel took the screen from back, once the slot
+    /// is free and the Session still asks it first. A question answered
+    /// elsewhere or interrupted meanwhile is gone, and stays gone.
+    fn restore_question(&mut self) {
+        if self.prompt.is_some() || self.question_stash.is_none() {
+            return;
+        }
+        let asked = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.questions.first());
+        if asked == self.question_stash.as_ref().map(|held| &held.call) {
+            self.prompt = self.question_stash.take().map(Prompt::Ask);
+        } else {
+            self.question_stash = None;
+        }
+    }
+
     fn running(&self) -> bool {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
     }
@@ -1135,15 +1186,21 @@ impl App {
                         a.always.is_some(),
                     )))
                 } else {
-                    question.map(|q| Prompt::Ask(AskUserPrompt::new(q.clone())))
+                    question.map(|q| {
+                        let held = self.question_stash.take().filter(|held| held.call == *q);
+                        Prompt::Ask(held.unwrap_or_else(|| AskUserPrompt::new(q.clone())))
+                    })
                 };
             }
         }
         self.reopen_upgrade();
     }
 
-    /// Puts back the update dialog another prompt took the screen from.
+    /// Puts back what another prompt took the screen from: the question
+    /// first, since a pending question outranks the update dialog, then the
+    /// dialog.
     fn reopen_upgrade(&mut self) {
+        self.restore_question();
         if self.prompt.is_none() {
             self.prompt = self.upgrade.take().map(Prompt::Upgrade);
         }
@@ -1510,6 +1567,7 @@ impl App {
 
     fn handle(&mut self, event: InputEvent) -> Outcome {
         let outcome = self.handle_input(event);
+        self.restore_question();
         if !self.composer.palette_open()
             && let Some(draft) = self.palette_stash.take()
             && self.composer.is_empty()
@@ -1522,6 +1580,10 @@ impl App {
     fn handle_input(&mut self, event: InputEvent) -> Outcome {
         let key = match event {
             InputEvent::Paste(text) => {
+                if self.question_palette() {
+                    self.paste(text);
+                    return Outcome::Continue;
+                }
                 match &mut self.prompt {
                     None => self.paste(text),
                     Some(Prompt::Providers(panel)) => panel.paste(&text),
@@ -1581,6 +1643,24 @@ impl App {
             }
             return Outcome::Continue;
         }
+        // A question keeps the keys, but while its free-text answer is not
+        // being edited `/`, Ctrl+O and Ctrl+P open the command palette over
+        // it, and the palette then owns them.
+        if matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing) {
+            if self.composer.palette_open() {
+                let outcome = self.composer_key(key);
+                if !self.composer.palette_open() && !self.composer.is_empty() {
+                    self.composer.clear();
+                }
+                return outcome;
+            }
+            if (key.code == KeyCode::Char('/') && key.mods.0 & !Modifiers::SHIFT.0 == 0)
+                || (ctrl && matches!(key.code, KeyCode::Char('o' | 'p')))
+            {
+                self.open_palette();
+                return Outcome::Continue;
+            }
+        }
         if let Some(prompt) = &mut self.prompt {
             let effect = match prompt {
                 Prompt::Sessions(p) => p.handle_key(key),
@@ -1611,12 +1691,16 @@ impl App {
             self.sync_task_details();
             return outcome;
         }
+        self.composer_key(key)
+    }
+
+    /// A key for the composer: the palette, the shortcuts around it and the
+    /// draft editor, with what a submit, a command or a shell line does.
+    fn composer_key(&mut self, key: KeyEvent) -> Outcome {
+        let ctrl = key.mods.contains(Modifiers::CTRL);
         match key.code {
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
-                if !self.composer.is_empty() {
-                    self.palette_stash = Some(self.composer.text().to_owned());
-                }
-                self.composer.set_draft("/");
+                self.open_palette();
                 return Outcome::Continue;
             }
             KeyCode::Char('d') if ctrl => {
@@ -2395,7 +2479,7 @@ impl App {
             approvals: t(status_label(&self.approvals)).to_owned(),
             model: self.label.clone(),
         };
-        self.prompt = Some(Prompt::Settings(SettingsPanel::new(&values, select)));
+        self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
 
     /// Flips a `/settings` switch, or opens the picker behind a row.
@@ -2408,15 +2492,16 @@ impl App {
                 self.settings_return = self.prompt.is_some().then_some(setting);
             }
             Setting::Language => {
-                self.prompt = Some(Prompt::Language(LanguagePanel::new(i18n::saved_locale(
+                self.open_prompt(Prompt::Language(LanguagePanel::new(i18n::saved_locale(
                     &self.home,
                 ))));
             }
             Setting::Approvals => {
-                self.prompt = Some(Prompt::Approvals(ApprovalsPanel::new(&self.approvals)));
+                let panel = ApprovalsPanel::new(&self.approvals);
+                self.open_prompt(Prompt::Approvals(panel));
             }
             Setting::Model => {
-                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.open_prompt(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
             }
             Setting::StartupForm => {
@@ -2482,7 +2567,7 @@ impl App {
     fn plugins(&mut self, args: &str) {
         let args = args.trim();
         if args.is_empty() {
-            self.prompt = Some(Prompt::Plugins(PluginsPanel::new()));
+            self.open_prompt(Prompt::Plugins(PluginsPanel::new()));
             self.host.send(Command::ListPlugins);
             return;
         }
@@ -2498,7 +2583,7 @@ impl App {
             (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
             _ => PathBuf::from(&self.cwd_key).join(path),
         };
-        self.prompt = Some(Prompt::Plugins(PluginsPanel::installing(&path)));
+        self.open_prompt(Prompt::Plugins(PluginsPanel::installing(&path)));
         self.host.send(Command::Plugin(
             crate::model::session::PluginAction::Install(path),
         ));
@@ -2568,19 +2653,21 @@ impl App {
             }
             "web" => Outcome::Web,
             "resume" => {
-                self.prompt = Some(Prompt::Sessions(SessionsPanel::new()));
+                self.open_prompt(Prompt::Sessions(SessionsPanel::new()));
                 self.host.send(Command::ListSessions);
                 Outcome::Continue
             }
             "lines" => {
                 if let Some(snapshot) = &self.snapshot {
-                    self.prompt = Some(Prompt::Lines(Box::new(LinesPanel::new(snapshot))));
+                    let panel = LinesPanel::new(snapshot);
+                    self.open_prompt(Prompt::Lines(Box::new(panel)));
                 }
                 Outcome::Continue
             }
             "timeline" => {
                 if let Some(snapshot) = &self.snapshot {
-                    self.prompt = Some(Prompt::Timeline(Box::new(TimelinePanel::new(snapshot))));
+                    let panel = TimelinePanel::new(snapshot);
+                    self.open_prompt(Prompt::Timeline(Box::new(panel)));
                 }
                 Outcome::Continue
             }
@@ -2606,25 +2693,23 @@ impl App {
             }
             "tasks" => {
                 if let Some(snapshot) = &self.snapshot {
-                    self.prompt = Some(Prompt::Tasks(TasksPanel::new(snapshot)));
-                    self.host.send(Command::TaskHistory {
-                        projection_id: snapshot.projection_id,
-                    });
+                    let panel = TasksPanel::new(snapshot);
+                    let projection_id = snapshot.projection_id;
+                    self.open_prompt(Prompt::Tasks(panel));
+                    self.host.send(Command::TaskHistory { projection_id });
                 }
                 Outcome::Continue
             }
             "theme" => {
                 if let Some(context) = &self.theme_context {
-                    self.prompt = Some(Prompt::Theme(ThemePanel::new(
-                        context.mode,
-                        context.appearance,
-                        &context.active,
-                    )));
+                    let panel = ThemePanel::new(context.mode, context.appearance, &context.active);
+                    self.open_prompt(Prompt::Theme(panel));
                 }
                 Outcome::Continue
             }
             "approvals" => {
-                self.prompt = Some(Prompt::Approvals(ApprovalsPanel::new(&self.approvals)));
+                let panel = ApprovalsPanel::new(&self.approvals);
+                self.open_prompt(Prompt::Approvals(panel));
                 Outcome::Continue
             }
             "plugins" => {
@@ -2632,13 +2717,13 @@ impl App {
                 Outcome::Continue
             }
             "connect" => {
-                self.prompt = Some(Prompt::Providers(Box::new(ProvidersPanel::new())));
+                self.open_prompt(Prompt::Providers(Box::new(ProvidersPanel::new())));
                 self.host.send(Command::ListProviders);
                 Outcome::Continue
             }
             "login" => {
                 self.login_attempts += 1_000;
-                self.prompt = Some(Prompt::Login(Box::new(OauthView::new(
+                self.open_prompt(Prompt::Login(Box::new(OauthView::new(
                     DIM_OAUTH_ID,
                     "DimAgent",
                     self.login_attempts,
@@ -2647,7 +2732,7 @@ impl App {
                 Outcome::Continue
             }
             "models" => {
-                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.open_prompt(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
                 Outcome::Continue
             }
@@ -2665,7 +2750,7 @@ impl App {
                 Outcome::Continue
             }
             "language" => {
-                self.prompt = Some(Prompt::Language(LanguagePanel::new(i18n::saved_locale(
+                self.open_prompt(Prompt::Language(LanguagePanel::new(i18n::saved_locale(
                     &self.home,
                 ))));
                 Outcome::Continue
@@ -3000,8 +3085,10 @@ impl App {
         } else {
             &p.accent
         };
-        let palette_overlay =
-            self.fullscreen && self.prompt.is_none() && self.composer.palette_open();
+        let question_palette = self.question_palette();
+        let palette_overlay = self.fullscreen
+            && self.composer.palette_open()
+            && (self.prompt.is_none() || question_palette);
         let (cursor_row, cursor_col) = if self.composer.is_empty() || palette_overlay {
             let placeholder = match shell {
                 Some(_) => t(SHELL_PLACEHOLDER),
@@ -3078,10 +3165,11 @@ impl App {
                 border_line(("╰", "╯"), None, Some(&place), outer, &edge)
             );
         }
-        let replaced = matches!(
-            self.prompt,
-            Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
-        );
+        let replaced = !question_palette
+            && matches!(
+                self.prompt,
+                Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
+            );
         if !replaced {
             live.extend(composer_box);
         }
@@ -3099,6 +3187,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Ask(_)) if question_palette => None,
             Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
@@ -3118,6 +3207,16 @@ impl App {
                 })
             };
             frame.overlay = match &self.prompt {
+                _ if palette_overlay => {
+                    let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
+                    let page = budget.saturating_sub(5).clamp(3, 16);
+                    self.composer
+                        .palette_overlay(width, page, p)
+                        .map(|(rows, query)| Overlay {
+                            rows,
+                            cursor: Some((2, (4 + query) as u16)),
+                        })
+                }
                 Some(Prompt::Sessions(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Tasks(prompt)) => {
                     list(prompt.render(list_width, budget, p, &self.markdown))
@@ -3134,21 +3233,12 @@ impl App {
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Settings(prompt)) => list(prompt.render(list_width, budget, p)),
-                None if palette_overlay => {
-                    let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
-                    let page = budget.saturating_sub(5).clamp(3, 16);
-                    self.composer
-                        .palette_overlay(width, page, p)
-                        .map(|(rows, query)| Overlay {
-                            rows,
-                            cursor: Some((2, (4 + query) as u16)),
-                        })
-                }
                 _ => None,
             };
         }
         let panel = match &self.prompt {
             _ if frame.overlay.is_some() => None,
+            Some(Prompt::Ask(_)) if question_palette => self.composer.palette_panel(outer, p),
             Some(Prompt::Sessions(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Tasks(prompt)) => {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
@@ -5727,5 +5817,246 @@ mod tests {
         let text = chunk(&["◆ hello".to_owned(), "  world".to_owned()]);
         assert_eq!(text, "\n ◆ hello\n   world\n");
         assert_eq!(crate::ui::text::display_width("◆ hello"), 7);
+    }
+
+    /// An interface whose Session asks one question, and what it sends.
+    fn asked() -> (
+        App,
+        std::rc::Rc<std::cell::RefCell<Vec<Command>>>,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let mut call = questions();
+        call.questions.truncate(1);
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            projection_id: 7,
+            focus: "main".into(),
+            questions: vec![call],
+            ..ViewSnapshot::default()
+        })));
+        (app, sent, home)
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            code,
+            Modifiers::NONE,
+        )));
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn selection(app: &App) -> Option<Vec<String>> {
+        match &app.prompt {
+            Some(Prompt::Ask(prompt)) => prompt.selections.get("tall").cloned(),
+            _ => None,
+        }
+    }
+
+    /// With a question pending and its answer to be chosen, `/` and Ctrl+O
+    /// open the palette, the keys go to it, and Enter runs a command there:
+    /// nothing is answered or declined, and the question keeps its
+    /// selections.
+    #[test]
+    fn a_command_runs_over_a_question_that_keeps_its_answers() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(
+            selection(&app).as_deref(),
+            Some(&["option 0".to_owned()][..])
+        );
+
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.composer.palette_open(), "the palette opened over it");
+        typed(&mut app, "mcp");
+        assert!(
+            app.frame((80, 40))
+                .live
+                .iter()
+                .any(|row| row.contains("Commands")),
+            "the palette is drawn in the panel's place"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args.is_empty()),
+            "the palette ran /mcp"
+        );
+        assert_eq!(
+            selection(&app).as_deref(),
+            Some(&["option 0".to_owned()][..]),
+            "the question keeps its selection"
+        );
+        assert!(
+            !sent
+                .borrow()
+                .iter()
+                .any(|c| matches!(c, Command::AskAnswers { .. } | Command::AskCancel { .. })),
+            "nothing was answered or declined"
+        );
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Enter);
+        match sent.borrow().last() {
+            Some(Command::AskAnswers { answers, .. }) => assert_eq!(
+                answers[0].selected,
+                vec!["option 0".to_owned()],
+                "the question answers with the selection it kept"
+            ),
+            _ => panic!("the question answers"),
+        }
+    }
+
+    /// A question stays pending while the palette is up and comes back with
+    /// its state when the palette closes.
+    #[test]
+    fn closing_the_palette_gives_the_keys_back_to_the_question() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char(' '));
+        let ctrl_o = crate::ui::terminal::KeyEvent::new(KeyCode::Char('o'), Modifiers::CTRL);
+        let _ = app.handle(InputEvent::Key(ctrl_o));
+        assert!(app.composer.palette_open(), "Ctrl+O opened the palette");
+        typed(&mut app, "mc");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.composer.palette_open(), "Esc resets the query first");
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.composer.palette_open(), "the second Esc closes it");
+        assert!(matches!(&app.prompt, Some(Prompt::Ask(_))));
+        assert_eq!(
+            selection(&app).as_deref(),
+            Some(&["option 0".to_owned()][..])
+        );
+        assert!(
+            !sent
+                .borrow()
+                .iter()
+                .any(|c| matches!(c, Command::AskCancel { .. })),
+            "Esc in the palette does not decline"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::AskCancel { .. })),
+            "Esc on the question still declines"
+        );
+    }
+
+    /// A command that opens its own panel keeps the question aside and
+    /// hands it back when that panel closes.
+    #[test]
+    fn a_panel_command_gives_the_question_back() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "models");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, Some(Prompt::Models(_))));
+        assert!(matches!(sent.borrow().last(), Some(Command::ListModels)));
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            selection(&app).as_deref(),
+            Some(&["option 0".to_owned()][..]),
+            "the question came back with its selection"
+        );
+    }
+
+    /// A question answered elsewhere while its panel is open is not
+    /// brought back when the panel closes.
+    #[test]
+    fn a_question_dropped_under_a_panel_stays_gone() {
+        let (mut app, _sent, _home) = asked();
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "models");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.prompt, Some(Prompt::Models(_))));
+
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            projection_id: 7,
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        assert!(
+            matches!(app.prompt, Some(Prompt::Models(_))),
+            "the panel stays open"
+        );
+        press(&mut app, KeyCode::Esc);
+        assert!(app.prompt.is_none(), "the question is gone for good");
+    }
+
+    /// A question dropped under the open palette leaves the palette as the
+    /// ordinary one.
+    #[test]
+    fn a_question_dropped_under_the_palette_leaves_the_palette() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "mc");
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            projection_id: 7,
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        assert!(app.prompt.is_none());
+        assert_eq!(app.composer.text(), "/mc", "the query stays");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args.is_empty()),
+            "the palette ran /mcp"
+        );
+    }
+
+    /// `/` on the free-text row opens the palette rather than starting the
+    /// answer; once the row edits, `/` is text and the answer may start
+    /// with a path.
+    #[test]
+    fn the_free_text_answer_takes_slash_only_once_it_edits() {
+        let (mut app, sent, _home) = asked();
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Char('/'));
+        assert!(
+            app.composer.palette_open(),
+            "`/` opens the palette on the row"
+        );
+        assert!(
+            matches!(&app.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing),
+            "it did not start the answer"
+        );
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.composer.palette_open());
+
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.prompt, Some(Prompt::Ask(prompt)) if prompt.typing));
+        typed(&mut app, "/usr/local");
+        match &app.prompt {
+            Some(Prompt::Ask(prompt)) => assert_eq!(prompt.draft.text(), "/usr/local"),
+            _ => panic!("the answer is being edited"),
+        }
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Enter);
+        match sent.borrow().last() {
+            Some(Command::AskAnswers { answers, .. }) => assert_eq!(
+                answers[0].custom.as_deref(),
+                Some("/usr/local"),
+                "/ inside the answer is text"
+            ),
+            _ => panic!("the answer carries the path"),
+        }
     }
 }
