@@ -3,6 +3,8 @@
 //! Covers the acceptance scenarios from docs/design/appserver/persistent-shell.md §10.
 
 #![cfg(unix)]
+#[path = "local_support/compaction.rs"]
+mod compaction_support;
 #[path = "local_support/process.rs"]
 mod process_support;
 use dim_agent_capabilities::{
@@ -137,19 +139,36 @@ struct Harness {
     agent: Agent,
     model: Arc<Script>,
     cwd: PathBuf,
+    compacting: bool,
 }
 
 impl Harness {
-    async fn new(mut platform: HostPlatform) -> Self {
+    async fn new(platform: HostPlatform) -> Self {
+        Self::with_context(platform, false).await
+    }
+    /// The same assembly with a context model and a strategy bound, so a flow
+    /// test can compact (`local_support/compaction.rs`).
+    async fn new_compacting(platform: HostPlatform) -> Self {
+        Self::with_context(platform, true).await
+    }
+    async fn with_context(mut platform: HostPlatform, compacting: bool) -> Self {
         platform.home = scratch("home");
         let cwd = scratch("cwd");
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        Self::with_platform(root, view, cwd).await
+        Self::with_platform_context(root, view, cwd, compacting).await
     }
     async fn with_platform(root: Ctx, view: rutis::host::FiberView, cwd: PathBuf) -> Self {
+        Self::with_platform_context(root, view, cwd, false).await
+    }
+    async fn with_platform_context(
+        root: Ctx,
+        view: rutis::host::FiberView,
+        cwd: PathBuf,
+        compacting: bool,
+    ) -> Self {
         wait_active(
             &root,
             &[view],
@@ -169,9 +188,13 @@ impl Harness {
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-            .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(ContextModelHost(compacting.then(|| {
+                Arc::new(compaction_support::Window) as Arc<dyn ResolveContextModel>
+            }))))
             .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
-            .session_value(Arc::new(CompactionStrategyHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(compacting.then(|| {
+                Arc::new(compaction_support::Window) as Arc<dyn CompactionStrategy>
+            }))))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
                     Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
@@ -188,10 +211,11 @@ impl Harness {
             agent,
             model,
             cwd,
+            compacting,
         }
     }
     fn config(&self) -> SessionConfig {
-        SessionConfig {
+        let mut config = SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
             tools: Some(vec!["execute".into()]),
             permission_policy: PermissionPolicy {
@@ -199,7 +223,17 @@ impl Harness {
                 ..Default::default()
             },
             ..SessionConfig::default()
+        };
+        if self.compacting {
+            config.model = ModelSelection {
+                provider_id: "mock".into(),
+                model_id: "window".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            };
         }
+        config
     }
     async fn session(&self) -> Session {
         self.agent.create_session(self.config()).await.unwrap()
@@ -1176,6 +1210,56 @@ async fn shell_exit_kills_background_jobs() {
         text(&end.result)
     );
     assert!(gone(&pid).await);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// An `execute` call declares the command the persistent shell ran with the
+/// exit status it observed, and a later compaction's digest lists it
+/// (ContextCompaction §5.10, acceptance 18(a)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execute_declares_the_command_it_ran_in_the_digest() {
+    let harness = Harness::new_compacting(platform(&[]).await).await;
+    let session = harness.session().await;
+    let command = "printf 'line\\n'; (exit 3)";
+    harness
+        .model
+        .push(&[("execute", json!({"command": command}))]);
+    session
+        .submit("x".repeat(8_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = until(&session, "the command", |events| tool_results(events) == 1).await;
+    let result = &results(&events)[0];
+    assert!(
+        text(result).contains("[Command finished with exit code 3]"),
+        "{}",
+        text(result)
+    );
+    let declared = ToolEffect::CommandRun {
+        command: command.into(),
+        exit_code: Some(3),
+        signal: None,
+    };
+    assert_eq!(result.effects, Some(vec![declared.clone()]));
+
+    // A later turn gives the compaction a cut that replaces the call.
+    session
+        .submit("next".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let (compaction, events) = compaction_support::compact_now(&session).await;
+    let (entries, replacement) = compaction_support::digest(&events, compaction);
+    let entries = entries.expect("the digest lists the command");
+    assert_eq!(entries.entries, vec![declared]);
+    assert!(!entries.dropped);
+    let rendered = compaction_support::message_text(&replacement[1]);
+    assert!(
+        rendered.contains("ran exit 3: printf 'line\\\\n'; (exit 3)"),
+        "{rendered}"
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }

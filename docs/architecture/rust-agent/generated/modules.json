@@ -9119,6 +9119,7 @@
         "path ToolResult",
         "path ToolResult::error",
         "path ToolResult::text",
+        "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
       ]
     },

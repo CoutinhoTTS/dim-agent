@@ -20,7 +20,8 @@ use crate::{
 };
 use dim_agent_runtime::{Dispatcher, Names, Timeline};
 use dim_agent_types::{
-    EventKind, ExecEndedData, ExecStartedData, ExecStatus, JsonObject, ToolContent, ToolResult,
+    EventKind, ExecEndedData, ExecStartedData, ExecStatus, JsonObject, ToolContent, ToolEffect,
+    ToolResult,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -754,7 +755,7 @@ impl ShellSession {
                     }
                     let mut result = ToolResult::text(text);
                     result.is_error = Some(true);
-                    return Ok(result);
+                    return Ok(ran(result, command, None));
                 }
                 if let Some(code) = marker_code(&inner.retained, &end_marker) {
                     let pos = inner.retained.rfind(&end_marker).expect("marker present");
@@ -778,20 +779,27 @@ impl ShellSession {
                     }
                     let mut result = ToolResult::text(text);
                     result.is_error = (code != "0").then_some(true);
-                    return Ok(result);
+                    return Ok(ran(result, command, code.parse().ok()));
                 }
             }
             if tokio::time::Instant::now() >= deadline {
                 if self.config.member {
-                    return self.interrupt(&start_marker, &end_marker).await;
+                    return self
+                        .interrupt(&start_marker, &end_marker)
+                        .await
+                        .map(|result| ran(result, command, None));
                 }
                 return self
                     .occupy_current(command, context, start_marker, end_marker)
-                    .await;
+                    .await
+                    .map(|result| ran(result, command, None));
             }
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    return self.interrupt(&start_marker, &end_marker).await;
+                    return self
+                        .interrupt(&start_marker, &end_marker)
+                        .await
+                        .map(|result| ran(result, command, None));
                 }
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
@@ -1103,7 +1111,7 @@ impl ShellSession {
             "taskId": task_id,
             "outputPath": output_path.to_string_lossy(),
         })));
-        Ok(result)
+        Ok(ran(result, command, None))
     }
 
     /// Stops a task by id.
@@ -1382,6 +1390,18 @@ fn shell_args(dialect: ShellDialect) -> Vec<std::ffi::OsString> {
         ShellDialect::Posix => vec!["-i".into()],
         ShellDialect::Pwsh => vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()],
     }
+}
+
+/// Declares the command the call sent to the shell (session boundary A.6):
+/// the exit status the end marker carried, or none while it was still
+/// running.
+fn ran(mut result: ToolResult, command: &str, exit_code: Option<i32>) -> ToolResult {
+    result.effects = Some(vec![ToolEffect::CommandRun {
+        command: command.to_owned(),
+        exit_code,
+        signal: None,
+    }]);
+    result
 }
 
 fn describe(command: &str) -> String {
