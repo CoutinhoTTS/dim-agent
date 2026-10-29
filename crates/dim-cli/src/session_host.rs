@@ -2070,6 +2070,12 @@ impl Worker {
             let mut message = format!("{notice} {}", updated.display_name);
             if listing_unsupported {
                 message.push_str("; saved without testing the key because model listing is unsupported");
+            } else if probe
+                && let Err(error) = self.client.rpc("provider.refresh", json!({"providerId": provider_id})).await
+            {
+                // The probe listed the connection that was just committed;
+                // applying the connection applies that listing too.
+                message.push_str(&format!("; listing its models failed: {error}"));
             }
             Ok(message)
         }.await;

@@ -6897,6 +6897,12 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         entry["version"] = json!(2);
         entry["connection"]["baseUrl"] = json!("https://second.example/v1");
         wire.reply(&update, entry.clone());
+        let refresh = wire.read("provider.refresh");
+        assert_eq!(refresh["params"]["providerId"], id);
+        wire.reply(
+            &refresh,
+            json!({"version":2,"disabledModelIds":[],"models":[]}),
+        );
         let listed = wire.read("provider.management");
         wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         wait_release.recv_timeout(PATIENCE).unwrap();
