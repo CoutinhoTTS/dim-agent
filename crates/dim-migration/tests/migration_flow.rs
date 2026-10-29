@@ -1000,6 +1000,12 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
         json!({"disabledSkillIds":["user:legacy-skill"]}).to_string(),
     )
     .unwrap();
+    std::fs::create_dir_all(source.join("data/plugins/web")).unwrap();
+    std::fs::write(
+        source.join("data/plugins/web/state.json"),
+        json!({"version":1,"enabled":true,"activeProvider":"dim-oauth","activeProviderExplicit":true,"providers":{}}).to_string(),
+    )
+    .unwrap();
     db.execute_batch("CREATE TABLE scheduled_jobs(jobId TEXT PRIMARY KEY,name TEXT,prompt TEXT,status TEXT,rrule TEXT,cwd TEXT,providerId TEXT,modelId TEXT,reasoningEffort TEXT,sessionMode TEXT,boundSessionId TEXT,nextRunAt TEXT,lastRunAt TEXT,createdAt TEXT);").unwrap();
     db.execute("INSERT INTO scheduled_jobs VALUES ('paused','Paused job','do work','paused','FREQ=DAILY;BYHOUR=9;BYMINUTE=15',?1,'mock','deterministic',NULL,'new',NULL,NULL,NULL,'2026-01-01T00:00:00Z')",[source.to_str().unwrap()]).unwrap();
     let before = snapshot(&source);
@@ -1081,6 +1087,15 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     let schedule: Value = serde_json::from_str(&schedule).unwrap();
     assert_eq!(schedule["jobs"][0]["enabled"], false);
     assert_eq!(schedule["jobs"][0]["schedule"]["cron"], "15 9 * * *");
+    let web: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/web'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let web: Value = serde_json::from_str(&web).unwrap();
+    assert_eq!(web["searchService"]["kind"], "dim-oauth");
     native
         .execute(
             "UPDATE settings_documents SET document=?1 WHERE source='user/schedule'",
@@ -1577,7 +1592,7 @@ async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler
         .canonicalize()
         .unwrap();
     let defaults = target.join("defaults.json");
-    std::fs::write(&defaults,json!({"plugins":{"web":repository.join("runtime/plugins/web"),"scheduler":repository.join("runtime/plugins/scheduler")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
+    std::fs::write(&defaults,json!({"plugins":{"scheduler":repository.join("runtime/plugins/scheduler")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);

@@ -900,18 +900,21 @@ fn validate_settings(source: &str, value: &Value) -> Result<()> {
         }
         "web" => {
             let service = &value["searchService"];
-            if service["kind"] != "brave"
-                || !service["apiKey"]
+            let dim_oauth = service
+                .as_object()
+                .is_some_and(|s| s.len() == 1 && s.get("kind") == Some(&json!("dim-oauth")));
+            let brave = service["kind"] == "brave"
+                && service["apiKey"]
                     .as_str()
                     .is_some_and(|key| !key.is_empty())
-                || service.get("endpoint").is_some_and(|url| {
-                    !url.as_str().is_some_and(|raw| {
+                && service.get("endpoint").is_none_or(|url| {
+                    url.as_str().is_some_and(|raw| {
                         reqwest::Url::parse(raw).is_ok_and(|url| {
                             matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
                         })
                     })
-                })
-            {
+                });
+            if !dim_oauth && !brave {
                 return Err(invalid());
             }
         }
