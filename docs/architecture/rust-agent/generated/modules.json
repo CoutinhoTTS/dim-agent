@@ -14335,6 +14335,7 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path AgentConfig::default",
+        "path dim_agent_runtime::SessionConfig",
         "use dim_agent_runtime::AgentConfig"
       ]
     },

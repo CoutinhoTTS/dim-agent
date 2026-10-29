@@ -51,6 +51,15 @@ pub fn model_profile(
     Ok((models, profile))
 }
 
+/// The Session defaults a product home and a development model configuration
+/// serve: `tools` unset, so a Session declares every host tool and every tool
+/// a part registers (#364), under the workspace-write preset. Every caller
+/// that serves this assembly takes them from here, so the two cannot drift.
+pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig) {
+    defaults.tools = None;
+    defaults.permission_policy.preset = dim_agent_types::PermissionPreset::WorkspaceWrite;
+}
+
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
 pub fn run_with(
@@ -251,9 +260,7 @@ pub fn run_with(
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
     }
     if config.product_home.is_some() || model_config.is_some() {
-        config.session_defaults.tools = None;
-        config.session_defaults.permission_policy.preset =
-            dim_agent_types::PermissionPreset::WorkspaceWrite;
+        product_session_defaults(&mut config.session_defaults);
     } else {
         config.session_defaults.permission_policy.allowed_tools =
             vec!["echo".into(), "wait".into()];
