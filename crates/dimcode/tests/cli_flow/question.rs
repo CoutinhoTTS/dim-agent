@@ -878,6 +878,308 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
     daemon.join().unwrap();
 }
 
+/// A pending question does not block commands: `/` and `Ctrl+O` open the
+/// palette over it, `/mcp` prints its report and leaves the question
+/// pending (nothing is answered), a command that opens a panel hands the
+/// question back with its answer, and `Esc` in the palette returns to the
+/// question instead of declining it.
+#[test]
+fn tui_commands_run_over_a_pending_question() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (proceed, control) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            step(
+                wire,
+                "main",
+                9,
+                "tool-call",
+                asked("request-one", "c1", json!([deploy()])),
+            );
+            let catalog = wire.read("mcp.catalog");
+            wire.reply(
+                &catalog,
+                json!({"userRevision":"1","projectRevision":null,"servers":[],
+                    "userApplication":{},"projectApplication":null}),
+            );
+            let state = wire.read("session.mcp");
+            wire.reply(&state, json!({"sessionId":"session","servers":[]}));
+            let response = wire.read("session.question.respond");
+            assert_eq!(
+                response["params"],
+                json!({"sessionId":"session","branchId":"main","requestId":"request-one","callId":"c1",
+                    "answers":[{"questionId":"1","selected":["production"]}]}),
+                "the question answers with what it kept over the commands"
+            );
+            wire.reply(&response, json!({}));
+            step(
+                wire,
+                "main",
+                10,
+                "tool-result",
+                answered("main-9", "request-one", "c1", false),
+            );
+            step(
+                wire,
+                "main",
+                11,
+                "text",
+                json!({"turn_id":"turn","request_id":"after","delta":"question answered after commands"}),
+            );
+            let mut line = String::new();
+            assert_eq!(
+                wire.0.read_line(&mut line).unwrap(),
+                0,
+                "unexpected request: {line}"
+            );
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        proceed.send(()).unwrap();
+        terminal.until("Where to deploy?");
+        terminal.write(b"1");
+        terminal.until("Review your answers");
+
+        terminal.write(b"/mcp\r");
+        terminal.until("Columns: ID, source");
+
+        terminal.write(b"\x0f");
+        terminal.until(if fullscreen {
+            "Command Palette"
+        } else {
+            "Commands"
+        });
+        terminal.write(&[0x1b]);
+        terminal.until("Review your answers");
+
+        terminal.write(b"\x0f");
+        terminal.write(b"appr\r");
+        terminal.until("Tool Approvals");
+        terminal.write(&[0x1b]);
+        terminal.until("production");
+        terminal.write(b"\r");
+        terminal.until("question answered after commands");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A command's argument is typed over a pending question: `/mcp logout`
+/// carries the server id to the daemon, nothing answers the question before
+/// its confirmation, and the question then answers normally.
+#[test]
+fn tui_command_arguments_run_over_a_pending_question() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (proceed, control) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            step(
+                wire,
+                "main",
+                9,
+                "tool-call",
+                asked("request-one", "c1", json!([deploy()])),
+            );
+            let catalog = wire.read("mcp.catalog");
+            wire.reply(
+                &catalog,
+                json!({"userRevision":"1","projectRevision":null,
+                    "servers":[{"id":"fixture","source":"user","enabled":true,"transport":"stdio"}],
+                    "userApplication":{},"projectApplication":null}),
+            );
+            let logout = wire.read("mcp.auth.logout");
+            assert_eq!(
+                logout["params"]["id"], "fixture",
+                "the argument typed over the question reached the daemon"
+            );
+            wire.reply(&logout, json!({"revoked":true}));
+            let response = wire.read("session.question.respond");
+            assert_eq!(
+                response["params"],
+                json!({"sessionId":"session","branchId":"main","requestId":"request-one","callId":"c1",
+                    "answers":[{"questionId":"1","selected":["production"]}]}),
+                "the question answers with what it kept over the command"
+            );
+            wire.reply(&response, json!({}));
+            step(
+                wire,
+                "main",
+                10,
+                "tool-result",
+                answered("main-9", "request-one", "c1", false),
+            );
+            step(
+                wire,
+                "main",
+                11,
+                "text",
+                json!({"turn_id":"turn","request_id":"after","delta":"question answered after the argument"}),
+            );
+            let mut line = String::new();
+            assert_eq!(
+                wire.0.read_line(&mut line).unwrap(),
+                0,
+                "unexpected request: {line}"
+            );
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        proceed.send(()).unwrap();
+        terminal.until("Where to deploy?");
+        terminal.write(b"1");
+        terminal.until("Review your answers");
+
+        terminal.write(b"/mcp logout fixture\r");
+        terminal.until("Signed out");
+
+        terminal.write(b"\r");
+        terminal.until("question answered after the argument");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// `/` inside a free-text answer is text, so an answer can start with a
+/// path; and a question answered elsewhere while the palette is open leaves
+/// the palette as the ordinary one, over which a message still submits.
+#[test]
+fn tui_free_text_answers_keep_their_slashes_and_the_palette_survives_a_dropped_question() {
+    let home = Home::new();
+    let (proceed, control) = mpsc::channel();
+    let (typed, palette_typed) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        step(
+            wire,
+            "main",
+            9,
+            "tool-call",
+            asked("request-one", "c1", json!([deploy()])),
+        );
+        let response = wire.read("session.question.respond");
+        assert_eq!(
+            response["params"],
+            json!({"sessionId":"session","branchId":"main","requestId":"request-one","callId":"c1",
+                "answers":[{"questionId":"1","selected":[],"custom":"/usr/local"}]}),
+            "/ inside the free-text answer is text"
+        );
+        wire.reply(&response, json!({}));
+        step(
+            wire,
+            "main",
+            10,
+            "tool-result",
+            answered("main-9", "request-one", "c1", false),
+        );
+        step(
+            wire,
+            "main",
+            11,
+            "tool-call",
+            asked("request-two", "c2", json!([database()])),
+        );
+        palette_typed.recv_timeout(Duration::from_secs(10)).unwrap();
+        step(
+            wire,
+            "main",
+            12,
+            "tool-result",
+            answered("main-11", "request-two", "c2", false),
+        );
+        step(
+            wire,
+            "main",
+            13,
+            "text",
+            json!({"turn_id":"turn","request_id":"after","delta":"question dropped under the palette"}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"], "done",
+            "the palette and the composer are the ordinary ones again"
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        step(
+            wire,
+            "main",
+            14,
+            "text",
+            json!({"turn_id":"turn","request_id":"after-submit","delta":"submitted after the drop"}),
+        );
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "unexpected request: {line}"
+        );
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    proceed.send(()).unwrap();
+    terminal.until("Where to deploy?");
+    terminal.write(b"3");
+    terminal.write(b"/usr/local\r");
+    terminal.until("Review your answers");
+    terminal.write(b"\r");
+    terminal.until("Which database should the service use?");
+
+    terminal.write(b"/keys");
+    typed.send(()).unwrap();
+    terminal.until("question dropped under the palette");
+    terminal.write(b"\r");
+    terminal.until("Application keys");
+    terminal.write(b"done\r");
+    terminal.until("submitted after the drop");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn native_tui_question_answer_reaches_the_next_model_request() {

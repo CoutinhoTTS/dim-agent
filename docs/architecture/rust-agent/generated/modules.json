@@ -28122,11 +28122,14 @@
         "path KeyCode::PageDown",
         "path KeyCode::Tab",
         "path KeyCode::Up",
+        "path KeyEvent",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
+        "path Modifiers::SHIFT",
         "path crate::ui::terminal::KeyEvent::new",
         "use crate::ui::terminal::InputEvent",
         "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
         "use crate::ui::terminal::Modifiers"
       ]
     },
@@ -28373,6 +28376,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path Command",
+        "path Command::AskAnswers",
         "path Command::ListPlugins",
         "path Command::OpenLine",
         "path Command::Plugin",
@@ -28452,6 +28456,7 @@
         "path InputEvent::Key",
         "path KeyCode",
         "path KeyCode::BackTab",
+        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
