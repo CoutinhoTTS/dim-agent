@@ -1480,10 +1480,11 @@ mod native {
             Ok(started) => Ok(started <= created_at),
             Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(true),
             Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                ) =>
+                if error.raw_os_error() == Some(libc::ESRCH)
+                    || matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
             {
                 Ok(false)
             }
