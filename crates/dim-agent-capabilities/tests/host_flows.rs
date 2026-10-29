@@ -1306,6 +1306,12 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .wait_for(|progress| progress.thinking == "deep thought")
             .await
             .unwrap();
+        let thinking_part = session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .thinking_part_id
+            .expect("open thinking part id");
         assert!(outputs(&session.history("main", None).await.unwrap()).is_empty());
         send(vec![
             ModelChunk::ThinkingEnd {
@@ -1320,6 +1326,8 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .unwrap();
         let shown = session.get::<ModelProgress>("main").unwrap().unwrap();
         assert_eq!((shown.text_offset, shown.thinking_offset), (0, 12));
+        let first_text_part = shown.text_part_id.clone().expect("first text part id");
+        assert!(shown.thinking_part_id.is_none());
         assert_eq!(
             outputs(&session.history("main", None).await.unwrap()),
             ["thinking:deep thought"]
@@ -1397,10 +1405,145 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         );
         assert!(events.iter().any(|event| matches!(&event.kind,
             EventKind::ToolResult(data) if data.call_event_id.is_some())));
+        let thinking_event = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::Thinking(_)))
+            .expect("thinking event");
+        assert_eq!(thinking_event.id, thinking_part);
+        let text_events: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Text(_)))
+            .collect();
+        assert!(text_events.len() >= 3);
+        assert_eq!(text_events[0].id, first_text_part);
+        assert!(
+            text_events[1..]
+                .iter()
+                .all(|event| event.id != first_text_part),
+            "only the first event carries the block id"
+        );
         assert_eq!(
             session.get::<ModelProgress>("main").unwrap().unwrap(),
             ModelProgress::default()
         );
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Provider end markers are not durable events: adjacent text or thinking
+/// events stay one block, and progress keeps the block id history exposes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_markers_do_not_split_adjacent_blocks() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (chunks, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = builder(
+            Arc::new(ChannelModel(Mutex::new(Some(receiver)))),
+            Arc::new(MockTools),
+        )
+        .build();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        let send = |list: Vec<ModelChunk>| {
+            for chunk in list {
+                chunks.send(chunk).unwrap();
+            }
+        };
+        send(vec![
+            ModelChunk::MessageStart {
+                message_id: "ends".into(),
+            },
+            ModelChunk::Thinking("first".into()),
+        ]);
+        progress
+            .wait_for(|progress| progress.thinking == "first")
+            .await
+            .unwrap();
+        let thinking_id = session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .thinking_part_id
+            .expect("open thinking part id");
+        send(vec![
+            ModelChunk::ThinkingEnd {
+                thinking: "first".into(),
+            },
+            ModelChunk::Thinking("second".into()),
+        ]);
+        progress
+            .wait_for(|progress| {
+                progress.thinking.ends_with("second")
+                    && progress.thinking_part_id.as_deref() == Some(thinking_id.as_str())
+            })
+            .await
+            .unwrap();
+        send(vec![
+            ModelChunk::ThinkingEnd {
+                thinking: "second".into(),
+            },
+            ModelChunk::Text("a".into()),
+        ]);
+        progress
+            .wait_for(|progress| progress.text == "a")
+            .await
+            .unwrap();
+        let text_id = session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .text_part_id
+            .expect("open text part id");
+        send(vec![ModelChunk::TextEnd, ModelChunk::Text("b".into())]);
+        progress
+            .wait_for(|progress| {
+                progress.text.ends_with('b')
+                    && progress.text_part_id.as_deref() == Some(text_id.as_str())
+            })
+            .await
+            .unwrap();
+        send(vec![
+            ModelChunk::TextEnd,
+            ModelChunk::MessageStop {
+                message_id: "ends".into(),
+                reason: ModelStopReason::EndTurn,
+            },
+        ]);
+        drop(chunks);
+        session.idle("main").await.unwrap();
+        let events = session.history("main", None).await.unwrap();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Thinking(data) => Some((data.delta.as_str(), event.id.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thinking.iter().map(|(delta, _)| *delta).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(thinking[0].1, thinking_id.as_str());
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Text(data) => Some((data.delta.as_str(), event.id.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts.iter().map(|(delta, _)| *delta).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(texts[0].1, text_id.as_str());
         agent.close().await.unwrap();
     })
     .await

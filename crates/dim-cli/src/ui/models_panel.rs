@@ -521,6 +521,7 @@ mod tests {
                 item("plain", &[], None, None),
             ],
             current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
         }));
         panel
     }
@@ -589,6 +590,7 @@ mod tests {
         panel.set_models(Ok(ModelList {
             models: vec![item("flash", &["low", "high"], Some("low"), Some("low"))],
             current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
         }));
         assert!(drawn(&panel).contains("‹ low ›"));
         assert!(matches!(

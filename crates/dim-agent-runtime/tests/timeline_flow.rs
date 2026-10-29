@@ -9,6 +9,34 @@ fn input(text: &str) -> EventDraft {
     EventKind::InputMessage(InputMessageData::text(text, None)).into()
 }
 #[tokio::test]
+async fn producer_preassigned_event_id_is_the_first_delta_part_id() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let timeline = Timeline::new(
+        ctx.clone(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store,
+    );
+    let _rewrite = timeline
+        .before(&ctx, "rewrite", &["input/message"], |draft| {
+            Ok(EventDraft::new(draft.kind))
+        })
+        .unwrap();
+    let event = timeline
+        .append(input("first part").with_id("part-1"))
+        .unwrap();
+    assert_eq!(event.id, "part-1");
+}
+
+#[tokio::test]
 async fn before_pipeline_is_atomic_and_branch_snapshots_share_only_fixed_prefix() {
     let store = Arc::new(MemoryTimelineStore::default());
     store

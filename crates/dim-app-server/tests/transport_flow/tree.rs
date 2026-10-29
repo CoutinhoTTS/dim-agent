@@ -79,7 +79,7 @@ async fn failed_branch_build_keeps_private_details_off_both_transports() {
         let sid = created["result"]["sessionId"].as_str().unwrap();
         let session = server.agent().unwrap().get_session(sid).unwrap();
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
-        assert_eq!(attached["result"], json!({}));
+        assert_eq!(attached["result"]["sessionId"], sid);
         let failed = client
             .rpc(
                 "session.branch_create",
@@ -201,7 +201,7 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
         let at = idle["result"]["sequence"].as_u64().unwrap();
         assert_eq!(at, session.sequence("main").unwrap());
         let attached = tree.rpc("session.attach", json!({"sessionId":sid})).await;
-        assert_eq!(attached["result"], json!({}), "attach returns no history");
+        assert_eq!(attached["result"]["sessionId"], sid);
         assert_eq!(
             tree.rpc("session.attach", json!({"sessionId":sid,"after":1}))
                 .await["error"]["data"]["appError"],
@@ -415,7 +415,12 @@ async fn tree_attach_forwards_later_events_of_every_branch_in_branch_order() {
         let high = session.sequence("main").unwrap();
         let mut client = Client::new_version(&server, ws, 2).await;
         let attach = client.rpc("session.attach", json!({"sessionId":sid})).await;
-        assert_eq!(attach["result"], json!({}), "attach returns no history");
+        assert_eq!(attach["result"]["sessionId"], sid);
+        assert!(
+            attach["result"].get("agentId").is_none() && attach["result"].get("title").is_none(),
+            "a v2 record carries no v3 fields: {}",
+            attach["result"]
+        );
 
         let child = control
             .rpc(

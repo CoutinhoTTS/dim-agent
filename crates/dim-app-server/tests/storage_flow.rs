@@ -96,6 +96,11 @@ fn text(sequence: u64, delta: &str) -> StoredEvent {
         }),
     )
 }
+fn text_with_id(sequence: u64, delta: &str, id: &str) -> StoredEvent {
+    let mut entry = text(sequence, delta);
+    Arc::make_mut(&mut entry.event).id = id.into();
+    entry
+}
 async fn append(
     store: &SqliteTimelineStore,
     key: TimelineKey,
@@ -540,6 +545,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         steps: vec![TraceStep {
             handler: "before".into(),
             result: Some(EventDraft {
+                id: None,
                 tags: first.event.tags.clone(),
                 kind: prepare,
             }),
@@ -567,6 +573,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         steps: vec![TraceStep {
             handler: "transform".into(),
             result: Some(EventDraft {
+                id: None,
                 tags: fifth.event.tags.clone(),
                 kind: fifth.event.kind.clone(),
             }),
@@ -766,6 +773,87 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
     store.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// A text block's identity is the first delta's event id, so the output-row
+/// merge and decode path must preserve that id.
+#[tokio::test]
+async fn output_block_start_id_roundtrips_through_the_merged_row() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let written = [text_with_id(1, "a", "part-1"), text(2, "b")];
+    append(&store, key("session", "main"), written.to_vec())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
+    let session = agent.restore_session("session".into()).await.unwrap();
+    let restored = session.history("main", Some(2)).await.unwrap();
+    let text: Vec<_> = restored
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Text(_)))
+        .collect();
+    assert_eq!(text.len(), 2);
+    assert_eq!(text[0].id, "part-1");
+    assert_eq!(text[1].id, "event-2");
+    agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A producer's preassigned draft id is runtime-only. A before trace must keep
+/// the old draft shape so an older reader can still open the store.
+#[tokio::test]
+async fn stored_trace_drafts_do_not_persist_producer_ids() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut traced = text(1, "hello");
+    let kind = traced.event.kind.clone();
+    traced.trace = Some(TimelineTrace {
+        event_id: traced.event.id.clone(),
+        original: EventDraft::new(kind.clone()).with_id("block-id"),
+        steps: vec![TraceStep {
+            handler: "before".into(),
+            result: Some(EventDraft::new(kind).with_id("step-id")),
+        }],
+    });
+    append(&store, key("session", "main"), vec![traced])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let connection = Connection::open(&database.0).unwrap();
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM timeline_events WHERE session_id = ?1 AND sequence = 1",
+            ["session"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let trace = &row["records"][0]["trace"];
+    assert_eq!(trace["event_id"], "event-1");
+    assert!(trace["original"].get("id").is_none());
+    assert!(trace["steps"][0]["result"].get("id").is_none());
 }
 
 /// An extension event (#2) is stored and read like any other event: it gets a
@@ -1109,6 +1197,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
     let mut traced = record(2, prepare(&first));
     let draft = |request: &Arc<ModelRequest>| {
         Some(EventDraft {
+            id: None,
             tags: traced.event.tags.clone(),
             kind: prepare(request),
         })

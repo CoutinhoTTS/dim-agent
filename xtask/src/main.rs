@@ -3,6 +3,7 @@ mod app_server;
 mod catalog;
 mod modules;
 mod plugins;
+mod scenario_eval;
 mod summary_eval;
 mod types;
 #[global_allocator]
@@ -19,6 +20,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
         Some("summary-eval") => summary_eval::run().await?,
+        Some("scenario-eval") => scenario_eval::run().await?,
         Some("check") => {
             boundaries(false)?;
             catalog::check(&root()).await?;
@@ -27,7 +29,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|summary-eval [OPTIONS]|check|types"
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
                     .into(),
             );
         }
@@ -103,7 +105,11 @@ fn configured_agent()
             ..Default::default()
         });
         dim_agent_capabilities::defaults::install_with_process_model(&mut builder);
-        dim_agent_capabilities::defaults::install_compaction(&mut builder, models.clone());
+        dim_agent_capabilities::defaults::install_compaction(
+            &mut builder,
+            models.clone(),
+            dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig::default(),
+        );
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))

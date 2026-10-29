@@ -7,8 +7,11 @@ rust-version.workspace = true
 
 [dependencies]
 dim-client.workspace = true
+dim-migration.workspace = true
 dim-acp.workspace = true
 dim-agent-types.workspace = true
+dim-agent-capabilities.workspace = true
+tokio-util.workspace = true
 rutis.workspace = true
 rutis-bridge.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

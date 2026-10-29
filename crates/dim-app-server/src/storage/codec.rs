@@ -407,6 +407,7 @@ pub(super) fn encode(
     let mut draft = |draft: &EventDraft| {
         let value = match bare(&draft.kind) {
             Some(kind) => serde_json::to_value(EventDraft {
+                id: draft.id.clone(),
                 tags: draft.tags.clone(),
                 kind,
             }),

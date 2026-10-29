@@ -169,6 +169,12 @@ pub struct ModelProgressNotice {
     pub branch_id: String,
     pub turn_id: Option<String>,
     pub request_id: Option<String>,
+    /// Stable identity of the open text block, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_part_id: Option<String>,
+    /// Stable identity of the open thinking block, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_part_id: Option<String>,
     pub text: String,
     /// Unicode scalar values of this request's `step/text` deltas before `text`.
     pub text_offset: u64,
@@ -191,6 +197,8 @@ impl ModelProgressNotice {
             branch_id,
             turn_id: progress.turn_id,
             request_id: progress.request_id,
+            text_part_id: progress.text_part_id,
+            thinking_part_id: progress.thinking_part_id,
             text: progress.text,
             text_offset: progress.text_offset,
             thinking: progress.thinking,

@@ -49,9 +49,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y permitir · n rechazar · ←→/Tab mover · Enter confirmar"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter enviar · Tab editar · Esc declinar",
-        "Space toggle · Tab next · Esc decline" => "Space marcar · Tab siguiente · Esc declinar",
-        "1-9 select · Tab next · Esc decline" => "1-9 elegir · Tab siguiente · Esc declinar",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter enviar · Tab editar · / comandos · Esc declinar"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space marcar · Tab siguiente · / comandos · Esc declinar"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 elegir · Tab siguiente · / comandos · Esc declinar"
+        }
         "Question" => "Pregunta",
         "Question on branch {branch}" => "Pregunta en la rama {branch}",
         "Permission on branch {branch}" => "Permiso en la rama {branch}",
@@ -60,14 +66,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // prompts.rs: AskUser
         "Confirm" => "Confirmar",
         "Enter save · Esc back" => "Enter guardar · Esc volver",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter enviar · 1-9 editar · Tab/←→ volver · Esc declinar"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter enviar · 1-9 editar · Tab/←→ volver · / comandos · Esc declinar"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ mover · Space marcar · Enter siguiente · Tab/←→ cambiar · Esc declinar"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ mover · Space marcar · Enter siguiente · Tab/←→ cambiar · / comandos · Esc declinar"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ mover · 1-9 elegir · Enter siguiente · Tab/←→ cambiar · Esc declinar"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ mover · 1-9 elegir · Enter siguiente · Tab/←→ cambiar · / comandos · Esc declinar"
         }
         "AskUserQuestion received an invalid payload." => {
             "AskUserQuestion recibió datos no válidos."

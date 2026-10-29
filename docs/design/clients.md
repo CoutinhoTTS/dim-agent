@@ -50,13 +50,20 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 | --- | --- |
 | Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 5); [App Server README](../../crates/dim-app-server/README.md) |
 | Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
-| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
+| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo` as `session.list` gives it, so a client that opens a known Session takes the model from it and reads no catalog; a reload leaves the title fields absent and `running` false, and the notices that follow correct them | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
 | Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
 | Approvals and questions: `approval.request` / `cancelled` / `resolved`; a question is a pending `ask_user` call answered by `session.question.respond` | [ADR 003](../adr/003-approval-scope.md), [Questions](plugins/Questions.md) |
 | Interfaces viewing a Session: the UI registry, terminal UIs as UI leaves (`ui.open`, `ui.attach`, `ui.status`) | [Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves) |
 | Provider management for every client | [Provider management](appserver/provider-management.md) |
 
 The CLI requires protocol v3 and the `session.create` and `session.history` features; the web client and its assets require an exact protocol match ([web workspace §2.4](web-workspace.md)).
+
+### Timeline block identity
+
+- A text/thinking block is identified by the `id` of its **first raw event**. Following same-kind events belong to that block until a durable event of the other kind (thinking for text, text for thinking) or a tool event starts the next block. Provider `TextEnd`/`ThinkingEnd` are not durable and do not split a block. Replay, history and storage preserve the event ids.
+- Tools use `call_id`; user inputs use the `input/message` event id.
+- `session.model.progress` carries `textPartId` / `thinkingPartId` for the open blocks. They equal the first-event id that will publish that block.
+- Clients must key timeline blocks/groups by that first-event id (or `call_id` for tools), not by local ordinals, request ids or synthetic `:progress` ids. UI-only group/expansion keys may derive from those stable ids.
 
 ## 3. Capability coverage
 
