@@ -109,9 +109,11 @@ Each built-in entry moves verbatim to the capability that writes its markers, an
 | 60 | `dim-state` | PromptGuide | session | What a state block is |
 | 70 | `dim-rule` | PromptGuide | session | What a rule block is, and how it ends |
 | 80 | `dim-summary` | ContextCompaction's summary strategy part | session | What a summary is |
-| 90 | `dim-digest` | ContextCompaction's summary strategy part | session | What a digest is |
+| 90 | `dim-digest` | ContextCompaction's context-preparation part | branch | What a digest is |
 
 The registrar is the part that writes the marker, not the part that authors the source's words. Prompt turns any `Context` or `State` source into a `<dim-rule>` or `<dim-state>` input, so those two markers are Prompt's even when the source's words are PromptSources'. A profile that installs Prompt without PromptSources can still be handed a context source, and the markers it writes need their entries.
+
+A compaction's replacement belongs to the policy every strategy is called through, not to a strategy: the policy composes the digest after any strategy returns ([ContextCompaction §5.10](ContextCompaction.md#510-class-3a-the-digest)). The entry therefore registers with the part that binds the policy, and only while a strategy is bound — a Session with no strategy compacts nothing and writes no digest. A Session with a strategy other than the product one still sends `<dim-digest>`, and its guide explains it.
 
 A capability that writes a marker and registers no entry is a capability the guide does not explain; a capability that registers an entry for a marker nothing writes leaves a promise the runtime does not keep. Both are the writer's to fix, and [#551](../model-prompts.md#92-every-capability-that-writes-model-facing-text) makes each writer assert the pair in its own flow.
 

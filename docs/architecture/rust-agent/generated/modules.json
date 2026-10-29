@@ -6696,6 +6696,18 @@
     },
     {
       "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Branch",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",

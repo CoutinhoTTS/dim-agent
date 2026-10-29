@@ -13,6 +13,7 @@ atomic ConfigurationPublisher used by Prompt.
 | `S:ContextModelHost` | Optional window facts for context policy and recovery. |
 | `S:CompactionStrategyHost` | Optional compaction strategy; the policy exists when both hosts are bound. |
 | `S:PrepareContextHost` | Host preparation hook. |
+| `S:GuideEntries` | Register the digest entry while a strategy is bound. |
 | `B:TimelineIdentity` | Identify configuration publication scope; Session and branch ids of the `context.prepare` span. |
 | `B:Dispatcher` | Replay and receive preparation/steer/interrupt transitions and report faults. |
 | `B:Timeline` | Read fixed context, publish handoff and configuration facts. |
@@ -42,6 +43,12 @@ summary and falls back to fact replay; it does not repeat model work. Trusted
 builders must independently preserve full-replay semantics; a checksum is not
 proof of semantic correctness or authorization.
 
+The compaction replacement is the policy's, so the part registers the
+`dim-digest` entry of the input guide from its own `apply`, scoped to its
+branch and only while a strategy is bound: without one the policy compacts
+nothing and no digest can be written
+([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)).
+
 ## Tests
 
 [context_flow.rs](../../../../crates/dim-agent-capabilities/tests/context_flow.rs):
@@ -53,7 +60,7 @@ proof of semantic correctness or authorization.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:HistoryRenderer`、`S:PrepareContextHost` |
+| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareContextHost` |
 | 提供 | `B:ConfigurationPublisher`、`B:ContextPreparation` |
 | 被注入于 | `ModelProvider`、`Prompt` |
 <!-- /generated -->

@@ -87,6 +87,7 @@ flowchart LR
   p21 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p38
   p21 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p38
   p21 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p38
+  p27 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p38
   p33 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p38
   p33 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p38
   p33 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p38

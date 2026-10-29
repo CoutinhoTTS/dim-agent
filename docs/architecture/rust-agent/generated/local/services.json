@@ -1181,6 +1181,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::config::TimelineIdentity@main",
             "scope": null,
             "status": "Ready"
@@ -1219,6 +1224,12 @@
             "service": "dim_agent_capabilities::host::PrepareContextHost@session",
             "scope": null,
             "provider": 31,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "scope": null,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -1262,6 +1273,12 @@
           {
             "service": "dim_agent_capabilities::host::PrepareContextHost@session",
             "provider": 31,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "provider": 39,
             "declared": true,
             "external": true
           },

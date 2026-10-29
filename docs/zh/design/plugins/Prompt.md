@@ -109,9 +109,11 @@ Prompt 自己的两个调用点留在原处：ContextPreparation 放置它发布
 | 60 | `dim-state` | PromptGuide | Session | 状态块是什么 |
 | 70 | `dim-rule` | PromptGuide | Session | 规则块是什么、怎样结束 |
 | 80 | `dim-summary` | ContextCompaction 的摘要策略部件 | Session | 摘要是什么 |
-| 90 | `dim-digest` | ContextCompaction 的摘要策略部件 | Session | 清单是什么 |
+| 90 | `dim-digest` | ContextCompaction 的上下文准备部件 | 分支 | 清单是什么 |
 
 登记者是写该标记的部件，不是撰写该来源措辞的部件。Prompt 把任何 `Context` 或 `State` 来源写成 `<dim-rule>` 或 `<dim-state>` 输入，所以即使措辞是 PromptSources 的，这两个标记也是 Prompt 的。只装 Prompt 不装 PromptSources 的 profile 仍可能被宿主塞入上下文来源，它写出的标记需要自己的条目。
+
+压缩产生的替换内容属于任何策略都要经由的 ContextPolicy，而不属于某一个策略：无论哪个策略返回，清单都由 ContextPolicy 组合（[ContextCompaction §5.10](ContextCompaction.md#510-第-3a-类清单)）。因此该条目由绑定 ContextPolicy 的部件登记，且只在有策略绑定时登记——没有策略的 Session 不做压缩，也就不写清单。绑定了产品策略之外策略的 Session 仍然会发送 `<dim-digest>`，它的指南会解释它。
 
 写了标记却不登记条目的能力，是模型读不到解释的能力；为没人写的标记登记条目，是运行时兑现不了的承诺。两者都归写入者自己修，而 [#551](../model-prompts.md#92-每个写入面向模型文字的能力) 让每个写入者在自己流程里断言这一对。
 
