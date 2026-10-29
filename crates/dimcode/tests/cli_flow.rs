@@ -2812,6 +2812,110 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
     daemon.join().unwrap();
 }
 
+/// `session.create` fails the way it does without a model, so the TUI has
+/// no Session: commands that need one must answer on their own.
+fn no_session_daemon(home: &Home, quieted: std::sync::mpsc::Sender<()>) -> thread::JoinHandle<()> {
+    home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"No model is chosen","data":{"appError":"provider_failed"}}}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.quiet(Duration::from_millis(1200));
+        let _ = quieted.send(());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    })
+}
+
+#[test]
+fn tui_mcp_without_a_session_reports_the_catalog_only() {
+    let home = Home::new();
+    let (quieted, quiet_done) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"No model is chosen","data":{"appError":"provider_failed"}}}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,json!({"userRevision":"1","projectRevision":null,"servers":[],"userApplication":{},"projectApplication":null}));
+        // There is no Session, so there are no Session server states to ask for.
+        wire.quiet(Duration::from_millis(1200));
+        let _ = quieted.send(());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Sign in with /login");
+    terminal.write(b"/mcp\r");
+    terminal.until("No MCP server is configured.");
+    quiet_done.recv_timeout(PATIENCE).unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("session_closed"));
+}
+
+#[test]
+fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
+    let home = Home::new();
+    let (quieted, quiet_done) = std::sync::mpsc::channel();
+    let daemon = no_session_daemon(&home, quieted);
+    let mut terminal = Terminal::launch_tui(home.command());
+    // The startup notice is the first; the command's answer is the second.
+    terminal.until("Sign in with /login");
+    terminal.write(b"/agent ghost\r");
+    terminal.until("Sign in with /login");
+    quiet_done.recv_timeout(PATIENCE).unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("session_closed"));
+}
+
+#[test]
+fn tui_effort_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
+    let home = Home::new();
+    let (quieted, quiet_done) = std::sync::mpsc::channel();
+    let daemon = no_session_daemon(&home, quieted);
+    let mut terminal = Terminal::launch_tui(home.command());
+    // The startup notice is the first; the command's answer is the second.
+    terminal.until("Sign in with /login");
+    terminal.write(b"/effort high\r");
+    terminal.until("Sign in with /login");
+    quiet_done.recv_timeout(PATIENCE).unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("session_closed"));
+}
+
+#[test]
+fn tui_shell_without_a_session_settles_with_the_no_session_notice() {
+    let home = Home::new();
+    let (quieted, quiet_done) = std::sync::mpsc::channel();
+    let daemon = no_session_daemon(&home, quieted);
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Sign in with /login");
+    terminal.write(b"!echo hi\r");
+    // The settled shell block carries the notice as its status, and the
+    // status line repeats it; neither the block nor the row stays running.
+    terminal.until("failed: Sign in with /login");
+    terminal.until("Shell: Sign in with");
+    quiet_done.recv_timeout(PATIENCE).unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("session_closed"));
+}
+
 #[test]
 fn tui_pasted_images_and_long_text_submit_as_user_content() {
     use base64::{Engine, engine::general_purpose::STANDARD};
