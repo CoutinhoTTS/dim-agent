@@ -591,6 +591,11 @@ async fn the_roll_forward_reads_the_compaction_in_effect_before_the_new_cut() {
         "an entry before the first cut is not rebuilt"
     );
     assert!(!text(&replacement[1]).contains("/work/f00.txt"));
+    assert_eq!(
+        replacement[1],
+        digest_message(&first.entries, true),
+        "the digest is the carried record: no effect declared before the first cut is listed"
+    );
     agent.close().await.unwrap();
 }
 
@@ -784,6 +789,66 @@ async fn an_entry_over_the_bound_is_dropped_like_an_older_one() {
     let (_, entries, replacement) = parts(&completed(&events, command));
     let entries = entries.expect("the note is still the digest");
     assert!(entries.entries.is_empty());
+    assert!(entries.dropped);
+    assert_eq!(replacement[1], digest_message(&[], true));
+    agent.close().await.unwrap();
+}
+
+/// (d) When even the note alone is over the bound, every entry is dropped and
+/// the record still holds `{entries: [], dropped: true}`, so a later digest
+/// keeps the note (§5.10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_note_over_the_bound_is_still_recorded_and_kept() {
+    // B = 7,000, so `0.05 × B` is smaller than the note itself.
+    let context = facts(7_064.);
+    let note = context.count_tokens(&ModelRequest::new("", "", vec![digest_message(&[], true)]))
+        - context.count_tokens(&ModelRequest::new("", "", Vec::new()));
+    assert!(
+        note > 0.05 * 7_000.,
+        "the note alone is over the bound: {note}"
+    );
+    let script = Arc::new(Script::default());
+    let (agent, session) = effects_session(script.clone(), context).await;
+    turn(
+        &script,
+        &session,
+        &"x".repeat(4_000),
+        vec![
+            Step::Calls(vec![(
+                "declare",
+                json!({"effects": [{"kind": "fileWritten", "path": "/work/a.txt"}]}),
+            )]),
+            Step::Says("done"),
+        ],
+    )
+    .await;
+    turn(&script, &session, "next", vec![Step::Says("ok")]).await;
+    let (command, events) = compact_now(&session).await;
+    let (recorded, entries, replacement) = parts(&completed(&events, command));
+    assert_eq!(
+        recorded.map(|parts| parts.digest),
+        Some(1),
+        "the note is the digest"
+    );
+    let entries = entries.expect("the note alone is still recorded");
+    assert!(entries.entries.is_empty(), "{entries:?}");
+    assert!(entries.dropped);
+    assert_eq!(replacement[1], digest_message(&[], true));
+
+    // The note does not fit this window either, and a later digest still
+    // carries it rather than starting over without it.
+    turn(
+        &script,
+        &session,
+        &"y".repeat(4_000),
+        vec![Step::Calls(vec![("plain", json!({}))]), Step::Says("done")],
+    )
+    .await;
+    turn(&script, &session, "next two", vec![Step::Says("ok")]).await;
+    let (command, events) = compact_now(&session).await;
+    let (_, entries, replacement) = parts(&completed(&events, command));
+    let entries = entries.expect("the note is still the digest");
+    assert!(entries.entries.is_empty(), "{entries:?}");
     assert!(entries.dropped);
     assert_eq!(replacement[1], digest_message(&[], true));
     agent.close().await.unwrap();

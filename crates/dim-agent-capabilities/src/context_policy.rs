@@ -1034,7 +1034,10 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
 /// one entry per path or command with its latest outcome. Beyond
 /// `DIGEST_SHARE` of the input budget the least recently declared entries are
 /// dropped, and `dropped` stays set once anything was; with every entry
-/// dropped the note alone is the digest. None when not even that fits.
+/// dropped the note alone is the digest, written even when it alone is over
+/// the bound so that later digests keep it. None when the cut has no event in
+/// the view, or when the record's cut is one the view can place neither among
+/// its events nor as the compaction it applies.
 fn digest_entries(
     view: &View,
     retain_from: &str,
@@ -1061,19 +1064,51 @@ fn digest_entries(
     let (start, mut entries, mut dropped) = match previous {
         Some(data) => {
             let ContextCompactionResult::Completed {
-                retain_from,
+                retain_from: cut,
                 digest_entries,
                 ..
             } = &data.outcome
             else {
                 unreachable!("matched a completed compaction")
             };
-            (
-                events
+            // The scan of the events since that cut starts at the first event
+            // the fixed context carries at or after it, in timeline order
+            // (§5.10).
+            let order: HashMap<&str, usize> = view
+                .events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| (event.id.as_str(), index))
+                .collect();
+            let start = match order.get(cut.as_str()) {
+                Some(&cut) => events
                     .iter()
-                    .position(|event| &event.id == retain_from)
-                    .unwrap_or(0)
-                    .min(end),
+                    .position(|event| {
+                        order
+                            .get(event.id.as_str())
+                            .is_some_and(|index| *index >= cut)
+                    })
+                    .unwrap_or(end),
+                // The view carries no event at that cut. It still places it
+                // when it is the cut the view's compaction applied: the
+                // replay then begins at or after it, so every event the
+                // context carries is at or after it and the scan starts at
+                // the replay's first event. A cut the view can place neither
+                // way records no digest.
+                None => {
+                    let applied = view
+                        .checkpoint
+                        .as_ref()
+                        .is_some_and(|checkpoint| checkpoint.retain_from == *cut);
+                    if !applied {
+                        return None;
+                    }
+                    0
+                }
+            }
+            .min(end);
+            (
+                start,
                 digest_entries
                     .as_ref()
                     .map(|digest| digest.entries.clone())
@@ -1110,22 +1145,22 @@ fn digest_entries(
         )) - empty
     };
     let limit = DIGEST_SHARE * input_budget(model);
-    if count(&entries, dropped) > limit {
+    if (dropped || !entries.is_empty()) && count(&entries, dropped) > limit {
         dropped = true;
         // Dropping entries from the front only shrinks the rendered message,
         // so the largest suffix that fits is one binary search rather than
-        // one render per entry.
+        // one render per entry. When even the note alone is over the bound,
+        // every entry goes and the note stays.
         let fits = |kept: usize| count(&entries[kept..], true) <= limit;
-        if !fits(entries.len()) {
-            return None;
-        }
         let (mut low, mut high) = (0, entries.len());
-        while high - low > 1 {
-            let middle = low + (high - low) / 2;
-            if fits(middle) {
-                high = middle;
-            } else {
-                low = middle;
+        if fits(high) {
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if fits(middle) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
             }
         }
         entries = entries.split_off(high);
