@@ -372,6 +372,8 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 
 `inputSchema` 节点可以省略 `type`，例如由 `oneOf` 表达约束时。保留提供的关键字和
 `type` 是否存在；工具注册和模型请求准备都不为这类节点补造类型。
+持久化声明遵守[原生 v22 格式决定](../../../design/appserver/native-storage-format.md#580-v22-格式决定)；
+v21 读取器无法解码省略 `type` 的节点。
 
 ```text
 // ToolDeclaration

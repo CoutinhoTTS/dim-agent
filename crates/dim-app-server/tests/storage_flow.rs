@@ -194,7 +194,7 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_metadata",
 ];
 /// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
-/// v19 and v20 add none.
+/// v19 through v22 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -2426,6 +2426,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V19,
         V20,
         V21,
+        V22,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2577,6 +2578,15 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V21, "DELETE FROM agent_store_format"),
         (
             Base::V21,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=22",
+        ),
+        (Base::V22, "DELETE FROM agent_store_format"),
+        (
+            Base::V22,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=21",
+        ),
+        (
+            Base::V21,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=20",
         ),
         (
@@ -2591,6 +2601,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V19, "DROP TABLE session_metadata"),
         (Base::V20, "DROP TABLE session_metadata"),
         (Base::V21, "DROP TABLE session_metadata"),
+        (Base::V22, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2602,7 +2613,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V18 => drop(v16_tables_store(&database.0, 18)),
             Base::V19 => drop(v16_tables_store(&database.0, 19)),
             Base::V20 => drop(v16_tables_store(&database.0, 20)),
-            Base::V21 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V21 => drop(v16_tables_store(&database.0, 21)),
+            Base::V22 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2636,7 +2648,7 @@ fn marker(connection: &Connection) -> Vec<i64> {
 }
 
 /// Upgrades the disposable `connection`'s store, built at `from` and holding
-/// every documented row of the tables it has, to the exact v21 store in place:
+/// every documented row of the tables it has, to the exact v22 store in place:
 /// every business row is unchanged, the added tables are empty, and only that
 /// open reports the upgrade. The documented v16 request row then reads and
 /// continues as mixed rows.
@@ -2667,8 +2679,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [21]);
+    assert_eq!(schema(&connection), schema_of(22));
+    assert_eq!(marker(&connection), [22]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2731,9 +2743,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     db.close().await.unwrap();
 }
 
-/// An empty store is created at exactly v21; a v13 store takes S5a's,
-/// S5b's, #193's, #2's, #364's, the branch end's and #527's one-way steps in
-/// one open.
+/// An empty store is created at exactly v22; a v13 store takes S5a's,
+/// and all subsequent one-way steps in one open.
 #[tokio::test]
 async fn a_v13_store_upgrades_in_place_once() {
     let fresh = Database::new();
@@ -2741,8 +2752,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [21]);
+    assert_eq!(schema(&connection), schema_of(22));
+    assert_eq!(marker(&connection), [22]);
     drop(connection);
 
     let database = Database::new();
@@ -2750,8 +2761,7 @@ async fn a_v13_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 13).await;
 }
 
-/// S5b's one-way upgrade, then #193's, #2's, #364's, the branch end's and
-/// #527's: an exact v15 store becomes the exact v21 store.
+/// An exact v15 store upgrades without rewriting its business rows.
 #[tokio::test]
 async fn a_v15_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2760,8 +2770,7 @@ async fn a_v15_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 15).await;
 }
 
-/// #193's, #2's, #364's, the branch end's and #527's one-way upgrades replace
-/// only the marker of an exact v16 store.
+/// An exact v16 store upgrades by replacing only its marker.
 #[tokio::test]
 async fn a_v16_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2770,9 +2779,7 @@ async fn a_v16_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 16).await;
 }
 
-/// #2's, #364's, the branch end's and #527's one-way upgrades replace only the
-/// marker of an exact v17 store: its rows, v16 and v17 request rows alike, are
-/// unchanged.
+/// An exact v17 store upgrades without rewriting its mixed v16/v17 request rows.
 #[tokio::test]
 async fn a_v17_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2781,9 +2788,7 @@ async fn a_v17_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 17).await;
 }
 
-/// #364's, the branch end's and #527's one-way upgrades replace only the
-/// marker of an exact v18 store: its Session configurations and Agent
-/// profiles, which all name their tools, read unchanged.
+/// An exact v18 store upgrades with its explicit tool mount lists unchanged.
 #[tokio::test]
 async fn a_v18_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2792,8 +2797,7 @@ async fn a_v18_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 18).await;
 }
 
-/// The branch end's and #527's one-way upgrades replace only the marker of an
-/// exact v19 store.
+/// An exact v19 store upgrades by replacing only its marker.
 #[tokio::test]
 async fn a_v19_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2802,13 +2806,107 @@ async fn a_v19_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 19).await;
 }
 
-/// #527's one-way upgrade replaces only the marker of an exact v20 store.
+/// An exact v20 store upgrades by replacing only its marker.
 #[tokio::test]
 async fn a_v20_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v16_tables_store(&database.0, 20);
     assert_eq!(schema(&connection), schema_of(20));
     upgrades_in_place_once(&database, connection, 20).await;
+}
+
+#[tokio::test]
+async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 21);
+    assert_eq!(schema(&connection), schema_of(21));
+    upgrades_in_place_once(&database, connection, 21).await;
+
+    let tools: Vec<ToolDefinition> = serde_json::from_value(serde_json::json!([{
+        "name": "lookup", "description": "Look up an item", "source": "static",
+        "inputSchema": {"type": "object", "properties": {
+            "rule": {"oneOf": [{"const": "allow"}, {"const": "deny"}]}
+        }}
+    }]))
+    .unwrap();
+    let configured = record(
+        1,
+        EventKind::ContextConfigured(ContextConfiguredData {
+            timeline: "main".into(),
+            revision: "configuration".into(),
+            previous: None,
+            prompt: None,
+            settings: Box::new(ModelConfiguration {
+                provider_id: "mock".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                tools: Some(tools.clone()),
+                tool_sources: vec![],
+                config: None,
+                metadata: None,
+            }),
+            system: None,
+        }),
+    );
+    let mut request = ModelRequest::new("mock", "test", vec![Message::text(Role::User, "Hi")]);
+    request.tools = Some(Arc::new(tools.clone()));
+    let called = record(
+        2,
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: Arc::new(request),
+            configuration: None,
+            prompt: None,
+        }),
+    );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("schema", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("schema", "main"),
+        vec![configured.clone(), called.clone()],
+    )
+    .await
+    .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let connection = Connection::open(&database.0).unwrap();
+    assert_ne!(schema(&connection), schema_of(21));
+    assert_eq!(marker(&connection), [22]);
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::to_value(&tools).unwrap()
+    );
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
+    let session = agent.restore_session("schema".into()).await.unwrap();
+    let restored = session.history("main", Some(2)).await.unwrap();
+    assert_eq!(restored[0], configured.event);
+    assert_eq!(restored[1], called.event);
+    agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }
 
 /// The daemon names the one-way upgrade on stderr, where its default log
@@ -2854,7 +2952,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v21; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v22; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(

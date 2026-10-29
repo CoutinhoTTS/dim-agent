@@ -374,6 +374,8 @@ ToolBinding reconciles the table through the existing Prompt / BranchOpening flo
 An `inputSchema` node may omit `type`, for example when `oneOf` supplies its
 constraints. Preserve the supplied keywords and whether `type` is present;
 neither registration nor model preparation inserts a type for such a node.
+Persisted declarations follow the [native v22 format decision](../appserver/native-storage-format.md#580-v22-格式决定);
+v21 readers cannot decode a node whose `type` is absent.
 
 ```text
 // ToolDeclaration
