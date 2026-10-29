@@ -19,7 +19,6 @@ replaying history; rebuilding restores it from checkpoint configuration and fact
 | `B:Dispatcher` | Order configuration adoption and state projection. |
 | `B:Timeline` | Write controls and rebuild adopted context. |
 | `S:FaultReporter` | Report owned work failures. |
-| `S:GuideEntries` | Compose the guide this branch carries at each adoption it publishes. |
 | `B:BranchOpening` | Register initial prompt completion receipt. |
 
 ## Events and lifetime
@@ -54,7 +53,7 @@ owners, rule check and complete-candidate concurrency limit.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:GuideEntries`、`S:InitialPromptConfiguration`、`S:PromptHost` |
+| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:InitialPromptConfiguration`、`S:PromptHost` |
 | 提供 | `B:Prompt`、`B:StateCell<PromptSnapshot>`、`B:dyn ConfigureControl` |
 | 被注入于 | `PromptSourcesBranch`、`SkillsBranch`、`ToolBinding` |
 <!-- /generated -->
@@ -79,9 +78,10 @@ None: it provides the table and owns its two entries.
 A registration is an effect of the part that made it: it is withdrawn when that
 part unloads, and a reloaded part replaces its entry instead of doubling it. A
 composition already made is unaffected by a later registration or withdrawal:
-the adopted System is fixed until the next adoption that renders it — the first
-configuration or a change of sources — and a tools-only or model-only adoption
-keeps the adopted System and its guide. Entries
+the adopted System is fixed until the next adoption that publishes a
+configuration. A tools-only or model-only adoption re-renders the guide over
+the source text the configuration records, and one written before the source
+was recorded keeps its adopted System. Entries
 reach the model only through the System a branch adopted or through the request
 Loop assembles, never through a request of their own.
 
@@ -89,6 +89,8 @@ Loop assembles, never through a request of their own.
 
 [prompt_guide.rs](../../../../tests/integration/tests/prompt_guide.rs):
 `both_paths_carry_one_composition`,
+`an_adopted_request_and_the_summarizers_request_carry_one_system`,
+`a_tools_only_adoption_carries_the_entry_its_writer_registers`,
 `an_entry_waits_for_the_next_adoption_that_renders_the_system`,
 `each_branch_keeps_its_own_entries`, `the_frame_states_the_compaction_handle`;
 [reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
@@ -100,5 +102,5 @@ Loop assembles, never through a request of their own.
 | 作用域 | Session |
 | 注入 | — |
 | 提供 | `S:GuideEntries`、`S:dyn HostDispatch#guideEntries` |
-| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`Prompt`、`ShellInput`、`TimelineTree` |
+| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`ShellInput`、`TimelineTree` |
 <!-- /generated -->

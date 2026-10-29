@@ -1152,7 +1152,7 @@ async fn judge_probes(
         }
     };
     let parsed = parse_judgements(&reply)
-        .ok_or_else(|| format!("the judge answered with no verdict list: {reply}"))?;
+        .map_err(|_| format!("the judge answered with no verdict list: {reply}"))?;
     Ok(parsed
         .into_iter()
         .map(|judgement| {
@@ -1199,15 +1199,42 @@ async fn collected(mut stream: ModelStream) -> std::result::Result<(String, bool
     Ok((text, true))
 }
 
-/// The first JSON array of a reply that parses as a verdict list. Prose, a
-/// fenced block or a bracketed lead-in before the array must not hide it, and
-/// a bracket inside a quoted verdict is part of the JSON, not a boundary.
-pub(crate) fn parse_judgements(text: &str) -> Option<Vec<Judgement>> {
-    text.match_indices('[').find_map(|(start, _)| {
-        serde_json::Deserializer::from_str(&text[start..])
+/// The verdicts of a judge reply: the first JSON array that parses as a
+/// verdict list, or else the first run of verdict objects, one per line.
+/// Prose, a fenced block or a bracketed lead-in before the verdicts must not
+/// hide them, and a bracket inside a quoted verdict is part of the JSON, not
+/// a boundary. A reply with neither says why it could not be read.
+pub(crate) fn parse_judgements(text: &str) -> std::result::Result<Vec<Judgement>, String> {
+    let mut array_error = None;
+    for (start, _) in text.match_indices('[') {
+        match serde_json::Deserializer::from_str(&text[start..])
             .into_iter::<Vec<Judgement>>()
-            .next()?
-            .ok()
+            .next()
+        {
+            Some(Ok(judged)) => return Ok(judged),
+            Some(Err(error)) => {
+                array_error.get_or_insert(error.to_string());
+            }
+            None => {}
+        }
+    }
+    if let Some(judged) = objects(text) {
+        return Ok(judged);
+    }
+    Err(array_error.unwrap_or_else(|| "the reply holds no verdict object".to_owned()))
+}
+
+/// The first run of verdict objects in a reply, one per line: the objects
+/// from the first `{` that starts one, up to the first value that is not one.
+fn objects(text: &str) -> Option<Vec<Judgement>> {
+    text.match_indices('{').find_map(|(start, _)| {
+        let mut values =
+            serde_json::Deserializer::from_str(&text[start..]).into_iter::<Judgement>();
+        let mut judged = Vec::new();
+        while let Some(Ok(judgement)) = values.next() {
+            judged.push(judgement);
+        }
+        (!judged.is_empty()).then_some(judged)
     })
 }
 
@@ -1576,6 +1603,54 @@ mod tests {
     use dim_app_server::model_catalog::FieldUpdate;
     use dim_app_server::provider::{CreateProvider, PreferencesPatch};
     use std::sync::Mutex;
+
+    /// The verdicts are read from a JSON array, with prose and a bracketed
+    /// lead-in before it and a bracket inside a quote.
+    #[test]
+    fn a_verdict_array_is_read_with_prose_around_it() {
+        let judged = parse_judgements(
+            "The verdicts are:\n```json\n[not this]\n\
+             [{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end]\"}]\n\
+             ```\nThat is all.",
+        )
+        .unwrap();
+        assert_eq!(judged.len(), 1);
+        assert_eq!(judged[0].id, "ran");
+        assert_eq!(judged[0].verdict, Verdict::Present);
+    }
+
+    /// The verdicts are read from one object per line, with prose around the
+    /// run and a brace in the prose before it.
+    #[test]
+    fn verdicts_one_object_per_line_are_read_with_prose_around_them() {
+        let judged = parse_judgements(
+            "Here they are, brace {not json} and all:\n\
+             {\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}\n\
+             {\"id\": \"floods\", \"verdict\": \"absent\", \"quote\": \"\"}\n\
+             That is all.",
+        )
+        .unwrap();
+        assert_eq!(judged.len(), 2);
+        assert_eq!(judged[0].id, "ran");
+        assert_eq!(judged[0].verdict, Verdict::Present);
+        assert_eq!(judged[1].id, "floods");
+        assert_eq!(judged[1].verdict, Verdict::Absent);
+    }
+
+    /// A reply with neither a verdict array nor a verdict object says why: the
+    /// array attempt's own error where there is an array, and the missing
+    /// object where there is none.
+    #[test]
+    fn a_reply_with_no_verdict_says_why() {
+        let error = parse_judgements("the run looks fine to me")
+            .err()
+            .expect("a reply with no verdict object");
+        assert_eq!(error, "the reply holds no verdict object");
+        let error = parse_judgements(r#"[{"id": "ran", "verdict": "maybe"}]"#)
+            .err()
+            .expect("an array of no verdict object");
+        assert!(error.contains("unknown variant `maybe`"), "{error}");
+    }
 
     /// The conversation request carries the model's saved preferences, as the
     /// bundled client's `session.create` does; without saved preferences it
