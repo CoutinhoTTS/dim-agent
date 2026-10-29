@@ -23,8 +23,7 @@ const SYSTEM: &str = "You summarize a coding session so that it can continue wit
 /// How the summarizer asks for reasoning (ContextCompaction §13.2). `Off` is
 /// the default; a value the model rejects for its protocol falls back to
 /// `Inherit`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SummaryReasoning {
     Inherit,
     #[default]
