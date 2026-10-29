@@ -40,6 +40,15 @@ test("a user message carries the cut a child line opens at", () => {
   assert.equal(line.branchId, "b-7c")
   assert.equal(line.purpose, "parser race")
   assert.equal(line.before, "try RwLock")
+  assert.equal(line.failed, undefined)
+
+  projection.apply(event(7, {
+    kind: "branch-create-failed",
+    branchId: "b-7c",
+    status: "failed",
+    error: "boom",
+  }))
+  assert.equal(projection.rows[1].failed, true)
 })
 
 test("branch messages, ends and the last turn end become rows", () => {

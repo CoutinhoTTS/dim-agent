@@ -151,7 +151,7 @@ function resizeBy(delta: number): void {
       :data-detail-expanded="ui.detailExpanded"
       :style="{ '--detail-width': `${ui.detailWidth}px` }"
     >
-      <main id="main" class="main-region" :aria-label="t('a11y.mainContent')">
+      <main id="main" class="main-region" :aria-label="t('a11y.mainContent')" @pointerdown="ui.detailFocused = false" @focusin="ui.detailFocused = false">
         <button v-if="ui.sidebarCollapsed && ui.shellMode !== 'compact'" class="ui-icon-button sidebar-reopen" data-variant="ghost" data-size="md" type="button" :aria-label="t('sidebar.openMenu')" v-tooltip="t('sidebar.openMenu')" @click="ui.sidebarCollapsed = false">
           <PanelLeftOpen aria-hidden="true" />
         </button>
@@ -176,7 +176,7 @@ function resizeBy(delta: number): void {
         @keydown.left.prevent="resizeBy(-16)"
         @keydown.right.prevent="resizeBy(16)"
       />
-      <aside v-if="detailOpen && sessionId" class="detail-region" data-active="true" :aria-label="t('lines.panelAria')">
+      <aside v-if="detailOpen && sessionId" class="detail-region" data-active="true" :aria-label="t('lines.panelAria')" @pointerdown="ui.detailFocused = true" @focusin="ui.detailFocused = true">
         <LinesPanel :session-id="sessionId" />
       </aside>
     </div>

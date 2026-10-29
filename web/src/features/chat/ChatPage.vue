@@ -26,6 +26,7 @@ const view = computed(() => chat.views[props.sessionId])
 const summary = computed(() => sessions.byId.get(props.sessionId))
 const title = computed(() => summary.value?.preview ?? t("sidebar.untitled"))
 const approval = computed(() => view.value?.approvals.find((request) => request.branchId === MAIN_BRANCH))
+const approvalKeyboard = computed(() => ui.approvalKeyboard(props.sessionId, MAIN_BRANCH, view.value?.approvals ?? []))
 const composer = ref<InstanceType<typeof ComposerPanel>>()
 const lineCount = computed(() => view.value?.lines.filter((line) => line.id !== MAIN_BRANCH).length ?? 0)
 const linesBusy = computed(() => {
@@ -111,7 +112,7 @@ function branch(text: string, cut: number): void {
       @quote="composer?.quote($event)"
     />
     <div v-if="approval" class="composer-panel">
-      <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" />
+      <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
     </div>
     <ComposerPanel
       v-else

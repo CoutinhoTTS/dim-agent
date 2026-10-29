@@ -20,7 +20,7 @@ const view = computed(() => chat.views[props.sessionId])
 const branch = computed(() => view.value?.branches[props.branchId])
 const line = computed(() => view.value?.lines.find((candidate) => candidate.id === props.branchId))
 const approval = computed(() => view.value?.approvals.find((request) => request.branchId === props.branchId))
-const mainApproval = computed(() => view.value?.approvals.some((request) => request.branchId === MAIN_BRANCH) === true)
+const approvalKeyboard = computed(() => ui.approvalKeyboard(props.sessionId, props.branchId, view.value?.approvals ?? []))
 const open = computed(() => line.value === undefined
   ? branch.value?.status !== "failed"
   : line.value.state.kind === "working" || line.value.state.kind === "waiting")
@@ -121,7 +121,7 @@ function noModel(): void {
         @quote="quote"
       />
       <div v-if="approval" class="line-approval">
-        <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" :keyboard="!mainApproval" />
+        <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
       </div>
       <ComposerPanel
         v-else-if="open"

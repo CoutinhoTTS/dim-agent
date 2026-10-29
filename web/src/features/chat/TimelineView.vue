@@ -122,11 +122,19 @@ onMounted(() => void toEnd())
               <strong class="sr-only">{{ t("chat.assistant") }}</strong>
               <ChatMarkdown :content="entry.row.text" :final="!entry.row.streaming" :message-id="entry.row.key" />
             </article>
-            <button v-else-if="entry.row.kind === 'line'" type="button" class="timeline-line-marker" :aria-label="t('lines.openLine', { name: entry.row.purpose || shortId(entry.row.branchId) })" @click="emit('openLine', entry.row.branchId)">
+            <button
+              v-else-if="entry.row.kind === 'line'"
+              type="button"
+              class="timeline-line-marker"
+              :disabled="entry.row.failed === true"
+              :aria-label="t('lines.openLine', { name: entry.row.purpose || shortId(entry.row.branchId) })"
+              @click="entry.row.failed !== true && emit('openLine', entry.row.branchId)"
+            >
               <GitBranch :size="14" aria-hidden="true" />
               <span class="timeline-line-name">{{ entry.row.purpose || shortId(entry.row.branchId) }}</span>
               <code>{{ shortId(entry.row.branchId) }}</code>
-              <span v-if="entry.row.before" class="timeline-line-cut">{{ t("timeline.beforeMessage", { message: entry.row.before }) }}</span>
+              <span v-if="entry.row.failed" class="timeline-line-failed">{{ t("lines.state.creationFailed") }}</span>
+              <span v-else-if="entry.row.before" class="timeline-line-cut">{{ t("timeline.beforeMessage", { message: entry.row.before }) }}</span>
             </button>
             <p v-else-if="entry.row.kind === 'line-ended'" class="timeline-notice">
               {{ entry.row.issuer === "itself" ? t("timeline.lineEndedItself") : entry.row.issuer === "operation" ? t("timeline.lineEndedByOperation") : t("timeline.lineEndedWith", { id: entry.row.ancestor ?? "" }) }}

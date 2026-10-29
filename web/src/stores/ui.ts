@@ -1,5 +1,6 @@
 import { computed, ref, watch } from "vue"
 import { defineStore } from "pinia"
+import { approvalKeyboardBranch } from "../features/lines/line-state"
 
 export type ShellMode = "compact" | "regular" | "wide"
 
@@ -59,11 +60,12 @@ export const useUiStore = defineStore("ui", () => {
   const collapsedWorkspaces = ref(persisted.collapsedWorkspaces)
   const lastSessionId = ref(persisted.lastSessionId)
   const drawerOpen = ref(false)
-  const shellWidth = ref(960)
+  const shellWidth = ref(typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth : 1200)
   const shellMode = computed<ShellMode>(() => shellWidth.value < 720 ? "compact" : shellWidth.value < 960 ? "regular" : "wide")
   const detailOpen = ref(persisted.detailOpen)
   const detailWidth = ref(persisted.detailWidth)
   const detailExpanded = ref(false)
+  const detailFocused = ref(false)
   const lineTabs = ref<Record<string, string[]>>({})
   const activeLineTab = ref<Record<string, string | undefined>>({})
   const newLine = ref<NewLineRequest | undefined>()
@@ -108,12 +110,15 @@ export const useUiStore = defineStore("ui", () => {
 
   function openLines(sessionId: string): void {
     detailOpen.value = true
+    detailFocused.value = true
     activeLineTab.value = { ...activeLineTab.value, [sessionId]: undefined }
   }
 
   function toggleLines(sessionId: string): void {
-    if (detailOpen.value && activeLineTab.value[sessionId] === undefined) detailOpen.value = false
-    else openLines(sessionId)
+    if (detailOpen.value && activeLineTab.value[sessionId] === undefined) {
+      detailOpen.value = false
+      detailFocused.value = false
+    } else openLines(sessionId)
   }
 
   function openLine(sessionId: string, branchId: string): void {
@@ -121,6 +126,7 @@ export const useUiStore = defineStore("ui", () => {
     if (!tabs.includes(branchId)) lineTabs.value = { ...lineTabs.value, [sessionId]: [...tabs, branchId] }
     activeLineTab.value = { ...activeLineTab.value, [sessionId]: branchId }
     detailOpen.value = true
+    detailFocused.value = true
   }
 
   function activateLine(sessionId: string, branchId: string): void {
@@ -130,6 +136,7 @@ export const useUiStore = defineStore("ui", () => {
     }
     activeLineTab.value = { ...activeLineTab.value, [sessionId]: branchId }
     detailOpen.value = true
+    detailFocused.value = true
   }
 
   function closeLineTab(sessionId: string, branchId: string): void {
@@ -143,6 +150,17 @@ export const useUiStore = defineStore("ui", () => {
   function closeDetail(): void {
     detailOpen.value = false
     detailExpanded.value = false
+    detailFocused.value = false
+  }
+
+  function approvalKeyboard(sessionId: string, branchId: string, approvals: readonly { branchId: string }[]): boolean {
+    return approvalKeyboardBranch(approvals, {
+      detailOpen: detailOpen.value,
+      detailExpanded: detailExpanded.value,
+      shellWidth: shellWidth.value,
+      activeLine: activeLineTab.value[sessionId],
+      detailFocused: detailFocused.value,
+    }) === branchId
   }
 
   function requestNewLine(request: NewLineRequest): void {
@@ -167,13 +185,15 @@ export const useUiStore = defineStore("ui", () => {
     if (newLine.value?.sessionId === sessionId) newLine.value = undefined
     if (endingLine.value?.sessionId === sessionId) endingLine.value = undefined
     if (detailOpen.value) detailOpen.value = false
+    detailFocused.value = false
   }
 
   return {
     sidebarCollapsed, lastSessionId, drawerOpen, shellWidth, shellMode, setShellWidth,
     isWorkspaceExpanded, toggleWorkspace,
-    detailOpen, detailWidth, detailExpanded, lineTabs, activeLineTab, newLine, endingLine,
+    detailOpen, detailWidth, detailExpanded, detailFocused, lineTabs, activeLineTab, newLine, endingLine,
     setDetailWidth, openLines, toggleLines, openLine, activateLine, closeLineTab, closeDetail,
+    approvalKeyboard,
     requestNewLine, closeNewLine, requestEndLine, closeEndLine, resetSessionTabs,
   }
 })

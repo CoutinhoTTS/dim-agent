@@ -2890,6 +2890,16 @@
       ]
     },
     {
+      "id": "dim_cli::ui::approvals_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::approvals_panel",
+      "file": "crates/dim-cli/src/ui/approvals_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::ui::commands",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -3464,6 +3474,17 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::models_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::models_panel",
+      "file": "crates/dim-cli/src/ui/models_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "vec"
       ]
     },
@@ -22149,6 +22170,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path dim_agent_types::ModelCapabilities",
+        "path dim_agent_types::ModelReasoning",
         "path dim_agent_types::ModelServiceTier"
       ]
     },
@@ -22980,6 +23002,13 @@
     },
     {
       "from": "dim_cli::ui::approvals_panel",
+      "to": "dim_cli::ui::approvals_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
@@ -23070,6 +23099,47 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel::tests",
+      "to": "dim_cli::ui::approvals_panel",
+      "references": [
+        "path ApprovalsPanel",
+        "path ApprovalsPanel::choice",
+        "path ApprovalsPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::En",
+        "path crate::ui::i18n::set"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path crate::ui::theme::palette::terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode"
       ]
     },
     {
@@ -24515,6 +24585,13 @@
     },
     {
       "from": "dim_cli::ui::models_panel",
+      "to": "dim_cli::ui::models_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::ui::prompts",
       "references": [
         "path Effect",
@@ -24533,6 +24610,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Char",
+        "path KeyCode::Right",
         "path KeyEvent",
         "path Modifiers::CTRL",
         "use crate::ui::terminal::KeyCode",
@@ -24546,6 +24624,47 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ModelItem",
+        "path ModelList"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel::tests",
+      "to": "dim_cli::ui::models_panel",
+      "references": [
+        "path ModelsPanel",
+        "path ModelsPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyCode::Char",
+        "path KeyCode::Esc",
+        "path KeyCode::Right",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path crate::ui::theme::palette::terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode"
       ]
     },
     {
@@ -27730,8 +27849,9 @@
       "to": "dim_cli::ui::approvals_panel",
       "references": [
         "path ApprovalsPanel",
+        "path ApprovalsPanel::choice",
         "path ApprovalsPanel::new",
-        "path crate::ui::approvals_panel::MODES",
+        "path crate::ui::approvals_panel::announced_title",
         "path status_label",
         "use crate::ui::approvals_panel::ApprovalsPanel",
         "use crate::ui::approvals_panel::status_label"

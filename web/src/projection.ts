@@ -18,7 +18,7 @@ export type TimelineRow =
   | { kind: "assistant"; key: string; text: string; streaming: boolean }
   | { kind: "thinking"; key: string; text: string; streaming: boolean; elapsedMs?: number }
   | { kind: "tool"; key: string; callId: string; name: string; input: Record<string, unknown>; pending: boolean; result?: ToolResult }
-  | { kind: "line"; key: string; branchId: string; purpose: string; before?: string }
+  | { kind: "line"; key: string; branchId: string; purpose: string; before?: string; failed?: boolean }
   | { kind: "line-ended"; key: string; issuer: "itself" | "operation" | "ancestor"; ancestor?: string }
   | { kind: "source-message"; key: string; from: string; steer: boolean; final: boolean; body: string }
   | { kind: "source-idle"; key: string; branch: string; status: string }
@@ -49,6 +49,7 @@ export class Projection {
   private thoughts = new Map<string, Stream>()
   private requestStarts = new Map<string, number>()
   private tools = new Map<string, number>()
+  private lines = new Map<string, number>()
 
   /** Applies one event; false when it was already applied. */
   apply(event: SessionEvent): boolean {
@@ -77,13 +78,18 @@ export class Projection {
         const at = content.at ?? event.sequence
         const message = this.rows.find((row) => row.kind === "user" && row.cut === at)
         const before = message?.kind === "user" ? clipFirstLine(message.text) : undefined
-        this.push({
+        this.lines.set(content.branchId, this.push({
           kind: "line",
           key: `line-${event.sequence}`,
           branchId: content.branchId,
           purpose: firstLine(content.prompt),
           ...(before === undefined ? {} : { before }),
-        })
+        }))
+        break
+      }
+      case "branch-create-failed": {
+        const index = this.lines.get(content.branchId)
+        if (index !== undefined) this.update(index, { failed: true })
         break
       }
       case "branch-end": {
