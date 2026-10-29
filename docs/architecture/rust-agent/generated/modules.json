@@ -18584,7 +18584,8 @@
       "references": [
         "mod view",
         "use view::ManagementProvider",
-        "use view::ManagementView"
+        "use view::ManagementView",
+        "use view::ModelsListed"
       ]
     },
     {
@@ -18713,6 +18714,13 @@
     },
     {
       "from": "dim_app_server::provider::editing",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path FieldUpdate",
@@ -18739,11 +18747,13 @@
         "path ProviderError::InvalidConfig",
         "path ProviderError::NotFound",
         "path ProviderError::Unsupported",
+        "path ProviderError::from",
         "path ProviderService",
         "path StaticAuth",
         "path StaticAuth::Anonymous",
         "path StaticProviderRecord",
         "path StaticRecordKind::Custom",
+        "path failure",
         "path read_static",
         "path validate_static_record"
       ]
@@ -18777,7 +18787,12 @@
       "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::provider::view",
       "references": [
-        "path ManagementProvider"
+        "path ManagementProvider",
+        "path ModelsListed",
+        "path ModelsListed::Bundled",
+        "path ModelsListed::Disabled",
+        "path ModelsListed::Listed",
+        "path ModelsListed::Unsupported"
       ]
     },
     {
@@ -23219,8 +23234,10 @@
         "path DraftPart::Text",
         "path EmptyProvider",
         "path EmptyReason::Disabled",
+        "path EmptyReason::Mixed",
         "path EmptyReason::NoModels",
         "path EmptyReason::Unavailable",
+        "path EmptyReason::Unreadable",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate::Conflict",
@@ -25566,8 +25583,10 @@
       "references": [
         "path EmptyProvider",
         "path EmptyReason::Disabled",
+        "path EmptyReason::Mixed",
         "path EmptyReason::NoModels",
         "path EmptyReason::Unavailable",
+        "path EmptyReason::Unreadable",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate",
