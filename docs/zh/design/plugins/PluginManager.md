@@ -139,7 +139,6 @@ flowchart LR
 {
   "plugins": {
     "goal": "plugins/goal",
-    "web": "plugins/web",
     "session-title": "plugins/session-title",
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler",

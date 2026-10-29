@@ -114,7 +114,6 @@ async fn run_tui_with_connection(
         fullscreen: options
             .fullscreen
             .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
-        isolation: client::isolation_policy_file(options),
     };
     let (leave, left) = tokio::sync::oneshot::channel();
     let tui = root.plugin(plugins::Tui {

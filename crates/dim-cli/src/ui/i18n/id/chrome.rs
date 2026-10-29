@@ -351,8 +351,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permissions" => "Izin",
         "Tool approvals" => "Persetujuan tool",
         "Command isolation" => "Isolasi perintah",
-        "Command isolation not saved: {error}" => "Isolasi perintah tidak tersimpan: {error}",
-        "Command isolation not read: {error}" => "Isolasi perintah tidak terbaca: {error}",
         "Models" => "Model",
         "Model" => "Model",
         "not set" => "belum diatur",

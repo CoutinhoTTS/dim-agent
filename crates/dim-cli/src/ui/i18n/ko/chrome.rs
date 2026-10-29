@@ -325,8 +325,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permissions" => "권한",
         "Tool approvals" => "도구 승인",
         "Command isolation" => "명령 격리",
-        "Command isolation not saved: {error}" => "명령 격리를 저장하지 못했습니다: {error}",
-        "Command isolation not read: {error}" => "명령 격리를 읽지 못했습니다: {error}",
         "Models" => "모델",
         "Model" => "모델",
         "not set" => "미설정",

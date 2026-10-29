@@ -134,13 +134,13 @@ Prompt 自己的两个调用点留在原处：ContextPreparation 放置它发布
 
 ### 6.1 插件桥接
 
-经插件桥接贡献的插件，与 Rust 部件用同样的方式登记条目：在自己的 `apply` 里，在它那一行装载期间，通过参数与应答都是 serde 数据的调用。桥接需要、但目前还没有的：
+经插件桥接贡献的插件，与 Rust 部件用同样的方式登记条目：在自己的 `apply` 里，在它那一行装载期间，通过参数与应答都是 serde 数据的调用。这条路由以三部分到达其他语言：
 
-1. **名字，在 Session 组里共享。** 这种形状的 Rust 登记表只有在提供的实例里共享名字，才能到达其他语言；运行外部部件的宿主列出这些名字（App Server 的 `share_names`），新名字加入其中。
+1. **名字，在 Session 组里共享。** 这种形状的 Rust 登记表只有在提供的实例里共享名字，才能到达其他语言；运行外部部件的宿主列出这些名字（App Server 的 `share_names`），`guideEntries` 与 `toolRegistry` 并列共享在那里。
 2. **把登记绑定到调用方的派发。** Rust 的 `register` 从调用方取 `ctx`；别的语言的调用方没有 `ctx`，所以这个名字经一个 `rutis_bridge` 的 `HostDispatch` 提供，它读 `rutis_bridge::session::caller_row()` 并以那一行登记——正是 `toolRegistry` 已经在用的形式。没有调用行时，调用以 `no_caller_row` 失败，而不是登记在谁的名下。
-3. **TypeScript 声明。** 接口与 `ToolRegistry` 的并列加入 `npm/plugin.d.ts`，写明上面的请求、应答与错误码。
+3. **TypeScript 声明。** 接口与 `ToolRegistry` 的并列加入 `npm/plugin.d.ts`，写明上面的请求、应答与错误码：`register(scope, entry)`，`scope` 为 `"session"` 或 `{"branch": "<分支 id>"}`，`entry` 为 `{markers, order, text}`；调用不带返回值；被拒时抛出 `GuideEntryError`，其 `code` 取 §2 的码之一（包括 `closed`），在调用行之外调用时为 `no_caller_row`。
 
-这三项由它们的所有者改自己的文件；本文提出需求，不在这里实现。能力本身——表、组合与两处放置——不依赖这三项就能在 Rust 里工作，所以这个改动里每个内建写入者的条目路由都是完整的。
+能力本身——表、组合与两处放置——只靠 Rust 就能工作，所以不接桥接时每个内建写入者的条目路由已经完整，桥接让它对生活在另一种语言里的写入者也完整。
 
 ### 6.2 写入者
 

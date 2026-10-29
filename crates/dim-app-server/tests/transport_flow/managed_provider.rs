@@ -15,6 +15,7 @@ use dim_app_server::{
     managed_provider::{
         AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
         ManagedFuture, ManagedModel, ManagedProvider, ManagedProviderRow, ProviderDescriptor,
+        WebSearchRequest, WebSearchResponse,
         management::{
             BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
             ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
@@ -102,6 +103,13 @@ impl ManagedProvider for Provider {
             .unwrap()),
             _ => Err(ManagedError::TokenMissing),
         })
+    }
+    fn web_search(
+        &self,
+        _: WebSearchRequest,
+        _: CancellationToken,
+    ) -> ManagedFuture<WebSearchResponse> {
+        ready(Err(ManagedError::TokenMissing))
     }
     fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",

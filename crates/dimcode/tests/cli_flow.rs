@@ -3,6 +3,9 @@
 #[path = "cli_flow/acp.rs"]
 mod acp;
 
+#[path = "cli_flow/context.rs"]
+mod context;
+
 #[path = "cli_flow/migration.rs"]
 mod migration;
 #[path = "cli_flow/permission.rs"]
@@ -132,6 +135,15 @@ impl Wire {
         );
         let idle = self.read("session.idle");
         self.reply(&idle, json!({"sequence":8}));
+    }
+    /// Answers the context reading the interface asks for when it enters a
+    /// Session: this fixture reports the method as unknown, as a Session
+    /// that does not contribute it would.
+    fn no_context(&mut self) {
+        let request = self.read("session.context.usage");
+        self.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32601,"message":"Unknown method: session.context.usage",
+            "data":{"appError":"unknown_method"}}}));
     }
     fn event(&mut self, sequence: u64, name: &str, data: Value) {
         self.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":format!("event-{sequence}"),"sequence":sequence,"create_at":1,"type":"step","name":name,"data":data}}));
@@ -2751,6 +2763,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let run = wire.read("shell.run");
@@ -2822,6 +2835,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wire.notice("session.mcp.state", json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
@@ -2994,6 +3008,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let put = wire.read("attachment.put");
@@ -3048,6 +3063,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
@@ -3103,6 +3119,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         assert_eq!(catalog["params"], json!({"providerId":"test"}));
         let capabilities = json!({"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384});
         wire.reply(&catalog, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities}]}}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
@@ -3313,6 +3330,72 @@ impl Drop for OwnedDaemon {
             }
         }
     }
+}
+
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn fresh_native_startup_uses_workspace_and_ask_without_policy_file() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let output = home
+        .command()
+        .arg("--server")
+        .arg(&binary)
+        .arg("--model-config")
+        .arg(&config)
+        .args(["mcp", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut wire = Wire(BufReader::new(stream));
+    wire.send(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":3,"clientKind":"cli"}}));
+    let mut line = String::new();
+    wire.0.read_line(&mut line).unwrap();
+    let hello: Value = serde_json::from_str(&line).unwrap();
+    assert!(hello.get("result").is_some(), "{hello}");
+    wire.send(json!({"jsonrpc":"2.0","id":2,"method":"host.isolation.get","params":{}}));
+    line.clear();
+    wire.0.read_line(&mut line).unwrap();
+    let snapshot: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(snapshot["result"]["source"], "defaults", "{snapshot}");
+    assert_eq!(
+        snapshot["result"]["effective"],
+        json!({"sandbox":"workspace","escalation":"ask"})
+    );
+    assert_eq!(
+        snapshot["result"]["path"],
+        home.0
+            .canonicalize()
+            .unwrap()
+            .join("rust/host-isolation.json")
+            .to_str()
+            .unwrap()
+    );
+    assert!(!home.0.join("rust/host-isolation.json").exists());
+    assert!(!home.0.join("host-isolation.json").exists());
+    assert!(
+        home.command()
+            .arg("--server")
+            .arg(&binary)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -4054,6 +4137,7 @@ fn tui_mcp_says_when_no_server_is_configured() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let catalog = wire.read("mcp.catalog");
@@ -4094,6 +4178,7 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let catalog = wire.read("mcp.catalog");
@@ -4155,6 +4240,7 @@ fn tui_mcp_enables_and_disables_a_project_server() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let catalog = |enabled: bool| {
@@ -5027,6 +5113,7 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let toggle = wire.read("web.toggle");
@@ -5076,6 +5163,7 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wait_release.recv_timeout(PATIENCE).unwrap();
@@ -5588,6 +5676,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let create = wire.read("session.create");
@@ -5609,6 +5698,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["sessionId"], "next");
         wire.reply(&submit, json!({"event":{}}));
+        wire.no_context();
         wire.notice("ui.shutdown", json!({"uiId":"ui-1","reason":"not you"}));
         wire.notice(
             "ui.shutdown",
@@ -5649,6 +5739,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let first = wire.read("session.submit");
@@ -5775,6 +5866,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
@@ -5894,6 +5986,7 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
             let submit = wire.read("session.submit");
@@ -5942,6 +6035,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
@@ -6031,6 +6125,7 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         let read = wire.read("session.permission.get");
         assert_eq!(read["params"], json!({"sessionId":"session","branchId":"main"}));
         wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let read = wire.read("session.permission.get");
@@ -6103,6 +6198,7 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let mut line = String::new();
@@ -6141,6 +6237,7 @@ fn tui_approval_menu_sets_ask_or_full_access_and_remembers_it() {
             &read,
             json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}),
         );
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let read = wire.read("session.permission.get");
@@ -6212,6 +6309,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
             let submit = wire.read("session.submit");
@@ -6232,6 +6330,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
             wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
             wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            wire.no_context();
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 line.clear();
@@ -6320,6 +6419,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let mut line = String::new();
@@ -6352,6 +6452,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -6458,6 +6559,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         // The composer's first frame is out before the row is sent: `until`
@@ -6476,6 +6578,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
                      "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
                      "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        wire.no_context();
         wait_more.recv().unwrap();
         // A record that locates its parts: the summary is the strategy's
         // message, and the pinned input follows it, shown apart.
@@ -6490,6 +6593,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
                      "replacement_parts":{"strategy":1,"digest":0},
                      "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        wire.no_context();
         // A record whose parts cannot meet its bound: the header names them.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-start-3","sequence":16,"create_at":1,"type":"context","name":"compaction-start",
@@ -6504,6 +6608,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
                                     "insufficientSpace":{"parts":[
                                         {"part":"summary","tokens":3200.0},
                                         {"part":"pinnedInputs","tokens":1100.0}]}}}}}));
+        wire.no_context();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -6559,6 +6664,7 @@ fn tui_compact_calls_the_context_method_and_reports_its_reply() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         for attempt in 0..3 {
@@ -6579,6 +6685,8 @@ fn tui_compact_calls_the_context_method_and_reports_its_reply() {
                                  "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":120.0,
                                                 "entriesReplaced":0,"modelCallCount":0,"durationMs":1,"strategy":{"kind":"summary"}}}}}));
                     wire.reply(&compact, json!({"status":"skipped","reason":"nothing to cut"}));
+                    // The compaction result marks the reading stale.
+                    wire.no_context();
                 }
                 _ => wire.send(json!({"jsonrpc":"2.0","id":compact["id"],"error":
                     {"code":-32601,"message":"Unknown method: session.context.compact","data":{"appError":"unknown_method"}}})),
@@ -6804,6 +6912,9 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
                                         "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}],
                 "through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_context();
+        // Replaying the restored compaction marks the reading stale again.
+        wire.no_context();
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -6928,6 +7039,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+        wire.no_context();
         let accounts = wire.read("account.providers");
         wire.reply(&accounts, json!([]));
         for _ in 0..2 {
