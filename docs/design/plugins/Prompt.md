@@ -135,13 +135,13 @@ The state and rules a branch adopted are not facts about the guide: they are pro
 
 ### 6.1 The plugin bridge
 
-A plugin contributed through the plugin bridge registers an entry the same way a Rust part does: from its `apply`, for as long as its row is loaded, through a call whose arguments and reply are serde data. What the bridge needs, and does not have yet:
+A plugin contributed through the plugin bridge registers an entry the same way a Rust part does: from its `apply`, for as long as its row is loaded, through a call whose arguments and reply are serde data. The route reaches other languages in three parts:
 
-1. **The name, shared in the Session group.** A Rust registry of this shape reaches other languages only when its name is shared where it is provided; the host that runs foreign parts lists those names (`share_names` in the App Server), and the new one joins them.
-2. **A dispatch that ties the registration to the caller.** The Rust `register` takes its `ctx` from the caller; a foreign caller has no `ctx`, so the name is served through a `rutis_bridge` `HostDispatch` that reads `rutis_bridge::session::caller_row()` and registers under that row — the form `toolRegistry` already uses. Without a caller row the call fails with `no_caller_row` rather than registering in no one's name.
-3. **The TypeScript declaration.** The interface joins `npm/plugin.d.ts` beside `ToolRegistry`'s, naming the request, the reply and the error codes above.
+1. **The name, shared in the Session group.** A Rust registry of this shape reaches other languages only when its name is shared where it is provided; the host that runs foreign parts lists those names (`share_names` in the App Server), and `guideEntries` is shared there beside `toolRegistry`.
+2. **A dispatch that ties the registration to the caller.** The Rust `register` takes its `ctx` from the caller; a foreign caller has no `ctx`, so the name is served through a `rutis_bridge` `HostDispatch` that reads `rutis_bridge::session::caller_row()` and registers under that row — the form `toolRegistry` uses. Without a caller row the call fails with `no_caller_row` rather than registering in no one's name.
+3. **The TypeScript declaration.** The interface joins `npm/plugin.d.ts` beside `ToolRegistry`'s, naming the request, the reply and the error codes above: `register(scope, entry)` where `scope` is `"session"` or `{"branch": "<branch id>"}` and `entry` is `{markers, order, text}`; the call resolves with no value; a refusal throws a `GuideEntryError` whose `code` is one of §2's codes, `closed` included, and `no_caller_row` for a call made outside a row.
 
-The owner of these three changes its own files; this design raises them and does not build them. The capability itself — the table, the composition and the two placements — needs none of the three to work in Rust, so the entries' route is complete for every built-in writer in this change.
+The capability itself — the table, the composition and the two placements — works in Rust alone, so the entries' route is complete for every built-in writer without the bridge, and the bridge makes it complete for the writers that live in another language.
 
 ### 6.2 The writers
 

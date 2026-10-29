@@ -1961,6 +1961,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#guideEntries@session",
+        "provider": 27,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessionConfig@session",
         "provider": 21,
         "generation": 1,
