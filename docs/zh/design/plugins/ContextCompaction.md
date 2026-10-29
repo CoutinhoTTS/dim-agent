@@ -852,7 +852,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 **候选分组 (a)。** 候选提示是产品摘要策略的工厂配置：`ProductSummaryStrategyConfig` 增加一个可选成员保存系统提示（§13.5），设置时策略用它代替 `SYSTEM`。产品配置不设置它。目标句（§13.3）追加到当前使用的提示末尾；分块、折叠、截断处理、推理映射和请求预算都不变，所以两个分组运行的都是已发布的代码，只有提示不同。
 
-报告按下面的表格展示每个分组，然后输出一行结论：`candidate passes; median T: current 1850, candidate 1600`，或同样格式的 `candidate fails`，判定按 §6 对 `current` 的规则：`F ≥ F_current − δ`、`X ≥ X_current − δ`、`V ≤ V_current`，`δ = 0.05`，失败数（`failed`；`skipped` 单独计数）不多于 `current` 的。没有对应类别探针的比率不参与该规则。两个分组各自的 `T` 中位数写在结论旁边，使长度始终可见（§6：每个分数旁都报告长度）。
+报告按下面的表格展示每个分组，然后输出一行结论：`candidate passes; median T: current 1850, candidate 1600`，或同样格式的 `candidate fails` 及未通过的规则。结论就是[面向模型的提示词 §8.1](../model-prompts.md#81-规则)的规则用于本运行器的指标；候选文本自身的 token 成本——提示的，以及给出目标句时它的——写在分数旁边。没有对应类别探针的比率不参与。`skipped` 单独计数，两个分组各自的 `T` 中位数写在结论旁边，使长度始终可见（§6：每个分数旁都报告长度）。
 
 **用例。** `xtask/summary-eval/cases/` 中的 JSON 文件，每段历史一个：
 

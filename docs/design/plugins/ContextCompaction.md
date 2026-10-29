@@ -1628,12 +1628,12 @@ folding, cut-off handling, reasoning mapping and the request budget are unchange
 run the shipped code and only the prompt differs.
 
 The report shows each arm as the table below does, then one verdict line: `candidate passes;
-median T: current 1850, candidate 1600`, or `candidate fails` in the same shape, by the §6 rule
-against `current`: `F ≥ F_current − δ`, `X ≥ X_current − δ`, `V ≤ V_current`, with `δ = 0.05`,
-and failures no more than `current`'s (the `failed` count; `skipped` stays a separate count). A
-rate with no probe of its kind among the cases is left out of the rule. Both arms' median `T`
-stand beside the verdict, so the length is visible (§6: the length is reported beside every
-score).
+median T: current 1850, candidate 1600`, or `candidate fails` with the rules that failed, in the
+same shape. The verdict is [model-facing prompts §8.1](../model-prompts.md#81-the-rule)'s rule
+applied to this runner's metrics; the candidate texts' own token cost — the prompt's, and the
+length sentence's when one is given — stands beside the scores. A rate with no probe of its kind
+among the cases is left out. `skipped` stays a separate count, and both arms' median `T` stand
+beside the verdict, so the length is visible (§6: the length is reported beside every score).
 
 **Cases.** JSON files in `xtask/summary-eval/cases/`, one per history:
 

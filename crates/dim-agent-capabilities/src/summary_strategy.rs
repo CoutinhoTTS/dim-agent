@@ -93,6 +93,10 @@ impl LengthSentence {
     fn render(&self, target: f64) -> String {
         self.0.replace("{target}", &format!("{target:.0}"))
     }
+    /// The template as the configuration states it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Refuses a [`LengthSentence`] without exactly one `{target}` placeholder.

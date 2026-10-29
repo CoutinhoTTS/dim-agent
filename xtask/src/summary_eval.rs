@@ -4,6 +4,7 @@
 //! against an isolated product home whose providers are configured, and the
 //! output goes outside the repository.
 use crate::app_server;
+use crate::scenario_eval::text_tokens;
 use dim_agent_capabilities::{
     context_block,
     context_model::ProductContextModel,
@@ -150,13 +151,26 @@ pub async fn run() -> Result<()> {
         .iter()
         .map(|(arm, metrics)| metrics.row(arm))
         .collect();
+    let scored: Vec<(String, String)> = prepared
+        .iter()
+        .flat_map(|case| {
+            case.probes
+                .iter()
+                .map(|probe| (case.id.clone(), probe.id.clone()))
+        })
+        .collect();
     let verdict = match results.as_slice() {
         [(_, current), (_, candidate)] if options.candidate.is_some() => {
-            Some(verdict(current, candidate))
+            Some(verdict(current, candidate, &scored))
         }
         _ => None,
     };
     let mut report = table(&rows);
+    report.push_str(&candidate_cost_line(
+        &options.model,
+        options.candidate.as_deref(),
+        options.candidate_length.as_ref(),
+    ));
     report.push_str(&judge_line(
         &options.judge,
         &judge_configuration,
@@ -1343,6 +1357,10 @@ struct Metrics {
     /// Judged probes the judge did not answer, for the operator to correct
     /// by hand (ContextCompaction §13.4).
     unjudged: usize,
+    /// The `(case, probe)` pairs the judge answered at least once
+    /// (model-prompts §8.1): the judged floor asks every scored probe for
+    /// one in each arm.
+    judged: BTreeSet<(String, String)>,
     cut_offs: u64,
     failed: usize,
     skipped: usize,
@@ -1389,6 +1407,8 @@ impl Metrics {
             let present = verdict == Some("present");
             if verdict == Some("unparsed") {
                 self.unjudged += 1;
+            } else {
+                self.judged.insert((case.id.clone(), probe.id.clone()));
             }
             match probe.kind {
                 ProbeKind::Exact => {
@@ -1485,25 +1505,74 @@ fn recall(counts: (usize, usize)) -> Option<f64> {
     (counts.1 > 0).then(|| counts.0 as f64 / counts.1 as f64)
 }
 
-/// The §6 verdict of the candidate arm against the current one
-/// (ContextCompaction §13.4): `δ = 0.05`, a rate with no probe of its kind is
-/// left out, and the failures are the `failed` runs.
-fn verdict(current: &Metrics, candidate: &Metrics) -> String {
+/// The model-prompts §8.1 rule of the candidate arm against the current one
+/// (ContextCompaction §13.4): each rate at least `current − δ` with
+/// `δ = 0.05`, violations, failed runs and unjudged runs no higher, and every
+/// scored probe judged at least once in each arm. A rate with no probe of its
+/// kind among the cases is left out. There is no absolute pass line.
+struct Rule {
+    passes: bool,
+    failures: Vec<String>,
+}
+fn rule(current: &Metrics, candidate: &Metrics, scored: &[(String, String)]) -> Rule {
     const DELTA: f64 = 0.05;
-    let rate = |current: (usize, usize), candidate: (usize, usize)| match (
-        recall(current),
-        recall(candidate),
-    ) {
-        (Some(current), Some(candidate)) => candidate >= current - DELTA,
-        _ => true,
+    let mut failures = Vec::new();
+    let mut rate = |name: &str, current: (usize, usize), candidate: (usize, usize)| {
+        let (Some(current), Some(candidate)) = (recall(current), recall(candidate)) else {
+            return;
+        };
+        if candidate < current - DELTA {
+            failures.push(format!(
+                "{name} falls from {current:.3} to {candidate:.3} (δ = {DELTA:.2})"
+            ));
+        }
     };
-    let passes = rate(current.facts, candidate.facts)
-        && rate(current.exact, candidate.exact)
-        && candidate.violations <= current.violations
-        && candidate.failed <= current.failed;
+    rate("fact recall", current.facts, candidate.facts);
+    rate("exact recall", current.exact, candidate.exact);
+    if candidate.violations > current.violations {
+        failures.push(format!(
+            "violations rise from {} to {}",
+            current.violations, candidate.violations
+        ));
+    }
+    if candidate.failed > current.failed {
+        failures.push(format!(
+            "failed runs rise from {} to {}",
+            current.failed, candidate.failed
+        ));
+    }
+    if candidate.unjudged > current.unjudged {
+        failures.push(format!(
+            "unjudged runs rise from {} to {}",
+            current.unjudged, candidate.unjudged
+        ));
+    }
+    for (case, probe) in scored {
+        for (arm, metrics) in [("current", current), ("candidate", candidate)] {
+            if !metrics.judged.contains(&(case.clone(), probe.clone())) {
+                failures.push(format!("{case}/{probe} has no judged run in the {arm} arm"));
+            }
+        }
+    }
+    Rule {
+        passes: failures.is_empty(),
+        failures,
+    }
+}
+
+/// The verdict line: whether the candidate passes, the rules that failed
+/// when it does not, and both arms' median `T` beside them, so the length is
+/// visible (ContextCompaction §13.4).
+fn verdict(current: &Metrics, candidate: &Metrics, scored: &[(String, String)]) -> String {
+    let rule = rule(current, candidate, scored);
+    let failures = if rule.failures.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", rule.failures.join("; "))
+    };
     format!(
-        "candidate {}; median T: current {}, candidate {}",
-        if passes { "passes" } else { "fails" },
+        "candidate {}{failures}; median T: current {}, candidate {}",
+        if rule.passes { "passes" } else { "fails" },
         median_tokens(current),
         median_tokens(candidate),
     )
@@ -1587,6 +1656,32 @@ fn judge_line(
         configuration.effort.as_deref().unwrap_or("none"),
         configuration.tier.as_deref().unwrap_or("none"),
     )
+}
+
+/// The candidate texts' own token cost beside the scores (model-prompts
+/// §8.1): the prompt, and the length sentence when one is given, counted
+/// with the product's counter on the request each text travels in. Empty
+/// without a candidate: the current arm runs the shipped texts.
+fn candidate_cost_line(
+    model: &ModelId,
+    prompt: Option<&str>,
+    length_sentence: Option<&LengthSentence>,
+) -> String {
+    let Some(prompt) = prompt else {
+        return String::new();
+    };
+    let mut line = format!(
+        "\ncandidate tokens: prompt {:.0}",
+        text_tokens(model, prompt)
+    );
+    if let Some(sentence) = length_sentence {
+        line += &format!(
+            ", length sentence {:.0}",
+            text_tokens(model, sentence.as_str())
+        );
+    }
+    line.push('\n');
+    line
 }
 
 /// `F` per 3b class: one row per `item` a `fact` probe names, one column per
@@ -1681,6 +1776,90 @@ mod tests {
             .err()
             .expect("an array of no verdict object");
         assert!(error.contains("unknown variant `maybe`"), "{error}");
+    }
+
+    /// An arm's metrics over one judged case, with the given unjudged count
+    /// and every other metric level.
+    fn metrics(judged: &[(&str, &str)], unjudged: usize) -> Metrics {
+        Metrics {
+            judged: judged
+                .iter()
+                .map(|(case, probe)| ((*case).to_owned(), (*probe).to_owned()))
+                .collect(),
+            unjudged,
+            ..Metrics::default()
+        }
+    }
+    fn scored_probes(probes: &[(&str, &str)]) -> Vec<(String, String)> {
+        probes
+            .iter()
+            .map(|(case, probe)| ((*case).to_owned(), (*probe).to_owned()))
+            .collect()
+    }
+
+    /// More unjudged probes than the current arm fails the verdict even when
+    /// every other metric is level (model-prompts §8.1).
+    #[test]
+    fn a_candidate_with_more_unjudged_runs_fails() {
+        let scored = scored_probes(&[("cjk", "constraint")]);
+        let current = metrics(&[("cjk", "constraint")], 0);
+        let candidate = metrics(&[("cjk", "constraint")], 1);
+        assert_eq!(
+            verdict(&current, &candidate, &scored),
+            "candidate fails: unjudged runs rise from 0 to 1; median T: current –, candidate –"
+        );
+        assert!(verdict(&current, &current, &scored).starts_with("candidate passes"));
+    }
+
+    /// A scored probe the judge never answered in one arm fails the verdict
+    /// (model-prompts §8.1): the rate it feeds would rest on no judgment
+    /// there.
+    #[test]
+    fn a_probe_with_no_judged_run_in_one_arm_fails() {
+        let both = [("cjk", "constraint"), ("code", "signature")];
+        let scored = scored_probes(&both);
+        let line = verdict(
+            &metrics(&both, 0),
+            &metrics(&[("cjk", "constraint")], 0),
+            &scored,
+        );
+        assert!(line.starts_with("candidate fails"), "{line}");
+        assert!(
+            line.contains("code/signature has no judged run in the candidate arm"),
+            "{line}"
+        );
+        let line = verdict(
+            &metrics(&[("code", "signature")], 0),
+            &metrics(&both, 0),
+            &scored,
+        );
+        assert!(
+            line.contains("cjk/constraint has no judged run in the current arm"),
+            "{line}"
+        );
+    }
+
+    /// The report states the candidate texts' own token cost beside the
+    /// scores, counted as the product counts the request each text travels in
+    /// (model-prompts §8.1): the prompt, and the length sentence too when one
+    /// is given.
+    #[test]
+    fn the_report_states_the_candidate_texts_token_cost() {
+        let model = ModelId {
+            provider_id: "provider".into(),
+            model_id: "model".into(),
+        };
+        let prompt = "You write summaries of coding sessions.";
+        let sentence = LengthSentence::new("Keep it to {target} tokens.").unwrap();
+        assert_eq!(
+            candidate_cost_line(&model, Some(prompt), Some(&sentence)),
+            "\ncandidate tokens: prompt 11, length sentence 8\n"
+        );
+        assert_eq!(
+            candidate_cost_line(&model, Some(prompt), None),
+            "\ncandidate tokens: prompt 11\n"
+        );
+        assert_eq!(candidate_cost_line(&model, None, None), "");
     }
 
     /// The conversation request carries the model's saved preferences, as the
