@@ -986,19 +986,23 @@ async fn web_fetch_times_out_when_the_response_never_finishes() {
         .count();
     let started = std::time::Instant::now();
     submit(&mut client, &id, "web_fetch", json!({"url": base})).await;
-    loop {
-        let count = session
-            .local("main", ..)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|event| matches!(event.kind, EventKind::ToolResult(_)))
-            .count();
-        if count > before {
-            break;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let count = session
+                .local("main", ..)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ToolResult(_)))
+                .count();
+            if count > before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    })
+    .await
+    .expect("web_fetch must settle within 120s when the response never finishes");
     assert!(
         started.elapsed() >= Duration::from_secs(25),
         "finished in {:?}, before the 30s whole-call deadline",

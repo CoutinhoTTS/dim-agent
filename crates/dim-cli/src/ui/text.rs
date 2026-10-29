@@ -33,21 +33,6 @@ pub const LOAD_MORE_MARK: &str = "\u{2191}";
 /// The mark in front of a branch line.
 pub const LINE_MARK: &str = "\u{2442}";
 
-/// Glyphs drawn in transcript gutter cells.
-pub const GUTTER_MARKS: &[&str] = &[
-    USER_MARK,
-    ASSISTANT_MARK,
-    THINKING_BAR,
-    ERROR_MARK,
-    STATUS_MARK,
-    SHELL_MARK,
-    RUNNING_MARK,
-    DONE_MARK,
-    FAILED_MARK,
-    LOAD_MORE_MARK,
-    LINE_MARK,
-];
-
 /// The gutter glyphs that count as chrome after a row's margin column. The
 /// others (`$`, `·`, `✓`, `✗`, `↑`, `⑂`) can start assistant prose, which has
 /// no gutter. Fullscreen copy retains these ambiguous marks on margin-prefixed

@@ -34,7 +34,7 @@ use crate::ui::render::Frame;
 use crate::ui::render::panel::{clip, escape_len, strip_escapes};
 use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
-use crate::ui::text::{GUTTER_MARKS, MARGIN_MARKS, display_width};
+use crate::ui::text::{MARGIN_MARKS, display_width};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
@@ -213,8 +213,7 @@ impl Selection {
 /// Columns of chrome before the copyable text of a plain row.
 ///
 /// Committed rows have one margin space. This fallback recognizes
-/// [`MARGIN_MARKS`] after it and [`GUTTER_MARKS`] at column 0 in unpadded rows.
-/// Ambiguous marks after the margin are kept, including shell/status chrome;
+/// [`MARGIN_MARKS`] after it. Ambiguous marks after the margin are kept, including shell/status chrome;
 /// content starting with a margin mark is stripped. Per-row chrome metadata
 /// is needed to distinguish those cases.
 fn text_inset(plain: &str) -> usize {
@@ -223,12 +222,6 @@ fn text_inset(plain: &str) -> usize {
     let Some(first) = glyphs.next() else {
         return 0;
     };
-    if display_width(first) != 1 {
-        return 0;
-    }
-    if GUTTER_MARKS.contains(&first) {
-        return display_width(first);
-    }
     if first != " " {
         return 0;
     }
@@ -1701,17 +1694,17 @@ mod tests {
     fn a_drag_selects_whole_graphemes_past_the_gutter_and_stays_until_the_next_press() {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
-        doc.say(&["◆\x1b[1mhello\x1b[0m world", "◆分析仓库 ok"]);
+        doc.say(&[" ◆\x1b[1mhello\x1b[0m world", " ◆分析仓库 ok"]);
         draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
         let before = emu.rows_text();
         let at = |kind, column, row| MouseEvent { kind, column, row };
         assert_eq!(
-            screen.mouse(at(MouseKind::Press, 7, 5), &doc),
+            screen.mouse(at(MouseKind::Press, 8, 5), &doc),
             MouseOutcome::Ignored
         );
         assert!(draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc).is_empty());
         assert_eq!(
-            screen.mouse(at(MouseKind::Drag, 2, 6), &doc),
+            screen.mouse(at(MouseKind::Drag, 3, 6), &doc),
             MouseOutcome::Redraw
         );
         let bytes = draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
@@ -1723,12 +1716,12 @@ mod tests {
         );
         assert!(bytes.contains("◆\x1b[0;7m分\x1b[0m析"), "{bytes:?}");
         assert_eq!(
-            screen.mouse(at(MouseKind::Release, 2, 6), &doc),
+            screen.mouse(at(MouseKind::Release, 3, 6), &doc),
             MouseOutcome::Copy("world\n分".to_owned())
         );
         assert!(screen.selecting());
         assert_eq!(
-            screen.mouse(at(MouseKind::Press, 3, 5), &doc),
+            screen.mouse(at(MouseKind::Press, 4, 5), &doc),
             MouseOutcome::Redraw
         );
         assert!(!screen.selecting());
@@ -1808,7 +1801,7 @@ mod tests {
     fn a_double_click_copies_the_word_and_a_triple_click_the_row() {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
-        doc.say(&["◆see foo-bar.rs now", "◆分析仓库, ok"]);
+        doc.say(&[" ◆see foo-bar.rs now", " ◆分析仓库, ok"]);
         draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
         let at = |kind, column, row| MouseEvent { kind, column, row };
         let mut click = |column, row| {
@@ -1816,19 +1809,19 @@ mod tests {
             screen.mouse(at(MouseKind::Release, column, row), &doc)
         };
         assert_eq!(
-            click(10, 5),
+            click(11, 5),
             MouseOutcome::Click {
                 block: Some(0),
                 row: 1
             }
         );
-        assert_eq!(click(10, 5), MouseOutcome::Copy("bar".to_owned()));
+        assert_eq!(click(11, 5), MouseOutcome::Copy("bar".to_owned()));
         assert_eq!(
-            click(10, 5),
+            click(11, 5),
             MouseOutcome::Copy("see foo-bar.rs now".to_owned())
         );
-        click(4, 6);
-        assert_eq!(click(4, 6), MouseOutcome::Copy("分析仓库".to_owned()));
+        click(5, 6);
+        assert_eq!(click(5, 6), MouseOutcome::Copy("分析仓库".to_owned()));
     }
 
     #[test]
