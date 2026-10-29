@@ -48,7 +48,9 @@ rutis root
     ├─ Aimux ──► ModelHost / request 对象                   （--model-config PATH 或产品配置）
     ├─ ConfiguredModels ──► 开发目录与 resolver              （--model-config PATH）
     ├─ SqliteStorage ──► SessionStore                       （--database PATH 或 --home PATH）
-    ├─ ManagedProviders、OpenAICodexOAuth、GrokOAuth ──► Provider（--product-home PATH）
+    ├─ ManagedProviders（每个 server）
+    ├─ ManagedProviderMethods ──► account 命名空间（--product-home PATH）
+    ├─ OpenAICodexOAuth、GrokOAuth ──► Provider（--product-home PATH）
     ├─ ManagedProviderBinding、JS runtime 与账号插件行       （可选，单独提供的插件）
     ├─ Settings                                             （--product-home 或本地执行 Session）
     ├─ McpPublication、Mcp、HostPlatform、SkillsCatalog     （受保护 profile 且执行 Session）
@@ -136,7 +138,8 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
 | `SettingsPlugin` | Generic BusinessDocument sources and per-source CAS; no domain interpretation, approvals, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
-| `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
+| `ManagedProvidersPlugin` | managed provider 的当前绑定代次与在途操作；无绑定时请求明确失败；每个 server 装配 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
+| `ManagedProviderMethodsPlugin` | `account` 管理命名空间（`account.providers/status/recover/logout`、`account.login.*`、`account.usage`）；随产品 home 装配 | 向 `ManagementMethods` 注册 `account` | `ManagedProviders`、`ManagementMethods` |
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
 | `AimuxPlugin`（进程级） | 共享 HTTP 资源、请求/流转换及取消桥接 | `ModelHost`：接收最终请求、已解析连接与取消信号的 request 对象 | 无业务服务依赖；不注入 Provider、ToolRegistry 或 Session |
 | `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录与 resolver | 开发目录与 resolver | — |
