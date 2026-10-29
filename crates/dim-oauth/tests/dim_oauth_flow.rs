@@ -100,7 +100,7 @@ async fn process(home: &Path) -> Process {
     root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
     let views = [
         root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()])),
-        root.plugin(ManagedProvidersPlugin::new(&names).unwrap()),
+        root.plugin(ManagedProvidersPlugin),
         root.plugin(DimOAuthPlugin::new(&names, 0, ids).unwrap()),
         root.plugin(ManagedProviderBinding::new(&names).unwrap()),
         root.plugin(Capture::new(&names, captured.clone()).unwrap()),

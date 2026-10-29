@@ -334,7 +334,7 @@ reply ----------> 回复与通知额度 ----------------+
 
 | 方法 | 去向 | 提供方（命名空间） |
 | --- | --- | --- |
-| `account.providers/status/recover/logout`、`account.login.*` | `managementMethods` | ManagedProviders（`account`） |
+| `account.providers/status/recover/logout`、`account.login.*` | `managementMethods` | ManagedProviderMethods（`account`） |
 | `account.codex.*`、`account.grok.*` | `managementMethods` | OpenAI Codex OAuth（`account.codex`）、Grok OAuth（`account.grok`） |
 | `provider.*` | `managementMethods` | Provider（`provider`） |
 | `skills.catalog/set_enabled/refresh` | `managementMethods` | SkillsCatalog（`skills`） |

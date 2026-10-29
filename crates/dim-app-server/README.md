@@ -382,7 +382,7 @@ with byte preservation and unchanged transaction/backup/lifecycle behavior.
 
 ## Managed provider contract
 
-`ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed service a managed provider plugin publishes. `ManagedProviderBinding` hands it to the process-owned `ManagedProviders`, which the account RPC, the provider service and `webSearch` (exported via `#[rutis::service]` for the `Web` plugin) use. Without a binding the process lists no managed providers and `webSearch` fails with `unavailable`.
+`ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed service a managed provider plugin publishes. `ManagedProviderBinding` hands it to the process-owned `ManagedProviders`, which the account RPC, the provider service and `webSearch` (exported via `#[rutis::service]` for the `Web` plugin) use. `ManagedProviders` is assembled on every server; `ManagedProviderMethods`, also a process row, registers the `account` namespace with `managementMethods` and is assembled with a product home. Without a binding the process lists no managed providers and `webSearch` fails with `unavailable`.
 
 | Method | Input | Value |
 | --- | --- | --- |

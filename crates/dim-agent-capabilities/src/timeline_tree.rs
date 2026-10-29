@@ -1732,7 +1732,7 @@ struct LineView {
 const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
 
 /// `<dim-branch-lines>`, the roster BranchLine writes on main.
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
 const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
@@ -2662,7 +2662,7 @@ fn tool_line_identity(line: &str, parent: &str, prompt: &str) -> InputBlock {
         format!("How you work with {parent}:"),
         format!("- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell {parent}."),
         format!("- Tell {parent} with the branch tool (message, to \"{parent}\"). Use mode \"steer\" for what {parent} must act on now: a finding that changes its work or another line's, a blocking question, a conflict. Use \"append\" for progress {parent} should see at its next step. Do not repeat what {parent} already knows: when several steps give the same result, send one message for the run of them, and say only what changes what {parent} does or what it cannot see for itself."),
-        format!("- You share the workspace with {parent} and its other lines. Change only the files {parent} gave you; before changing any other file, tell {parent} which. If edit or write fails with file_modified_since_read, another line may have changed the file: read it again and tell {parent} before you continue."),
+        format!("- You share the workspace with {parent} and its other lines. Change only the files {parent} gave you; before changing any other file, tell {parent} which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell {parent} before you continue."),
         "- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.".to_string(),
         format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. That is your last action; {parent} receives it."),
     ]
@@ -2699,7 +2699,9 @@ const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session
 /// The product sets none of it, so the built-in text is in force.
 #[derive(Clone, Default)]
 pub struct BranchToolConfig {
-    /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`].
+    /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`]. A
+    /// candidate keeps the description's protocol sentences byte-identical
+    /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
     pub description: Option<Arc<str>>,
 }
 

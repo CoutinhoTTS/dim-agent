@@ -13781,9 +13781,10 @@
         "mod managed_provider",
         "path managed_provider::ManagedProvider",
         "path managed_provider::ManagedProviderBinding::new",
+        "path managed_provider::ManagedProviderMethodsPlugin::new",
         "path managed_provider::ManagedProviderRow",
         "path managed_provider::ManagedProviders",
-        "path managed_provider::ManagedProvidersPlugin::new"
+        "path managed_provider::ManagedProvidersPlugin"
       ]
     },
     {
