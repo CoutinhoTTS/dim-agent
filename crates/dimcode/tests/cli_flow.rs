@@ -6542,3 +6542,74 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
         ]
     );
 }
+
+/// A provider with unavailable models and none selectable keeps a muted row
+/// in `/models` naming it, its unavailable count and the command that shows
+/// the reasons; models the user disabled are not counted, an all-disabled
+/// provider keeps no row, and a provider with a selectable model lists it as
+/// before.
+#[test]
+fn tui_models_picker_names_a_provider_with_no_selectable_model() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            let model = |id: &str, unavailable: bool| {
+                let reason = if unavailable {
+                    json!("provider_unavailable")
+                } else {
+                    Value::Null
+                };
+                json!({"id":id,"name":id,"unavailableReason":reason,
+                    "capabilities":dim_agent_types::ModelCapabilities::default()})
+            };
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog"]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"ready","modelId":"vendor/model-a"}}),
+                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "provider.list" => json!({"providers":[
+                    {"providerId":"ready","displayName":"Ready","enabled":true},
+                    {"providerId":"empty","displayName":"Empty","enabled":true},
+                    {"providerId":"mixed","displayName":"Mixed","enabled":true},
+                    {"providerId":"hidden","displayName":"All disabled","enabled":true}]}),
+                "provider.catalog" => {
+                    let (models, disabled) = match request["params"]["providerId"].as_str().unwrap() {
+                        "empty" => (
+                            json!([model("vendor/embed-a", true), model("vendor/embed-b", true)]),
+                            json!([]),
+                        ),
+                        "mixed" => (
+                            json!([model("vendor/embed-c", true), model("vendor/hidden-a", false)]),
+                            json!(["vendor/hidden-a"]),
+                        ),
+                        "hidden" => (
+                            json!([model("vendor/hidden-b", false)]),
+                            json!(["vendor/hidden-b"]),
+                        ),
+                        _ => (json!([model("vendor/model-a", false)]), json!([])),
+                    };
+                    json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
+                }
+                "account.providers" => json!([]),
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("ready / vendor/model-a");
+    terminal.write(b"/models\r");
+    terminal.until("Ready / vendor/model-a");
+    terminal.until("Empty: 2 models unavailable · dimcode models empty");
+    terminal.until("Mixed: 1 model unavailable · dimcode models mixed");
+    terminal.until("Edit models");
+    assert!(!terminal.transcript.contains("All disabled:"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}

@@ -7,7 +7,6 @@ use crate::app_server;
 use dim_agent_capabilities::{
     context_block,
     context_model::ProductContextModel,
-    file_storage::FileStorage,
     history::{HistoryEntry, summary_message},
     host::{
         CompactionCheckpoint, CompactionCut, CompactionInput, CompactionStrategy, ContextModel,
@@ -66,9 +65,6 @@ pub async fn run() -> Result<()> {
     let resolver = server
         .service::<ProviderConnectionResolver>()
         .ok_or("the product profile serves no connection resolver")?;
-    let storage = server
-        .service::<FileStorage>()
-        .ok_or("the product profile serves no file storage")?;
     let model = selection_with_preferences(&providers, &options.model, &cancel).await?;
     let judge = selection_with_preferences(&providers, &options.judge, &cancel).await?;
     let summarizer = Configuration::read(model.config.as_ref());
@@ -77,23 +73,18 @@ pub async fn run() -> Result<()> {
     for case in &cases {
         prepared.push(Prepared::new(case, &model, &cancel).await?);
     }
-    let file = CompactionFile::open(&home)?;
     let mut results = Vec::new();
     let mut no_temperature = 0;
     for arm in arms(&options) {
-        file.write(arm.reasoning)?;
         let strategy = SummaryStrategy::new(
             host.clone(),
             resolver.clone(),
-            Some(storage.clone()),
             ProductSummaryStrategyConfig {
-                home: Some(home.clone()),
+                reasoning: arm.reasoning,
                 target: arm.target,
                 system_prompt: arm.prompt.clone(),
             },
-        )
-        .await
-        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        );
         let mut metrics = Metrics::default();
         for case in &prepared {
             for run in 0..options.runs {
@@ -148,7 +139,6 @@ pub async fn run() -> Result<()> {
         println!("{}", metrics.line(&arm));
         results.push((arm, metrics));
     }
-    drop(file);
     let rows: Vec<Value> = results
         .iter()
         .map(|(arm, metrics)| metrics.row(arm))
@@ -210,8 +200,8 @@ async fn selection_with_preferences(
         .map_err(|error| format!("{}: {error}", target.provider_id))?)
 }
 
-/// `--home` must be an isolated product home: the evaluation writes its arms'
-/// `compaction.json` there and must never touch the product home.
+/// `--home` must be an isolated product home holding the providers'
+/// configuration; it must never be the product home.
 fn isolated_home(path: &Path) -> Result<PathBuf> {
     let home = std::fs::canonicalize(path)
         .map_err(|error| format!("--home {}: {error}", path.display()))?;
@@ -398,44 +388,6 @@ fn arms(options: &Options) -> Vec<Arm> {
 }
 fn percent(share: f64) -> String {
     format!("{}", (share * 100.).round() as u64)
-}
-
-/// The home's `compaction.json`, written per arm and restored afterwards.
-struct CompactionFile {
-    path: PathBuf,
-    previous: Option<Vec<u8>>,
-}
-impl CompactionFile {
-    fn open(home: &Path) -> Result<Self> {
-        let path = home.join("compaction.json");
-        let previous = match std::fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Self { path, previous })
-    }
-    fn write(&self, reasoning: SummaryReasoning) -> Result<()> {
-        std::fs::write(
-            &self.path,
-            json!({"summaryReasoning": reasoning.name()}).to_string(),
-        )?;
-        Ok(())
-    }
-}
-impl Drop for CompactionFile {
-    fn drop(&mut self) {
-        let restored = match &self.previous {
-            Some(bytes) => std::fs::write(&self.path, bytes),
-            None => match std::fs::remove_file(&self.path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                other => other,
-            },
-        };
-        if let Err(error) = restored {
-            eprintln!("could not restore {}: {error}", self.path.display());
-        }
-    }
 }
 
 /// One compaction of a case: the whole history after its checkpoint, and the
@@ -1838,11 +1790,8 @@ mod tests {
         let strategy = SummaryStrategy::new(
             Arc::new(ModelHost(driver.clone())),
             Arc::new(ProviderConnectionResolver(Arc::new(Local))),
-            None,
             ProductSummaryStrategyConfig::default(),
-        )
-        .await
-        .unwrap();
+        );
         let selection = fake_selection();
         let cancel = CancellationToken::new();
         let prepared = Prepared::new(case, &selection, &cancel).await.unwrap();
@@ -1930,11 +1879,8 @@ mod tests {
         let strategy = SummaryStrategy::new(
             Arc::new(ModelHost(driver)),
             Arc::new(ProviderConnectionResolver(Arc::new(Local))),
-            None,
             ProductSummaryStrategyConfig::default(),
-        )
-        .await
-        .unwrap();
+        );
         let selection = fake_selection();
         let cancel = CancellationToken::new();
         let prepared = Prepared::new(case, &selection, &cancel).await.unwrap();

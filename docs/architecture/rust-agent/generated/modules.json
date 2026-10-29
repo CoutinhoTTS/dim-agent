@@ -7009,7 +7009,7 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::summary_strategy",
       "references": [
-        "path ProductSummaryStrategyConfig",
+        "path ProductSummaryStrategyConfig::default",
         "path ProductSummaryStrategyPlugin::new",
         "use crate::summary_strategy::ProductSummaryStrategyConfig",
         "use crate::summary_strategy::ProductSummaryStrategyPlugin"
@@ -9710,16 +9710,6 @@
         "path EventKind::InputApplied",
         "path EventKind::ModelStart",
         "path InputMode::Append"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::summary_strategy",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorage",
-        "path FileStorageError::Io",
-        "use crate::file_storage::FileStorage",
-        "use crate::file_storage::FileStorageError"
       ]
     },
     {
@@ -18030,6 +18020,7 @@
         "path ModelSource::Custom",
         "path NewApiEndpoint",
         "path ProviderProjection",
+        "path crate::model_catalog::model_kind",
         "use crate::model_catalog::BundledCatalog",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
@@ -22510,6 +22501,7 @@
         "path DraftPart::Block",
         "path DraftPart::Paste",
         "path DraftPart::Text",
+        "path EmptyProvider",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate::Conflict",
@@ -22570,6 +22562,7 @@
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
         "use crate::model::session::DraftPart",
+        "use crate::model::session::EmptyProvider",
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
@@ -24803,6 +24796,7 @@
       "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::model::session",
       "references": [
+        "path EmptyProvider",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate",
@@ -24813,6 +24807,7 @@
         "path SubagentModelPolicy::Agent",
         "path SubagentModelPolicy::Fixed",
         "path SubagentModelPolicy::Inherit",
+        "use crate::model::session::EmptyProvider",
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
