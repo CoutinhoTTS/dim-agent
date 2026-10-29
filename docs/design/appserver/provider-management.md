@@ -368,10 +368,13 @@ adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
 with the model's other saved preferences.
 
 The picker also fills a static provider whose catalog holds no models through
-`provider.refresh`, once per provider per connection, when `provider.list` says
-its models can be listed, and shows what the refresh stored. A failed read or a
-failed refresh keeps the provider's row, and a reply that arrives after the
-picker closed only records the fill: the next open reads it.
+`provider.refresh`, once per version of its catalog in a connection, when
+`provider.list` says its models can be listed, and shows what the refresh
+stored. A successful refresh records the version it wrote, so a listing that
+comes back empty is not asked for again; a write to the record, such as an
+enable or a re-point, asks once more. A failed read or a failed refresh keeps
+the provider's row, and a reply that arrives after the picker closed only
+records the fill: the next open reads it.
 
 ```text
 Select a model
