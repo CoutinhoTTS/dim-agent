@@ -591,10 +591,10 @@ async fn configured_compaction_uses_the_window_declared_in_the_model_file() {
 }
 
 /// The conversation keeps its own reasoning while the summarizer's comes from
-/// the user's `compaction.json`, and an invalid file fails the compaction
-/// (ContextCompaction §13.2, §13.5).
+/// the strategy's factory defaults, and the diagnostics say which value it ran
+/// with (ContextCompaction §13.2, §13.5).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn summary_reasoning_comes_from_the_compaction_file() {
+async fn summary_reasoning_comes_from_factory_configuration() {
     tokio::time::timeout(Duration::from_secs(120), async {
         let provider = Arc::new(Provider::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -609,7 +609,6 @@ async fn summary_reasoning_comes_from_the_compaction_file() {
         std::fs::create_dir_all(&home).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(home.join("compaction.json"), r#"{"summaryReasoning":"off"}"#).unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
         let capabilities = dim_agent_types::ModelCapabilities {
@@ -673,12 +672,6 @@ async fn summary_reasoning_comes_from_the_compaction_file() {
         assert_eq!(completed["data"]["diagnostics"]["strategy"]["reasoning"], "off");
         assert!(completed["data"]["diagnostics"]["strategy"].get("targetTokens").is_none());
 
-        std::fs::write(home.join("compaction.json"), r#"{"summaryReasoning":"sometimes"}"#).unwrap();
-        let failed = client
-            .rpc("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
-            .await;
-        assert_eq!(failed["error"]["data"]["appError"], "compaction_failed");
-        assert!(failed["error"]["message"].as_str().unwrap().contains("compaction.json"), "{failed}");
         server.child.kill().await.unwrap();
         http.abort();
         std::fs::remove_dir_all(directory).unwrap();
