@@ -1731,18 +1731,19 @@ impl TimelineStore for SqliteTimelineStore {
             let (done, wait) = tokio::sync::oneshot::channel();
             {
                 let admission = self.admission.lock().unwrap();
-                if admission.closed {
-                    return Err(error("Timeline storage is closed"));
+                if admission.closed
+                    || admission
+                        .sender
+                        .send(Command::Release {
+                            session_id: session_id.into(),
+                            done,
+                        })
+                        .is_err()
+                {
+                    return Ok(());
                 }
-                admission
-                    .sender
-                    .send(Command::Release {
-                        session_id: session_id.into(),
-                        done,
-                    })
-                    .map_err(error)?;
             }
-            wait.await.map_err(error)?
+            wait.await.unwrap_or(Ok(()))
         })
     }
     fn session_config<'a>(
@@ -2162,4 +2163,81 @@ pub(super) async fn validate_session(
         }
     }
     Ok(branches.into_values().collect())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn release_flow_preserves_history_and_tolerates_a_stopped_writer() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let directory = std::env::temp_dir().join(format!("dim-release-{}", uuid::Uuid::new_v4()));
+    let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let (done, published) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key.clone(),
+            vec![StoredEvent {
+                event: Arc::new(AgentEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    sequence: 1,
+                    create_at: dim_agent_runtime::core::unix_millis(),
+                    tags: None,
+                    kind: EventKind::InputMessage(dim_agent_types::InputMessageData::text(
+                        "saved", None,
+                    )),
+                }),
+                trace: None,
+                batch_end: 1,
+            }],
+            Box::new(move |result| {
+                let _ = done.send(result);
+            }),
+        )
+        .unwrap();
+    published.await.unwrap().unwrap();
+    store.release_session("session").await.unwrap();
+    store.release_session("session").await.unwrap();
+    store.release_session("unknown").await.unwrap();
+    let mut release = Box::pin(store.release_session("session"));
+    {
+        let _connection = db.connection.lock().unwrap();
+        let (done, _) = tokio::sync::oneshot::channel();
+        let admission = store.admission.lock().unwrap();
+        assert!(
+            admission
+                .sender
+                .send(Command::Rollback {
+                    session_id: "unknown".into(),
+                    done
+                })
+                .is_ok()
+        );
+        assert!(admission.sender.send(Command::Close).is_ok());
+        drop(admission);
+        assert!(
+            release
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    release.await.unwrap();
+    store.release_session("session").await.unwrap();
+    assert_eq!(store.head(&key).await.unwrap(), 1);
+    assert_eq!(store.read(&key, 1..=1).await.unwrap().len(), 1);
+    assert!(store.close().await.is_err());
+    store.release_session("session").await.unwrap();
+    db.close().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
 }

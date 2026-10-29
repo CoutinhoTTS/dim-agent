@@ -2343,6 +2343,8 @@
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/timeline.rs",
       "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "format",
         "matches",
         "params",
@@ -20444,6 +20446,7 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
+        "path SessionConfig::default",
         "use dim_agent_runtime::SessionConfig"
       ]
     },
@@ -20618,6 +20621,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path SqliteStorage",
+        "path SqliteStorage::open",
         "path error",
         "use super::SqliteStorage",
         "use super::sqlite::error"
