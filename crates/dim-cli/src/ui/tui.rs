@@ -1294,7 +1294,7 @@ impl App {
     }
 
     /// Queued inputs, oldest first: submitted while a turn was already
-    /// running, not yet consumed.
+    /// running, without their `input/applied` yet.
     fn queued(&self) -> Vec<(String, String)> {
         self.snapshot
             .as_ref()
@@ -3944,6 +3944,7 @@ impl App {
                     cut,
                     pending: false,
                 };
+                self.mark_rewritten(index);
             }
         }
         self.message_blocks.retain(|index| {
@@ -5809,6 +5810,12 @@ mod tests {
     fn fullscreen_settles_a_committed_message_in_place() {
         let mut drawn = attached();
         drawn.app.fullscreen = true;
+        let size = (80, 40);
+        let mut full = FullScreen::new(size, false);
+        let paint = |drawn: &mut Drawn, full: &mut FullScreen| {
+            let frame = drawn.app.frame(size);
+            full.render(&frame, size, &drawn.app.palette, &drawn.app)
+        };
         show(&mut drawn, vec![message(true)]);
         assert!(
             drawn.app.history.iter().any(|block| matches!(
@@ -5817,13 +5824,21 @@ mod tests {
             )),
             "fullscreen commits the message where it was said"
         );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the pending row is painted"
+        );
         show(&mut drawn, vec![message(false)]);
         assert!(
             drawn.app.history.iter().any(|block| matches!(
                 block,
                 Block::User { text, pending: false, .. } if text == "find the leak"
             )),
-            "fullscreen redraws the same row once the model reads it"
+            "fullscreen rewrites the same row once the model reads it"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the settled row is painted again"
         );
         assert!(
             !drawn
