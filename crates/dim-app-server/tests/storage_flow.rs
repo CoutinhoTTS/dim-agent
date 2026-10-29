@@ -4224,6 +4224,19 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
         .map(|event| event.sequence)
         .collect();
     assert_eq!(sequences, (1..=600).collect::<Vec<_>>());
+    for range in [0..=0, 0..=1, 2..=2, 199..=201, 600..=601] {
+        let expected: Vec<_> = range.clone().filter(|sequence| *sequence > 0).collect();
+        assert_eq!(
+            store
+                .read(&key("paged", "main"), range)
+                .await
+                .unwrap()
+                .iter()
+                .map(|record| record.event.sequence)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
     assert!(
         sessions
             .read_page("paged", 600, 200, through)
@@ -4238,10 +4251,17 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
         .unwrap();
     assert!(matches!(&call.kind, EventKind::ToolCall(data) if data.calls[0].name == "echo"));
     let connection = Connection::open(&database.0).unwrap();
-    let plan: String = connection.query_row(
-        "EXPLAIN QUERY PLAN SELECT sequence FROM timeline_events WHERE session_id='paged' AND branch_id='main' AND last_sequence>=201 AND sequence<=400 ORDER BY last_sequence",
-        [], |row| row.get(3)).unwrap();
-    assert!(plan.contains("timeline_events_by_end"), "{plan}");
+    let plan = connection
+        .prepare("EXPLAIN QUERY PLAN SELECT sequence, last_sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3), ?3) AND sequence <= ?4 AND last_sequence >= ?3 ORDER BY sequence")
+        .unwrap()
+        .query_map(params!["paged", "main", 201, 400], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join("\n");
+    assert!(plan.contains("sequence>? AND sequence<?"), "{plan}");
+    assert!(!plan.contains("timeline_events_by_end"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     drop(connection);
     drop(store);
     drop(sessions);

@@ -1183,14 +1183,13 @@ fn create_session(connection: &Connection, session: &str, config: &SessionConfig
 }
 fn insert_branch(connection: &Connection, session: &str, info: &BranchRecord) -> Result<()> {
     connection
-        .execute(
-            "INSERT INTO timeline_branches VALUES (?1, ?2, ?3, 0)",
-            params![
-                session,
-                info.id,
-                serde_json::to_string(info).map_err(error)?
-            ],
-        )
+        .prepare_cached("INSERT INTO timeline_branches VALUES (?1, ?2, ?3, 0)")
+        .map_err(error)?
+        .execute(params![
+            session,
+            info.id,
+            serde_json::to_string(info).map_err(error)?
+        ])
         .map_err(error)?;
     Ok(())
 }
@@ -1264,11 +1263,13 @@ fn output_row(kind: &str) -> bool {
 }
 fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
     connection
-        .query_row(
+        .prepare_cached(
             "SELECT sequence FROM timeline_branches WHERE session_id = ?1 AND branch_id = ?2",
-            params![key.session_id, key.branch_id],
-            |row| read_sequence(row, 0),
         )
+        .map_err(error)?
+        .query_row(params![key.session_id, key.branch_id], |row| {
+            read_sequence(row, 0)
+        })
         .map_err(error)
 }
 pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
@@ -1294,7 +1295,7 @@ fn write_batch(
         let kind = record.event.kind.key();
         match &record.event.kind {
             EventKind::Text(data) | EventKind::Thinking(data) => {
-                let previous: Option<(u64, String, String)> = connection.query_row("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1", params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
+                let previous: Option<(u64, String, String)> = connection.prepare_cached("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1").map_err(error)?.query_row(params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
                 let output_data = wire.event["data"]
                     .as_object_mut()
                     .ok_or_else(|| error("output data is missing in event encoding"))?;
@@ -1321,7 +1322,7 @@ fn write_batch(
                         records,
                     })
                     .map_err(error)?;
-                    connection.execute("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5", params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(start)?]).map_err(error)?;
+                    connection.prepare_cached("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5").map_err(error)?.execute(params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(start)?]).map_err(error)?;
                     continue;
                 }
                 let row = Row::Output {
@@ -1358,14 +1359,15 @@ fn write_batch(
         }
     }
     connection
-        .execute(
+        .prepare_cached(
             "UPDATE timeline_branches SET sequence = ?3 WHERE session_id = ?1 AND branch_id = ?2",
-            params![
-                batch.key.session_id,
-                batch.key.branch_id,
-                sql_sequence(sequence)?
-            ],
         )
+        .map_err(error)?
+        .execute(params![
+            batch.key.session_id,
+            batch.key.branch_id,
+            sql_sequence(sequence)?
+        ])
         .map_err(error)?;
     if batch.key.branch_id == "main" {
         if let Some(last) = batch.events.last() {
@@ -1392,20 +1394,19 @@ fn insert_event(
     row: &Row,
 ) -> Result<()> {
     connection
-        .execute(
-            "INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
-            params![
-                key.session_id,
-                key.branch_id,
-                sql_sequence(sequence)?,
-                kind,
-                serde_json::to_string(row).map_err(error)?,
-                match row {
-                    Row::Event { record } => record.event["id"].as_str(),
-                    Row::Output { .. } => None,
-                }
-            ],
-        )
+        .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)")
+        .map_err(error)?
+        .execute(params![
+            key.session_id,
+            key.branch_id,
+            sql_sequence(sequence)?,
+            kind,
+            serde_json::to_string(row).map_err(error)?,
+            match row {
+                Row::Event { record } => record.event["id"].as_str(),
+                Row::Output { .. } => None,
+            }
+        ])
         .map_err(error)?;
     Ok(())
 }
@@ -1474,7 +1475,7 @@ impl Rows {
         key: &TimelineKey,
         range: &RangeInclusive<u64>,
     ) -> Result<Self> {
-        let mut query = connection.prepare_cached("SELECT sequence, last_sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?4 AND last_sequence >= ?3 ORDER BY last_sequence").map_err(error)?;
+        let mut query = connection.prepare_cached("SELECT sequence, last_sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3), ?3) AND sequence <= ?4 AND last_sequence >= ?3 ORDER BY sequence").map_err(error)?;
         let rows = query
             .query_map(
                 params![

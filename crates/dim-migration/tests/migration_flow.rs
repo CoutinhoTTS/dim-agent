@@ -2,7 +2,7 @@
 use dim_agent_capabilities::defaults;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::EventKind;
-use dim_app_server::{ServerConfig, serve};
+use dim_app_server::{ServerConfig, serve, storage::SqliteStorage};
 use dim_client::{Client, ConnectionConfig, Server};
 use dim_migration::{Migration, MigrationPlugin, Outcome, TaskStatus};
 use rusqlite::{Connection, params};
@@ -670,6 +670,20 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     let db = fixture(&source);
     let target = directory.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
+    let native_path = target.join("rust/dimcode.sqlite");
+    let native = SqliteStorage::open(native_path.clone()).unwrap();
+    native.close().await.unwrap();
+    Connection::open(&native_path)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE session_catalog; DROP TABLE agent_store_format;
+             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 22));
+             INSERT INTO agent_store_format VALUES (22);",
+        )
+        .unwrap();
+    let (previous, version) = SqliteStorage::open_read_only(native_path).unwrap();
+    assert_eq!(version, 22);
+    previous.close().await.unwrap();
     std::fs::write(
         target.join("config.json"),
         r#"{"locale":"en","tuiToolDetailsExpanded":false}"#,

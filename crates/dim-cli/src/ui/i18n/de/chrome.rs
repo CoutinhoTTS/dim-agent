@@ -357,8 +357,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permissions" => "Berechtigungen",
         "Tool approvals" => "Tool-Freigaben",
         "Command isolation" => "Befehlsisolation",
-        "Command isolation not saved: {error}" => "Befehlsisolation nicht gespeichert: {error}",
-        "Command isolation not read: {error}" => "Befehlsisolation nicht gelesen: {error}",
         "Models" => "Modelle",
         "Model" => "Modell",
         "not set" => "nicht gesetzt",

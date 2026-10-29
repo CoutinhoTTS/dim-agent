@@ -1068,6 +1068,43 @@ impl Worker {
                 self.send(Update::Models(models));
                 self.read_model_policy(false).await;
             }
+            Command::ReadIsolation => {
+                if !self.client.supports(&[
+                    "host.isolation.get",
+                    "host.isolation.update",
+                    "host.isolation.reset",
+                ]) {
+                    self.send(Update::Isolation(Err(
+                        "This daemon does not support Command isolation settings".into(),
+                    )));
+                } else {
+                    let result = self.client.typed("host.isolation.get", json!({})).await;
+                    self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                }
+            }
+            Command::SaveIsolation {
+                expected_revision,
+                policy,
+            } => {
+                let result = self
+                    .client
+                    .typed(
+                        "host.isolation.update",
+                        json!({"expectedRevision": expected_revision, "policy": policy}),
+                    )
+                    .await;
+                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+            }
+            Command::ResetIsolation(expected_revision) => {
+                let result = self
+                    .client
+                    .typed(
+                        "host.isolation.reset",
+                        json!({"expectedRevision": expected_revision}),
+                    )
+                    .await;
+                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+            }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
                 expected_revision,
@@ -1438,10 +1475,7 @@ impl Worker {
     /// Refreshes the composer's context reading once it is stale; a session
     /// whose usage is unknown shows none.
     async fn poll_context(&mut self) {
-        if !std::mem::take(&mut self.context_stale)
-            || self.session_id.is_empty()
-            || !self.client.supports(&["session.context.usage"])
-        {
+        if !std::mem::take(&mut self.context_stale) || self.session_id.is_empty() {
             return;
         }
         let reading = self.context_usage().await.ok().map(|usage| ContextReading {

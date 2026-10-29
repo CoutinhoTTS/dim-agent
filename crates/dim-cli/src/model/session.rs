@@ -129,6 +129,12 @@ pub enum Command {
     CloseSessions,
     /// List the models that can be chosen.
     ListModels,
+    ReadIsolation,
+    SaveIsolation {
+        expected_revision: String,
+        policy: dim_agent_types::isolation::IsolationPolicy,
+    },
+    ResetIsolation(String),
     ClearModelPreferences {
         provider_id: String,
         model_id: String,
@@ -542,6 +548,7 @@ pub enum Update {
     Models(Result<ModelList, String>),
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
+    Isolation(Result<dim_agent_types::isolation::IsolationPolicySnapshot, String>),
     /// A transient status-line message.
     Toast(String),
     /// The default tool-approval mode (wire name).

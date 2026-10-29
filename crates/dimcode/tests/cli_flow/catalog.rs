@@ -15,6 +15,7 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
         wire.reply(&attach,attach_record(&attach));
         let history=wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
         let providers=wire.read("account.providers");
         wire.reply(&providers,json!([]));
         let first=wire.read("session.catalog");
