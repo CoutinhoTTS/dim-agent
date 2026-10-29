@@ -365,6 +365,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Ratón (pantalla completa)",
         "Permissions" => "Permisos",
         "Tool approvals" => "Aprobaciones",
+        "Command isolation" => "Aislamiento de comandos",
+        "Command isolation not saved: {error}" => {
+            "No se guardó el aislamiento de comandos: {error}"
+        }
+        "Command isolation not read: {error}" => "No se leyó el aislamiento de comandos: {error}",
         "Models" => "Modelos",
         "Model" => "Modelo",
         "not set" => "sin definir",

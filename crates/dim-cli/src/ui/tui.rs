@@ -249,6 +249,7 @@ fn run_terminal(
         surroundings.home.clone(),
         cwd_key,
     );
+    app.isolation = surroundings.isolation.clone();
     app.fullscreen = full.is_some();
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
@@ -689,6 +690,8 @@ struct App {
     composer: Composer,
     cwd_key: String,
     home: PathBuf,
+    /// This profile's `host-isolation.json`, when this OS isolates commands.
+    isolation: Option<PathBuf>,
     /// How tool groups are drawn by default (`/tools`, which redraws every
     /// committed group too).
     tool_detail: Detail,
@@ -926,6 +929,7 @@ impl App {
             group_details: HashMap::new(),
             tail_groups: Vec::new(),
             home,
+            isolation: None,
             notices: Vec::new(),
             reports: Vec::new(),
             banner_committed: false,
@@ -2483,6 +2487,19 @@ impl App {
                 &[("locale", i18n::system_locale().label())],
             ),
         };
+        let isolation =
+            self.isolation
+                .clone()
+                .and_then(|path| match crate::ui::isolation::enabled(&path) {
+                    Ok(on) => Some(on),
+                    Err(error) => {
+                        self.set_notice(tf(
+                            "Command isolation not read: {error}",
+                            &[("error", &error)],
+                        ));
+                        None
+                    }
+                });
         let values = SettingValues {
             theme: theme.to_owned(),
             language,
@@ -2492,6 +2509,7 @@ impl App {
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
             model: self.label.clone(),
+            isolation,
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -2545,6 +2563,19 @@ impl App {
                 let value = if self.mouse { "on" } else { "off" };
                 if let Some(error) = crate::ui::config::write(&self.home, MOUSE_KEY, value.into()) {
                     self.set_notice(error);
+                }
+                self.settings_return = None;
+                self.open_settings(setting);
+            }
+            Setting::Isolation => {
+                if let Some(path) = self.isolation.clone()
+                    && let Ok(on) = crate::ui::isolation::enabled(&path)
+                    && let Err(error) = crate::ui::isolation::set_enabled(&path, !on)
+                {
+                    self.set_notice(tf(
+                        "Command isolation not saved: {error}",
+                        &[("error", &error)],
+                    ));
                 }
                 self.settings_return = None;
                 self.open_settings(setting);

@@ -351,6 +351,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Souris (plein écran)",
         "Permissions" => "Autorisations",
         "Tool approvals" => "Approbations d'outils",
+        "Command isolation" => "Isolation des commandes",
+        "Command isolation not saved: {error}" => {
+            "Isolation des commandes non enregistrée : {error}"
+        }
+        "Command isolation not read: {error}" => "Isolation des commandes illisible : {error}",
         "Models" => "Modèles",
         "Model" => "Modèle",
         "not set" => "non défini",

@@ -370,7 +370,7 @@ CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写
 | --- | --- |
 | 由审阅模型代替用户回答审批 | 一个通过 Approval 公开的回答操作作答的审批回答者，带自己的模型调用和设计，类似 Collaboration 的领导者路径；不是 CLI 改动 |
 | 只在一个 Session 内记住的允许 | 一条记录下来的事实，或 Session 作用域的规则来源（F2 §10.2 暂缓了按工作区的用户规则）；CLI 进程内的记忆会在没有记录决定的情况下代为回答 |
-| 在 CLI 中设置沙箱 | F5 只提供 `host-isolation.json`，没有读写方法；需要 HostPlatform 的管理方法，带修订号、仅限本地，类似 `permission.rules` |
+| 开关以外的隔离字段 | `/settings` 只开关本机 `host-isolation.json` 的沙箱，并保留其余字段。路径、升级和显式层级仍需手改文件；远程客户端仍需要带修订号的 HostPlatform 方法 |
 | Shift+Tab 循环切换 | 只涉及 CLI：编辑器动作结果和确认路径（决定 4） |
 | `--allowed-tools`/`--disallowed-tools` | 一个工具目录读取接口，用于在参数边界校验名字（决定 2） |
 | 回合运行中使用 `/approvals` | 只涉及 CLI：运行中的回合读取普通行并回答审批；面板调用需要加入它的多路复用循环 |

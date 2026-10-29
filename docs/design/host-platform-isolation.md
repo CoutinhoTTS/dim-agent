@@ -135,6 +135,15 @@ writable parent. A writable child inside a read-only root is supported.
 Writable roots also permit reads; grants are additive. Naming an environment value grants no
 filesystem access to the path it contains. No file is written merely because defaults are used.
 
+The CLI `/settings` switch is a local edit of this same file, not a protocol method and not
+client configuration. On macOS and Linux it shows whether isolation is on. Turning it off writes
+`"sandbox": "host"` into a version 2 file, or `"enabled": false` into a version 1 file, and keeps
+every other field; a missing file becomes `{"version": 2, "sandbox": "host"}`. Turning it on
+removes that field. When only `version` remains, the CLI deletes the file, which restores the
+default `workspace` tier. An explicit `network` tier that was the file's only field therefore
+becomes `workspace`. An invalid file is reported and left unchanged. The switch is absent on
+Windows. A running command keeps the policy it started with.
+
 Read at each model process start; no cache, watcher, Session subscription, loader reload or
 restart of an existing shell. No configured location, or a missing file at that location, uses
 the defined default. An existing invalid file fails explicitly. The `host` tier returns the
@@ -403,15 +412,17 @@ approval or rule. Successful commands, timeouts, disabled policy and Windows get
 persistent shell's `execute` results carry none: that tool is not in the App Server's product
 assembly, and ShellSession can keep the same value if it joins.
 
-**CLI status.** The CLI shows no isolation indicator beside the permission preset. Isolation is
-the execution node's local policy, read at each process start. No client-visible read reports it;
-an indicator would need a new protocol method or hello feature, and a value read when a client
-attaches can be stale by the next command. The CLI guide documents the policy and states that
-presets and approvals do not change it, and the failure note names the file. A client indicator
-needs its own protocol decision.
+**CLI status.** On macOS and Linux, `/settings` shows Command isolation and turns this file on or
+off, as [Configuration owner and format](#configuration-owner-and-format) describes. It reads the
+file when the panel opens. There is no indicator beside the permission preset and no protocol
+method: the switch edits the node's local file, so it follows this node's home and does not report
+another node's policy. A value shown in the panel can be stale by the next command if the file
+changes elsewhere. Windows has no row. The CLI guide documents the policy and states that presets
+and approvals do not change it, and the failure note names the file.
 
 **User documentation.** The [CLI guide](../../crates/dim-cli/README.md#command-isolation) has the user page: the
-file location for each profile, the fields, how to disable isolation, opt-in toolchain roots and
+file location for each profile, the fields, how to disable isolation from `/settings` or by
+editing the file, opt-in toolchain roots and
 what isolation does not cover. For macOS it also describes the temporary directory, developer
 tools and git configuration in user terms, what an explicit list drops, and how a list grants
 git's configuration files as file roots. Per-platform defaults stay in this design's
