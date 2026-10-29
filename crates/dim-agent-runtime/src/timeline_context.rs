@@ -28,6 +28,8 @@ pub struct TimelineContext {
     ctx: Ctx,
     view: FiberView,
     children: Vec<FiberView>,
+    /// Loader row ids the branch profile requires.
+    required: Arc<[String]>,
     copies: crate::parts::Copies,
     scope: BranchScope,
     timeline: Timeline,
@@ -122,6 +124,7 @@ impl TimelineContext {
         ctx: Ctx,
         view: FiberView,
         children: Vec<FiberView>,
+        required: Arc<[String]>,
         copies: crate::parts::Copies,
         scope: BranchScope,
         timeline: Timeline,
@@ -137,6 +140,7 @@ impl TimelineContext {
             ctx,
             view,
             children,
+            required,
             copies,
             scope,
             timeline,
@@ -297,6 +301,14 @@ impl TimelineContext {
             .collect();
         crate::assembly::retain_scope(&mut snapshot, scope, |plugin| rows.contains(&plugin));
         snapshot
+    }
+    /// This branch's scope view.
+    pub(crate) fn scope_view(&self) -> &FiberView {
+        &self.view
+    }
+    /// The loader row ids this branch's profile requires.
+    pub(crate) fn required_rows(&self) -> &[String] {
+        &self.required
     }
     pub(crate) fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Option<Arc<StateCell<S>>> {
         self.ctx

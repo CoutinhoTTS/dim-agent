@@ -989,7 +989,7 @@ pub(crate) struct Loaded<S> {
     pub ctx: Ctx,
     pub scope: S,
     pub children: Vec<FiberView>,
-    required: Arc<[String]>,
+    pub(crate) required: Arc<[String]>,
 }
 
 pub(crate) struct SessionAssembly {
@@ -1353,6 +1353,7 @@ impl TimelineFactory {
                     ctx.clone(),
                     created.view.clone(),
                     branch.scope.children.clone(),
+                    branch.scope.required.clone(),
                     owner.copies.clone(),
                     scope,
                     branch.timeline.clone(),
@@ -1503,10 +1504,7 @@ async fn create_instance(
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let mut waiting = rows(loader, &created.view, Some(&required));
     waiting.extend(instance().2.required);
-    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
-        .await
-        .and_then(|()| validate(ctx, created.view.id, &waiting))
-    {
+    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel).await {
         return Err((error, Some(created)));
     }
     created.children = rows(loader, &created.view, None);
@@ -1816,32 +1814,94 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
     AgentError::Build(format!("initialization timed out: {}", pending.join("; ")))
 }
 
-/// Assembly checks for plugin authors. A diagnostics snapshot walks the whole
-/// process tree, so release builds skip it to keep Session creation constant-time.
-fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
-    if !cfg!(debug_assertions) {
-        return Ok(());
+/// One rule an assembly breaks ([`Agent::check_assembly`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AssemblyRule {
+    /// A required row, or a plugin below one, is not `Active`.
+    Ready,
+    /// A plugin reads an external service it does not declare.
+    UndeclaredRead,
+    /// A plugin read a service generation its resolved dependencies lack.
+    Generation,
+    /// A scoped service is provided without an instance key.
+    InstanceKey,
+}
+
+/// One problem [`Agent::check_assembly`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssemblyFinding {
+    /// The plugin the finding is about.
+    pub plugin: String,
+    /// The rule the plugin breaks.
+    pub rule: AssemblyRule,
+    /// What the rule saw: a fiber state, or a service key.
+    pub detail: String,
+}
+impl std::fmt::Display for AssemblyFinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.rule {
+            AssemblyRule::Ready => write!(
+                f,
+                "{} is not Active after its scope became ready: {}",
+                self.plugin, self.detail
+            ),
+            AssemblyRule::UndeclaredRead => {
+                write!(f, "{} read undeclared service {}", self.plugin, self.detail)
+            }
+            AssemblyRule::Generation => write!(
+                f,
+                "{} read a service generation absent from resolved dependencies: {}",
+                self.plugin, self.detail
+            ),
+            AssemblyRule::InstanceKey => write!(
+                f,
+                "scoped service provided without an instance key: {}",
+                self.detail
+            ),
+        }
     }
-    let snapshot = ctx.diagnostics();
-    let members = subtree(&snapshot, scope);
-    let required: HashSet<_> = required
+}
+
+/// Checks one live scope of `snapshot`: its `required` rows, their descendants
+/// and everything else in the scope, as creation used to. `view` is the scope
+/// instance, `required` the loader row ids its profile requires and `nested`
+/// the scopes nested inside it. Each plugin is checked once, by the innermost
+/// scope that contains it: a nested scope's subtree is left to that scope's
+/// own pass.
+pub(crate) fn check_scope(
+    snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
+    loader: &Loader,
+    view: &FiberView,
+    required: &[String],
+    nested: &[FiberView],
+    findings: &mut Vec<AssemblyFinding>,
+) {
+    let rows = required_rows(loader, view, required);
+    let excluded: HashSet<_> = nested
         .iter()
-        .flat_map(|view| subtree(&snapshot, view.id))
+        .flat_map(|nested| subtree(snapshot, nested.id))
         .collect();
+    let members: HashSet<_> = subtree(snapshot, view.id)
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect();
+    let required: HashSet<_> = rows.iter().flat_map(|id| subtree(snapshot, *id)).collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
         if required.contains(&plugin.id) && plugin.state != FiberState::Active {
-            return Err(AgentError::Build(format!(
-                "{} is not Active after its scope became ready: {:?}",
-                plugin.name, plugin.state
-            )));
+            findings.push(AssemblyFinding {
+                plugin: plugin.name.clone(),
+                rule: AssemblyRule::Ready,
+                detail: format!("{:?}", plugin.state),
+            });
         }
         for access in &plugin.accesses {
             if access.external && !access.declared {
-                return Err(AgentError::Build(format!(
-                    "{} read undeclared service {}",
-                    plugin.name,
-                    access.key.describe()
-                )));
+                findings.push(AssemblyFinding {
+                    plugin: plugin.name.clone(),
+                    rule: AssemblyRule::UndeclaredRead,
+                    detail: access.key.describe(),
+                });
             }
             if access.external
                 && access.provider.is_some()
@@ -1853,25 +1913,50 @@ fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
                         && Some(r.generation) == access.generation
                 })
             {
-                return Err(AgentError::Build(format!(
-                    "{} read a service generation absent from resolved dependencies: {}",
-                    plugin.name,
-                    access.key.describe()
-                )));
+                findings.push(AssemblyFinding {
+                    plugin: plugin.name.clone(),
+                    rule: AssemblyRule::Generation,
+                    detail: access.key.describe(),
+                });
             }
         }
     }
-    if let Some(binding) = snapshot
+    for binding in snapshot
         .bindings
         .iter()
-        .find(|b| members.contains(&b.provider) && b.key.instance_id().is_none())
+        .filter(|b| members.contains(&b.provider) && b.key.instance_id().is_none())
     {
-        return Err(AgentError::Build(format!(
-            "scoped service provided without an instance key: {}",
-            binding.key.describe()
-        )));
+        findings.push(AssemblyFinding {
+            plugin: snapshot
+                .plugins
+                .iter()
+                .find(|p| p.id == binding.provider)
+                .map(|p| p.name.clone())
+                .unwrap_or_default(),
+            rule: AssemblyRule::InstanceKey,
+            detail: binding.key.describe(),
+        });
     }
-    Ok(())
+}
+
+/// The plugin ids of one scope instance's required rows: the loader rows
+/// `required` names, copied in `view`'s instance. Every row of a scope is
+/// either a required row or below one, so a mounted part is covered by its
+/// mounter's row without being listed here.
+fn required_rows(loader: &Loader, view: &FiberView, required: &[String]) -> HashSet<PluginId> {
+    loader
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.plugin.is_some_and(|plugin| plugin != view.id))
+        .filter(|entry| required.iter().any(|id| id == &entry.id))
+        .filter(|entry| {
+            entry
+                .instance
+                .as_ref()
+                .is_some_and(|info| info.chain.iter().any(|(_, id)| *id == view.instance()))
+        })
+        .filter_map(|entry| entry.plugin)
+        .collect()
 }
 
 /// Plugin IDs of `root` and its descendants in one diagnostics snapshot.

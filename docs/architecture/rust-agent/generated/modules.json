@@ -1118,7 +1118,6 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/assembly.rs",
       "unexpandedMacros": [
-        "cfg",
         "format",
         "json",
         "matches",
@@ -1126,7 +1125,8 @@
         "tokio::pin",
         "tokio::select",
         "tracing::error",
-        "vec"
+        "vec",
+        "write"
       ]
     },
     {
@@ -12157,6 +12157,7 @@
         "path AgentHost::Private",
         "path AgentHost::Within",
         "path Assembly",
+        "path AssemblyFinding",
         "path BuiltSession",
         "path Extension",
         "path Owned",
@@ -12168,10 +12169,12 @@
         "path SessionInitialization::Restore",
         "path assembly",
         "path build_session",
+        "path check_scope",
         "path crate::assembly::with_copies",
         "path group",
         "path own_placement",
         "path release",
+        "path required",
         "path scope_diagnostics",
         "path shutdown_scope",
         "use crate::assembly::AgentHost",
@@ -12182,6 +12185,7 @@
         "use crate::assembly::Placement",
         "use crate::assembly::SessionInitialization",
         "use crate::assembly::build_session",
+        "use crate::assembly::check_scope",
         "use crate::assembly::own_placement",
         "use crate::assembly::release",
         "use crate::assembly::scope_diagnostics",
@@ -12990,6 +12994,7 @@
         "path crate::assembly::retain_scope",
         "path crate::assembly::shutdown_scope",
         "path crate::assembly::with_copies",
+        "path required",
         "path rows"
       ]
     },
