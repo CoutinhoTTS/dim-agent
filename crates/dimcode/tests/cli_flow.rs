@@ -3960,6 +3960,132 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
     daemon.join().unwrap();
 }
 
+/// `/mcp enable` and `/mcp disable` send what `dimcode mcp enable` /
+/// `disable` sends, report the same text, and the next `/mcp` lists the new
+/// state.
+#[test]
+fn tui_mcp_enables_and_disables_a_project_server() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = |enabled: bool| {
+            json!({"userRevision":"user:1","projectRevision":"project:1","servers":[
+                {"id":"docs","source":"project","transport":"http","enabled":enabled}
+            ],"userApplication":{},"projectApplication":null})
+        };
+        let session = json!({"sessionId":"session","servers":[],"catalogError":null,"closed":false});
+        // `/mcp`: the project entry starts disabled.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(false));
+        let state = wire.read("session.mcp");
+        wire.reply(&state, session.clone());
+        // `/mcp enable docs`
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(false));
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(
+            (
+                &set["params"]["id"],
+                &set["params"]["source"],
+                &set["params"]["expectedVersion"],
+                &set["params"]["enabled"]
+            ),
+            (
+                &json!("docs"),
+                &json!("project"),
+                &json!("project:1"),
+                &json!(true)
+            )
+        );
+        assert!(set["params"]["cwd"].is_string());
+        wire.reply(&set, json!({}));
+        // The next `/mcp` shows it enabled.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true));
+        let state = wire.read("session.mcp");
+        wire.reply(&state, session.clone());
+        // `/mcp disable docs`
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true));
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(
+            (&set["params"]["id"], &set["params"]["enabled"]),
+            (&json!("docs"), &json!(false))
+        );
+        wire.reply(&set, json!({}));
+        // The next `/mcp` shows it disabled again.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(false));
+        let state = wire.read("session.mcp");
+        wire.reply(&state, session);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp\r");
+    terminal.until("disabled");
+    terminal.write(b"/mcp enable docs\r");
+    terminal.until("Enabled \"docs\" (project).");
+    terminal.until(".mcp.json");
+    terminal.write(b"/mcp\r");
+    terminal.until("enabled");
+    terminal.write(b"/mcp disable docs\r");
+    terminal.until("Disabled \"docs\" (project).");
+    terminal.write(b"/mcp\r");
+    terminal.until("disabled");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The standalone `mcp enable` prints the entry and the source; the TUI's
+/// `/mcp enable` shares that function.
+#[test]
+fn mcp_enable_reports_the_entry_and_the_source() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        mcp_hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({"userRevision":"user:1","projectRevision":"project:1","servers":[
+            {"id":"docs","source":"project","transport":"http","enabled":false}
+        ],"userApplication":{},"projectApplication":null}),
+        );
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(set["params"]["enabled"], json!(true));
+        wire.reply(&set, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "enable", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled \"docs\" (project).\n"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
+}
+
 #[test]
 fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_next_command() {
     let home = Home::new();
