@@ -22901,6 +22901,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::configure",
       "references": [
+        "path configure::needs_session",
         "path configure::run",
         "use crate::configure"
       ]
