@@ -428,7 +428,7 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
             wire.hello(&[]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(
                 &history,
@@ -616,7 +616,7 @@ fn tui_questions_keep_structured_answers_and_the_leader_draft() {
             wire.hello(&[]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
             let providers = wire.read("account.providers");
@@ -677,7 +677,7 @@ fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[event("main",9,"tool-call",asked("old-request","c1",json!([deploy()])))],"through":9,"nextAfter":9,"done":true}));
         let providers = wire.read("account.providers");
@@ -736,7 +736,7 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
         wire.hello(&["shell.run", "shell.stop"]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -805,7 +805,7 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[
             {"id":"request","sequence":1,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r","call_id":"agent","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Inspect readonly member question"}},
@@ -816,7 +816,7 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         wire.reply(&providers,json!([]));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"],"member");
-        wire.reply(&attach,json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         assert_eq!(history["params"]["sessionId"],"member");
         let mut peer = today();

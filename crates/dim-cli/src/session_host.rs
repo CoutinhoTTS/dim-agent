@@ -412,6 +412,14 @@ struct Created {
     model: ModelId,
 }
 
+/// The record `session.attach` replies for the Session it opened. A server
+/// from before the record existed replies `{}`.
+#[derive(Deserialize)]
+struct Attached {
+    #[serde(default)]
+    model: Option<ModelId>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WebToggled {
@@ -564,7 +572,7 @@ impl Worker {
             .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
         self.enter(
             created.session_id,
-            created.model,
+            Some(created.model),
             SwitchKind::New,
             attached_session,
         )
@@ -596,7 +604,7 @@ impl Worker {
             Ok(created) => {
                 self.enter(
                     created.session_id,
-                    created.model,
+                    Some(created.model),
                     SwitchKind::New,
                     attached_session,
                 )
@@ -622,7 +630,7 @@ impl Worker {
     async fn enter(
         &mut self,
         session_id: String,
-        model: ModelId,
+        model: Option<ModelId>,
         kind: SwitchKind,
         attached_session: String,
     ) -> crate::Result<()> {
@@ -640,9 +648,16 @@ impl Worker {
                 .await?;
             self.ui_id = None;
         }
-        self.client
-            .rpc("session.attach", json!({"sessionId": session_id}))
+        let attached: Attached = self
+            .client
+            .typed("session.attach", json!({"sessionId": session_id}))
             .await?;
+        // Without a record, find the model in the catalog: this is the only
+        // caller of `list()` besides `/resume`, and only for an older server.
+        let model = match model.or(attached.model) {
+            Some(model) => model,
+            None => self.model_of(&session_id).await?,
+        };
         self.session_id = session_id.clone();
         self.register_ui().await;
         self.mcp_required.clear();
@@ -724,17 +739,22 @@ impl Worker {
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let listed = self.list().await?;
-        let session = listed
-            .into_iter()
-            .find(|session| session.session_id == session_id)
-            .ok_or_else(|| format!("Session {session_id} was not found"))?;
-        self.enter(session_id, session.model, kind, attached_session)
-            .await
+        self.enter(session_id, None, kind, attached_session).await
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
         self.client.typed("session.summaries", json!({})).await
+    }
+
+    /// The model of one Session, found in the catalog. Only a server whose
+    /// `session.attach` reply carries no record needs this.
+    async fn model_of(&mut self, session_id: &str) -> crate::Result<ModelId> {
+        let sessions = self.list().await?;
+        sessions
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .map(|session| session.model)
+            .ok_or_else(|| format!("Session {session_id} is absent from the catalog").into())
     }
 
     async fn submit(&mut self, text: String, mode: &str) {

@@ -13782,6 +13782,7 @@
       "to": "dim_agent_types::profile",
       "references": [
         "path AgentProfile",
+        "path dim_agent_types::ModelId",
         "use dim_agent_types::AgentProfile"
       ]
     },
@@ -13850,6 +13851,13 @@
       "references": [
         "path SettingsService",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path crate::storage::TitleFields::default"
       ]
     },
     {
@@ -15581,6 +15589,7 @@
         "path RpcError",
         "path RpcError::app",
         "path RpcError::closed",
+        "path RpcError::from",
         "path RpcError::wire",
         "path params"
       ]
@@ -15705,8 +15714,9 @@
         "path Notification::TreeEvent",
         "path Outbound::notice",
         "path Outbound::result",
-        "path Reply::empty",
+        "path Reply::Attach",
         "path RequestId",
+        "path SessionInfo",
         "path StateNotice"
       ]
     },

@@ -831,6 +831,8 @@ pub enum Reply {
     Create(CreateResult),
     Fork(ForkResult),
     List(Vec<SessionInfo>),
+    /// The attached Session's directory record, as `session.list` gives it.
+    Attach(SessionInfo),
     Summaries(Vec<SessionSummary>),
     Submit(SubmitResult),
     InputLookup(InputLookupResult),
