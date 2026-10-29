@@ -22610,6 +22610,7 @@
       "from": "dim_cli::plugins",
       "to": "dim_cli::ui::terminal",
       "references": [
+        "path ui::terminal::EXIT_BUDGET",
         "path ui::terminal::restore_if_held"
       ]
     },

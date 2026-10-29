@@ -82,7 +82,7 @@ pub const EXIT_TERMINAL_LOST: i32 = 129;
 /// client not draining its pane) delays an exit by this much, never holds it.
 /// Short enough that a person does not wait on a dead terminal, long enough
 /// for the frames of a live one.
-const EXIT_BUDGET: Duration = Duration::from_millis(1000);
+pub(crate) const EXIT_BUDGET: Duration = Duration::from_millis(1000);
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const FENCE_TIMEOUT: Duration = Duration::from_millis(300);
