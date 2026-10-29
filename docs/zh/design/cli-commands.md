@@ -32,7 +32,8 @@ Settings > Command isolation
 ```
 
 打开面板时分别读取策略快照和当前 `main` 分支的 Permission 预设。快照的 revision 随草稿保留，
-不作为用户输入字段。隔离层级和扩大范围请求的选择器只修改草稿。编辑版本 1 策略的
+不作为用户输入字段。隔离层级和扩大范围请求的选择器打开时预选草稿值，字段省略时预选其有效值，
+并且只修改草稿。编辑版本 1 策略的
 tier/escalation 时，显式将其有效设置转换为版本 2，并保留可选列表。Save 提交完整草稿和
 读取时的 revision；Reset to defaults 先要求确认，再携带该 revision 由所有者重置。
 两种操作都不会自动重试过期 revision。发生冲突时保留草稿，显示错误并提供 Reload；

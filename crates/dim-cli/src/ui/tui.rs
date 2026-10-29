@@ -4855,6 +4855,8 @@ mod tests {
         app.handle_input(key(KeyCode::Enter));
         assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
         let policy = IsolationPolicy {
+            sandbox: Some(Sandbox::Host),
+            escalation: Some(IsolationEscalation::Deny),
             environment: Some(Vec::new()),
             read_only_paths: Some(vec!["/usr".into()]),
             ..IsolationPolicy::default()
@@ -4864,14 +4866,19 @@ mod tests {
             path: home.path().join("host-isolation.json"),
             source: IsolationPolicySource::File,
             effective: IsolationPolicyEffective {
-                sandbox: Sandbox::Workspace,
-                escalation: IsolationEscalation::Ask,
+                sandbox: Sandbox::Host,
+                escalation: IsolationEscalation::Deny,
             },
             policy,
         };
         app.apply(Update::Isolation(Ok(snapshot)));
         app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Up));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
         app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Enter));
         app.handle_input(key(KeyCode::Enter));
         for _ in 0..3 {
             app.handle_input(key(KeyCode::Down));
@@ -4884,6 +4891,7 @@ mod tests {
             }) => {
                 assert_eq!(expected_revision, "r1");
                 assert_eq!(policy.sandbox, Some(Sandbox::Network));
+                assert_eq!(policy.escalation, Some(IsolationEscalation::Deny));
                 assert_eq!(policy.environment, Some(Vec::new()));
                 assert_eq!(policy.read_only_paths, Some(vec!["/usr".into()]));
                 assert_eq!(policy.writable_paths, None);

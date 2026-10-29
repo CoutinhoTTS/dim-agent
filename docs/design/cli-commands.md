@@ -38,7 +38,8 @@ Settings > Command isolation
 
 Opening the panel reads the policy snapshot and the current `main` Permission preset separately.
 The snapshot revision stays with the draft, not as a user-entered field. Tier and wider-request
-pickers change the draft only. Editing a version 1 policy's tier/escalation explicitly converts
+pickers initially select the draft value, or its effective value when omitted, and change the
+draft only. Editing a version 1 policy's tier/escalation explicitly converts
 its effective settings to version 2, preserving optional lists. Save submits the complete draft
 with the inspected revision; Reset to defaults asks for confirmation, then resets through the
 owner with that revision. Neither action retries a stale revision automatically. A conflict

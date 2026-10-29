@@ -73,7 +73,7 @@ impl IsolationPanel {
                 self.message = Some(error);
             }
         }
-        self.refresh(None);
+        self.refresh();
     }
 
     fn dirty(&self) -> bool {
@@ -132,7 +132,7 @@ impl IsolationPanel {
         }
     }
 
-    fn refresh(&mut self, selected: Option<&str>) {
+    fn refresh(&mut self) {
         let mut items = Vec::new();
         if let Some(message) = &self.message {
             items.push(Item::heading(message));
@@ -239,6 +239,15 @@ impl IsolationPanel {
             }
             _ => return,
         }
+        let selected = match (&self.page, &self.snapshot, &self.draft) {
+            (Page::Tier, Some(snapshot), Some(draft)) => {
+                Some(draft.sandbox.unwrap_or(snapshot.effective.sandbox).name())
+            }
+            (Page::Escalation, Some(snapshot), Some(draft)) => Some(escalation_name(
+                draft.escalation.unwrap_or(snapshot.effective.escalation),
+            )),
+            _ => None,
+        };
         self.list = Self::list();
         self.list.set_items(Ok(items), selected);
     }
@@ -265,7 +274,7 @@ impl IsolationPanel {
         {
             if key.code == KeyCode::Esc {
                 self.page = Page::List(*field);
-                self.refresh(None);
+                self.refresh();
             } else if key.code == KeyCode::Enter {
                 let field = *field;
                 let index = *index;
@@ -281,7 +290,7 @@ impl IsolationPanel {
                 }
                 self.set_values(field, Some(values));
                 self.page = Page::List(field);
-                self.refresh(None);
+                self.refresh();
             } else {
                 input.handle_key(key);
             }
@@ -299,7 +308,7 @@ impl IsolationPanel {
             }
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('n') | KeyCode::Enter) {
                 self.page = Page::Main;
-                self.refresh(None);
+                self.refresh();
             }
             return Effect::None;
         }
@@ -313,7 +322,7 @@ impl IsolationPanel {
             let mut values = self.values(field).unwrap_or_default();
             values.remove(index);
             self.set_values(field, Some(values));
-            self.refresh(None);
+            self.refresh();
             return Effect::None;
         }
         match self.list.handle_key(key) {
@@ -402,7 +411,7 @@ impl IsolationPanel {
             },
             Event::None | Event::Refresh => return Effect::None,
         }
-        self.refresh(None);
+        self.refresh();
         Effect::None
     }
 
