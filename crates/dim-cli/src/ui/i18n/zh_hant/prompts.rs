@@ -47,9 +47,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y 允許 · n 拒絕 · ←→/Tab 移動 · Enter 確認"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter 送出 · Tab 編輯 · Esc 不回答",
-        "Space toggle · Tab next · Esc decline" => "Space 切換 · Tab 下一題 · Esc 不回答",
-        "1-9 select · Tab next · Esc decline" => "1-9 選擇 · Tab 下一題 · Esc 不回答",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter 送出 · Tab 編輯 · / 指令 · Esc 不回答"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space 切換 · Tab 下一題 · / 指令 · Esc 不回答"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 選擇 · Tab 下一題 · / 指令 · Esc 不回答"
+        }
         "Question" => "問題",
         "Question on branch {branch}" => "來自分支 {branch} 的問題",
         "Permission on branch {branch}" => "來自分支 {branch} 的授權請求",
@@ -58,14 +64,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // prompts.rs: AskUser
         "Confirm" => "確認",
         "Enter save · Esc back" => "Enter 儲存 · Esc 返回",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter 送出 · 1-9 修改 · Tab/←→ 返回 · Esc 不回答"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter 送出 · 1-9 修改 · Tab/←→ 返回 · / 指令 · Esc 不回答"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 移動 · Space 勾選 · Enter 下一題 · Tab/←→ 切換 · Esc 不回答"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 移動 · Space 勾選 · Enter 下一題 · Tab/←→ 切換 · / 指令 · Esc 不回答"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 移動 · 1-9 選擇 · Enter 下一題 · Tab/←→ 切換 · Esc 不回答"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 移動 · 1-9 選擇 · Enter 下一題 · Tab/←→ 切換 · / 指令 · Esc 不回答"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion 收到無效的資料。",
         "Missing answer for Q{index}" => "第 {index} 題尚未回答",
@@ -74,6 +80,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "未回答",
         // approvals_panel.rs
         "Tool Approvals" => "工具核准",
+        "Approval" => "核准",
+        "Ask" => "詢問",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "執行命令、存取網路、工作區外寫入與未分類工具前先詢問"
+        }
         "full access" => "完整存取",
         "All tools run automatically, bypass permissions" => "所有工具自動執行，略過權限確認",
         "approve for me" => "智慧權限",

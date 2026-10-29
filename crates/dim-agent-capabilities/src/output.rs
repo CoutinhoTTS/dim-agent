@@ -99,6 +99,14 @@ pub(crate) struct Output {
     scope: ModelCallData,
     /// Text of the current block not committed yet.
     text: String,
+    /// Stable identity of the current text block, across flush chunks.
+    text_part_id: Option<String>,
+    /// Whether the first text event carrying `text_part_id` was committed.
+    text_part_committed: bool,
+    /// Stable identity of the current thinking block.
+    thinking_part_id: Option<String>,
+    /// Whether the first thinking event carrying `thinking_part_id` was committed.
+    thinking_part_committed: bool,
     text_since: Option<Instant>,
     pub started: Vec<StartedCall>,
     committed_text: String,
@@ -125,6 +133,10 @@ impl Output {
             progress,
             scope,
             text: String::new(),
+            text_part_id: None,
+            text_part_committed: false,
+            thinking_part_id: None,
+            thinking_part_committed: false,
             text_since: None,
             started: Vec::new(),
             committed_text: String::new(),
@@ -182,13 +194,17 @@ impl Output {
         let earlier = self.handed_off(thinking);
         self.progress.update(|progress| {
             if progress.request_id.as_deref() == Some(self.scope.request_id.as_str()) {
-                let shown = if thinking {
-                    &mut progress.thinking
+                if thinking {
+                    progress.text_part_id = None;
+                    progress.thinking_part_id = self.thinking_part_id.clone();
+                    progress.thinking.truncate(earlier);
+                    progress.thinking.push_str(tail);
                 } else {
-                    &mut progress.text
-                };
-                shown.truncate(earlier);
-                shown.push_str(tail);
+                    progress.thinking_part_id = None;
+                    progress.text_part_id = self.text_part_id.clone();
+                    progress.text.truncate(earlier);
+                    progress.text.push_str(tail);
+                }
             }
         });
     }
@@ -229,10 +245,18 @@ impl Output {
     }
     /// Commits one output event; the event is checked against before-commit
     /// rewrites.
-    fn commit(&mut self, kind: EventKind) -> Result<Arc<AgentEvent>, HostError> {
+    fn commit(
+        &mut self,
+        kind: EventKind,
+        id: Option<String>,
+    ) -> Result<Arc<AgentEvent>, HostError> {
+        let mut draft = EventDraft::new(kind);
+        if let Some(id) = id {
+            draft = draft.with_id(id);
+        }
         let event = self
             .timeline
-            .append(kind.into())
+            .append(draft)
             .map_err(|error| HostError::failed(error.to_string()))?;
         let (turn_id, request_id) = match &event.kind {
             EventKind::Text(d) | EventKind::Thinking(d) => (&d.turn_id, &d.request_id),
@@ -248,13 +272,30 @@ impl Output {
         Ok(event)
     }
     fn text(&mut self, delta: String) -> Result<(), HostError> {
-        self.show(|progress| progress.text.push_str(&delta));
+        if self.text_part_id.is_none() {
+            self.text_part_id = Some(uuid::Uuid::new_v4().to_string());
+            self.text_part_committed = false;
+        }
+        self.thinking_part_id = None;
+        self.thinking_part_committed = false;
+        let part_id = self.text_part_id.clone();
+        self.show(|progress| {
+            progress.text_part_id = part_id;
+            progress.thinking_part_id = None;
+            progress.text.push_str(&delta);
+        });
         self.text.push_str(&delta);
         let since = *self.text_since.get_or_insert_with(Instant::now);
         if self.text.len() >= TEXT_FLUSH_BYTES || since.elapsed() >= TEXT_FLUSH_AGE {
             self.flush_text()?;
         }
         Ok(())
+    }
+    /// Ends the provider's text block. The block identity stays open because
+    /// `TextEnd` is not durable: adjacent text events with no thinking or tool
+    /// event between them are one block in history.
+    fn end_text(&mut self) -> Result<(), HostError> {
+        self.flush_text()
     }
     /// Commits the buffered text as one `step/text`.
     pub fn flush_text(&mut self) -> Result<(), HostError> {
@@ -263,11 +304,20 @@ impl Output {
         }
         self.text_since = None;
         let delta = std::mem::take(&mut self.text);
-        let event = self.commit(EventKind::Text(TextData {
-            turn_id: self.scope.turn_id.clone(),
-            request_id: self.scope.request_id.clone(),
-            delta,
-        }))?;
+        let event_id = if self.text_part_committed {
+            None
+        } else {
+            self.text_part_committed = true;
+            self.text_part_id.clone()
+        };
+        let event = self.commit(
+            EventKind::Text(TextData {
+                turn_id: self.scope.turn_id.clone(),
+                request_id: self.scope.request_id.clone(),
+                delta,
+            }),
+            event_id,
+        )?;
         let EventKind::Text(data) = &event.kind else {
             return Err(HostError::failed("Committed output changed its kind"));
         };
@@ -276,17 +326,50 @@ impl Output {
         self.hand_off(event.sequence, Handoff::Text(data.delta.len()));
         Ok(())
     }
+    fn thinking_delta(&mut self, thinking: String) -> Result<(), HostError> {
+        self.flush_text()?;
+        self.text_part_id = None;
+        self.text_part_committed = false;
+        if self.thinking_part_id.is_none() {
+            self.thinking_part_id = Some(uuid::Uuid::new_v4().to_string());
+            self.thinking_part_committed = false;
+        }
+        let part_id = self.thinking_part_id.clone();
+        self.show(|progress| {
+            progress.text_part_id = None;
+            progress.thinking_part_id = part_id;
+            progress.thinking.push_str(&thinking);
+        });
+        Ok(())
+    }
     fn thinking(&mut self, thinking: String) -> Result<(), HostError> {
         self.flush_text()?;
+        self.text_part_id = None;
+        self.text_part_committed = false;
         if thinking.is_empty() {
+            self.thinking_part_id = None;
+            self.thinking_part_committed = false;
             self.replace_tail(true, "");
             return Ok(());
         }
-        let event = self.commit(EventKind::Thinking(ThinkingData {
-            turn_id: self.scope.turn_id.clone(),
-            request_id: self.scope.request_id.clone(),
-            delta: thinking,
-        }))?;
+        if self.thinking_part_id.is_none() {
+            self.thinking_part_id = Some(uuid::Uuid::new_v4().to_string());
+            self.thinking_part_committed = false;
+        }
+        let event_id = if self.thinking_part_committed {
+            None
+        } else {
+            self.thinking_part_committed = true;
+            self.thinking_part_id.clone()
+        };
+        let event = self.commit(
+            EventKind::Thinking(ThinkingData {
+                turn_id: self.scope.turn_id.clone(),
+                request_id: self.scope.request_id.clone(),
+                delta: thinking,
+            }),
+            event_id,
+        )?;
         let EventKind::Thinking(data) = &event.kind else {
             return Err(HostError::failed("Committed output changed its kind"));
         };
@@ -297,17 +380,26 @@ impl Output {
     }
     fn tool_start(&mut self, call_id: String, name: String) -> Result<(), HostError> {
         self.flush_text()?;
-        self.commit(EventKind::ToolUseStart(ToolUseStartData {
-            turn_id: self.scope.turn_id.clone(),
-            request_id: self.scope.request_id.clone(),
-            call_id: call_id.clone(),
-            name: name.clone(),
-        }))?;
+        self.text_part_id = None;
+        self.text_part_committed = false;
+        self.thinking_part_id = None;
+        self.thinking_part_committed = false;
+        self.commit(
+            EventKind::ToolUseStart(ToolUseStartData {
+                turn_id: self.scope.turn_id.clone(),
+                request_id: self.scope.request_id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+            }),
+            None,
+        )?;
         self.started.push(StartedCall {
             id: call_id.clone(),
             complete: false,
         });
         self.show(|progress| {
+            progress.text_part_id = None;
+            progress.thinking_part_id = None;
             progress.tools.push(ToolProgress {
                 call_id,
                 name,
@@ -318,11 +410,18 @@ impl Output {
     }
     fn tool_use(&mut self, call: ToolCall) -> Result<(), HostError> {
         self.flush_text()?;
-        let event = self.commit(EventKind::ToolUse(ToolUseData {
-            turn_id: self.scope.turn_id.clone(),
-            request_id: self.scope.request_id.clone(),
-            call: call.clone(),
-        }))?;
+        self.text_part_id = None;
+        self.text_part_committed = false;
+        self.thinking_part_id = None;
+        self.thinking_part_committed = false;
+        let event = self.commit(
+            EventKind::ToolUse(ToolUseData {
+                turn_id: self.scope.turn_id.clone(),
+                request_id: self.scope.request_id.clone(),
+                call: call.clone(),
+            }),
+            None,
+        )?;
         if let EventKind::ToolUse(data) = &event.kind {
             self.committed_calls
                 .insert(data.call.id.clone(), data.call.clone());
@@ -391,7 +490,7 @@ impl Output {
             request_id: self.scope.request_id.clone(),
             content,
         };
-        let event = self.commit(EventKind::ModelContent(data.clone()))?;
+        let event = self.commit(EventKind::ModelContent(data.clone()), None)?;
         if event.kind != EventKind::ModelContent(data) {
             return Err(HostError::failed(
                 "Complete model content was changed before commit",
@@ -502,7 +601,7 @@ async fn parse_output(
             ModelChunk::Thinking(delta) => {
                 output.receive()?;
                 visible = true;
-                output.show(|progress| progress.thinking.push_str(&delta));
+                output.thinking_delta(delta)?;
             }
             ModelChunk::ThinkingEnd { thinking } => {
                 output.receive()?;
@@ -514,7 +613,7 @@ async fn parse_output(
                 visible = true;
                 output.text(delta)?;
             }
-            ModelChunk::TextEnd => output.flush_text()?,
+            ModelChunk::TextEnd => output.end_text()?,
             ModelChunk::ToolStart { id, name } => {
                 output.receive()?;
                 visible = true;

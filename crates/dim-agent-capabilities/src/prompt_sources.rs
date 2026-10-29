@@ -192,7 +192,12 @@ fn xml_tag(name: &str, value: &str) -> String {
 
 /// The runtime environment (TS `renderRuntimeEnvironment`): one tag per
 /// line, values escaped; the date is its own source.
-fn environment(platform: &HostPlatform, shell: &ShellStatus, cwd: &str) -> String {
+fn environment(
+    platform: &HostPlatform,
+    shell: &ShellStatus,
+    cwd: &str,
+    policy: &PromptSourcesConfig,
+) -> String {
     let os = match platform.os {
         Os::Macos => "darwin",
         Os::Linux => "linux",
@@ -209,10 +214,15 @@ fn environment(platform: &HostPlatform, shell: &ShellStatus, cwd: &str) -> Strin
             output_encoding,
             ..
         }) => {
-            let (edition, guidance) = shell_guidance(*edition);
+            let shell = *edition;
+            let (edition, built_in) = shell_guidance(shell);
+            let guidance = match &policy.shell_guidance {
+                Some(custom) => custom(shell),
+                None => built_in.to_owned(),
+            };
             entries.push(xml_tag("shell", &executable_path.to_string_lossy()));
             entries.push(xml_tag("shell_edition", edition));
-            entries.push(xml_tag("shell_guidance", guidance));
+            entries.push(xml_tag("shell_guidance", &guidance));
             entries.push(xml_tag(
                 "shell_output_encoding",
                 match output_encoding {
@@ -221,7 +231,11 @@ fn environment(platform: &HostPlatform, shell: &ShellStatus, cwd: &str) -> Strin
                 },
             ));
             if platform.os == Os::Windows {
-                entries.push(xml_tag("file_encoding_guidance", FILE_ENCODING_GUIDANCE));
+                let guidance = policy
+                    .file_encoding_guidance
+                    .as_deref()
+                    .unwrap_or(FILE_ENCODING_GUIDANCE);
+                entries.push(xml_tag("file_encoding_guidance", guidance));
             }
         }
         ShellStatus::Unavailable { reason, .. } => {
@@ -299,11 +313,24 @@ async fn load_instructions(cwd: &str, home: &Path) -> Result<Instructions, HostE
         .map_err(|_| HostError::failed("AGENTS.md read task failed"))?
 }
 
+/// Factory configuration of the sources' policy texts ([PromptSources §2]).
+/// The product sets none of them, so the built-in texts are in force.
+#[derive(Clone, Default)]
+pub struct PromptSourcesConfig {
+    /// `dim/base` in place of the built-in identity and rules.
+    pub base: Option<Arc<str>>,
+    /// The shell guidance the environment source carries, per edition.
+    pub shell_guidance: Option<Arc<dyn Fn(ShellEdition) -> String + Send + Sync>>,
+    /// The file-encoding guidance the environment source carries.
+    pub file_encoding_guidance: Option<Arc<str>>,
+}
+
 struct Sources {
     platform: Arc<HostPlatform>,
     config: Arc<SessionConfig>,
     today: Today,
     stopped: CancellationToken,
+    policy: PromptSourcesConfig,
 }
 
 impl LoadPrompt for Sources {
@@ -321,7 +348,10 @@ impl LoadPrompt for Sources {
             }
             let (body, delivery, order) = match target.source.as_str() {
                 BASE => (
-                    Some(format!("{IDENTITY}\n{DEFAULTS}")),
+                    Some(match &self.policy.base {
+                        Some(base) => base.to_string(),
+                        None => format!("{IDENTITY}\n{DEFAULTS}"),
+                    }),
                     PromptDelivery::System,
                     0,
                 ),
@@ -345,6 +375,7 @@ impl LoadPrompt for Sources {
                         &self.platform,
                         &self.platform.exec_shell().await,
                         &self.config.cwd,
+                        &self.policy,
                     )),
                     PromptDelivery::State,
                     200,
@@ -382,14 +413,25 @@ pub struct PromptSourcesPlugin {
     config: Key<SessionConfig>,
     registry: Key<PromptRegistry>,
     pub today: Today,
+    policy: PromptSourcesConfig,
 }
 impl PromptSourcesPlugin {
     pub fn new(names: &Names<'_>, today: Today) -> rutis::Result<Self> {
+        Self::with_config(names, today, PromptSourcesConfig::default())
+    }
+    /// The plugin with a candidate's policy texts at its factory
+    /// configuration ([PromptSources §2](../../../docs/design/plugins/PromptSources.md)).
+    pub fn with_config(
+        names: &Names<'_>,
+        today: Today,
+        policy: PromptSourcesConfig,
+    ) -> rutis::Result<Self> {
         Ok(Self {
             platform: names.key()?,
             config: names.key()?,
             registry: names.key()?,
             today,
+            policy,
         })
     }
 }
@@ -414,6 +456,7 @@ impl DynPlugin for PromptSourcesPlugin {
                 config,
                 today: self.today.clone(),
                 stopped: ctx.cancellation_token(),
+                policy: self.policy.clone(),
             });
             for name in SOURCES {
                 registry.register(ctx, name, sources.clone())?;

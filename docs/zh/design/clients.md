@@ -50,7 +50,7 @@ flowchart TB
 | --- | --- |
 | 线路协议 v3：分帧、`hello` 与功能声明、通知 | `crates/dim-app-server/src/protocol.rs`（没有文字版参考，见 §4 第 5 条）；[App Server README](../../../crates/dim-app-server/README.md) |
 | Session 方法与管理方法之分，以及每种入口提供哪些方法 | [Session 边界](contracts/session-boundary.md)（A.3 入口）、[管理方法](../../design/appserver/management-methods.md) |
-| 读取 Session：先 `session.attach`，再按固定的头部读 `session.history`，然后接收实时的 `session.event`、`session.state`、`session.model.progress`；由客户端自己折叠 | [Session 访问](contracts/session-access.md)、[CLI 命令](cli-commands.md)；[#276](https://github.com/arcships/dim/issues/276) 的处理结论 |
+| 读取 Session：先 `session.attach`，再按固定的头部读 `session.history`，然后接收实时的 `session.event`、`session.state`、`session.model.progress`；由客户端自己折叠。attach 的回复携带该 Session 的 `SessionInfo`，与 `session.list` 给出的相同，因此打开已知 Session 的客户端从它取模型，不读目录；重载期间标题字段缺失、`running` 为 false，随后的通知将其更正 | [Session 访问](contracts/session-access.md)、[CLI 命令](cli-commands.md)；[#276](https://github.com/arcships/dim/issues/276) 的处理结论 |
 | 不属于 Timeline 事实的广播通知（`session.notice`，例如标题） | [Session 广播通知](appserver/session-notices.md) |
 | 审批与提问：`approval.request` / `cancelled` / `resolved`；提问是一次未完成的 `ask_user` 调用，用 `session.question.respond` 回答 | [ADR 003](../adr/003-approval-scope.md)、[Questions](plugins/Questions.md) |
 | 查看 Session 的界面：UI 登记处，终端界面作为 UI 叶子（`ui.open`、`ui.attach`、`ui.status`） | [Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) |
@@ -69,7 +69,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 登录、登出（OAuth、Dim 账号） | 已实现 | — | `/login`、`dimcode login` |
 | API-key Provider 的添加/编辑/测试/启用/禁用/切换 | 已实现；删除和模型列表编辑：CLI 中无（服务端已支持） | 只读的 `provider.*` | [Provider 管理](appserver/provider-management.md) |
 | 切换模型 | 已实现 | 已实现 | `session.model.update` |
-| 推理强度、快速模式 | 已实现（`/effort`、`/fast`）；在 `/models` 里调推理强度：无 | — | [模型配置](../../design/model-configuration.md) |
+| 推理强度、快速模式 | 已实现（`/effort`、`/fast`，以及 `/models` 中用 ←/→ 调整） | — | [模型配置](../../design/model-configuration.md) |
 | 子 agent 模型策略 | 已完成（`/models` → Subagent models） | — | [子 agent 模型策略](../../design/subagent-model-policy.md)、[#263](https://github.com/arcships/dim/issues/263) |
 | 辅助模型 | 服务端已按所有者设计（例如 SessionTitle）；没有客户端界面 | — | [AuxiliaryModel](appserver/auxiliary-model.md) |
 
@@ -91,6 +91,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 能力 | CLI | Web | 来源 |
 | --- | --- | --- | --- |
 | 发送、排队、自动发送、引导（`Ctrl+S`）、中断 | 已实现 | 发送和停止：已实现；排队：后续阶段 | InputQueue（S1） |
+| 线：树、切换、新建、发送、停止、审批、结束 | 已实现 | 已实现（右侧 Lines 面板） | [Timeline 线](../../design/timeline-branches.md) §14、[Web 工作区](../../design/web-workspace.md#41-lines-and-branch) |
 | `/queue` 面板与删除排队消息 | 无（只能按 Up 取回） | — | 服务端契约已实现（S1） |
 | 取回排队消息重新编辑 | 已实现；带附件的消息会丢失附件（§4 第 4 条） | — | |
 | 多行、粘贴、大段粘贴、图片、混合附件、`@` 文件、`!` / `!!` | 已实现 | 附件：后续阶段 | [CLI 附件输入](../../design/cli-attachment-input.md)、[ShellInput](plugins/ShellInput.md) |
@@ -100,7 +101,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 打开链接、工具分组、`/tools` | 已实现 | 已实现（渲染） | |
 | 流式输出、运行状态、终端状态与进度 | 已实现 | 已实现 | |
 | 文件改动反馈 | 已实现 | 已实现 | |
-| 工具审批 | 已实现 | 已实现 | [ADR 003](../adr/003-approval-scope.md) |
+| 工具审批 | 已实现（`/approval` 选择询问或完全访问；`/approvals` 还编辑命令规则） | 已实现 | [ADR 003](../adr/003-approval-scope.md) |
 | 用户提问（`ask_user`） | 已实现（行模式客户端与终端界面） | 无 | [Questions](plugins/Questions.md)（由 #269、#336、#351 实现） |
 | 待办状态 | 不做 | 不做 | [总体设计](overview.md) §1 |
 | 后台任务：命令与成员（详情、停止单个、全部停止） | 已实现 | — | [后台任务列表](../../design/background-task-list.md)、[输出](../../design/background-task-output.md)、[成员会话](../../design/member-conversation.md) |

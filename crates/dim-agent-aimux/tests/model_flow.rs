@@ -287,12 +287,16 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0]["model"], "test-model");
         assert_eq!(requests[0]["temperature"].as_f64(), Some(0.));
-        assert_eq!(
-            requests[0]["messages"][0]["content"],
-            format!(
-                "system instructions\n\n{}",
-                include_str!("../../dim-agent-capabilities/src/input-guide.txt").trim_end()
-            )
+        let system = requests[0]["messages"][0]["content"]
+            .as_str()
+            .expect("the request's system text");
+        assert!(
+            system.starts_with("system instructions\n\n# How to read your input"),
+            "{system:?}"
+        );
+        assert!(
+            system.ends_with("they do not renew any permission."),
+            "{system:?}"
         );
         assert_eq!(requests[2]["messages"].as_array().unwrap().last().unwrap()["content"], "result text");
 

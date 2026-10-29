@@ -19,6 +19,7 @@ pub mod model_provider;
 mod output;
 pub mod permission;
 pub mod prompt;
+pub mod prompt_guide;
 pub mod prompt_registry;
 pub mod prompt_sources;
 pub mod prompt_state;
@@ -64,6 +65,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<tool_registry::ToolSourcesView>(catalog, session);
     register::<history::HistoryRenderer>(catalog, session);
     register::<prompt::InitialPromptConfiguration>(catalog, session);
+    register::<prompt_guide::GuideEntries>(catalog, session);
     register::<prompt_registry::PromptRegistry>(catalog, session);
     register::<skills::SessionSkills>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);

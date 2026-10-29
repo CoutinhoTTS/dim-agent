@@ -1,20 +1,33 @@
 //! The `/models` picker (port of `ModelPanel` and `buildModelRows` for the
-//! models a daemon offers; reasoning-effort levels and "Edit models" are not
-//! built yet), and its "Subagent models" action when the daemon manages that
-//! policy:
+//! models a daemon offers; "Edit models" is not built yet), and its
+//! "Subagent models" action when the daemon manages that policy:
 //!
 //! ```text
-//! Select a model                  Subagent models
-//!   Current provider / model        Agent choice (default)
-//!   Other provider / model          Inherit requesting branch
-//!   Edit models                     Fixed model > the model list again
+//! Select a model
+//! > Provider / model          ‹ high ›  current
+//!   Other provider / model    low
+//!   Edit models
 //!   Subagent models: Agent choice
-//!                                   Applies to new members, including named Agents.
-//!                                   Existing members keep their models.
+//! Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+//!
+//! Subagent models
+//!   Agent choice (default)
+//!   Inherit requesting branch
+//!   Fixed model > the model list again
+//!   Applies to new members, including named Agents.
+//!   Existing members keep their models.
 //! ```
+//!
+//! ←/→ cycles the highlighted model's advertised reasoning efforts and wraps.
+//! The choice stays on that row until the list is replaced. Enter adopts the
+//! model; a cycled effort is saved as its `reasoningEffort` and sent with the
+//! model's other saved preferences. A model with no advertised effort ignores
+//! the arrows. Typing in the filter keeps ←/→ for the cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
+
+use std::collections::BTreeMap;
 
 use crate::model::session::{
     EmptyProvider, ModelItem, ModelList, ModelPolicyUpdate, SubagentModelPolicy,
@@ -26,7 +39,7 @@ use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use dim_agent_types::ModelId;
 
-const HINT: &str = "Enter select · Ctrl+X clear saved · Esc clear/close";
+const HINT: &str = "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close";
 const POLICY_HINT: &str = "Enter select · Esc back";
 const EDIT_MODELS: &str = "__edit_models__";
 const SUBAGENT_MODELS: &str = "__subagent_models__";
@@ -56,6 +69,8 @@ pub struct ModelsPanel {
     listed: Option<Result<ModelList, String>>,
     /// `None` while the daemon does not manage the policy: no action.
     policy: Option<Policy>,
+    /// Effort ←/→ chose for `provider::model`, until the list is replaced.
+    chosen: BTreeMap<String, String>,
 }
 
 impl ModelsPanel {
@@ -65,10 +80,12 @@ impl ModelsPanel {
             list: list(View::Models),
             listed: None,
             policy: None,
+            chosen: BTreeMap::new(),
         }
     }
 
     pub fn set_models(&mut self, models: Result<ModelList, String>) {
+        self.chosen.clear();
         self.listed = Some(models);
         self.rebuild(None);
     }
@@ -141,11 +158,21 @@ impl ModelsPanel {
             (View::Fixed, _) => None,
             (View::Policy, _) => mode.map(str::to_owned),
         };
+        let focus = preselect
+            .map(str::to_owned)
+            .or_else(|| selected.clone())
+            .or_else(|| marked.clone());
+        let show_effort = self.view == View::Models;
         let items = match self.view {
             View::Policy => Some(Ok(self.policy_rows(mode))),
             View::Models | View::Fixed => self.listed.as_ref().map(|listed| {
                 listed.clone().map(|list| {
-                    let mut items = model_rows(&list.models, marked.as_deref());
+                    let mut items = model_rows(
+                        &list.models,
+                        marked.as_deref(),
+                        show_effort.then_some(focus.as_deref()).flatten(),
+                        show_effort.then_some(&self.chosen),
+                    );
                     items.extend(empty_rows(&list.empty));
                     if self.view == View::Models {
                         items.push(Item::new(EDIT_MODELS, t("Edit models"), ""));
@@ -227,6 +254,13 @@ impl ModelsPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         if self.view == View::Models
+            && key.mods.0 == 0
+            && matches!(key.code, KeyCode::Left | KeyCode::Right)
+            && self.list.filter_is_empty()
+        {
+            return self.cycle(key.code == KeyCode::Right);
+        }
+        if self.view == View::Models
             && key.code == KeyCode::Char('x')
             && key.mods.contains(Modifiers::CTRL)
         {
@@ -245,7 +279,11 @@ impl ModelsPanel {
                 })
                 .unwrap_or(Effect::None);
         }
+        let before = self.list.selected_id();
         let event = self.list.handle_key(key);
+        if self.view == View::Models && event == Event::None && self.list.selected_id() != before {
+            self.rebuild(None);
+        }
         match (self.view, event) {
             (_, Event::None | Event::Refresh) => Effect::None,
             (View::Models, Event::Close) => Effect::Close,
@@ -284,10 +322,47 @@ impl ModelsPanel {
                 Some((provider, model)) => Effect::SelectModel {
                     provider_id: provider.to_owned(),
                     model_id: model.to_owned(),
+                    reasoning_effort: self.chosen.get(&id).cloned(),
                 },
                 None => Effect::None,
             },
         }
+    }
+
+    fn cycle(&mut self, forward: bool) -> Effect {
+        let Some(id) = self.list.selected_id() else {
+            return Effect::None;
+        };
+        let effort = {
+            let Some(model) = self
+                .models()
+                .iter()
+                .find(|model| key(&model.provider_id, &model.model_id) == id)
+            else {
+                return Effect::None;
+            };
+            if model.efforts.is_empty() {
+                return Effect::None;
+            }
+            let current = self
+                .chosen
+                .get(&id)
+                .map(String::as_str)
+                .or(model.saved_effort.as_deref())
+                .or(model.default_effort.as_deref());
+            let index = current.and_then(|value| model.efforts.iter().position(|e| e == value));
+            let len = model.efforts.len();
+            let next = match index {
+                Some(index) if forward => (index + 1) % len,
+                Some(index) => (index + len - 1) % len,
+                None if forward => 0,
+                None => len - 1,
+            };
+            model.efforts[next].clone()
+        };
+        self.chosen.insert(id, effort);
+        self.rebuild(None);
+        Effect::None
     }
 
     pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
@@ -319,27 +394,56 @@ fn list(view: View) -> ListPanel {
     }
 }
 
-fn model_rows(models: &[ModelItem], marked: Option<&str>) -> Vec<Item> {
+fn model_rows(
+    models: &[ModelItem],
+    marked: Option<&str>,
+    focus: Option<&str>,
+    chosen: Option<&BTreeMap<String, String>>,
+) -> Vec<Item> {
     let mut items: Vec<Item> = Vec::new();
     if !models.is_empty() {
         items.push(Item::heading(t(SECTION)));
     }
     for model in models {
         let id = key(&model.provider_id, &model.model_id);
-        let detail = if Some(id.as_str()) == marked {
-            t("current")
-        } else {
-            ""
-        };
         let mut row = Item::new(
-            id,
+            id.clone(),
             format!("{} / {}", provider_name(model), model.model_id),
-            detail,
+            effort_detail(
+                model,
+                chosen
+                    .and_then(|chosen| chosen.get(&id))
+                    .map(String::as_str),
+                Some(id.as_str()) == focus,
+                Some(id.as_str()) == marked,
+            ),
         );
         row.search = model.display_name.clone();
         items.push(row);
     }
     items
+}
+
+fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current: bool) -> String {
+    let shown = chosen
+        .or(model.saved_effort.as_deref())
+        .or(model.default_effort.as_deref());
+    let effort = if model.efforts.is_empty() {
+        String::new()
+    } else if focused {
+        match shown {
+            Some(value) => format!("‹ {value} ›"),
+            None => "‹ — ›".to_owned(),
+        }
+    } else {
+        shown.unwrap_or("").to_owned()
+    };
+    match (effort.is_empty(), current) {
+        (true, true) => t("current").to_owned(),
+        (false, true) => format!("{effort}  {}", t("current")),
+        (false, false) => effort,
+        (true, false) => String::new(),
+    }
 }
 
 /// A provider with models but nothing selectable keeps a muted row, after
@@ -379,4 +483,122 @@ fn provider_name(model: &ModelItem) -> &str {
 
 fn key(provider: &str, model: &str) -> String {
     format!("{provider}::{model}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::terminal::Modifiers;
+    use crate::ui::theme::{Appearance, ColorMode};
+
+    fn key_of(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, Modifiers::NONE)
+    }
+
+    fn item(
+        id: &str,
+        efforts: &[&str],
+        saved: Option<&str>,
+        default_effort: Option<&str>,
+    ) -> ModelItem {
+        ModelItem {
+            provider_id: "dim".into(),
+            provider_name: "Dim OAuth".into(),
+            provider_version: 1,
+            model_id: id.into(),
+            display_name: id.into(),
+            efforts: efforts.iter().map(|effort| (*effort).to_owned()).collect(),
+            default_effort: default_effort.map(str::to_owned),
+            saved_effort: saved.map(str::to_owned),
+        }
+    }
+
+    fn panel() -> ModelsPanel {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            models: vec![
+                item("flash", &["low", "high"], Some("low"), Some("low")),
+                item("plain", &[], None, None),
+            ],
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+        }));
+        panel
+    }
+
+    fn drawn(panel: &ModelsPanel) -> String {
+        panel
+            .render(
+                80,
+                16,
+                &crate::ui::theme::palette::terminal_palette(
+                    ColorMode::TrueColor,
+                    Appearance::Dark,
+                ),
+            )
+            .join("\n")
+    }
+
+    #[test]
+    fn arrows_cycle_the_highlighted_models_effort_and_enter_adopts_it() {
+        let mut panel = panel();
+        let screen = drawn(&panel);
+        assert!(screen.contains("‹ low ›"), "{screen}");
+        assert!(screen.contains("←/→"), "{screen}");
+        assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
+        assert!(drawn(&panel).contains("‹ high ›"));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
+        assert!(drawn(&panel).contains("‹ low ›"));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Left)), Effect::None);
+        assert!(drawn(&panel).contains("‹ high ›"));
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                ref provider_id,
+                ref model_id,
+                ref reasoning_effort,
+            } if provider_id == "dim" && model_id == "flash" && reasoning_effort.as_deref() == Some("high")
+        ));
+    }
+
+    #[test]
+    fn a_model_without_effort_ignores_arrows_and_enter_keeps_saved_preferences() {
+        let mut panel = panel();
+        assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
+        assert!(!drawn(&panel).contains('‹'), "{}", drawn(&panel));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                ref model_id,
+                reasoning_effort: None,
+                ..
+            } if model_id == "plain"
+        ));
+    }
+
+    #[test]
+    fn the_filter_keeps_left_and_right_and_a_fresh_list_drops_the_cycle() {
+        let mut panel = panel();
+        panel.handle_key(key_of(KeyCode::Char('f')));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Left)), Effect::None);
+        assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
+        assert!(drawn(&panel).contains("> f"));
+        panel.handle_key(key_of(KeyCode::Esc));
+        panel.handle_key(key_of(KeyCode::Right));
+        assert!(drawn(&panel).contains("‹ high ›"));
+        panel.set_models(Ok(ModelList {
+            models: vec![item("flash", &["low", "high"], Some("low"), Some("low"))],
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+        }));
+        assert!(drawn(&panel).contains("‹ low ›"));
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                reasoning_effort: None,
+                ..
+            }
+        ));
+    }
 }

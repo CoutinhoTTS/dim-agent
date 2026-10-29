@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_types::{SystemPrompt, SystemPromptPart};
 use rutis::host::CtxHost;
 
 pub(super) struct NamedExtension(pub String, pub Arc<AtomicUsize>);
@@ -111,6 +112,15 @@ impl ToolDriver for HoldTool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_plugin_reloads_keep_sessions() {
+    use std::{
+        io::{Read, Write},
+        os::{fd::AsRawFd, unix::net::UnixStream, unix::process::CommandExt},
+    };
+    unsafe extern "C" {
+        fn read(fd: i32, buffer: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buffer: *const u8, count: usize) -> isize;
+    }
+
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let tool = HoldTool {
@@ -168,7 +178,37 @@ async fn process_plugin_reloads_keep_sessions() {
     let listed = observer.rpc("session.list", json!({})).await;
     assert_eq!(listed["result"][0]["sessionId"], sid);
 
-    server.restart("Connection").await.unwrap();
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let spawning = std::thread::spawn(move || {
+        let fd = child.as_raw_fd();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--list").stdout(std::process::Stdio::null());
+        // SAFETY: the child uses only async-signal-safe read/write before exec;
+        // its socket and both one-byte buffers remain live throughout the calls.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                if write(fd, &byte, 1) != 1 || read(fd, &mut byte, 1) != 1 {
+                    return Err(std::io::Error::from_raw_os_error(5));
+                }
+                Ok(())
+            });
+        }
+        command.spawn().unwrap().wait().unwrap()
+    });
+    let mut ready = [0];
+    parent.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [1]);
+    let reloaded =
+        tokio::time::timeout(Duration::from_secs(10), server.restart("Connection")).await;
+    parent.write_all(&[1]).unwrap();
+    assert!(spawning.join().unwrap().success());
+    reloaded
+        .expect("Connection reload must settle while a child holds inherited descriptors")
+        .unwrap();
     let mut reconnected = Client::new(&server, false).await;
     assert_eq!(reconnected.instance, client.instance);
     assert_ok(
@@ -871,6 +911,165 @@ async fn state_notifications_follow_a_loop_reload() {
             }
         }
     }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The frame's first paragraph: the guide opens with it.
+const FRAME_FIRST: &str = "# How to read your input";
+/// The entry the guide probe registers from its own `apply`.
+const GUIDE_PROBE_ENTRY: &str =
+    r#"<dim-guide-probe source="test">: an entry a contributor registered for this flow."#;
+
+fn system_of(prompt: &SystemPrompt) -> String {
+    match prompt {
+        SystemPrompt::Text(text) => text.clone(),
+        SystemPrompt::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                SystemPromptPart::Text { text, .. } => text.as_str(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// The system text of the last model call on `branch`.
+async fn last_system(session: &dim_agent_runtime::Session, branch: &str) -> String {
+    let events = session.history(branch, None).await.unwrap();
+    let request = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .expect("a model call");
+    system_of(request.system.as_deref().expect("a system text"))
+}
+
+/// A Session part that mounts a guide probe; the owner keeps the probe's
+/// view so the test reloads one generation of it.
+struct GuideProbeOwner {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
+    guide: rutis::host::Key<dim_agent_capabilities::prompt_guide::GuideEntries>,
+}
+impl rutis::Plugin for GuideProbeOwner {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        let view = ctx.plugin(GuideProbe {
+            flag: self.flag.clone(),
+            guide: self.guide.clone(),
+        });
+        (&view).await.map_err(|error| {
+            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                format!("guide probe failed: {error}").into(),
+            ))
+        })?;
+        self.views.lock().unwrap().push(view);
+        Ok(())
+    }
+}
+
+/// A contributor: while the test's flag is set, each generation registers
+/// an entry for the marker it writes, from its own `apply`.
+struct GuideProbe {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    guide: rutis::host::Key<dim_agent_capabilities::prompt_guide::GuideEntries>,
+}
+impl rutis::host::DynPlugin for GuideProbe {
+    fn name(&self) -> &str {
+        "GuideProbe"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.guide.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        use dim_agent_capabilities::prompt_guide::{GuideEntry, GuideScope};
+        Box::pin(async move {
+            let guide = ctx.require_at(&self.guide)?;
+            if self.flag.load(Ordering::SeqCst) {
+                guide.register(
+                    ctx,
+                    GuideScope::Session,
+                    GuideEntry {
+                        markers: vec!["dim-guide-probe".into()],
+                        order: 65,
+                        text: GUIDE_PROBE_ENTRY.into(),
+                    },
+                )?;
+            }
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// An entry registers from a contributor's `apply`, is in the request
+/// while that generation is loaded, and leaves the request with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_leaves_with_its_contributor() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let views = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (install_flag, install_views) = (flag.clone(), views.clone());
+    let (server, agent) = launch_with(
+        Arc::new(MockTools),
+        ServerConfig::default(),
+        move |builder| {
+            builder.require_feature(Feature::new("GuideProbeOwner").session(
+                "GuideProbeOwner",
+                move |names| {
+                    Ok(Box::new(GuideProbeOwner {
+                        flag: install_flag.clone(),
+                        views: install_views.clone(),
+                        guide: names.key()?,
+                    }))
+                },
+            ));
+        },
+    )
+    .await;
+    let mut client = Client::new(&server, false).await;
+    let created = client.rpc("session.create", create(json!(["echo"]))).await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&sid).unwrap();
+
+    // Loaded, the contributor's entry is part of the request's guide.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"text":"while loaded"}),
+            )
+            .await,
+    );
+    assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+    let loaded = last_system(&session, "main").await;
+    assert!(loaded.starts_with(FRAME_FIRST), "{loaded:?}");
+    assert!(loaded.contains(GUIDE_PROBE_ENTRY), "{loaded:?}");
+
+    // The next generation does not register: the entry leaves the request
+    // as soon as its contributor is gone.
+    flag.store(false, Ordering::SeqCst);
+    let view = views.lock().unwrap().last().cloned().expect("a probe");
+    view.restart().await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"text":"after reload"}),
+            )
+            .await,
+    );
+    assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+    let after = last_system(&session, "main").await;
+    assert!(after.starts_with(FRAME_FIRST), "{after:?}");
+    assert!(!after.contains(GUIDE_PROBE_ENTRY), "{after:?}");
+
     server.shutdown();
     server.join().await.unwrap();
 }

@@ -46,9 +46,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y 允许 · n 拒绝 · ←→/Tab 移动 · Enter 确认"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter 提交 · Tab 编辑 · Esc 拒答",
-        "Space toggle · Tab next · Esc decline" => "Space 切换 · Tab 下一题 · Esc 拒答",
-        "1-9 select · Tab next · Esc decline" => "1-9 选择 · Tab 下一题 · Esc 拒答",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter 提交 · Tab 编辑 · / 命令 · Esc 拒答"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space 切换 · Tab 下一题 · / 命令 · Esc 拒答"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 选择 · Tab 下一题 · / 命令 · Esc 拒答"
+        }
         "Question" => "问题",
         "Question on branch {branch}" => "来自分支 {branch} 的问题",
         "Permission on branch {branch}" => "来自分支 {branch} 的授权请求",
@@ -56,14 +62,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question not ready; press Enter to send again" => "问题尚未就绪；按 Enter 重试",
         "Confirm" => "确认",
         "Enter save · Esc back" => "Enter 保存 · Esc 返回",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter 提交 · 1-9 修改 · Tab/←→ 返回 · Esc 拒答"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter 提交 · 1-9 修改 · Tab/←→ 返回 · / 命令 · Esc 拒答"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 移动 · Space 勾选 · Enter 下一题 · Tab/←→ 切题 · Esc 拒答"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 移动 · Space 勾选 · Enter 下一题 · Tab/←→ 切题 · / 命令 · Esc 拒答"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 移动 · 1-9 选择 · Enter 下一题 · Tab/←→ 切题 · Esc 拒答"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 移动 · 1-9 选择 · Enter 下一题 · Tab/←→ 切题 · / 命令 · Esc 拒答"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion 收到无效的数据。",
         "Missing answer for Q{index}" => "第 {index} 题缺少回答",
@@ -71,6 +77,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Review your answers and press Enter to submit." => "确认答案后按 Enter 提交。",
         "Not answered" => "未回答",
         "Tool Approvals" => "工具审批",
+        "Approval" => "审批",
+        "Ask" => "询问",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "执行命令、访问网络、工作区外写入和未分类工具前先询问"
+        }
         "full access" => "完全授权",
         "All tools run automatically, bypass permissions" => "所有工具自动执行，跳过权限确认",
         "approve for me" => "智能权限",

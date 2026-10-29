@@ -412,6 +412,14 @@ struct Created {
     model: ModelId,
 }
 
+/// The record `session.attach` replies for the Session it opened. A server
+/// from before the record existed replies `{}`.
+#[derive(Deserialize)]
+struct Attached {
+    #[serde(default)]
+    model: Option<ModelId>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WebToggled {
@@ -564,7 +572,7 @@ impl Worker {
             .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
         self.enter(
             created.session_id,
-            created.model,
+            Some(created.model),
             SwitchKind::New,
             attached_session,
         )
@@ -596,7 +604,7 @@ impl Worker {
             Ok(created) => {
                 self.enter(
                     created.session_id,
-                    created.model,
+                    Some(created.model),
                     SwitchKind::New,
                     attached_session,
                 )
@@ -622,7 +630,7 @@ impl Worker {
     async fn enter(
         &mut self,
         session_id: String,
-        model: ModelId,
+        model: Option<ModelId>,
         kind: SwitchKind,
         attached_session: String,
     ) -> crate::Result<()> {
@@ -640,9 +648,16 @@ impl Worker {
                 .await?;
             self.ui_id = None;
         }
-        self.client
-            .rpc("session.attach", json!({"sessionId": session_id}))
+        let attached: Attached = self
+            .client
+            .typed("session.attach", json!({"sessionId": session_id}))
             .await?;
+        // Without a record, find the model in the catalog: this is the only
+        // caller of `list()` besides `/resume`, and only for an older server.
+        let model = match model.or(attached.model) {
+            Some(model) => model,
+            None => self.model_of(&session_id).await?,
+        };
         self.session_id = session_id.clone();
         self.register_ui().await;
         self.mcp_required.clear();
@@ -724,17 +739,22 @@ impl Worker {
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let listed = self.list().await?;
-        let session = listed
-            .into_iter()
-            .find(|session| session.session_id == session_id)
-            .ok_or_else(|| format!("Session {session_id} was not found"))?;
-        self.enter(session_id, session.model, kind, attached_session)
-            .await
+        self.enter(session_id, None, kind, attached_session).await
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
         self.client.typed("session.summaries", json!({})).await
+    }
+
+    /// The model of one Session, found in the catalog. Only a server whose
+    /// `session.attach` reply carries no record needs this.
+    async fn model_of(&mut self, session_id: &str) -> crate::Result<ModelId> {
+        let sessions = self.list().await?;
+        sessions
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .map(|session| session.model)
+            .ok_or_else(|| format!("Session {session_id} is absent from the catalog").into())
     }
 
     async fn submit(&mut self, text: String, mode: &str) {
@@ -1242,8 +1262,12 @@ impl Worker {
             Command::SelectModel {
                 provider_id,
                 model_id,
+                reasoning_effort,
             } => {
-                if let Err(error) = self.select_model(provider_id, model_id).await {
+                if let Err(error) = self
+                    .select_model(provider_id, model_id, reasoning_effort)
+                    .await
+                {
                     self.send(Update::Notice(format!("Model switch failed: {error}")));
                 }
             }
@@ -2063,6 +2087,15 @@ impl Worker {
             id: String,
             name: String,
             unavailable_reason: Option<String>,
+            #[serde(default)]
+            capabilities: dim_agent_types::ModelCapabilities,
+            #[serde(default)]
+            metadata: Option<CatalogReasoning>,
+        }
+        #[derive(Deserialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        struct CatalogReasoning {
+            reasoning: Option<dim_agent_types::ModelReasoning>,
         }
         let listed: Providers = self.client.typed("provider.list", json!({})).await?;
         let mut usable: Vec<(String, String)> = listed
@@ -2098,6 +2131,7 @@ impl Worker {
             let Some(catalog) = snapshot.ok().and_then(|snapshot| snapshot.catalog) else {
                 continue;
             };
+            let preferences = self.saved_preferences(&provider_id).await;
             let unavailable = catalog
                 .models
                 .iter()
@@ -2112,12 +2146,31 @@ impl Worker {
                         model.unavailable_reason.is_none()
                             && !catalog.disabled_model_ids.contains(&model.id)
                     })
-                    .map(|model| ModelItem {
-                        provider_id: provider_id.clone(),
-                        provider_name: provider_name.clone(),
-                        provider_version: catalog.version,
-                        model_id: model.id,
-                        display_name: model.name,
+                    .map(|model| {
+                        let (efforts, default_effort) = effort_choices(
+                            &model.capabilities,
+                            model
+                                .metadata
+                                .as_ref()
+                                .and_then(|meta| meta.reasoning.as_ref()),
+                        );
+                        let saved_effort = preferences.get(&model.id).and_then(|value| {
+                            value
+                                .get("reasoningEffort")
+                                .and_then(|effort| effort.as_str())
+                                .filter(|effort| efforts.iter().any(|option| option == *effort))
+                                .map(str::to_owned)
+                        });
+                        ModelItem {
+                            provider_id: provider_id.clone(),
+                            provider_name: provider_name.clone(),
+                            provider_version: catalog.version,
+                            model_id: model.id,
+                            display_name: model.name,
+                            efforts,
+                            default_effort,
+                            saved_effort,
+                        }
                     }),
             );
             if models.len() == before && unavailable > 0 {
@@ -2164,15 +2217,95 @@ impl Worker {
         self.send(Update::ModelPolicy(update));
     }
 
+    /// Saved preferences for the picker. Empty when management is absent or
+    /// the read fails, so the catalog list still shows.
+    async fn saved_preferences(
+        &mut self,
+        provider_id: &str,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        if !self.client.offers("provider.management") {
+            return std::collections::BTreeMap::new();
+        }
+        self.client
+            .typed::<ProviderManagement>("provider.management", json!({"providerId": provider_id}))
+            .await
+            .ok()
+            .and_then(|snapshot| snapshot.providers.into_iter().next())
+            .map(|provider| provider.preferences)
+            .unwrap_or_default()
+    }
+
+    /// Saves `effort` when it differs from the stored reasoning effort.
+    /// A daemon without management keeps the choice on this adoption only.
+    async fn save_reasoning_effort(
+        &mut self,
+        provider_id: &str,
+        model_id: &str,
+        effort: &str,
+    ) -> crate::Result<()> {
+        if !self.client.offers("provider.management") {
+            return Ok(());
+        }
+        let snapshot: ProviderManagement = self
+            .client
+            .typed("provider.management", json!({"providerId": provider_id}))
+            .await?;
+        let provider = snapshot
+            .providers
+            .into_iter()
+            .next()
+            .ok_or("Provider management entry is missing")?;
+        let saved = provider
+            .preferences
+            .get(model_id)
+            .and_then(|value| value.get("reasoningEffort"))
+            .and_then(|value| value.as_str());
+        if saved == Some(effort) {
+            return Ok(());
+        }
+        let version = provider
+            .version
+            .ok_or("Provider catalog must be refreshed before editing preferences")?;
+        self.client
+            .rpc(
+                "provider.preferences.update",
+                json!({
+                    "providerId": provider_id,
+                    "modelId": model_id,
+                    "expectedVersion": version,
+                    "patch": {"reasoningEffort": {"action": "set", "value": effort}}
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Switches the session's model, or at home the one the first message
     /// starts a session on, then makes it the default for new ones.
-    async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
+    /// A cycled `reasoning_effort` is saved first, then sent with the model's
+    /// other saved preferences.
+    async fn select_model(
+        &mut self,
+        provider_id: String,
+        model_id: String,
+        reasoning_effort: Option<String>,
+    ) -> crate::Result<()> {
         #[derive(Deserialize)]
         struct Updated {
             model: ModelId,
         }
-        let preferences =
+        if let Some(effort) = &reasoning_effort {
+            self.save_reasoning_effort(&provider_id, &model_id, effort)
+                .await?;
+        }
+        let mut preferences =
             saved_model_preferences(&mut self.client, &provider_id, &model_id).await?;
+        if let Some(effort) = &reasoning_effort {
+            let value = preferences.get_or_insert_with(|| json!({}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert("reasoningEffort".to_owned(), json!(effort));
+            }
+        }
         let model = if self.session_id.is_empty() {
             let model = ModelId {
                 provider_id,
@@ -2892,6 +3025,27 @@ struct CatalogModel {
 #[serde(rename_all = "camelCase")]
 struct CatalogPreferences {
     service_tier: Option<dim_agent_types::ModelServiceTier>,
+}
+
+fn effort_choices(
+    capabilities: &dim_agent_types::ModelCapabilities,
+    reasoning: Option<&dim_agent_types::ModelReasoning>,
+) -> (Vec<String>, Option<String>) {
+    let Some(reasoning) = reasoning else {
+        return (Vec::new(), None);
+    };
+    if !reasoning.supported || !capabilities.reasoning {
+        return (Vec::new(), None);
+    }
+    let mut efforts = reasoning.effort_options.clone().unwrap_or_default();
+    if reasoning.off.is_some() && !efforts.iter().any(|effort| effort == "none") {
+        efforts.push("none".into());
+    }
+    let default = reasoning
+        .effort
+        .clone()
+        .filter(|effort| efforts.iter().any(|option| option == effort));
+    (efforts, default)
 }
 
 pub(crate) async fn saved_model_preferences(

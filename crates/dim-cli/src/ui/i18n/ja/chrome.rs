@@ -294,13 +294,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "sign in to DimAgent" => "DimAgent にサインイン",
         "DimAgent account · usage · sign out" => "DimAgent アカウント · 使用量 · サインアウト",
         "configure tool approvals" => "ツール承認を設定",
+        "choose ask or full access" => "確認かフルアクセスを選ぶ",
         "open settings" => "設定を開く",
         "suspend to the shell" => "シェルへサスペンド",
         "exit" => "終了",
 
         // composer/palette.rs
-        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選択 · Ctrl+X 保存消去 · Esc 消去/閉じる"
+        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選択 · ←/→ 推論強度 · Ctrl+X 保存消去 · Esc 消去/閉じる"
         }
         "Enter select · Esc clear/close" => "Enter 選択 · Esc 消去/閉じる",
         "esc close" => "esc 閉じる",
@@ -333,6 +334,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "マウス（全画面）",
         "Permissions" => "権限",
         "Tool approvals" => "ツール承認",
+        "Command isolation" => "コマンド分離",
+        "Command isolation not saved: {error}" => "コマンド分離を保存できません：{error}",
+        "Command isolation not read: {error}" => "コマンド分離を読めません：{error}",
         "Models" => "モデル",
         "Model" => "モデル",
         "not set" => "未設定",

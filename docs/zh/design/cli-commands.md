@@ -21,6 +21,7 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
+| `/approval` | 在终端界面里为当前 Session 和之后的 Session 选择询问（`workspace-write`）或完全访问（[权限控制](#权限控制)）。 |
 | `/approvals`（别名 `/permissions`） | 交互客户端空闲时查看、切换和管理预设与命令规则。 |
 
 全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。现有的
@@ -245,7 +246,7 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
         v                                         v  创建成员时复制
  main: permission/changed（按版本 CAS）     agent 成员 Session（Collaboration）
    ^  由恢复时的 --permission
-   |  和 /approvals 写入
+   |  和 /approval 或 /approvals 写入
    +-- 分支点 --> 子分支（branch 工具）：分支点处 main 的策略，
                    之后是它自己的修改
 ```
@@ -256,6 +257,30 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
   `main` 的修改不会。切换的确认信息会说明这一点，下文的需求 R2 请 Collaboration 改为复制领导者分支的
   当前策略。
 - 分叉复制源 Session 的事实，所以分叉从源 Session 当前的 `main` 策略开始（#26）。
+
+### `/approval`
+
+终端界面里的 `/approval` 为 `main` 的预设打开两个选项。它写入与 `/approvals` 相同的
+`session.permission.update`，并以同样的方式把预设记入产品 home 的 `config.json`
+（`permissionPreset`）：没有 `--permission` 时，之后创建的 Session 在 `session.create` 里带上它，
+恢复的 Session 在 attach 之前把 `main` 切过去。它不列出也不编辑命令规则。行模式提示符拒绝这条
+命令，仍使用 `/approvals`。
+
+```text
+Approval
+> Ask            current
+  Full access
+↑↓/Tab move · Enter apply · Esc back
+```
+
+| 选项 | 预设 | 哪些会运行 |
+| --- | --- | --- |
+| 询问（Ask） | `workspace-write` | 读取和工作区写入直接运行；命令、网络、工作区外写入和未分类工具先询问 |
+| 完全访问（Full access） | `full-access` | 每次工具调用都不询问 |
+
+询问是产品默认。已经生效的选项上按 Enter 关闭菜单。完全访问仍要和 `/approvals` 一样先确认。
+当前是 `read-only` 时两个选项都不是当前项；选询问会切到 `workspace-write`。`read-only` 仍从
+`/approvals` 和 `--permission` 进入。提示里把 `workspace-write` 称为询问。
 
 ### `/approvals`
 
@@ -370,7 +395,7 @@ CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写
 | --- | --- |
 | 由审阅模型代替用户回答审批 | 一个通过 Approval 公开的回答操作作答的审批回答者，带自己的模型调用和设计，类似 Collaboration 的领导者路径；不是 CLI 改动 |
 | 只在一个 Session 内记住的允许 | 一条记录下来的事实，或 Session 作用域的规则来源（F2 §10.2 暂缓了按工作区的用户规则）；CLI 进程内的记忆会在没有记录决定的情况下代为回答 |
-| 在 CLI 中设置沙箱 | F5 只提供 `host-isolation.json`，没有读写方法；需要 HostPlatform 的管理方法，带修订号、仅限本地，类似 `permission.rules` |
+| 开关以外的隔离字段 | `/settings` 只开关本机 `host-isolation.json` 的沙箱，并保留其余字段。路径、升级和显式层级仍需手改文件；远程客户端仍需要带修订号的 HostPlatform 方法 |
 | Shift+Tab 循环切换 | 只涉及 CLI：编辑器动作结果和确认路径（决定 4） |
 | `--allowed-tools`/`--disallowed-tools` | 一个工具目录读取接口，用于在参数边界校验名字（决定 2） |
 | 回合运行中使用 `/approvals` | 只涉及 CLI：运行中的回合读取普通行并回答审批；面板调用需要加入它的多路复用循环 |
@@ -495,13 +520,23 @@ Session 地址及 `(branchId,requestId,callId)`。
    [x] Auth
    [ ] Billing
        Type your own answer: audit log
- Space toggle · Enter next · Tab switch · Esc decline
+ Space toggle · Enter next · Tab switch · / commands · Esc decline
 ```
 
 复用既有选择、确认和窄屏窗口：数字键选择，Space 多选切换，Tab/Shift+Tab 或左右键切题，
 Confirm 上 Enter 提交。只有 allowCustom 为 true 时显示自定义输入，并与所选标签分开提交。
 自定义行输入非空文字即勾选（单选时替换已选标签），清空则取消；编辑中 Esc 保留文字退出编辑，
 Enter 保留并进入下一题。编辑之外 Esc 拒答整次调用。显示脱敏不改变提交给 owner 的原始标签，composer 草稿保持。
+
+挂起的问题不阻塞命令。其自定义回答未进入编辑时，`/`、Ctrl+O 和 Ctrl+P 在问题之上打开命令面板，
+画在该模式画命令面板的位置，问题保留标签页、选择和已输入的回答。命令面板开启命令输入状态，
+按键一直留在 composer，键入命令的参数并显示在 composer 行上；Enter 与回复进行中一样执行命令，
+命令输入持续到这次 Enter、Esc，或草稿不再是命令为止。在命令面板中以及在输入参数时按 Esc
+都结束命令输入、把按键交还给问题，不拒答问题，也不中断正在运行的回合。
+会打开自身面板的命令把问题暂存，面板关闭时带回答题及其状态；
+期间 Session 已停止询问的问题不再带回。进入自定义行编辑之前 `/` 打开命令面板，因此回答本身可以以路径开头：
+Enter、Space、该行编号或任何其他输入字符进入编辑行，在其中输入的 `/` 是文本。
+其余场合 Esc 语义不变：有问题时拒答，无面板且运行中时中断，没有时间窗口。
 
 发送期间禁止重复提交；成功回复或已提交的批次 result 关闭提示。invalid/not-pending/其他
 失败保留回答和诊断，由 Confirm 显式重试；Esc 可重试拒答。result 先于迟到回复时以 result 为准；后续复用

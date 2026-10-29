@@ -53,6 +53,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `compactionStrategyHost` | session | ProductSummaryStrategy | Rust-only | — |
 | `contextModelHost` | session | SessionScope | Rust-only | — |
 | `faultReporter` | session | SessionScope | Rust-only | — |
+| `guideEntries` | session | PromptGuide | Rust-only | — |
 | `historyRenderer` | session | SessionScope | Rust-only | — |
 | `initialPromptConfiguration` | session | PromptRegistry | Rust-only | — |
 | `mcpSession` | session | McpSession | Rust-only | — |

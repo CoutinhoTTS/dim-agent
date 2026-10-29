@@ -49,9 +49,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y izinkan · n tolak · ←→/Tab pindah · Enter konfirmasi"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter kirim · Tab edit · Esc tolak",
-        "Space toggle · Tab next · Esc decline" => "Space centang · Tab lanjut · Esc tolak",
-        "1-9 select · Tab next · Esc decline" => "1-9 pilih · Tab lanjut · Esc tolak",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter kirim · Tab edit · / perintah · Esc tolak"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space centang · Tab lanjut · / perintah · Esc tolak"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 pilih · Tab lanjut · / perintah · Esc tolak"
+        }
         "Question" => "Pertanyaan",
         "Question on branch {branch}" => "Pertanyaan dari cabang {branch}",
         "Permission on branch {branch}" => "Izin pada cabang {branch}",
@@ -62,14 +68,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // prompts.rs: AskUser
         "Confirm" => "Konfirmasi",
         "Enter save · Esc back" => "Enter simpan · Esc kembali",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter kirim · 1-9 edit · Tab/←→ kembali · Esc tolak"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter kirim · 1-9 edit · Tab/←→ kembali · / perintah · Esc tolak"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ pindah · Space centang · Enter lanjut · Tab/←→ ganti · Esc tolak"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ pindah · Space centang · Enter lanjut · Tab/←→ ganti · / perintah · Esc tolak"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ pindah · 1-9 pilih · Enter lanjut · Tab/←→ ganti · Esc tolak"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ pindah · 1-9 pilih · Enter lanjut · Tab/←→ ganti · / perintah · Esc tolak"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion: payload tak valid.",
         "Missing answer for Q{index}" => "P{index} belum dijawab",
@@ -80,6 +86,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "Belum dijawab",
         // approvals_panel.rs
         "Tool Approvals" => "Persetujuan Tool",
+        "Approval" => "Persetujuan",
+        "Ask" => "Tanya",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "Tanya sebelum perintah, jaringan, tulis di luar ruang kerja, dan alat yang tidak terklasifikasi"
+        }
         "full access" => "akses penuh",
         "All tools run automatically, bypass permissions" => {
             "Semua tool jalan otomatis, lewati izin"

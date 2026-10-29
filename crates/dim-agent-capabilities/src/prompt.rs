@@ -3,6 +3,7 @@ use crate::{
     context_block,
     context_preparation::{ConfigurationPublisher, ToolSetAdoption},
     host::{HostError, PromptHost},
+    prompt_guide::GuideEntries,
     prompt_state::PromptSnapshot,
 };
 use dim_agent_runtime::*;
@@ -108,6 +109,8 @@ struct PromptState {
 
 pub struct Prompt {
     host: Arc<PromptHost>,
+    /// The Session's guide entries, composed for this branch.
+    guide: Arc<GuideEntries>,
     /// Sources the Session delivers, and the model a new Session adopts.
     initial: Arc<InitialPromptConfiguration>,
     publisher: Arc<ConfigurationPublisher>,
@@ -393,12 +396,14 @@ impl Prompt {
         if cancel.is_cancelled() {
             return Ok(ToolAdoptOutcome::Superseded);
         }
+        let guide = self.guide.compose(&self.identity.branch_id);
         let published = self
             .publisher
             .publish(
                 Vec::new(),
                 None,
                 Some(tools),
+                &guide,
                 |_, _| Vec::new(),
                 |_| {
                     if cancel.is_cancelled() {
@@ -499,29 +504,37 @@ impl Prompt {
                 _ => {}
             }
         }
+        let guide = self.guide.compose(&self.identity.branch_id);
         match self
             .publisher
-            .publish(changes, update.model, None, context_rules, |events| {
-                let mut state = self.state.lock().unwrap();
-                let valid = !state.closed
-                    && state
+            .publish(
+                changes,
+                update.model,
+                None,
+                &guide,
+                context_rules,
+                |events| {
+                    let mut state = self.state.lock().unwrap();
+                    let valid = !state.closed
+                        && state
+                            .pending
+                            .get(id)
+                            .is_some_and(|pending| !pending.cancel.is_cancelled());
+                    if !valid {
+                        return Err(AgentError::Cancelled("prompt adoption superseded".into()));
+                    }
+                    state
                         .pending
-                        .get(id)
-                        .is_some_and(|pending| !pending.cancel.is_cancelled());
-                if !valid {
-                    return Err(AgentError::Cancelled("prompt adoption superseded".into()));
-                }
-                state
-                    .pending
-                    .get_mut(id)
-                    .expect("valid pending adoption")
-                    .waiting_through = events
-                    .iter()
-                    .rev()
-                    .find(|event| !matches!(event.kind, EventKind::InputMessage(_)))
-                    .map(|event| event.sequence);
-                Ok(())
-            })
+                        .get_mut(id)
+                        .expect("valid pending adoption")
+                        .waiting_through = events
+                        .iter()
+                        .rev()
+                        .find(|event| !matches!(event.kind, EventKind::InputMessage(_)))
+                        .map(|event| event.sequence);
+                    Ok(())
+                },
+            )
             .await
         {
             Ok(Some(_)) => {}
@@ -615,6 +628,7 @@ pub struct PromptPlugin {
     state: rutis::host::Key<StateCell<PromptSnapshot>>,
     prompt: rutis::host::Key<Prompt>,
     configure: rutis::host::Key<dyn ConfigureControl>,
+    guide: rutis::host::Key<GuideEntries>,
 }
 impl PromptPlugin {
     pub fn new(names: &Names<'_>) -> std::result::Result<Self, Error> {
@@ -631,6 +645,7 @@ impl PromptPlugin {
             state: names.state_cell()?,
             prompt: names.key()?,
             configure: names.key()?,
+            guide: names.key()?,
         })
     }
 }
@@ -649,6 +664,7 @@ impl DynPlugin for PromptPlugin {
             self.faults.erase(),
             self.branch_phase.erase(),
             self.opening.erase(),
+            self.guide.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -662,12 +678,14 @@ impl DynPlugin for PromptPlugin {
             let faults = ctx.require_at(&self.faults)?;
             let branch_phase = ctx.require_at(&self.branch_phase)?;
             let opening = ctx.require_at(&self.opening)?;
+            let guide = ctx.require_at(&self.guide)?;
             if ctx.cancellation_token().is_cancelled() {
                 return Ok(Effect::Done);
             }
             let (adoption, mut adoptions) = tokio::sync::mpsc::unbounded_channel();
             let service = Arc::new(Prompt {
                 host,
+                guide,
                 initial,
                 publisher,
                 timeline: timeline.clone(),
@@ -963,19 +981,27 @@ impl Prompt {
                 }
             })
             .collect();
+        let guide = self.guide.compose(&self.identity.branch_id);
         self.publisher
-            .publish(changes, update.model.clone(), None, context_rules, |_| {
-                if cancel.is_cancelled()
-                    || matches!(
-                        self.branch_phase.phase(),
-                        BranchPhase::Closing | BranchPhase::Closed
-                    )
-                {
-                    Err(AgentError::Cancelled("initial prompt".into()))
-                } else {
-                    Ok(())
-                }
-            })
+            .publish(
+                changes,
+                update.model.clone(),
+                None,
+                &guide,
+                context_rules,
+                |_| {
+                    if cancel.is_cancelled()
+                        || matches!(
+                            self.branch_phase.phase(),
+                            BranchPhase::Closing | BranchPhase::Closed
+                        )
+                    {
+                        Err(AgentError::Cancelled("initial prompt".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
             .await?;
         Ok(())
     }

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 
-/// Adopt the stable guide together with the renderer's system configuration.
-pub(crate) fn with_input_guide(system: Option<SystemPrompt>) -> SystemPrompt {
-    let guide = include_str!("input-guide.txt").trim_end();
+/// Places the guide Prompt composed beside the renderer's system
+/// configuration.
+pub(crate) fn with_input_guide(system: Option<SystemPrompt>, guide: &str) -> SystemPrompt {
     match system {
         None => SystemPrompt::Text(guide.to_owned()),
         Some(SystemPrompt::Text(text)) if text.is_empty() => SystemPrompt::Text(guide.to_owned()),

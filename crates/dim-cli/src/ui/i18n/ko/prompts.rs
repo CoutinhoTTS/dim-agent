@@ -49,9 +49,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y 허용 · n 거부 · ←→/Tab 이동 · Enter 확인"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter 제출 · Tab 편집 · Esc 거절",
-        "Space toggle · Tab next · Esc decline" => "Space 토글 · Tab 다음 · Esc 거절",
-        "1-9 select · Tab next · Esc decline" => "1-9 선택 · Tab 다음 · Esc 거절",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter 제출 · Tab 편집 · / 명령 · Esc 거절"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space 토글 · Tab 다음 · / 명령 · Esc 거절"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 선택 · Tab 다음 · / 명령 · Esc 거절"
+        }
         "Question" => "질문",
         "Question on branch {branch}" => "브랜치 {branch}의 질문",
         "Permission on branch {branch}" => "브랜치 {branch} 권한",
@@ -60,14 +66,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // prompts.rs: AskUser
         "Confirm" => "확인",
         "Enter save · Esc back" => "Enter 저장 · Esc 뒤로",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter 제출 · 1-9 수정 · Tab/←→ 뒤로 · Esc 거절"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter 제출 · 1-9 수정 · Tab/←→ 뒤로 · / 명령 · Esc 거절"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 이동 · Space 토글 · Enter 다음 · Tab/←→ 전환 · Esc 거절"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 이동 · Space 토글 · Enter 다음 · Tab/←→ 전환 · / 명령 · Esc 거절"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 이동 · 1-9 선택 · Enter 다음 · Tab/←→ 전환 · Esc 거절"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 이동 · 1-9 선택 · Enter 다음 · Tab/←→ 전환 · / 명령 · Esc 거절"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion: 잘못된 데이터 수신",
         "Missing answer for Q{index}" => "Q{index}에 대한 답변 없음",
@@ -76,6 +82,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "답변 안 함",
         // approvals_panel.rs
         "Tool Approvals" => "도구 승인",
+        "Approval" => "승인",
+        "Ask" => "확인",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "명령, 네트워크, 작업 공간 밖 쓰기와 미분류 도구는 실행 전에 확인"
+        }
         "full access" => "전체 액세스",
         "All tools run automatically, bypass permissions" => "모든 도구 자동 실행, 권한 확인 생략",
         "approve for me" => "스마트 권한",

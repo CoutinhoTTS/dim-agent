@@ -128,6 +128,11 @@ fn install_with_prompt_capability_and_branch(
         )
         .require_feature(
             Feature::new("Prompt")
+                .session("PromptGuide", |names| {
+                    Ok(Box::new(crate::prompt_guide::PromptGuidePlugin::new(
+                        names,
+                    )?))
+                })
                 .branch("Prompt", |names| Ok(Box::new(PromptPlugin::new(names)?))),
         )
         .require_feature(
@@ -213,17 +218,23 @@ pub fn install_local_execution(
 }
 
 /// Installs ContextCompaction for a model that compacts: window facts from
-/// `model`, the summary strategy with its factory defaults, and the
-/// `session.context` methods (ContextCompaction §4).
-pub fn install_compaction(builder: &mut AgentBuilder, model: Arc<dyn ResolveContextModel>) {
+/// `model`, the summary strategy with `config`, and the `session.context`
+/// methods (ContextCompaction §4). `config` is the strategy's factory
+/// configuration; the product passes its defaults, and an evaluation passes a
+/// candidate prompt in `system_prompt` (ContextCompaction §13.5).
+pub fn install_compaction(
+    builder: &mut AgentBuilder,
+    model: Arc<dyn ResolveContextModel>,
+    config: ProductSummaryStrategyConfig,
+) {
     builder
         .session_value(Arc::new(ContextModelHost(Some(model))))
         .require_feature(
             Feature::new("ContextCompaction")
-                .session("ProductSummaryStrategy", |names| {
+                .session("ProductSummaryStrategy", move |names| {
                     Ok(Box::new(ProductSummaryStrategyPlugin::new(
                         names,
-                        ProductSummaryStrategyConfig::default(),
+                        config.clone(),
                     )?))
                 })
                 .session("ContextMethods", |names| {

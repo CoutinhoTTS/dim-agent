@@ -23,9 +23,13 @@ contract records the native platform acceptance evidence and outstanding checks.
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
+| `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
+| `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
+| `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
+| `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
 | `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
 
 Global home, workspace, server and model-profile options retain their current
@@ -33,7 +37,7 @@ meanings and work before or after the command. Existing login/account/logout,
 models, MCP and daemon commands remain available. Existing `--prompt`, piped
 stdin and `--resume` calls retain their behavior; `exec resume` also accepts the
 same existing global options. Supplying the Session twice or the prompt twice
-is an argument error. `--json` is an `exec` option, and `tui` requires a terminal.
+is an argument error. `--json` serves `exec` and `migration`, and `tui` requires a terminal.
 Help/version and argument errors do not start the daemon.
 
 The interactive export parser reads the format token and treats the remainder
@@ -42,6 +46,95 @@ quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
+
+### Migration interaction
+
+`dim` and the alpha package's `dima` invoke these same native commands. Bare
+`migration` imports each existing distribution independently:
+
+| Distribution | Legacy source | Native target home |
+| --- | --- | --- |
+| Global | `~/.dim/v2` containing `dimglobal.sqlite` | `~/.dim` |
+| CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode` |
+
+When both exist, both are imported. Sessions, Providers, Settings and task ledgers
+remain in their own target home. The default migration command uses these paths
+independently of the chat client's alpha/development home or `DIMCODE_HOME`.
+`./dev migration` invokes the same routing without injecting its development home
+or restarting a daemon. Development verification uses disposable user homes.
+
+An explicit `--home TARGET` scopes the command to that one home, reading
+`TARGET/v2` when `--source` is absent. `--source OLD_HOME` selects just that
+source; when it names a `v2` directory its parent is the target. Other custom
+source layouts require `--home TARGET` to make the destination explicit.
+The shared Migration plugin still receives one resolved source/target pair per
+invocation and knows no distribution directory convention.
+
+Default `list` reads both target homes. Default `show`, `retry` and `cancel`
+locate the task through the owners' task lists, including when its old source
+has been removed. JSON output is one object keyed by `global` and `cn`;
+each entry contains `home` and `result`, or `home` and `error`. An absent
+distribution is omitted. No matching source is an error; a task query with no
+matching task is an error; listing with neither target home present returns `{}`.
+A failure in one
+distribution is reported while the other is attempted. Cancellation stops the
+remaining imports. Overall exit is 1 for any failed distribution, otherwise 2
+for any partial result, 0 for success, or 130 when cancelled. Explicitly scoped
+commands retain their single-home JSON result.
+
+Inspect, run and retry require stopped legacy writers. Run and retry also require
+closed native clients and use normal verified shutdown to settle an existing target
+daemon. Without `--source-stopped`, a terminal shows the resolved homes and asks
+once for all selected sources. Declining exits 130; scripts must supply the flag.
+Source/target overlap is rejected before target access. Migration performs the data
+conversion offline under the native store lease; it does not start a daemon.
+The CLI binds `TARGET/rust/dimcode.sqlite`, matching its normal profile. Queries
+and inspection do not open that database. Disposal drains accepted work before
+exit. There is no persistent Migration selection or automatic trigger. Imported
+business configuration takes effect through normal feature loading.
+
+Open imported Global data with `dim --home ~/.dim`; the ordinary default home
+does not switch to Global. `dima` uses the same migration destinations, so pass
+`--home ~/.dimcode-alpha` explicitly to import into the alpha home instead.
+
+```text
+$ ./dev migration
+Source: /Users/me/.dim/v2
+Target: /Users/me/.dim
+Source: /Users/me/.dimcode/v2
+Target: /Users/me/.dimcode
+Close legacy and native clients using these homes. Continue? [y/N] y
+<fixed progress panel; see Migration terminal presentation>
+Migration completed
+Task: <task-id>
+Full report: dim migration show <task-id> --home /Users/me/.dim
+
+$ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
+{ "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }
+
+$ dim migration run --home /tmp/dim-new --source /tmp/dim-old --source-stopped --json
+{ "task": { "id": "...", "status": "partial", ... }, "objects": [ ... ] }
+
+$ dim migration show <task-id> --home /tmp/dim-new
+$ dim migration retry <task-id> --home /tmp/dim-new --source-stopped --json
+$ dim migration cancel <running-task-id> --home /tmp/dim-new
+$ dim migration list --home /tmp/dim-new
+```
+
+The [Migration plugin](plugins/Migration.md#终端展示) owns the fixed terminal
+progress panel and summary. Interactive run/retry displays that panel and finishes
+with a compact summary and report command. `--json` suppresses progress and prints
+the complete JSON on stdout; non-interactive output also remains JSON, with at most
+one stderr notice per step. Queries keep their JSON results. Exit codes are 0 for complete, 2 for partial, 1 for failure and 130 for
+settled cancellation. A partial report names failed, conflicting, deferred and
+unsupported objects and omitted fields. Ctrl+C requests cancellation and waits
+for accepted writes; a second process can use `cancel TASK`. Retry
+requires the stopped acknowledgement again, accepts a moved source path and keeps
+the prior report. Querying results does not require Migration to remain loaded.
+
+Client preference replacement requires stopped clients. Existing values and
+recorded clears remain unchanged. Ambiguous interrupted file writes are reported
+as conflicts; retry does not replay them over later user changes.
 
 P1 shell prefixes apply only to interactive input. Their execution, recording,
 progress, cancellation and lifetime follow [ShellInput](plugins/ShellInput.md).
@@ -244,10 +337,10 @@ Sessions with `workspace-write`; that default is unchanged.
 `exec resume`, before or after the command. Another value, a repeated flag or the flag on any
 other command is an argument error before the daemon starts.
 
-The terminal UI remembers the preset chosen in its `/approvals` panel as `permissionPreset` in
-the product home's `config.json`: without the flag, the sessions it creates get it in
-`session.create`, and a resumed one has `main` switched to it before attach. The flag wins for
-one run; choosing another preset in the panel replaces the remembered one.
+The terminal UI remembers the preset chosen in `/approval` or its `/approvals` panel as
+`permissionPreset` in the product home's `config.json`: without the flag, the sessions it creates
+get it in `session.create`, and a resumed one has `main` switched to it before attach. The flag
+wins for one run; choosing another preset in either menu replaces the remembered one.
 
 ```text
 $ dimcode exec --permission full-access -p 'Run the tests'
@@ -314,7 +407,7 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
         v                                         v  copied when a member is created
  main: permission/changed (CAS on version)    agent member Sessions (Collaboration)
    ^  written by --permission on resume
-   |  and /approvals
+   |  and /approval or /approvals
    +-- branch point --> child branch (branch tool): main's policy at the branch point,
                          then its own changes
 ```
@@ -326,6 +419,30 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
   reaches them; a later change on `main` does not. The confirmation of a switch says so, and
   requirement R2 below asks Collaboration to copy the leader branch's current policy.
 - A fork copies the source's facts, so it starts with the source's current `main` policy (#26).
+
+### `/approval`
+
+`/approval` in the terminal UI opens a menu of two choices for the `main` preset. It writes the
+same `session.permission.update` as `/approvals` and remembers the preset the same way. It does
+not list or edit command rules. At the line prompt the command is refused: that client keeps
+`/approvals`.
+
+```text
+Approval
+> Ask            current
+  Full access
+↑↓/Tab move · Enter apply · Esc back
+```
+
+| Choice | Preset | What runs |
+| --- | --- | --- |
+| Ask | `workspace-write` | Reads and workspace writes run; commands, network, outside writes and unclassified tools ask |
+| Full access | `full-access` | Every tool call runs without asking |
+
+Ask is the product default. Enter on the choice already in force closes the menu. Full access
+still asks for the same confirmation as `/approvals`. A session on `read-only` shows neither
+choice as current; Ask switches it to `workspace-write`. `read-only` stays available from
+`/approvals` and `--permission`. The notice names Ask for `workspace-write`.
 
 ### `/approvals`
 
@@ -457,7 +574,7 @@ filter.
 | --- | --- |
 | A reviewer model that answers approvals for the user | An approval answerer that responds through Approval's public respond operation, with its own model call and design, like the Collaboration leader route; not a CLI change |
 | Allows remembered only for one Session | A recorded fact or a Session-scoped rules source (F2 §10.2 defers per-workspace user rules); a CLI-process memory would answer without a recorded decision |
-| Sandbox settings in the CLI | F5 exposes `host-isolation.json` without a read or write method; HostPlatform management methods with a revision, local only, like `permission.rules` |
+| Isolation fields other than on/off | `/settings` turns the local `host-isolation.json` sandbox on or off and keeps every other field. Paths, escalation and an explicit tier still need a hand edit; a remote client still needs a HostPlatform method with a revision |
 | Shift+Tab cycle | CLI only: an editor action result and a confirmation path (decision 4) |
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
 | `/approvals` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
@@ -591,7 +708,7 @@ addressed by its original Session and `(branchId, requestId, callId)`.
    [x] Auth
    [ ] Billing
        Type your own answer: audit log
- Space toggle · Enter next · Tab switch · Esc decline
+ Space toggle · Enter next · Tab switch · / commands · Esc decline
 ```
 
 Reuse the current prompt's selection, review and narrow-screen window: number keys
@@ -602,6 +719,22 @@ is typed (replacing the chosen label in a single choice) and clearing it uncheck
 while editing, Esc leaves the editor keeping the text and Enter keeps it and moves to
 the next question. Outside the editor, Esc declines the whole call. Display sanitization
 never changes the labels sent to the owner. The composer's draft is preserved.
+
+A pending question does not block commands. While its free-text answer is not being
+edited, `/`, Ctrl+O and Ctrl+P open the command palette over it, drawn where that mode
+draws the palette, and the question keeps its tabs, selections and typed answers. The
+palette opens command entry, which keeps the keys through the command's argument, shown
+on the composer line; Enter runs the command as it runs during a reply, and command
+entry lasts until that Enter, Esc, or a draft that stops being a command. Esc in the
+palette and while an argument is typed closes command entry and gives the keys back to
+the question, declining nothing and interrupting no run. A command that opens its own
+panel puts the question aside and brings it back, with its state, when that panel
+closes; a question the Session stopped asking meanwhile is not brought back. `/` is the
+palette until the free-text row is edited, so an answer may itself start with a path:
+Enter, Space, the row's number or any other typed character edits the row, and `/`
+typed there is text.
+Esc keeps its meaning on every other surface: it declines an open question and
+interrupts a busy run with no prompt open, with no timing window.
 
 While submitting, disable duplicate responses. The successful reply or a committed
 batch result closes the prompt; invalid/not-pending/other failures keep the answers

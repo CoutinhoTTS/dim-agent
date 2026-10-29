@@ -49,9 +49,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y permitir · n rejeitar · ←→/Tab mover · Enter confirmar"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter enviar · Tab editar · Esc recusar",
-        "Space toggle · Tab next · Esc decline" => "Space alternar · Tab próxima · Esc recusar",
-        "1-9 select · Tab next · Esc decline" => "1-9 selecionar · Tab próxima · Esc recusar",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter enviar · Tab editar · / comandos · Esc recusar"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space alternar · Tab próxima · / comandos · Esc recusar"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 selecionar · Tab próxima · / comandos · Esc recusar"
+        }
         "Question" => "Pergunta",
         "Question on branch {branch}" => "Pergunta no branch {branch}",
         "Permission on branch {branch}" => "Permissão no branch {branch}",
@@ -62,14 +68,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // prompts.rs: AskUser
         "Confirm" => "Confirmar",
         "Enter save · Esc back" => "Enter salvar · Esc voltar",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter enviar · 1-9 editar · Tab/←→ voltar · Esc recusar"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter enviar · 1-9 editar · Tab/←→ voltar · / comandos · Esc recusar"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ mover · Space marcar · Enter próxima · Tab/←→ trocar · Esc recusar"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ mover · Space marcar · Enter próxima · Tab/←→ trocar · / comandos · Esc recusar"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ mover · 1-9 selecionar · Enter próxima · Tab/←→ trocar · Esc recusar"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ mover · 1-9 selecionar · Enter próxima · Tab/←→ trocar · / comandos · Esc recusar"
         }
         "AskUserQuestion received an invalid payload." => {
             "AskUserQuestion recebeu um payload inválido."
@@ -82,6 +88,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "Sem resposta",
         // approvals_panel.rs
         "Tool Approvals" => "Aprovações de ferramentas",
+        "Approval" => "Aprovação",
+        "Ask" => "Perguntar",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "Perguntar antes de comandos, rede, gravações fora do espaço e ferramentas não classificadas"
+        }
         "full access" => "acesso total",
         "All tools run automatically, bypass permissions" => {
             "Todas as ferramentas rodam sem pedir permissão"
