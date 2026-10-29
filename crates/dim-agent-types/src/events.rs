@@ -920,11 +920,8 @@ pub struct CollaborationResultData {
 pub struct EventDraft {
     /// Preassigned event id. Text/thinking producers use it to make the first
     /// delta id the stable block identity; the timeline generates one otherwise.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
+    /// Stays in-process: the committed event's `id` is the persisted identity.
+    #[serde(skip)]
     pub id: Option<String>,
     #[serde(
         default,

@@ -813,6 +813,48 @@ async fn output_block_start_id_roundtrips_through_the_merged_row() {
     db.close().await.unwrap();
 }
 
+/// A producer's preassigned draft id is runtime-only. A before trace must keep
+/// the old draft shape so an older reader can still open the store.
+#[tokio::test]
+async fn stored_trace_drafts_do_not_persist_producer_ids() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut traced = text(1, "hello");
+    let kind = traced.event.kind.clone();
+    traced.trace = Some(TimelineTrace {
+        event_id: traced.event.id.clone(),
+        original: EventDraft::new(kind.clone()).with_id("block-id"),
+        steps: vec![TraceStep {
+            handler: "before".into(),
+            result: Some(EventDraft::new(kind).with_id("step-id")),
+        }],
+    });
+    append(&store, key("session", "main"), vec![traced])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let connection = Connection::open(&database.0).unwrap();
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM timeline_events WHERE session_id = ?1 AND sequence = 1",
+            ["session"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let trace = &row["records"][0]["trace"];
+    assert_eq!(trace["event_id"], "event-1");
+    assert!(trace["original"].get("id").is_none());
+    assert!(trace["steps"][0]["result"].get("id").is_none());
+}
+
 /// An extension event (#2) is stored and read like any other event: it gets a
 /// row of its own holding its data's bytes, so the output deltas around it are
 /// not merged across it, and a restored Session, whose TimelineTree reads each
