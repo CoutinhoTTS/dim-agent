@@ -1574,9 +1574,9 @@ impl Metrics {
 }
 
 /// The §8.1 rule of a candidate arm against the current one: every probe's
-/// pass rate at least `current − δ`, and violations and failed runs no
-/// higher. A probe with no judged run in one arm fails the comparison by
-/// name. There is no absolute pass line.
+/// pass rate at least `current − δ`, and violations, failed runs and unjudged
+/// runs no higher. A probe with no judged run in one arm fails the comparison
+/// by name. There is no absolute pass line.
 struct Rule {
     passes: bool,
     failures: Vec<String>,
@@ -1637,6 +1637,12 @@ fn rule(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Rule 
         failures.push(format!(
             "failed runs rise from {} to {}",
             current.failed, candidate.failed
+        ));
+    }
+    if candidate.unjudged > current.unjudged {
+        failures.push(format!(
+            "unjudged runs rise from {} to {}",
+            current.unjudged, candidate.unjudged
         ));
     }
     Rule {
@@ -1702,7 +1708,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         metrics.entry(record.arm).or_default().add(scenario, record);
     }
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations and failed runs are no higher |\n",
+        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher |\n",
         instrument.text,
         instrument.model.provider_id,
         instrument.model.model_id,
@@ -1785,7 +1791,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         let rule = rule(current, candidate, scenarios);
         text += &if rule.passes {
             format!(
-                "\ncandidate passes: every probe is at least the current arm's − {delta:.2}, and violations and failed runs are no higher.\n",
+                "\ncandidate passes: every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher.\n",
                 delta = delta(),
             )
         } else {
@@ -2145,6 +2151,57 @@ mod tests {
             "{:?}",
             verdict.failures
         );
+    }
+
+    /// Unjudged runs are compared between the arms the way failed runs are: a
+    /// candidate with more of them fails the rule, and equal counts do not
+    /// fail it on their own (model-prompts §8.1).
+    #[test]
+    fn more_unjudged_runs_fail_the_candidate() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let arm = |arm: &'static str, judged: usize, unjudged: usize| {
+            let records: Vec<_> = (0..judged)
+                .map(|_| {
+                    record(
+                        arm,
+                        &scenario,
+                        &[("reports", ProbeVerdict::Present)],
+                        JudgeOutcome::Judged,
+                    )
+                })
+                .chain((0..unjudged).map(|_| {
+                    let mut run = record(
+                        arm,
+                        &scenario,
+                        &[("reports", ProbeVerdict::Unparsed)],
+                        JudgeOutcome::Unreadable,
+                    );
+                    run.judge_error = Some("the judge answered with no usable verdicts".into());
+                    run
+                }))
+                .collect();
+            metrics(&scenario, &records)
+        };
+        let verdict = rule(
+            &arm("current", 20, 0),
+            &arm("candidate", 19, 1),
+            std::slice::from_ref(&scenario),
+        );
+        assert!(!verdict.passes);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "unjudged runs rise from 0 to 1"),
+            "{:?}",
+            verdict.failures
+        );
+        let verdict = rule(
+            &arm("current", 19, 1),
+            &arm("candidate", 19, 1),
+            std::slice::from_ref(&scenario),
+        );
+        assert!(verdict.passes, "{:?}", verdict.failures);
     }
 
     /// A probe with no judged run in one arm cannot be compared: the rule
