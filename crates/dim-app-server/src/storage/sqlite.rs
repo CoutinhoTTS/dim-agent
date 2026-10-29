@@ -317,12 +317,14 @@ impl SqliteStorage {
                 tx.execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
-                for (_, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
+                for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
                     }
+                    if *from == 22 {
+                        super::catalog::backfill(&tx)?;
+                    }
                 }
-                super::catalog::backfill(&tx)?;
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
                 upgraded_from = Some(version);
