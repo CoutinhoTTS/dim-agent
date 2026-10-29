@@ -1501,13 +1501,6 @@ async fn create_instance(
     if let Err(error) = ready {
         return Err((error, Some(created)));
     }
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let mut waiting = rows(loader, &created.view, Some(&required));
-    waiting.extend(instance().2.required);
-    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel).await {
-        return Err((error, Some(created)));
-    }
-    created.children = rows(loader, &created.view, None);
     let optional: Vec<FiberView> = created
         .children
         .iter()
