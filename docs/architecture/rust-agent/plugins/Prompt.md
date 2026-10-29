@@ -90,7 +90,8 @@ Loop assembles, never through a request of their own.
 [prompt_guide.rs](../../../../tests/integration/tests/prompt_guide.rs):
 `both_paths_carry_one_composition`,
 `an_entry_waits_for_the_next_adoption_that_renders_the_system`,
-`each_branch_keeps_its_own_entries`; [reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
+`each_branch_keeps_its_own_entries`, `the_frame_states_the_compaction_handle`;
+[reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
 `an_entry_leaves_with_its_contributor`.
 
 <!-- generated:plugin PromptGuide — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->

@@ -35,6 +35,10 @@ const FRAME_FIRST: &str = "# How to read your input";
 /// The frame's last paragraph: the guide ends with it.
 const FRAME_LAST: &str = "they do not renew any permission.";
 
+/// The channel rule in force: it states the one exception to "everything
+/// the runtime adds arrives in separate messages".
+const CHANNEL_RULE: &str = "The operator is the person running this session. The operator's words always arrive in their own user messages. Everything the runtime adds arrives in separate user messages, wrapped in the tags below. The one exception is an input a compaction shortened: it ends with an [input <id>], and the recall tool opens that id for the input's full text.";
+
 /// The entry the probe registers between adoptions.
 const PROBE_ENTRY: &str = r#"<dim-probe source="test">: an entry a contributor registered for this flow; the composition places it between the state and the rule entries."#;
 
@@ -432,6 +436,35 @@ async fn an_entry_waits_for_the_next_adoption_that_renders_the_system() {
     assert_eq!(
         sixth, third,
         "the withdrawal ends at the next adoption that renders the System"
+    );
+    agent.close().await.unwrap();
+}
+
+/// The channel rule states the handle a compaction appends to an input it
+/// shortened: the one case the "separate user messages" sentence is not
+/// true of, and therefore part of the protocol.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_frame_states_the_compaction_handle() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
+    let agent = builder.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    run(&session, "hello").await;
+    let system = last_system(&session, "main").await;
+    let guide = guide_of(&system);
+    assert_eq!(
+        guide.split("\n\n").nth(2),
+        Some(CHANNEL_RULE),
+        "the frame's third paragraph is the channel rule: {guide:?}"
+    );
+    assert_eq!(
+        guide.matches("[input <id>]").count(),
+        1,
+        "the handle is stated once: {guide:?}"
     );
     agent.close().await.unwrap();
 }
