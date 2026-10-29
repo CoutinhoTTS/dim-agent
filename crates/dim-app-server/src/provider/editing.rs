@@ -443,17 +443,8 @@ impl ProviderService {
                     let models = owner.discover(&provider_id, &admitted, &cancel).await?;
                     (Some(models), ModelsListed::Listed)
                 };
-                if let Some(models) = &models
-                    && models.iter().any(|model| {
-                        admitted
-                            .user_models
-                            .iter()
-                            .any(|user| user.model_id == model.model_id)
-                    })
-                {
-                    return Err(ProviderError::Conflict(
-                        "Discovered models conflict with user-added model IDs".into(),
-                    ));
+                if let Some(models) = &models {
+                    reject_user_model_conflicts(&admitted, models)?;
                 }
                 if let Some(models) = models {
                     admitted.models = models;

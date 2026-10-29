@@ -2117,6 +2117,270 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A listing that collides with a user model fails the update and the refresh
+/// with one message that names every colliding ID and the fix, writes nothing,
+/// and the same update lists those IDs as defaults once they are deleted.
+#[tokio::test]
+async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing() {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(8);
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |uri: Uri| {
+            let send = send.clone();
+            async move {
+                let (reply, response) = oneshot::channel();
+                send.send((uri, reply)).await.unwrap();
+                response
+                    .await
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-conflict-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+
+    provider
+        .create(
+            input(
+                REMOTE,
+                &format!("{base}/old/v1"),
+                StaticAuth::Bearer,
+                Some("first-key"),
+                "first",
+                31,
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut version = 1;
+    for id in ["m", "n"] {
+        version = provider
+            .create_model(REMOTE.into(), version, model(id, 41), &cancel)
+            .await
+            .unwrap()
+            .version;
+    }
+    let before: Vec<String> = provider
+        .management(Some(REMOTE.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0)
+        .models
+        .unwrap()
+        .iter()
+        .map(|model| model.model.model_id.clone())
+        .collect();
+    assert_eq!(before, ["same", "m", "n"]);
+    let moved = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let patch = serde_json::from_value(json!({"baseUrl":format!("{base}/new/v1")})).unwrap();
+        tokio::spawn(async move {
+            provider
+                .update(REMOTE.into(), version, patch, &cancel)
+                .await
+        })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/new/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"m","context_window":64000,"max_output_tokens":512},
+                {"id":"n","context_window":64000,"max_output_tokens":512},
+                {"id":"fresh","context_window":64000,"max_output_tokens":512}
+            ]})),
+        ))
+        .unwrap();
+    let conflict = moved.await.unwrap().unwrap_err();
+    assert_eq!(
+        conflict.to_string(),
+        "Discovered models conflict with user-added models: m, n. Delete them through provider.models.delete, then retry."
+    );
+    let unchanged = provider
+        .management(Some(REMOTE.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    assert_eq!(unchanged.version, Some(version));
+    assert_eq!(
+        unchanged.connection.as_ref().unwrap().base_url,
+        format!("{base}/old/v1")
+    );
+    assert_eq!(
+        unchanged
+            .models
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|model| model.model.model_id.clone())
+            .collect::<Vec<_>>(),
+        before,
+        "a failed listing replaces nothing"
+    );
+
+    version = provider
+        .delete_model(REMOTE.into(), version, "m".into(), &cancel)
+        .await
+        .unwrap()
+        .version;
+    version = provider
+        .delete_model(REMOTE.into(), version, "n".into(), &cancel)
+        .await
+        .unwrap()
+        .version;
+    let moved = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let patch = serde_json::from_value(json!({"baseUrl":format!("{base}/new/v1")})).unwrap();
+        tokio::spawn(async move {
+            provider
+                .update(REMOTE.into(), version, patch, &cancel)
+                .await
+        })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/new/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"m","context_window":64000,"max_output_tokens":512},
+                {"id":"n","context_window":64000,"max_output_tokens":512},
+                {"id":"fresh","context_window":64000,"max_output_tokens":512}
+            ]})),
+        ))
+        .unwrap();
+    let updated = moved.await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated).unwrap()["modelsListed"],
+        json!("listed")
+    );
+    let catalog = provider
+        .catalog_for(REMOTE.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        catalog
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["m", "n", "fresh"],
+        "the deleted user models are the endpoint's defaults now"
+    );
+
+    // The refresh path answers the same message.
+    version = provider
+        .create_model(REMOTE.into(), catalog.version, model("k", 51), &cancel)
+        .await
+        .unwrap()
+        .version;
+    let refresh = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { provider.refresh_for(REMOTE.into(), &cancel).await })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/new/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"k","context_window":64000,"max_output_tokens":512}
+            ]})),
+        ))
+        .unwrap();
+    let conflict = refresh.await.unwrap().unwrap_err();
+    assert_eq!(
+        conflict.to_string(),
+        "Discovered models conflict with user-added models: k. Delete them through provider.models.delete, then retry."
+    );
+    let unchanged = provider
+        .catalog_for(REMOTE.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.version, version);
+    assert_eq!(
+        unchanged
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["m", "n", "fresh", "k"],
+        "a failed refresh replaces nothing"
+    );
+
+    version = provider
+        .delete_model(REMOTE.into(), version, "k".into(), &cancel)
+        .await
+        .unwrap()
+        .version;
+    let refresh = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { provider.refresh_for(REMOTE.into(), &cancel).await })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/new/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"k","context_window":64000,"max_output_tokens":512}
+            ]})),
+        ))
+        .unwrap();
+    let refreshed = refresh.await.unwrap().unwrap();
+    assert_eq!(refreshed.version, version + 1);
+    assert_eq!(
+        refreshed
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["k"]
+    );
+
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// A listing item's `type: "model"` names the object, not a model kind: an
 /// OpenAI-compatible provider lists those models available and a Session
 /// adopts one, an already stored catalog keeps them available without a

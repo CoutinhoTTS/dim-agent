@@ -423,8 +423,10 @@ plus userModels, apply descriptor overrides to their owned defaults and endpoint
 overrides before deriving routes. Preserve these fields on refresh, writes and
 bundled-definition reseeding; managed preferences are preserved only for a
 same-account refresh (§3.2). User IDs must not collide with default/override IDs;
-a refresh introducing a collision fails without replacing the admitted catalog.
-Delete the colliding user model through `provider.models.delete`, then retry refresh.
+a refresh introducing a collision fails without replacing the admitted catalog,
+and an update that lists the new endpoint follows the same rule: it fails, names
+the colliding user models, and writes nothing. Delete the colliding user model
+through `provider.models.delete`, then retry the refresh or the update.
 
 Bundled reseeding must not fail seeding or Provider activation on that collision.
 When a changed fingerprint's candidate would collide with a user model, leave

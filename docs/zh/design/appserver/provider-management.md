@@ -327,7 +327,8 @@ Settings 一起另行决定，不作为本方案前置。
 路由推导前应用 endpointOverrides。refresh、普通写入、bundled reseed 均保留新增字段；
 托管目录的偏好仅在同账号 refresh 时保留（§3.2）。
 用户 ID 不能与默认/覆盖 ID 冲突；refresh 引入冲突则失败，不替换已准入目录。
-解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh。
+列举新端点的 update 遵循同一规则：失败，点名冲突的用户模型，不写入任何内容。
+解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh 或该 update。
 
 bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。fingerprint 改变后的实际
 替换候选若与用户模型冲突，保留该记录已准入的定义、fingerprint 和 version，继续在既有
