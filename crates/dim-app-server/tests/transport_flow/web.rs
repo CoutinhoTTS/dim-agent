@@ -1,12 +1,107 @@
 //! Web through actual C4, Settings, Permission and ToolExecutor boundaries.
 use super::*;
-use dim_app_server::session_typescript::SessionTypeScriptConfig;
+use dim_app_server::managed_provider::{
+    AccountSnapshot, CredentialLease, ManagedCatalog, ManagedError, ManagedFuture, ManagedProvider,
+    ManagedProviderRow, ProviderDescriptor, WebSearchHit, WebSearchRequest, WebSearchResponse,
+    management::{
+        BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
+        ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
+    },
+};
+use rutis::host::BoxFuture;
+use rutis::{Ctx, Plugin};
+use std::sync::atomic::AtomicBool;
 use tokio::io::AsyncReadExt;
 
-fn rows() -> SessionTypeScriptConfig {
-    let mut config = session_typescript::fixture();
-    config.rows = vec![session_typescript::manifest_row("web")];
-    config
+struct SearchProvider(Arc<AtomicBool>);
+fn unused<T: Send + 'static>() -> ManagedFuture<T> {
+    Box::pin(async { Err(ManagedError::InvalidInput) })
+}
+impl ManagedProvider for SearchProvider {
+    fn providers(&self) -> Vec<ProviderDescriptor> {
+        vec![ProviderDescriptor {
+            provider_id: "dimcode-api-oauth".into(),
+            display_name: "Dim OAuth".into(),
+            login_methods: vec!["device".into()],
+        }]
+    }
+    fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
+        unused()
+    }
+    fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
+        unused()
+    }
+    fn begin_browser(&self, _: BrowserLoginBegin) -> ManagedFuture<BrowserLogin> {
+        unused()
+    }
+    fn complete_browser(&self, _: ManagedBrowserLoginComplete) -> ManagedFuture<AccountSnapshot> {
+        unused()
+    }
+    fn begin_device(&self, _: LoginBegin) -> ManagedFuture<DeviceLogin> {
+        unused()
+    }
+    fn attempt_status(&self, _: &ManagedLoginAttempt) -> Result<LoginState, ManagedError> {
+        Err(ManagedError::AttemptNotFound)
+    }
+    fn cancel_attempt(&self, _: ManagedLoginAttempt) -> ManagedFuture<()> {
+        unused()
+    }
+    fn logout(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
+        unused()
+    }
+    fn usage(&self, _: &str) -> ManagedFuture<Usage> {
+        unused()
+    }
+    fn web_search(&self, req: WebSearchRequest) -> ManagedFuture<WebSearchResponse> {
+        let signed_in = self.0.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if !signed_in {
+                return Err(ManagedError::TokenMissing);
+            }
+            Ok(WebSearchResponse {
+                results: vec![
+                    WebSearchHit {
+                        title: format!("<b>Managed {}</b>", req.query),
+                        url: "https://managed.example.com/hit".into(),
+                        snippet: "Managed <i>snippet</i>".into(),
+                        published_at: Some("2026-10-28".into()),
+                    },
+                    WebSearchHit {
+                        title: "Blocked".into(),
+                        url: "https://sub.blocked.test/ignored".into(),
+                        snippet: "ignored".into(),
+                        published_at: None,
+                    },
+                ],
+            })
+        })
+    }
+    fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
+        unused()
+    }
+    fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {
+        unused()
+    }
+    fn recover_rejected(&self, _: &CredentialLease) -> ManagedFuture<CredentialLease> {
+        unused()
+    }
+    fn finish_rejected(&self, _: &CredentialLease) -> ManagedFuture<()> {
+        unused()
+    }
+    fn quiesce(&self) -> BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
+}
+struct SearchProviderPlugin(Arc<AtomicBool>);
+impl Plugin for SearchProviderPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "search-provider-fixture"
+    }
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide_as::<dyn ManagedProvider>(Arc::new(SearchProvider(self.0.clone())))?;
+        Ok(())
+    }
 }
 
 async fn configure(client: &mut Client, document: Value) {
@@ -83,8 +178,7 @@ async fn idle(client: &mut Client, id: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_web_settings_permission_cancellation_and_restore() {
+async fn web_settings_permission_cancellation_and_restore() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(AtomicUsize::new(0));
@@ -139,17 +233,25 @@ async fn node_web_settings_permission_cancellation_and_restore() {
     let home = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("dw-{}", uuid::Uuid::new_v4()));
-    let parts = rows();
+    let signed_in = Arc::new(AtomicBool::new(false));
+    let signed_in_row = signed_in.clone();
     let config = ServerConfig {
         product_home: Some(home.clone()),
         target_home: Some(home.join("rust")),
-        session_typescript: Some(parts.clone()),
+        managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+            let flag = signed_in_row.clone();
+            builtins
+                .builtins
+                .register::<Value, _, _>("SearchProviderFixture", move |_| {
+                    Ok(SearchProviderPlugin(flag.clone()))
+                });
+            "SearchProviderFixture".to_owned()
+        }))),
         ..Default::default()
     };
     let mut saved = None;
     for restoring in [false, true] {
         let (server, _model_requests, _) = super::session_typescript::start(config.clone()).await;
-        super::session_typescript::plugin_active(&server, &parts.rows[0]).await;
         let mut client = Client::new_version(&server, false, 3).await;
         if !restoring {
             assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
@@ -179,6 +281,42 @@ async fn node_web_settings_permission_cancellation_and_restore() {
             submit(&mut client, &id, "web_search", json!({"query":"initial"})).await;
             idle(&mut client, &id).await;
             assert!(text(&result(&session).await).contains("search_unavailable"));
+            signed_in.store(true, Ordering::SeqCst);
+            submit(
+                &mut client,
+                &id,
+                "web_search",
+                json!({"query":"oauth-default","blocked_domains":["blocked.test"]}),
+            )
+            .await;
+            idle(&mut client, &id).await;
+            let managed_hit = result(&session).await;
+            assert_ne!(managed_hit.is_error, Some(true), "{managed_hit:?}");
+            assert!(text(&managed_hit).contains("Managed oauth-default -site:blocked.test"));
+            assert!(text(&managed_hit).contains("https://managed.example.com/hit"));
+            assert!(!text(&managed_hit).contains("sub.blocked.test"));
+            assert_eq!(
+                managed_hit.structured_content.as_ref().unwrap()["results"],
+                json!([{
+                    "title": "Managed oauth-default -site:blocked.test",
+                    "url": "https://managed.example.com/hit",
+                    "snippet": "Managed snippet",
+                    "published_at": "2026-10-28"
+                }])
+            );
+            let before = requests.load(Ordering::SeqCst);
+            submit(
+                &mut client,
+                &id,
+                "web_fetch",
+                json!({"url":"http://198.18.0.1/"}),
+            )
+            .await;
+            idle(&mut client, &id).await;
+            let fake_ip = result(&session).await;
+            assert_eq!(fake_ip.is_error, Some(true));
+            assert!(text(&fake_ip).contains("blocked_address: Reserved benchmark addresses"));
+            assert_eq!(requests.load(Ordering::SeqCst), before);
             configure(&mut client, json!({"allowPrivateHosts":["127.0.0.1"],
                 "searchService":{"kind":"brave","endpoint":format!("{base}/search"),"apiKey":"fixture-web-key"}})).await;
             submit(
@@ -197,6 +335,7 @@ async fn node_web_settings_permission_cancellation_and_restore() {
                     .unwrap()
                     .contains("fixture-web-key")
             );
+            signed_in.store(false, Ordering::SeqCst);
             configure(&mut client, json!({"allowPrivateHosts":["127.0.0.1"]})).await;
             let before = requests.load(Ordering::SeqCst);
             submit(&mut client, &id, "web_search", json!({"query":"removed"})).await;

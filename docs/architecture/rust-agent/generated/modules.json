@@ -1670,6 +1670,7 @@
       "file": "crates/dim-app-server/src/managed_provider.rs",
       "unexpandedMacros": [
         "matches",
+        "tokio::select",
         "vec"
       ]
     },
@@ -2352,6 +2353,41 @@
         "tracing::warn",
         "vec",
         "writeln"
+      ]
+    },
+    {
+      "id": "dim_app_server::web",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/web.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::web::content",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::web",
+      "file": "crates/dim-app-server/src/web/content.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_app_server::web::network",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::web",
+      "file": "crates/dim-app-server/src/web/network.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::select",
+        "vec",
+        "write"
       ]
     },
     {
@@ -13838,6 +13874,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::web",
+      "references": [
+        "mod web",
+        "path web::WebPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::web_entry",
       "references": [
         "mod web_entry"
@@ -20503,6 +20547,155 @@
       "references": [
         "path crate::ui_host::UiHost",
         "path crate::ui_host::UiHost::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "path ToolExecutionContext",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "use dim_agent_capabilities::tool_registry::ToolContribution",
+        "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartRegistry::register",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ToolContent::Text",
+        "use dim_agent_types::ToolContent"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolSource::Extension",
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolResult",
+        "use dim_agent_types::ToolSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_app_server::managed_provider",
+      "references": [
+        "path ManagedProviders",
+        "path ManagedSearchError::SearchFailed",
+        "path ManagedSearchError::Unavailable",
+        "path WebSearchRequest",
+        "use crate::managed_provider::ManagedProviders",
+        "use crate::managed_provider::ManagedSearchError",
+        "use crate::managed_provider::WebSearchRequest"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_app_server::web::content",
+      "references": [
+        "mod content",
+        "path content",
+        "path convert",
+        "path plain_text",
+        "path redact",
+        "use content::convert",
+        "use content::plain_text",
+        "use content::redact"
+      ]
+    },
+    {
+      "from": "dim_app_server::web",
+      "to": "dim_app_server::web::network",
+      "references": [
+        "mod network",
+        "path Diagnostic",
+        "path NetworkConfig",
+        "path WebError",
+        "path WebError::new",
+        "path domain",
+        "path get",
+        "path hostname",
+        "path parse_url",
+        "path proxy_url",
+        "use network::DOWNLOAD_LIMIT",
+        "use network::Diagnostic",
+        "use network::NetworkConfig",
+        "use network::WebError",
+        "use network::domain",
+        "use network::get",
+        "use network::hostname",
+        "use network::parse_url",
+        "use network::proxy_url"
+      ]
+    },
+    {
+      "from": "dim_app_server::web::content",
+      "to": "dim_app_server::web::network",
+      "references": [
+        "path Diagnostic",
+        "path WebError",
+        "path WebError::new",
+        "use super::network::Diagnostic",
+        "use super::network::WebError"
       ]
     },
     {
@@ -31154,6 +31347,14 @@
     {
       "module": "dim_app_server::ui_host",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_app_server::web::content",
+      "path": "Container::Array"
+    },
+    {
+      "module": "dim_app_server::web::content",
+      "path": "Container::Object"
     },
     {
       "module": "dim_cli::browser",

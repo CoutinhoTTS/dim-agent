@@ -3,7 +3,7 @@ use dim_agent_runtime::Names;
 use dim_app_server::managed_provider::{
     AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
     ManagedFuture, ManagedProvider, ManagedProviderBinding, ManagedProviders,
-    ManagedProvidersPlugin, ProviderDescriptor,
+    ManagedProvidersPlugin, ProviderDescriptor, WebSearchRequest, WebSearchResponse,
     management::{
         BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
         ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
@@ -140,6 +140,9 @@ impl ManagedProvider for Provider {
         unused()
     }
     fn usage(&self, _: &str) -> ManagedFuture<Usage> {
+        unused()
+    }
+    fn web_search(&self, _: WebSearchRequest) -> ManagedFuture<WebSearchResponse> {
         unused()
     }
     fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
