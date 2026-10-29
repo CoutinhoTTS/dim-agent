@@ -48,10 +48,11 @@ pub enum Setting {
     Mouse,
     Notify,
     Approvals,
+    Isolation,
     Model,
 }
 
-const ROWS: [(Setting, &str); 8] = [
+const ROWS: [(Setting, &str); 9] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
@@ -59,6 +60,7 @@ const ROWS: [(Setting, &str); 8] = [
     (Setting::Mouse, "mouse"),
     (Setting::Notify, "notify"),
     (Setting::Approvals, "approvals"),
+    (Setting::Isolation, "isolation"),
     (Setting::Model, "model"),
 ];
 
@@ -133,6 +135,7 @@ impl SettingsPanel {
                 "Tool approvals",
                 link(&values.approvals),
             ),
+            row(Setting::Isolation, "Command isolation", link("")),
             Item::heading(t("Models")),
             row(
                 Setting::Model,

@@ -22,6 +22,7 @@ pub mod commands;
 pub mod composer;
 pub mod config;
 pub mod i18n;
+pub mod isolation_panel;
 pub mod keys;
 pub mod language_panel;
 pub mod line_input;

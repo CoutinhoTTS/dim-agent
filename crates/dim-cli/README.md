@@ -368,9 +368,11 @@ bubblewrap on Linux. Without a policy file, a command can write only inside the 
 workspace, read only the workspace and system directories, and has no network access. The
 [defaults table](../../docs/design/host-platform-isolation.md#scope-and-policy) lists each
 platform's directories and the environment variables passed through. Approving a command or
-choosing `full-access` does not widen the sandbox; only the policy file does. The model can also
-ask for a wider one with the `exec` `sandbox` argument, and the policy file decides whether that
-request runs.
+choosing `full-access` does not widen the sandbox by itself. The model can request a wider
+boundary with the `exec` `sandbox` argument. Missing policies and version 2 policies omitting
+`escalation` use `ask`, which delegates that request to Permission/Approval: the ordinary default
+`workspace-write` preset asks, while `full-access`, an allowed tool or an applicable allow rule
+can admit it without prompting. An explicit node `escalation: "deny"` still refuses wider requests.
 
 On macOS only, the default also lets common developer tools run:
 
@@ -390,8 +392,12 @@ On macOS only, the default also lets common developer tools run:
 A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
 macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
 for a read-only one. When an isolated command fails with a typical denial, its result tells the
-model that isolation may be the cause and names the policy file. The CLI does not display
-whether isolation is on; the policy file decides it.
+model that isolation may be the cause and names the policy file and `/settings > Command isolation`.
+That settings panel displays the effective tier, wider-request policy, source and actual execution-node
+path separately from the Permission preset. It lets you change the tier and `ask`/`deny`, edit
+advanced read/write path lists and environment names, save, or reset to product defaults.
+Omitted lists use defaults; explicit empty lists grant nothing. Environment values are never shown.
+Conflicting edits require reloading rather than overwriting another client's changes.
 
 ### Policy file
 
@@ -402,9 +408,11 @@ The daemon reads `host-isolation.json` from its home:
 | Product (`dimcode`, `--home PATH`) | `<home>/host-isolation.json`, by default `~/.dimcode/host-isolation.json` |
 | API-key configuration (`--model-config`) | `<home>/rust/host-isolation.json`, because this profile starts the daemon with `--home <home>/rust` |
 
-dimcode never creates the file. It is read each time a command starts, so an edit applies to the
-next command without restarting the daemon; a running command keeps the policy it started with.
-An invalid file makes every command fail with `isolation_config_invalid` until it is fixed.
+Reading absent-file defaults never creates the file. Saving or resetting in `/settings > Command isolation`
+atomically writes it with revision conflict detection; reset saves an explicit version 2 default policy.
+It is read each time a command starts, so an edit applies to the next command or new persistent shell
+without restarting the daemon; a running process keeps its original boundary. An invalid file makes
+model commands fail with `isolation_config_invalid`; settings remains accessible independently of exec.
 
 Only `version` is required. Version 2 is current; an existing version 1 file keeps working.
 Each other field replaces its default:
@@ -412,7 +420,7 @@ Each other field replaces its default:
 | Field | Meaning | Default |
 | --- | --- | --- |
 | `sandbox` | `workspace`, `network` or `host`: the boundary commands run in | `workspace` |
-| `escalation` | `ask` lets a command request a wider `sandbox`; `deny` refuses it | `deny` |
+| `escalation` | `ask` delegates wider requests to Permission/Approval; explicit `deny` refuses them | `ask` |
 | `readOnlyPaths` | Directories and files commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
 | `writablePaths` | Directories commands can read and write | The session workspace; on macOS also each command's `TMPDIR` |
 | `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
@@ -420,12 +428,14 @@ Each other field replaces its default:
 `workspace` writes only inside the session workspace and has no network; `network` adds host
 networking; `host` runs commands as your user with no sandbox at all. A model command names a
 tier with its `sandbox` argument. A tier at or below the file's runs directly; a wider one runs
-only when the file sets `"escalation": "ask"`, and otherwise fails with `isolation_denied`. The
+only when the effective escalation is `ask`, and an explicit `deny` fails with `isolation_denied`. The
 approval prompt shows the requested boundary; under `full-access`, for a tool in `allowedTools`
 or for a command you allowed always, a wider tier runs without a prompt. An approval never widens
 the boundary by itself. Version 1 spelled the tier as `enabled` and
 `network` (`false` runs commands as ordinary processes, `true` allows networking) and never
-allowed escalation.
+allowed escalation. Network access does not grant executable or credential access: Homebrew-installed
+`gh` may need an authorized `host` request or explicit Homebrew read roots as well as networking,
+then its normal authentication source. Dim does not synthesize GitHub credentials.
 
 Paths must be absolute and must exist; `~` is not expanded. `readOnlyPaths` takes directories
 and regular files: a file entry grants that file alone, not the directory around it, and an

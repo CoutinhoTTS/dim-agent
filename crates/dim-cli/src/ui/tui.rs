@@ -888,6 +888,7 @@ enum Prompt {
     Theme(ThemePanel),
     Language(LanguagePanel),
     Settings(SettingsPanel),
+    Isolation(Box<crate::ui::isolation_panel::IsolationPanel>),
     Exit(ExitConfirm),
     Upgrade(UpgradeDialog),
     Permission(PermissionPrompt),
@@ -1114,6 +1115,7 @@ impl App {
             | Some(Prompt::Theme(_))
             | Some(Prompt::Language(_))
             | Some(Prompt::Settings(_))
+            | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
             | Some(Prompt::Timeline(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
@@ -1457,6 +1459,11 @@ impl App {
                     panel.set_models(models);
                 }
             }
+            Update::Isolation(result) => {
+                if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
+                    panel.set_snapshot(result);
+                }
+            }
             Update::ModelPolicy(update) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt
                     && let Some(notice) = panel.set_policy(update)
@@ -1533,6 +1540,7 @@ impl App {
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
+                    Some(Prompt::Isolation(panel)) => panel.paste(&text),
                     Some(Prompt::Ask(prompt)) => prompt.paste(&text),
                     Some(_) => {}
                 }
@@ -1602,6 +1610,7 @@ impl App {
                 Prompt::Theme(p) => p.handle_key(key),
                 Prompt::Language(p) => p.handle_key(key),
                 Prompt::Settings(p) => p.handle_key(key),
+                Prompt::Isolation(p) => p.handle_key(key),
                 Prompt::Exit(p) => p.handle_key(key),
                 Prompt::Upgrade(p) => p.handle_key(key),
                 Prompt::Permission(p) => p.handle_key(key),
@@ -2266,6 +2275,15 @@ impl App {
                     model_id,
                 });
             }
+            Effect::ReadIsolation => self.host.send(Command::ReadIsolation),
+            Effect::SaveIsolation {
+                expected_revision,
+                policy,
+            } => self.host.send(Command::SaveIsolation {
+                expected_revision,
+                policy,
+            }),
+            Effect::ResetIsolation(revision) => self.host.send(Command::ResetIsolation(revision)),
             Effect::ReadModelPolicy => self.host.send(Command::ReadModelPolicy),
             Effect::SetModelPolicy {
                 expected_revision,
@@ -2414,6 +2432,12 @@ impl App {
             }
             Setting::Approvals => {
                 self.prompt = Some(Prompt::Approvals(ApprovalsPanel::new(&self.approvals)));
+            }
+            Setting::Isolation => {
+                self.prompt = Some(Prompt::Isolation(Box::new(
+                    crate::ui::isolation_panel::IsolationPanel::new(&self.approvals),
+                )));
+                self.host.send(Command::ReadIsolation);
             }
             Setting::Model => {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
@@ -3134,6 +3158,7 @@ impl App {
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Settings(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Isolation(prompt)) => list(prompt.render(list_width, budget, p)),
                 None if palette_overlay => {
                     let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
                     let page = budget.saturating_sub(5).clamp(3, 16);
@@ -3165,6 +3190,7 @@ impl App {
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
@@ -4697,6 +4723,84 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn isolation_settings_edit_save_conflict_and_reset_without_model_execution() {
+        use dim_agent_types::isolation::{
+            IsolationEscalation, IsolationPolicy, IsolationPolicyEffective,
+            IsolationPolicySnapshot, IsolationPolicySource, Sandbox,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.run_command("settings", "");
+        for _ in 0..7 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
+        let policy = IsolationPolicy {
+            environment: Some(Vec::new()),
+            read_only_paths: Some(vec!["/usr".into()]),
+            ..IsolationPolicy::default()
+        };
+        let snapshot = IsolationPolicySnapshot {
+            revision: "r1".into(),
+            path: home.path().join("host-isolation.json"),
+            source: IsolationPolicySource::File,
+            effective: IsolationPolicyEffective {
+                sandbox: Sandbox::Workspace,
+                escalation: IsolationEscalation::Ask,
+            },
+            policy,
+        };
+        app.apply(Update::Isolation(Ok(snapshot)));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Enter));
+        for _ in 0..3 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        match sent.borrow().last() {
+            Some(Command::SaveIsolation {
+                expected_revision,
+                policy,
+            }) => {
+                assert_eq!(expected_revision, "r1");
+                assert_eq!(policy.sandbox, Some(Sandbox::Network));
+                assert_eq!(policy.environment, Some(Vec::new()));
+                assert_eq!(policy.read_only_paths, Some(vec!["/usr".into()]));
+                assert_eq!(policy.writable_paths, None);
+            }
+            _ => panic!("settings save must use local management, not model exec"),
+        }
+        app.apply(Update::Isolation(Err("isolation_policy_conflict".into())));
+        for _ in 0..3 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::SaveIsolation { expected_revision, policy }) if expected_revision == "r1" && policy.sandbox == Some(Sandbox::Network))
+        );
+        app.apply(Update::Isolation(Err("isolation_policy_conflict".into())));
+        for _ in 0..4 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Char('y')));
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::ResetIsolation(revision)) if revision == "r1")
+        );
     }
 
     /// A picked message opens a line of the shown line with the submitted
