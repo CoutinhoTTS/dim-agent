@@ -19,7 +19,11 @@
 //!
 //! The judge's verdicts are read from a JSON array or from one object per
 //! line. A reply that gives no verdict, or leaves a statement without one, is
-//! asked again with what was wrong, at most twice.
+//! asked again with what was wrong, at most twice. A run that did not fail on
+//! its own (an error or its wall-clock budget) and that its judge still
+//! cannot answer is unjudged: it adds nothing to its arm's probe rates,
+//! violations or failed runs, and the report lists it. A run that did fail on
+//! its own is a failed run, scored as before, whatever its judge did.
 //!
 //! Both arms load the product's default plugins, from the default
 //! configuration file the product ships (`--defaults FILE`, by default the
@@ -617,6 +621,14 @@ struct RunRecord {
     temperature_dropped: bool,
     probes: Vec<ProbeRecord>,
 }
+impl RunRecord {
+    /// Whether the run is unjudged: it did not fail on its own, an error or
+    /// its wall-clock budget, and the judge gave no answer (model-prompts
+    /// §8.1).
+    fn unjudged(&self) -> bool {
+        !self.failed && self.judge_error.is_some()
+    }
+}
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProbeRecord {
@@ -715,7 +727,7 @@ async fn run_once(
         turns: driven.turns,
         window: driven.window,
         duration_ms: started.elapsed().as_secs_f64() * 1000.,
-        failed: failed(driven.stop, error.as_deref(), &finished.probes),
+        failed: failed(driven.stop, error.as_deref()),
         error,
         judge_error: finished.judge_error,
         judge_reasks: finished.judge_reasks,
@@ -855,14 +867,11 @@ async fn drive_once(
     })
 }
 
-/// Whether the run counts as a failed run: an error, a wall-clock timeout, or
-/// a verdict the judge did not answer (model-prompts §8.1).
-fn failed(stop: &str, error: Option<&str>, probes: &[ProbeRecord]) -> bool {
-    stop == "seconds"
-        || error.is_some()
-        || probes
-            .iter()
-            .any(|probe| probe.verdict == ProbeVerdict::Unparsed)
+/// Whether the run counts as a failed run: an error or a wall-clock timeout
+/// (model-prompts §8.1). A run the judge cannot answer is unjudged instead,
+/// not failed.
+fn failed(stop: &str, error: Option<&str>) -> bool {
+    stop == "seconds" || error.is_some()
 }
 
 /// Every probe of a run that was not judged.
@@ -1453,7 +1462,8 @@ fn verdicts(scenario: &Scenario, reply: &str) -> std::result::Result<Vec<ProbeRe
         .collect())
 }
 
-/// The arm's metrics over its scenarios and runs (model-prompts §8.1).
+/// The arm's metrics over its scenarios and runs (model-prompts §8.1). An
+/// unjudged run adds nothing to them; the arm counts it apart.
 #[derive(Default)]
 struct Metrics {
     /// `(scenario, probe)` → `(passed runs, runs)`.
@@ -1462,9 +1472,16 @@ struct Metrics {
     failed: u32,
     /// Runs whose probes a judge answered.
     judged: u32,
+    /// Runs the judge gave no answer to, that did not fail on their own,
+    /// left out of every other count.
+    unjudged: u32,
 }
 impl Metrics {
     fn add(&mut self, scenario: &Scenario, record: &RunRecord) {
+        if record.unjudged() {
+            self.unjudged += 1;
+            return;
+        }
         self.failed += u32::from(record.failed);
         let judged = record.error.is_none() && record.judge_error.is_none();
         self.judged += u32::from(judged);
@@ -1506,7 +1523,8 @@ impl Metrics {
 
 /// The §8.1 rule of a candidate arm against the current one: every probe's
 /// pass rate at least `current − δ`, and violations and failed runs no
-/// higher. There is no absolute pass line.
+/// higher. A probe with no judged run in one arm fails the comparison by
+/// name. There is no absolute pass line.
 struct Rule {
     passes: bool,
     failures: Vec<String>,
@@ -1521,8 +1539,21 @@ fn rule(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Rule 
     for scenario in scenarios {
         for probe in &scenario.probes {
             let key = (scenario.id.clone(), probe.id.clone());
+            let current_counts = current.counts(&key);
+            let candidate_counts = candidate.counts(&key);
+            for (arm, counts) in [
+                ("current", &current_counts),
+                ("candidate", &candidate_counts),
+            ] {
+                if counts.is_none() {
+                    failures.push(format!(
+                        "{}/{} has no judged run in the {arm} arm",
+                        scenario.id, probe.id
+                    ));
+                }
+            }
             let (Some((current_passed, current_runs)), Some((candidate_passed, candidate_runs))) =
-                (current.counts(&key), candidate.counts(&key))
+                (current_counts, candidate_counts)
             else {
                 continue;
             };
@@ -1675,11 +1706,28 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             );
         }
     }
-    text += "\n| arm | violations | failed runs |\n| --- | --- | --- |\n";
+    text += "\n| arm | violations | failed runs | unjudged runs |\n| --- | --- | --- | --- |\n";
     for arm in ["current", "candidate"] {
         let empty = Metrics::default();
         let metrics = metrics.get(arm).unwrap_or(&empty);
-        text += &format!("| {arm} | {} | {} |\n", metrics.violations, metrics.failed);
+        text += &format!(
+            "| {arm} | {} | {} | {} |\n",
+            metrics.violations, metrics.failed, metrics.unjudged
+        );
+    }
+    let unjudged: Vec<&RunRecord> = records.iter().filter(|record| record.unjudged()).collect();
+    if !unjudged.is_empty() {
+        text += "\n| arm | scenario | run | judge error |\n| --- | --- | --- | --- |\n";
+        for record in unjudged {
+            let error = record.judge_error.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                error.lines().next().unwrap_or_default(),
+            );
+        }
     }
     if let (Some(current), Some(candidate)) = (metrics.get("current"), metrics.get("candidate")) {
         let rule = rule(current, candidate, scenarios);
@@ -1770,7 +1818,10 @@ mod tests {
         HostFuture, ModelConnection, ModelDriver, ModelStopReason, ResolveModelConnection,
         ResolvedModelConnection,
     };
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     fn probe(id: &str, kind: ProbeKind) -> Probe {
         Probe {
@@ -1841,6 +1892,20 @@ mod tests {
         ModelId {
             provider_id: "gateway".into(),
             model_id: "deepseek-v4.1-flash".into(),
+        }
+    }
+    /// One evaluation's instrument, reading `judge`'s verdicts.
+    fn instrument(judge: ModelId) -> Instrument {
+        Instrument {
+            text: "context-compaction/summary".into(),
+            model: model(),
+            judge,
+            runs: 1,
+            tokens: 1.,
+            model_configuration: None,
+            judge_configuration: None,
+            judge_temperature_dropped: 0,
+            judge_calls: 0,
         }
     }
 
@@ -2020,6 +2085,123 @@ mod tests {
         );
     }
 
+    /// A probe with no judged run in one arm cannot be compared: the rule
+    /// names the arm rather than reading the missing run as a fall (issue
+    /// #642).
+    #[test]
+    fn a_probe_with_no_judged_run_in_an_arm_fails_the_rule() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let current = metrics(
+            &scenario,
+            &[record(
+                "current",
+                &scenario,
+                &[("reports", ProbeVerdict::Present)],
+                false,
+            )],
+        );
+        let mut unjudged = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            false,
+        );
+        unjudged.judge_error = Some("the judge failed: no answer".into());
+        let verdict = rule(
+            &current,
+            &metrics(&scenario, std::slice::from_ref(&unjudged)),
+            std::slice::from_ref(&scenario),
+        );
+        assert!(!verdict.passes);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "case/reports has no judged run in the candidate arm"),
+            "{:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("falls from")),
+            "a missing judged run never reads as a fall: {:?}",
+            verdict.failures
+        );
+    }
+
+    /// A run that stopped on its wall-clock budget is a failed run, scored as
+    /// before, even when its judge gave no answer: only the run's own failure
+    /// would leave it out (issue #642).
+    #[test]
+    fn a_run_that_stopped_on_its_wall_clock_budget_stays_a_failed_run() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut record = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            failed("seconds", None),
+        );
+        record.stop = "seconds";
+        record.judge_error = Some("the judge failed: no answer".into());
+        assert!(!record.unjudged(), "the run failed on its own");
+        let metrics = metrics(&scenario, std::slice::from_ref(&record));
+        assert_eq!(metrics.failed, 1);
+        assert_eq!(metrics.unjudged, 0);
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&record),
+        );
+        assert!(text.contains("| candidate | 0 | 1 | 0 |"), "{text}");
+        assert!(
+            !text.contains("| arm | scenario | run | judge error |"),
+            "{text}"
+        );
+    }
+
+    /// The report counts each arm's unjudged runs, lists them with the first
+    /// line of the judge error, and adds no such row when there are none
+    /// (issue #642).
+    #[test]
+    fn the_report_lists_unjudged_runs_with_the_first_line_of_the_judge_error() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut unjudged = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            false,
+        );
+        unjudged.judge_error = Some("the judge failed: no answer\nand the retry too".into());
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&unjudged),
+        );
+        assert!(text.contains("| candidate | 0 | 0 | 1 |"), "{text}");
+        assert!(
+            text.contains("| candidate | case | 0 | the judge failed: no answer |"),
+            "{text}"
+        );
+        assert!(!text.contains("and the retry too"), "{text}");
+        let judged = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            false,
+        );
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&judged),
+        );
+        assert!(
+            !text.contains("| arm | scenario | run | judge error |"),
+            "{text}"
+        );
+    }
+
     struct Local;
     impl ResolveModelConnection for Local {
         fn resolve(
@@ -2036,8 +2218,10 @@ mod tests {
             })
         }
     }
-    /// Answers every judge call with prose that holds no verdict list.
-    struct Garbage;
+    /// Answers every judge call with prose that holds no verdict list, and
+    /// counts the calls it was asked.
+    #[derive(Default)]
+    struct Garbage(AtomicUsize);
     impl ModelDriver for Garbage {
         fn invoke(
             &self,
@@ -2045,6 +2229,7 @@ mod tests {
             _: ModelConnection,
             _: CancellationToken,
         ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+            self.0.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move {
                 Ok(Box::pin(futures_util::stream::iter(vec![
                     Ok(dim_agent_capabilities::host::ModelChunk::MessageStart {
@@ -2063,9 +2248,11 @@ mod tests {
         }
     }
 
-    /// A verdict the judge did not answer is a failed run, never a pass.
+    /// A judge that never answers in a readable form is asked three times, and
+    /// the run is unjudged: not a failed run, out of its arm's metrics, and
+    /// listed in the report (issue #642, acceptance 3).
     #[tokio::test]
-    async fn an_unparseable_verdict_is_a_failed_run() {
+    async fn a_judge_that_never_answers_readably_leaves_the_run_unjudged() {
         let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
         let judge = ModelSelection {
             provider_id: "fake".into(),
@@ -2074,8 +2261,9 @@ mod tests {
             config: None,
             metadata: None,
         };
-        let (probes, error, _, _) = judge_export(
-            &Arc::new(ModelHost(Arc::new(Garbage))),
+        let driver = Arc::new(Garbage::default());
+        let (probes, error, _, reasks) = judge_export(
+            &Arc::new(ModelHost(driver.clone())),
             &Arc::new(ProviderConnectionResolver(Arc::new(Local))),
             &judge,
             &scenario,
@@ -2083,18 +2271,52 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(
-            error
-                .as_deref()
-                .is_some_and(|error| error.contains("no usable verdicts")),
-            "{error:?}"
+        assert_eq!(
+            driver.0.load(Ordering::Relaxed),
+            3,
+            "the call and its two re-asks"
         );
+        assert_eq!(reasks, 2);
         assert!(
             probes
                 .iter()
                 .all(|probe| probe.verdict == ProbeVerdict::Unparsed)
         );
-        assert!(failed("idle", None, &probes));
+        let error = error.expect("an unusable answer is the judge's error");
+        assert!(
+            error.starts_with(
+                "the judge answered with no usable verdicts: it is not a JSON array of verdict objects ("
+            ),
+            "{error}"
+        );
+        let record = RunRecord {
+            failed: failed("idle", None),
+            judge_error: Some(error),
+            probes,
+            ..record("current", &scenario, &[], false)
+        };
+        assert!(!record.failed, "an unjudged run is not a failed run");
+        let metrics = metrics(&scenario, std::slice::from_ref(&record));
+        assert_eq!(metrics.unjudged, 1);
+        assert_eq!(metrics.failed, 0);
+        assert_eq!(metrics.judged, 0);
+        assert_eq!(
+            metrics.counts(&("case".to_owned(), "reports".to_owned())),
+            None,
+            "an unjudged run answers no probe"
+        );
+        let text = report(
+            &instrument(ModelId {
+                provider_id: "fake".into(),
+                model_id: "fake".into(),
+            }),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&record),
+        );
+        assert!(
+            text.contains("| current | case | 0 | the judge answered with no usable verdicts: it is not a JSON array of verdict objects ("),
+            "{text}"
+        );
     }
 
     /// The judge answers one verdict object per line: one request per run
@@ -2260,19 +2482,8 @@ mod tests {
     /// family is reported as a limitation of the measurement.
     #[test]
     fn a_same_family_judge_is_reported_as_a_limitation() {
-        let settings = |judge: ModelId| Instrument {
-            text: "context-compaction/summary".into(),
-            model: model(),
-            judge,
-            runs: 1,
-            tokens: 1.,
-            model_configuration: None,
-            judge_configuration: None,
-            judge_temperature_dropped: 0,
-            judge_calls: 0,
-        };
         let same = report(
-            &settings(ModelId {
+            &instrument(ModelId {
                 provider_id: "gateway".into(),
                 model_id: "auto/deepseek-v4.1".into(),
             }),
@@ -2282,7 +2493,7 @@ mod tests {
         assert!(same.contains("`gateway/auto/deepseek-v4.1`"), "{same}");
         assert!(same.contains("own family"), "{same}");
         let other = report(
-            &settings(ModelId {
+            &instrument(ModelId {
                 provider_id: "gateway".into(),
                 model_id: "claude-opus-5-5".into(),
             }),
