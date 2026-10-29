@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::session::{
-    EmptyProvider, ModelItem, ModelList, ModelPolicyUpdate, SubagentModelPolicy,
+    EmptyProvider, EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, SubagentModelPolicy,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
@@ -464,25 +464,41 @@ fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current
     }
 }
 
-/// A provider with models but nothing selectable keeps a muted row, after
-/// the models, naming it and the command that shows the reasons.
+/// A provider that offers nothing selectable keeps a muted row, after the
+/// models, naming it, why and the command that shows the details.
 fn empty_rows(providers: &[EmptyProvider]) -> Vec<Item> {
     providers
         .iter()
         .map(|provider| {
             let name = ("provider", provider.provider_name.as_str());
             let id = ("id", provider.provider_id.as_str());
-            let text = if provider.unavailable == 1 {
-                tf(
+            let text = match provider.reason {
+                EmptyReason::NoModels => tf(
+                    "{provider}: no models · dimcode models {id} --refresh",
+                    &[name, id],
+                ),
+                EmptyReason::Unavailable { count: 1 } => tf(
                     "{provider}: 1 model unavailable · dimcode models {id}",
                     &[name, id],
-                )
-            } else {
-                let count = provider.unavailable.to_string();
-                tf(
-                    "{provider}: {count} models unavailable · dimcode models {id}",
-                    &[name, ("count", &count), id],
-                )
+                ),
+                EmptyReason::Unavailable { count } => {
+                    let count = count.to_string();
+                    tf(
+                        "{provider}: {count} models unavailable · dimcode models {id}",
+                        &[name, ("count", &count), id],
+                    )
+                }
+                EmptyReason::Disabled { count: 1 } => tf(
+                    "{provider}: 1 model disabled · dimcode models {id}",
+                    &[name, id],
+                ),
+                EmptyReason::Disabled { count } => {
+                    let count = count.to_string();
+                    tf(
+                        "{provider}: {count} models disabled · dimcode models {id}",
+                        &[name, ("count", &count), id],
+                    )
+                }
             };
             let mut row = Item::heading(text);
             row.sticky = true;

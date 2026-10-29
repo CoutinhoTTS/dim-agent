@@ -371,6 +371,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: 모델 {count}개 사용 불가 · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}: 모델 없음 · dimcode models {id} --refresh"
+        }
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}: 모델 1개 사용 안 함 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}: 모델 {count}개 사용 안 함 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "모델이 없습니다. dimcode models {id} --refresh 로 확인하세요."
+        }
+        "No models. The provider listed none." => {
+            "모델이 없습니다. 이 제공자는 아무것도 나열하지 않았습니다."
+        }
         "Enter select · Esc back" => "Enter 선택 · Esc 뒤로",
         "Subagent models" => "서브에이전트 모델",
         "Subagent models: {policy}" => "서브에이전트 모델: {policy}",

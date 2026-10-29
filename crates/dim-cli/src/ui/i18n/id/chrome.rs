@@ -401,6 +401,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} model tak tersedia · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}: tanpa model · dimcode models {id} --refresh"
+        }
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}: 1 model dinonaktifkan · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}: {count} model dinonaktifkan · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "Tidak ada model. Jalankan dimcode models {id} --refresh untuk menampilkannya."
+        }
+        "No models. The provider listed none." => {
+            "Tidak ada model. Penyedia tidak menampilkan satu pun."
+        }
         "Enter select · Esc back" => "Enter pilih · Esc kembali",
         "Subagent models" => "Model subagen",
         "Subagent models: {policy}" => "Model subagen: {policy}",

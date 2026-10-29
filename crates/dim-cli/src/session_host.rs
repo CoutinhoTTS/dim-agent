@@ -21,9 +21,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, ModelItem, ModelList,
-    ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction,
-    ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind, Update,
+    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
+    ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply,
+    ProviderAction, ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
+    Update,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -2088,12 +2089,12 @@ impl Worker {
     ///
     /// A provider whose catalog is missing or lists no models is asked to
     /// refill it once per connection through `provider.refresh` when
-    /// `provider.list` says its models can be listed. The request is sent,
-    /// not awaited: the picker opens with what the catalogs hold, a provider
-    /// still listing none shows its row meanwhile, and a reply makes the
-    /// worker read the list again. A provider whose catalog cannot be read is
-    /// left out; one that lists unavailable models but has none selectable is
-    /// reported for its picker row. Models the user disabled make no row.
+    /// `provider.list` says its models can be listed. The request is sent, not
+    /// awaited: the picker opens with what the catalogs hold, a provider
+    /// still listing none shows its `no models` row meanwhile, and a reply
+    /// makes the worker read the list again. Every usable provider that
+    /// offers no selectable model is reported for its picker row, with the
+    /// reason.
     async fn models(&mut self) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         struct Providers {
@@ -2199,13 +2200,24 @@ impl Worker {
                 self.refill_requests.push(request);
             }
             let Some(catalog) = catalog else {
+                empty.push(EmptyProvider {
+                    provider_id,
+                    provider_name,
+                    reason: EmptyReason::NoModels,
+                });
                 continue;
             };
             let preferences = self.saved_preferences(&provider_id).await;
+            let total = catalog.models.len();
             let unavailable = catalog
                 .models
                 .iter()
                 .filter(|model| model.unavailable_reason.is_some())
+                .count();
+            let disabled = catalog
+                .models
+                .iter()
+                .filter(|model| catalog.disabled_model_ids.contains(&model.id))
                 .count();
             let before = models.len();
             models.extend(
@@ -2243,11 +2255,18 @@ impl Worker {
                         }
                     }),
             );
-            if models.len() == before && unavailable > 0 {
+            if models.len() == before {
+                let reason = if total == 0 {
+                    EmptyReason::NoModels
+                } else if unavailable > 0 {
+                    EmptyReason::Unavailable { count: unavailable }
+                } else {
+                    EmptyReason::Disabled { count: disabled }
+                };
                 empty.push(EmptyProvider {
                     provider_id,
                     provider_name,
-                    unavailable,
+                    reason,
                 });
             }
         }

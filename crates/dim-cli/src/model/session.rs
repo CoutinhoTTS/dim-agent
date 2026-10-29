@@ -394,13 +394,23 @@ pub struct ModelItem {
     pub saved_effort: Option<String>,
 }
 
-/// A usable provider with unavailable models and none selectable.
+/// Why a usable provider contributes no selectable model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EmptyReason {
+    /// It lists no models: none discovered yet, or none at all.
+    NoModels,
+    /// Every model it lists is unavailable.
+    Unavailable { count: usize },
+    /// Every model it lists is disabled.
+    Disabled { count: usize },
+}
+
+/// A usable provider with no selectable model.
 #[derive(Debug, Clone)]
 pub struct EmptyProvider {
     pub provider_id: String,
     pub provider_name: String,
-    /// How many of its models it lists as unavailable.
-    pub unavailable: usize,
+    pub reason: EmptyReason,
 }
 
 /// Which model new Collaboration members use (`collaboration.model_policy`).
@@ -432,8 +442,8 @@ pub enum ModelPolicyUpdate {
 pub struct ModelList {
     pub models: Vec<ModelItem>,
     pub current: Option<(String, String)>,
-    /// The providers with unavailable models and none selectable, so the
-    /// picker can say why they are missing.
+    /// The usable providers that offer no selectable model, with why, so the
+    /// picker can name them.
     pub empty: Vec<EmptyProvider>,
 }
 

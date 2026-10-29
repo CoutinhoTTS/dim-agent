@@ -343,6 +343,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} 个模型不可用 · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}：没有模型 · dimcode models {id} --refresh"
+        }
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}：1 个模型已禁用 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}：{count} 个模型已禁用 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "没有模型。运行 dimcode models {id} --refresh 查看。"
+        }
+        "No models. The provider listed none." => "没有模型。该 Provider 没有列出任何模型。",
         "Enter select · Esc back" => "Enter 选择 · Esc 返回",
         "Subagent models" => "子代理模型",
         "Subagent models: {policy}" => "子代理模型：{policy}",

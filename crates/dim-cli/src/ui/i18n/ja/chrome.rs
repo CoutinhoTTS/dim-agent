@@ -383,6 +383,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} モデル利用不可 · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}：モデルなし · dimcode models {id} --refresh"
+        }
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}：1 モデル無効 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}：{count} モデル無効 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "モデルがありません。dimcode models {id} --refresh で一覧できます。"
+        }
+        "No models. The provider listed none." => {
+            "モデルがありません。このプロバイダーは何も一覧しませんでした。"
+        }
         "Enter select · Esc back" => "Enter 選択 · Esc 戻る",
         "Subagent models" => "サブエージェントモデル",
         "Subagent models: {policy}" => "サブエージェントモデル：{policy}",

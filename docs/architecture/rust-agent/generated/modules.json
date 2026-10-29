@@ -18267,6 +18267,7 @@
       "references": [
         "mod drivers",
         "path drivers::connection",
+        "path drivers::remote_model_list",
         "path drivers::routes",
         "path drivers::supported"
       ]
@@ -19014,7 +19015,8 @@
         "path same_account",
         "path static_entries",
         "path static_models",
-        "path storage"
+        "path storage",
+        "path super::can_list_models"
       ]
     },
     {
@@ -20832,6 +20834,17 @@
         "path ui::config::save_fullscreen",
         "path ui::config::saved_fullscreen",
         "path ui::config::saved_permission"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::saved_locale",
+        "path crate::ui::i18n::set",
+        "path crate::ui::i18n::system_locale",
+        "path crate::ui::i18n::t",
+        "path crate::ui::i18n::tf"
       ]
     },
     {
@@ -22841,6 +22854,9 @@
         "path DraftPart::Paste",
         "path DraftPart::Text",
         "path EmptyProvider",
+        "path EmptyReason::Disabled",
+        "path EmptyReason::NoModels",
+        "path EmptyReason::Unavailable",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate::Conflict",
@@ -22901,6 +22917,7 @@
         "use crate::model::session::ContextReading",
         "use crate::model::session::DraftPart",
         "use crate::model::session::EmptyProvider",
+        "use crate::model::session::EmptyReason",
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
@@ -25100,6 +25117,9 @@
       "to": "dim_cli::model::session",
       "references": [
         "path EmptyProvider",
+        "path EmptyReason::Disabled",
+        "path EmptyReason::NoModels",
+        "path EmptyReason::Unavailable",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate",
@@ -25111,6 +25131,7 @@
         "path SubagentModelPolicy::Fixed",
         "path SubagentModelPolicy::Inherit",
         "use crate::model::session::EmptyProvider",
+        "use crate::model::session::EmptyReason",
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
@@ -25201,7 +25222,8 @@
       "to": "dim_cli::ui::models_panel",
       "references": [
         "path ModelsPanel",
-        "path ModelsPanel::new"
+        "path ModelsPanel::new",
+        "path provider_name"
       ]
     },
     {
@@ -25210,8 +25232,6 @@
       "references": [
         "path KeyCode",
         "path KeyCode::Char",
-        "path KeyCode::Esc",
-        "path KeyCode::Right",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::NONE",

@@ -409,6 +409,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} Modelle nicht verfügbar · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}: keine Modelle · dimcode models {id} --refresh"
+        }
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}: 1 Modell deaktiviert · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}: {count} Modelle deaktiviert · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "Keine Modelle. Mit dimcode models {id} --refresh auflisten."
+        }
+        "No models. The provider listed none." => {
+            "Keine Modelle. Der Anbieter hat keine aufgelistet."
+        }
         "Enter select · Esc back" => "Enter wählen · Esc zurück",
         "Subagent models" => "Subagent-Modelle",
         "Subagent models: {policy}" => "Subagent-Modelle: {policy}",
