@@ -6969,11 +6969,9 @@
         "path context_configuration",
         "path context_messages",
         "path crate::history::read_context",
-        "path with_input_guide",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_configuration",
-        "use crate::history::context_messages",
-        "use crate::history::with_input_guide"
+        "use crate::history::context_messages"
       ]
     },
     {
@@ -7690,16 +7688,6 @@
         "path InputMessageData",
         "path UserInput",
         "path events"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::history",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path SystemPrompt",
-        "path SystemPrompt::Parts",
-        "path SystemPrompt::Text",
-        "path SystemPromptPart::Text"
       ]
     },
     {
@@ -8648,14 +8636,6 @@
         "path PromptHost",
         "use crate::host::HostError",
         "use crate::host::PromptHost"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt",
-      "to": "dim_agent_capabilities::prompt_guide",
-      "references": [
-        "path GuideEntries",
-        "use crate::prompt_guide::GuideEntries"
       ]
     },
     {
