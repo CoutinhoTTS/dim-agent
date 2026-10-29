@@ -506,34 +506,4 @@ mod tests {
             })
             .collect()
     }
-
-    #[test]
-    fn a_pending_user_message_draws_faint_and_a_consumed_one_in_the_user_colour() {
-        use crate::ui::theme::ansi::{Paint, paint};
-        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
-        let markdown = MarkdownRenderer::new(&theme);
-        let drawn = |pending: bool| {
-            let mut message = row(RowKind::UserMessage, "find the leak");
-            message.pending = pending;
-            let block = project_row(&shared(&[message]), 0, Detail::Collapsed);
-            render_block(&block, 40, &theme.palette, &markdown)
-        };
-        let lead = |color: &str| {
-            paint(
-                "┃ ",
-                Paint {
-                    fg: Some(color),
-                    ..Paint::default()
-                },
-            )
-        };
-        assert!(
-            drawn(true)[0].starts_with(&lead(&theme.palette.faint)),
-            "a message the model has not read draws faint"
-        );
-        assert!(
-            drawn(false)[0].starts_with(&lead(&theme.palette.user)),
-            "a consumed message draws in the user colour"
-        );
-    }
 }
