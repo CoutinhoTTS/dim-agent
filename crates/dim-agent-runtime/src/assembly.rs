@@ -1532,8 +1532,8 @@ async fn create_instance(
         }
     }
 }
-/// Candidate rows, including nested extensions. Main and child branches do
-/// not exist until Session publication and have their own assembly snapshots.
+/// Reads current candidate rows, including nested instances added during
+/// readiness waits. Main and child branches have their own assembly snapshots.
 fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
     loader
         .instance_rows(instance.instance())
