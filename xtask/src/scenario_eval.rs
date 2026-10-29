@@ -17,6 +17,10 @@
 //! minus 0.05, and the candidate's violations and failed runs are no higher.
 //! There is no absolute pass line.
 //!
+//! The judge's verdicts are read from a JSON array or from one object per
+//! line. A reply that gives no verdict, or leaves a statement without one, is
+//! asked again with what was wrong, at most twice.
+//!
 //! Both arms load the product's default plugins, from the default
 //! configuration file the product ships (`--defaults FILE`, by default the
 //! one in this repository), through the App Server's own default plugin
@@ -97,7 +101,9 @@ use dim_agent_capabilities::{
     context_model::window_facts,
     host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver},
 };
-use dim_agent_types::{Message, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt};
+use dim_agent_types::{
+    Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
+};
 use dim_app_server::RunningServer;
 use dim_client::{Client, ConnectionConfig, Message as WireMessage, Server as WireServer};
 use serde_json::{Value, json};
@@ -126,6 +132,12 @@ const QUIET: Duration = Duration::from_secs(1);
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
+
+/// The message that asks the judge again, `{what}` saying why its last answer
+/// could not be used.
+const JUDGE_REASK: &str = "Your answer could not be used: {what}. Answer again with the JSON array only, one object per statement.";
+/// How many times one run's judge is asked again for an answer it cannot use.
+const REASKS: u32 = 2;
 
 /// Where one text lives in the assembly [`app_server::serve_home`] builds.
 enum TextMember {
@@ -598,6 +610,9 @@ struct RunRecord {
     failed: bool,
     error: Option<String>,
     judge_error: Option<String>,
+    /// How many times the judge was asked again for an answer it could not
+    /// use.
+    judge_reasks: u32,
     #[serde(skip)]
     temperature_dropped: bool,
     probes: Vec<ProbeRecord>,
@@ -703,6 +718,7 @@ async fn run_once(
         failed: failed(driven.stop, error.as_deref(), &finished.probes),
         error,
         judge_error: finished.judge_error,
+        judge_reasks: finished.judge_reasks,
         temperature_dropped: finished.temperature_dropped,
         probes: finished.probes,
     })
@@ -715,6 +731,7 @@ struct Finished {
     export: Option<String>,
     probes: Vec<ProbeRecord>,
     judge_error: Option<String>,
+    judge_reasks: u32,
     temperature_dropped: bool,
 }
 impl Finished {
@@ -730,6 +747,7 @@ impl Finished {
             export: None,
             probes: unparsed(scenario),
             judge_error: None,
+            judge_reasks: 0,
             temperature_dropped: false,
         }
     }
@@ -772,6 +790,7 @@ async fn drive_once(
             export: None,
             probes: unparsed(scenario),
             judge_error: None,
+            judge_reasks: 0,
             temperature_dropped: false,
         });
     }
@@ -806,6 +825,7 @@ async fn drive_once(
                 export: None,
                 probes: unparsed(scenario),
                 judge_error: Some(format!("no export to judge: {error}")),
+                judge_reasks: 0,
                 temperature_dropped: false,
             });
         }
@@ -819,16 +839,18 @@ async fn drive_once(
             export: Some(export),
             probes: unparsed(scenario),
             judge_error: Some("the served profile has no model host for the judge".to_owned()),
+            judge_reasks: 0,
             temperature_dropped: false,
         });
     };
-    let (probes, judge_error, temperature_dropped) =
+    let (probes, judge_error, temperature_dropped, judge_reasks) =
         judge_export(&host, &resolver, judge, scenario, &export, cancel).await;
     Ok(Finished {
         driven,
         export: Some(export),
         probes,
         judge_error,
+        judge_reasks,
         temperature_dropped,
     })
 }
@@ -1298,10 +1320,12 @@ async fn idle(
     Ok(true)
 }
 
-/// The judge's answer for one run: a record per probe, the judge's error, and
-/// whether the judge had to drop its temperature. A failed or unparseable
-/// answer leaves every probe `unparsed`, so the run is a failed run
-/// (model-prompts §8.1).
+/// The judge's answer for one run: a record per probe, the judge's error,
+/// whether the judge had to drop its temperature, and how many times it was
+/// asked again. A reply that gives no verdict, or leaves a probe without one,
+/// is asked again with what was wrong, at most [`REASKS`] times; a call that
+/// fails during a re-ask ends the asking. An answer that stays unusable
+/// leaves every probe `unparsed` (model-prompts §8.1).
 async fn judge_export(
     host: &Arc<ModelHost>,
     resolver: &Arc<ProviderConnectionResolver>,
@@ -1309,7 +1333,7 @@ async fn judge_export(
     scenario: &Scenario,
     export: &str,
     cancel: &CancellationToken,
-) -> (Vec<ProbeRecord>, Option<String>, bool) {
+) -> (Vec<ProbeRecord>, Option<String>, bool, u32) {
     let statements = scenario
         .probes
         .iter()
@@ -1318,59 +1342,98 @@ async fn judge_export(
         .join("\n");
     let text =
         format!("<statements>\n{statements}\n</statements>\n\n<timeline>\n{export}\n</timeline>");
-    let mut request = ModelRequest::new(
-        &judge.provider_id,
-        &judge.model_id,
-        vec![Message::text(Role::User, text)],
-    );
-    request.capability_snapshot = judge.capability_snapshot.clone();
+    let mut messages = vec![Message::text(Role::User, text)];
     let mut config = judge.config.clone().unwrap_or_default();
     config.temperature = Some(0.);
-    request.config = Some(config);
-    request.system = Some(Arc::new(SystemPrompt::Text(JUDGE_SYSTEM.into())));
-    let request = Arc::new(request);
     let mut dropped = false;
-    let reply = match complete(host, resolver, &request, cancel).await {
-        Ok(reply) => reply,
-        Err(error) => {
-            let Some(mut retry) = request
-                .config
-                .as_ref()
-                .and_then(|config| config.temperature)
-                .map(|_| (*request).clone())
-            else {
-                return (
-                    unparsed(scenario),
-                    Some(format!("the judge failed: {error}")),
-                    false,
-                );
-            };
-            retry.config.as_mut().expect("a config").temperature = None;
-            dropped = true;
-            match complete(host, resolver, &Arc::new(retry), cancel).await {
-                Ok(reply) => reply,
-                Err(retry) => {
+    let mut reasks = 0;
+    loop {
+        let request = Arc::new(judge_request(judge, &messages, &config));
+        let reply = match complete(host, resolver, &request, cancel).await {
+            Ok(reply) => reply,
+            Err(error) => {
+                // The first call is retried once without a temperature; a
+                // call that fails during a re-ask ends the asking.
+                if dropped || reasks > 0 {
                     return (
                         unparsed(scenario),
-                        Some(format!("the judge failed: {error}, then {retry}")),
+                        Some(format!("the judge failed: {error}")),
                         dropped,
+                        reasks,
                     );
                 }
+                config.temperature = None;
+                dropped = true;
+                let retry = Arc::new(judge_request(judge, &messages, &config));
+                match complete(host, resolver, &retry, cancel).await {
+                    Ok(reply) => reply,
+                    Err(retry) => {
+                        return (
+                            unparsed(scenario),
+                            Some(format!("the judge failed: {error}, then {retry}")),
+                            dropped,
+                            reasks,
+                        );
+                    }
+                }
             }
-        }
-    };
-    let Some(judged) = parse_judgements(&reply).ok() else {
-        return (
-            unparsed(scenario),
-            Some(format!("the judge answered with no verdict list: {reply}")),
-            dropped,
-        );
-    };
-    let judged: BTreeMap<String, (Verdict, Option<String>)> = judged
+        };
+        let what = match verdicts(scenario, &reply) {
+            Ok(probes) => return (probes, None, dropped, reasks),
+            Err(what) if reasks == REASKS => {
+                return (
+                    unparsed(scenario),
+                    Some(format!(
+                        "the judge answered with no usable verdicts: {what}\n{reply}"
+                    )),
+                    dropped,
+                    reasks,
+                );
+            }
+            Err(what) => what,
+        };
+        reasks += 1;
+        messages.push(Message::text(Role::Assistant, reply));
+        messages.push(Message::text(
+            Role::User,
+            JUDGE_REASK.replace("{what}", &what),
+        ));
+    }
+}
+
+/// The request one judge call carries: the conversation so far, the judge's
+/// configuration and the fixed system prompt.
+fn judge_request(
+    judge: &ModelSelection,
+    messages: &[Message],
+    config: &ModelConfig,
+) -> ModelRequest {
+    let mut request = ModelRequest::new(&judge.provider_id, &judge.model_id, messages.to_vec());
+    request.capability_snapshot = judge.capability_snapshot.clone();
+    request.config = Some(config.clone());
+    request.system = Some(Arc::new(SystemPrompt::Text(JUDGE_SYSTEM.into())));
+    request
+}
+
+/// The reply's verdict for every probe, or why it cannot be used: it does not
+/// read, or it answers no verdict for some probe. Ids the scenario does not
+/// have are ignored.
+fn verdicts(scenario: &Scenario, reply: &str) -> std::result::Result<Vec<ProbeRecord>, String> {
+    let judged: BTreeMap<String, (Verdict, Option<String>)> = parse_judgements(reply)
+        .map_err(|error| format!("it is not a JSON array of verdict objects ({error})"))?
         .into_iter()
         .map(|Judgement { id, verdict, quote }| (id, (verdict, quote.filter(|q| !q.is_empty()))))
         .collect();
-    let probes = scenario
+    let missing = scenario
+        .probes
+        .iter()
+        .filter(|probe| !judged.contains_key(&probe.id))
+        .map(|probe| probe.id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!("it has no verdict for {}", missing.join(", ")));
+    }
+    Ok(scenario
         .probes
         .iter()
         .map(|probe| {
@@ -1387,8 +1450,7 @@ async fn judge_export(
                 quote,
             }
         })
-        .collect();
-    (probes, None, dropped)
+        .collect())
 }
 
 /// The arm's metrics over its scenarios and runs (model-prompts §8.1).
@@ -1751,6 +1813,7 @@ mod tests {
             failed,
             error: None,
             judge_error: None,
+            judge_reasks: 0,
             temperature_dropped: false,
             probes: verdicts
                 .iter()
@@ -2011,7 +2074,7 @@ mod tests {
             config: None,
             metadata: None,
         };
-        let (probes, error, _) = judge_export(
+        let (probes, error, _, _) = judge_export(
             &Arc::new(ModelHost(Arc::new(Garbage))),
             &Arc::new(ProviderConnectionResolver(Arc::new(Local))),
             &judge,
@@ -2023,7 +2086,7 @@ mod tests {
         assert!(
             error
                 .as_deref()
-                .is_some_and(|error| error.contains("no verdict list")),
+                .is_some_and(|error| error.contains("no usable verdicts")),
             "{error:?}"
         );
         assert!(
@@ -2032,6 +2095,165 @@ mod tests {
                 .all(|probe| probe.verdict == ProbeVerdict::Unparsed)
         );
         assert!(failed("idle", None, &probes));
+    }
+
+    /// The judge answers one verdict object per line: one request per run
+    /// reads both probes' verdicts (issue #642, acceptance 1).
+    fn one_object_per_line(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            content(
+                "{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}\n\
+                 {\"id\": \"floods\", \"verdict\": \"absent\", \"quote\": \"nothing\"}",
+            )
+        })
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_judge_answering_one_object_per_line_is_read_in_one_request() {
+        let fixture = Fixture::start(
+            "per-line",
+            one_object_per_line,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [
+                    {"id": "ran", "kind": "must_show", "text": "the run has a transcript"},
+                    {"id": "floods", "kind": "must_not_show", "text": "the run floods the Timeline"}
+                ]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        assert_eq!(fixture.judge().len(), 2, "one judge request per arm");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeReasks"], 0, "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+            assert_eq!(record["probes"][1]["verdict"], "absent", "{record}");
+        }
+    }
+
+    /// The judge's first answer loses a level of escaping in a quote, as one
+    /// answer in the evaluation for #553 did, so it is not JSON.
+    const UNESCAPED: &str =
+        r#"[{"id": "ran", "verdict": "present", "quote": "turn/end: the run said "hello""}]"#;
+    /// The judge's first answer is [`UNESCAPED`], and every answer after a
+    /// re-ask is readable.
+    fn unescaped_then_readable(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            content(if text.contains("Your answer could not be used") {
+                "[{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}]"
+            } else {
+                UNESCAPED
+            })
+        })
+    }
+    /// A judge answer that does not read is asked again, and the second answer
+    /// is the one used (issue #642, acceptance 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_that_does_not_read_is_asked_again() {
+        let fixture = Fixture::start(
+            "re-ask",
+            unescaped_then_readable,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeReasks"], 1, "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+        }
+        let judge = fixture.judge();
+        assert_eq!(judge.len(), 4, "one call and one re-ask per arm");
+        for pair in judge.chunks(2) {
+            assert!(
+                !pair[0].contains("Your answer could not be used"),
+                "the first call carries no re-ask"
+            );
+            assert!(
+                pair[1].contains("the run said"),
+                "the re-ask carries the first answer: {}",
+                pair[1]
+            );
+            assert!(
+                pair[1].contains(
+                    "Your answer could not be used: it is not a JSON array of verdict objects ("
+                ),
+                "the re-ask says what was wrong: {}",
+                pair[1]
+            );
+            assert!(
+                pair[1].contains("\"role\":\"assistant\""),
+                "the first answer is carried as an assistant message: {}",
+                pair[1]
+            );
+        }
+    }
+
+    /// The judge's first answer leaves a probe without a verdict, and every
+    /// answer after a re-ask is complete.
+    fn missing_then_complete(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            content(if text.contains("Your answer could not be used") {
+                "[{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}, \
+                 {\"id\": \"floods\", \"verdict\": \"absent\", \"quote\": \"nothing\"}]"
+            } else {
+                "[{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}]"
+            })
+        })
+    }
+    /// A reply with no verdict for a probe is asked again, and the request
+    /// names the probe (issue #642, acceptance 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_with_no_verdict_for_a_probe_is_asked_again() {
+        let fixture = Fixture::start(
+            "missing",
+            missing_then_complete,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [
+                    {"id": "ran", "kind": "must_show", "text": "the run has a transcript"},
+                    {"id": "floods", "kind": "must_not_show", "text": "the run floods the Timeline"}
+                ]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeReasks"], 1, "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+            assert_eq!(record["probes"][1]["verdict"], "absent", "{record}");
+        }
+        let judge = fixture.judge();
+        assert_eq!(judge.len(), 4, "one call and one re-ask per arm");
+        for pair in judge.chunks(2) {
+            assert!(
+                pair[1].contains("Your answer could not be used: it has no verdict for floods."),
+                "the re-ask names the probe: {}",
+                pair[1]
+            );
+        }
     }
 
     /// The judge is named with the result, and one from the model's own
@@ -2237,6 +2459,17 @@ mod tests {
                 .iter()
                 .filter(|request| request.contains(&format!("/{arm}/")))
                 .filter(|request| !request.contains("You check statements"))
+                .cloned()
+                .collect()
+        }
+        /// The judge requests the provider received, in arrival order.
+        fn judge(&self) -> Vec<String> {
+            self.provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.contains("You check statements"))
                 .cloned()
                 .collect()
         }
