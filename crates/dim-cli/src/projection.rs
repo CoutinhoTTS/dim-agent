@@ -59,12 +59,12 @@ pub struct Projection {
     running: bool,
     approvals: Vec<ApprovalView>,
     pub questions: crate::question::Pending,
-    /// Messages written and not applied yet: InputQueue holds them, and the
-    /// queue strip shows them. Each enters the transcript when its
-    /// `input/applied` comes, so the transcript keeps the order the model
-    /// sees, and a withdrawn input never becomes a row. Withdrawal
-    /// re-submits the kept `UserInput` as Steer. Each keeps its input id and
-    /// the sequence it was submitted at.
+    /// Messages InputQueue still holds: submitted while a turn ran and not
+    /// applied yet, `Append` aside. Shown in the queue strip; each enters the
+    /// transcript when its `input/applied` comes, so the transcript keeps the
+    /// order the model sees, and a withdrawn input never becomes a row.
+    /// Withdrawal re-submits the kept `UserInput` as Steer. Each keeps its
+    /// input id and the sequence it was submitted at.
     held: Vec<(String, u64, UserInput)>,
     /// The row each written user message draws in, by input id, until its
     /// `input/consumed` settles that row.
@@ -216,7 +216,11 @@ impl Projection {
         match &event.content {
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    self.held.push((event.id.clone(), sequence, user.clone()));
+                    if self.running && data.mode != Some(InputMode::Append) {
+                        self.held.push((event.id.clone(), sequence, user.clone()));
+                    } else {
+                        self.push_user(&event.id, sequence, sequence, user);
+                    }
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     ShellRun::parse(text).is_some().then(|| text.clone())
@@ -1748,37 +1752,53 @@ mod tests {
         };
         let mut main = Projection::default();
         apply(&mut main, &[input(1, "in-1", "find the leak", "queue")]);
+        let rows = main.snapshot().rows;
+        assert!(
+            rows[0].pending,
+            "a message sent while idle is pending until the model reads it"
+        );
+        assert!(
+            main.snapshot().queued.is_empty(),
+            "a message that is not held is not in the queue strip"
+        );
+        apply(&mut main, &[control(2, "consumed", "in-1")]);
+        assert!(
+            !main.snapshot().rows[0].pending,
+            "a consumed message settles out of pending"
+        );
+        main.set_running(true);
+        apply(&mut main, &[input(3, "in-2", "and the test", "queue")]);
         assert_eq!(
             main.snapshot().queued.len(),
             1,
-            "a written message waits in the queue strip"
+            "a message queued while a turn runs waits in the queue strip"
         );
-        assert!(
-            main.snapshot().rows.is_empty(),
+        assert_eq!(
+            main.snapshot().rows.len(),
+            1,
             "a message the model cannot read yet is not in the transcript"
         );
-        main.set_running(true);
-        apply(&mut main, &[control(2, "applied", "in-1")]);
+        apply(&mut main, &[control(4, "applied", "in-2")]);
         let rows = main.snapshot().rows;
-        assert_eq!(rows[0].text, "find the leak");
+        assert_eq!(rows[1].text, "and the test");
         assert!(
-            rows[0].pending,
+            rows[1].pending,
             "a message applied but not consumed is pending"
         );
         assert!(
             main.snapshot().queued.is_empty(),
             "an applied message leaves the queue strip"
         );
-        apply(&mut main, &[control(3, "consumed", "in-1")]);
+        apply(&mut main, &[control(5, "consumed", "in-2")]);
         assert!(
-            !main.snapshot().rows[0].pending,
+            !main.snapshot().rows[1].pending,
             "a consumed message settles out of pending"
         );
         apply(
             &mut main,
             &[
-                input(4, "in-2", "withdrawn", "queue"),
-                control(5, "deleted", "in-2"),
+                input(6, "in-3", "withdrawn", "queue"),
+                control(7, "deleted", "in-3"),
             ],
         );
         assert!(
