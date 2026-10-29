@@ -353,6 +353,32 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} 個模型無法使用 · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}：沒有模型 · dimcode models {id} --refresh"
+        }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}：沒有模型 · 用 provider.models.create 新增模型"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}：{unavailable} 個不可用、{disabled} 個已停用 · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}：無法讀取 catalog · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "沒有快取的 catalog。請登入並執行 models PROVIDER --refresh。"
+        }
+        "Saved model preferences cleared" => "已清除儲存的模型偏好",
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}：1 個模型已停用 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}：{count} 個模型已停用 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "沒有模型。執行 dimcode models {id} --refresh 查看。"
+        }
+        "No models. The provider listed none." => "沒有模型。該 Provider 沒有列出任何模型。",
         "Enter select · Esc back" => "Enter 選擇 · Esc 返回",
         "Subagent models" => "子代理模型",
         "Subagent models: {policy}" => "子代理模型：{policy}",
