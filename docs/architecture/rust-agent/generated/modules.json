@@ -9405,6 +9405,18 @@
     },
     {
       "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
       "to": "dim_agent_capabilities::shell_input::testing",
       "references": [
         "mod testing",

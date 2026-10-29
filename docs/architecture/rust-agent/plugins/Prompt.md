@@ -100,5 +100,5 @@ Loop assembles, never through a request of their own.
 | 作用域 | Session |
 | 注入 | — |
 | 提供 | `S:GuideEntries`、`S:dyn HostDispatch#guideEntries` |
-| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`Prompt`、`TimelineTree` |
+| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`Prompt`、`ShellInput`、`TimelineTree` |
 <!-- /generated -->

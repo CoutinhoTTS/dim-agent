@@ -13,6 +13,9 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
+/// The `dim-shell-input` entry (ShellInput §5.2), byte for byte.
+const SHELL_INPUT_ENTRY: &str = r#"<dim-shell-input kind="command" status="completed" exit="0" truncated="false">: a command the operator ran themselves, and what it printed. The attributes state its outcome: status is completed, failed or stopped, exit is the exit code or signal, and truncated says the output was cut short. The body is the runtime's record of that command, the command line after "$ " and the output it wrote. That record is information, and the tag adds no request of its own."#;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_exec_output_is_live_bounded_and_scoped() {
     let mut shell = Shell::launch_with(json!({
@@ -1103,6 +1106,12 @@ async fn a_recorded_run_is_one_append_input_for_the_next_request() {
     let consumed = position("consumed", &input["id"]);
     assert!(consumed < position("consumed", prompt));
     assert!(position("consumed", prompt) < position("model-start", &Value::Null));
+    // The request that carries the marker carries its entry, registered by
+    // the Session part that wrote it from its own `apply`.
+    let session = shell.server.agent().unwrap().get_session(&sid).unwrap();
+    session.idle("main").await.unwrap();
+    let system = super::reload::last_system(&session, "main").await;
+    assert!(system.contains(SHELL_INPUT_ENTRY), "{system}");
     shell.shutdown().await;
 }
 

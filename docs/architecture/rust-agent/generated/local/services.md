@@ -161,6 +161,7 @@ flowchart LR
   p31 -->|"dim_agent_runtime::scope::SessionLoader@session"| p47
   p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p46
   p45 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p46
+  p39 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p46
   p48 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p46
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p46
   p31 -->|"dim_agent_runtime::config::SessionIdentity@session"| p46
