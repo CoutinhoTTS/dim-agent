@@ -29,6 +29,11 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    assert_eq!(
+        terminal.local_mode() & (libc::ICANON | libc::ECHO),
+        0,
+        "the interface is not in raw mode"
+    );
     terminal.raw(b"\x03");
     terminal.until("Press Ctrl+C again to exit");
     terminal.raw(b"\x03");
@@ -36,6 +41,11 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
     let status = terminal.wait_without_reading();
     daemon.join().unwrap();
     assert_eq!(status.code(), Some(130), "{}", terminal.transcript);
+    assert_eq!(
+        terminal.local_mode() & (libc::ICANON | libc::ECHO | libc::ISIG),
+        libc::ICANON | libc::ECHO | libc::ISIG,
+        "the terminal was left in raw mode"
+    );
 }
 
 /// The terminal already stopped consuming output before the presses: the
@@ -64,6 +74,11 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    assert_eq!(
+        terminal.local_mode() & (libc::ICANON | libc::ECHO),
+        0,
+        "the interface is not in raw mode"
+    );
     // Typing repaints the frame; unread, the queue fills and the renderer
     // blocks on it before the presses. The first press clears the draft, so
     // the second one exits.
@@ -90,4 +105,9 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
     let status = terminal.wait_without_reading();
     daemon.join().unwrap();
     assert_eq!(status.code(), Some(130), "{}", terminal.transcript);
+    assert_eq!(
+        terminal.local_mode() & (libc::ICANON | libc::ECHO | libc::ISIG),
+        libc::ICANON | libc::ECHO | libc::ISIG,
+        "the terminal was left in raw mode"
+    );
 }

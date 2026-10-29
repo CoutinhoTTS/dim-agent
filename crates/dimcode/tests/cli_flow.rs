@@ -1323,6 +1323,14 @@ impl Terminal {
         assert_eq!(unsafe { libc::ioctl(fd, WAITING_BYTES, &mut waiting) }, 0);
         waiting
     }
+    /// The terminal's local mode. Both ends of a pty share one termios, so
+    /// the master reads what raw mode set on the slave.
+    fn local_mode(&self) -> libc::tcflag_t {
+        let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut mode) }, 0);
+        mode.c_lflag
+    }
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + PATIENCE;
         loop {
