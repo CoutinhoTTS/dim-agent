@@ -82,7 +82,7 @@ catalog. Aggregation does not promise an atomic snapshot across account owners.
 | `connection` | Safe static-record connection below; `null` when connection configuration exists only in the optional account package |
 | `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority |
 | `preferences` | Map from model ID to the existing `ModelPreferences` shape |
-| `modelsListed` | Absent from the reads and from an update that changed no connection field; on the other updates it says what the write did with the record's models: `listed`, `bundled`, `unsupported` or `disabled` |
+| `modelsListed` | Absent from the reads and from an update that did not change `baseUrl`, `credential` or `headers`; on the other updates it says what the write did with the record's models: `listed`, `bundled`, `unsupported` or `disabled` |
 
 `ManagementDriver` fields are `driverKind: string`, `authTypes: StaticAuth["type"][]`
 and `remoteModelList: boolean`, derived from executable drivers. `StaticAuth` is the
@@ -123,7 +123,7 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 | Method | Request | Reply / behavior | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.create`  | `{providerId, displayName, connection, models: ModelEntry[], enabled}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts | true | `Drain` |
-| `provider.update`  | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction; a patch that changes a connection field also replaces the record's own models with the new connection's listing in that same compare-and-set write, and `modelsListed` says what it did | true | `Drain` |
+| `provider.update`  | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction; a patch that changes `baseUrl`, `credential` or `headers` also replaces the record's own models with the new endpoint's listing in that same compare-and-set write, and `modelsListed` says what it did; a `network`-only change saves alone | true | `Drain` |
 | `provider.probe`  | `{providerId, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
 | `provider.models.create`  | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
 | `provider.models.delete`  | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
@@ -151,15 +151,19 @@ same method: copy the complete public `ModelEntry` identified by
 `{providerId, modelId}`; persist neither a template reference nor a client-side
 bundled catalog. Clients never reconstruct descriptors from `ProviderModel`.
 
-An update that changes `baseUrl`, `credential`, `headers` or `network` lists the
-models of the new connection when the record's models are its own — the bundled
-catalog does not define the provider, or `remoteModels` is already true — and
-commits the listing with the connection in one compare-and-set write. The
-listing is taken outside the write and keeps `refresh`'s user-model conflict
-rule. A failed listing fails the update and writes nothing, so re-pointing never
-leaves the old endpoint's models on the new one. A driver that cannot list saves
-the connection alone. A record whose models are the bundled catalog's keeps them
-through any connection change, and later bundled updates still reach it;
+An update that changes `baseUrl`, `credential` or `headers` — the endpoint or
+the account the record reaches — lists the models of the new endpoint when the
+record's models are its own — the bundled catalog does not define the provider,
+or `remoteModels` is already true — and commits the listing with the connection
+in one compare-and-set write. The listing is taken outside the write and keeps
+`refresh`'s user-model conflict rule. A failed
+listing fails the update and writes nothing, so re-pointing never leaves the old
+endpoint's models on the new one. A `network`-only change — a proxy or a timeout
+— saves alone and lists nothing: it changes how the endpoint is reached, not
+what it serves, and requiring a listing would make those settings unsavable
+whenever listing fails. A driver that cannot list saves the connection alone. A
+record whose models are the bundled catalog's keeps them through any connection
+change, and later bundled updates still reach it;
 `dimcode models PROVIDER --refresh` stays the explicit way to replace them. A
 stored listing sets `remoteModels` as `refresh` does. The reply's `modelsListed`
 says which of these happened.
@@ -334,7 +338,8 @@ Native CLI migration includes `PROVIDER_METHODS` in
 Add probes the unsaved connection **before** create, retains its generated UUID
 for recovery, and never saves then refreshes as a test. Connection edits probe a
 draft when requested, then update the changed fields; the update lists and
-stores the new connection's models when the record's models are its own, so no
+stores the new endpoint's models when the record's models are its own, and a
+proxy or timeout edit saves alone, so no
 client refreshes a catalog on the user's behalf. Disconnect sends credential
 clear **and** `enabled:false` atomically, fixing the enabled-key-required rejection
 of clear alone. Enable/disable use update; account login/logout retain their owners.

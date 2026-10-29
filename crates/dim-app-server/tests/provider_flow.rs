@@ -416,32 +416,39 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let dead = format!("http://user:private-proxy@{}", unused.local_addr().unwrap());
             drop(unused);
-            let error = provider
+            // A network-only change saves alone: a dead proxy must not make it
+            // unsavable.
+            let saved = provider
                 .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"set","value":dead},"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
                 .await
-                .err()
                 .unwrap();
-            assert!(!error.to_string().contains("private-proxy"));
+            assert!(
+                !serde_json::to_string(&saved)
+                    .unwrap()
+                    .contains("private-proxy")
+            );
             assert_eq!(
                 direct.lock().unwrap().len(),
                 2,
-                "a connection update whose listing fails writes nothing"
+                "a network-only update lists nothing"
             );
-            provider
+            version = saved.version.unwrap();
+            let saved = provider
                 .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"clear"},"timeoutMs":{"action":"clear"}}})).unwrap(), &cancel)
                 .await
                 .unwrap();
             assert_eq!(
                 direct.lock().unwrap().len(),
-                3,
-                "the update listed the new connection once"
+                2,
+                "a network-only update lists nothing"
             );
+            assert_eq!(saved.version, Some(version + 1));
             version = provider
                 .refresh_for(PROXY.into(), &cancel)
                 .await
                 .unwrap()
                 .version;
-            assert_eq!(direct.lock().unwrap().len(), 4);
+            assert_eq!(direct.lock().unwrap().len(), 3);
             assert!(
                 provider
                     .update(PROXY.into(), version, serde_json::from_value(json!({"baseUrl":format!("http://{}/slow/v1", addresses[0]),"network":{"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
@@ -1885,6 +1892,32 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
             .map(|model| model.model.model_id.as_str())
             .collect::<Vec<_>>(),
         ["new-model", "second-model"]
+    );
+
+    // A network-only patch changes how the endpoint is reached, not what it
+    // serves: it saves alone, without a listing.
+    let timed = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let patch =
+            serde_json::from_value(json!({"network":{"timeoutMs":{"action":"set","value":4000}}}))
+                .unwrap();
+        tokio::spawn(async move { provider.update(REMOTE.into(), 2, patch, &cancel).await })
+    };
+    let timed = tokio::time::timeout(std::time::Duration::from_secs(2), timed)
+        .await
+        .expect("a network-only patch saves without a listing")
+        .unwrap()
+        .unwrap();
+    assert_eq!(timed.version, Some(3));
+    assert_eq!(timed.connection.as_ref().unwrap().timeout_ms, Some(4000));
+    assert_eq!(
+        serde_json::to_value(&timed).unwrap().get("modelsListed"),
+        None
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "a network-only patch sends no listing request"
     );
 
     let seeded = provider

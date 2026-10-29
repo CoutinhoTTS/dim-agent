@@ -33,18 +33,18 @@ pub struct ManagementProvider {
     pub models: Option<Vec<ManagementModel>>,
     pub preferences: BTreeMap<String, ModelPreferences>,
     /// What an update did with the record's models; absent from the reads and
-    /// from a patch that changed no connection field.
+    /// from a patch that did not change `baseUrl`, `credential` or `headers`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_listed: Option<ModelsListed>,
 }
 
 /// What `provider.update` did with the record's models when the patch changed
-/// its connection.
+/// the endpoint or the account it reaches.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelsListed {
-    /// It listed the new connection's models and stored them in the same
-    /// write as the connection.
+    /// It listed the new endpoint's models and stored them in the same write
+    /// as the endpoint.
     Listed,
     /// The record keeps its models, which are the bundled catalog's.
     Bundled,

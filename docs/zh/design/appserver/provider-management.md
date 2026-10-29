@@ -76,7 +76,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `connection` | 下表静态记录安全连接；连接配置只在可选账号包内时为 `null` |
 | `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,actions:string[],endpointOverride?:NewApiEndpoint}[]`；路由覆盖限 §6 可执行子集。仅账号无本地目录记录时为 `null`，坏目录报错。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制 |
 | `preferences` | model ID 到既有 `ModelPreferences` 的映射 |
-| `modelsListed` | 读取和不改连接字段的更新不含该字段；其余更新说明本次写入如何处理记录自身的模型：`listed`、`bundled`、`unsupported` 或 `disabled` |
+| `modelsListed` | 读取和不改 `baseUrl`、`credential`、`headers` 的更新不含该字段；其余更新说明本次写入如何处理记录自身的模型：`listed`、`bundled`、`unsupported` 或 `disabled` |
 
 `ManagementDriver` 为 `driverKind:string`、`authTypes:StaticAuth["type"][]`、
 `remoteModelList:boolean`，由可执行 driver 推导，只列允许自定义创建的 driver。
@@ -111,7 +111,7 @@ actions 只说明当前可用性，
 | 方法 | 请求 | 回复与语义 | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.create` | `{providerId,displayName,connection,models:ModelEntry[],enabled}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突 | true | `Drain` |
-| `provider.update` | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入；patch 改动连接字段时，同一次 CAS 写入还用新连接的列举结果替换记录自身的模型，`modelsListed` 说明结果 | true | `Drain` |
+| `provider.update` | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入；patch 改动 `baseUrl`、`credential` 或 `headers` 时，同一次 CAS 写入还用新 endpoint 的列举结果替换记录自身的模型，`modelsListed` 说明结果；只改 `network` 时单独保存 | true | `Drain` |
 | `provider.probe` | `{providerId,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
 | `provider.models.create` | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 modelConfigOverrides、disabledModelIds、modelPreferences 和 endpointOverrides 项 | true | `Drain` |
 | `provider.models.delete` | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
@@ -132,11 +132,14 @@ actions 只说明当前可用性，
 按 `{providerId,modelId}` 复制完整公开 `ModelEntry`，不保存模板引用或客户端 bundled catalog。
 客户端不反向转换执行投影 `ProviderModel`。
 
-`update` 改动 `baseUrl`、`credential`、`headers` 或 `network` 时，若记录自身的模型不属于
+`update` 改动 `baseUrl`、`credential` 或 `headers`（记录所达 endpoint 或账户）时，若记录自身的模型不属于
 bundled catalog（bundled 未定义该 Provider，或 `remoteModels` 已为真），就在写入之外列举
-新连接的模型，并与连接在同一次 CAS 写入中提交；用户模型冲突规则与 `refresh` 相同。列举
+新 endpoint 的模型，并与连接在同一次 CAS 写入中提交；用户模型冲突规则与 `refresh` 相同。
+列举
 失败则更新失败、不写入任何内容，重新指向不会把旧 endpoint 的模型留在新 endpoint 上。
-driver 不能列举时只保存连接。模型属于 bundled catalog 的记录在连接改动后仍保留它们，
+只改 `network`（代理或超时）时单独保存、不列举：它改变到达 endpoint 的方式而非其内容，
+若要求列举成功，列举失败时这些设置就无法保存。driver 不能列举时只保存连接。
+模型属于 bundled catalog 的记录在连接改动后仍保留它们，
 之后的 bundled 更新也照常到达；显式替换仍走 `dimcode models PROVIDER --refresh`。写入的
 列举结果按 `refresh` 的方式置 `remoteModels`；回复的 `modelsListed` 说明属于哪种情况。
 

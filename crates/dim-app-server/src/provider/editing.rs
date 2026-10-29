@@ -183,18 +183,18 @@ impl ProviderPatch {
                 .is_none_or(|network| network.proxy.is_none() && network.timeout_ms.is_none())
     }
 
-    /// Whether the patch rewrites where or how the connection is reached.
-    fn changes_connection(&self) -> bool {
+    /// Whether the patch changes the endpoint or the account the record
+    /// reaches: `baseUrl`, `credential` or non-empty `headers`, which can carry
+    /// the credential or an organisation route. A `network`-only change (a
+    /// proxy or a timeout) changes how the endpoint is reached, not what it
+    /// serves, so it saves alone and never needs a listing.
+    fn changes_endpoint(&self) -> bool {
         self.base_url.is_some()
             || self.credential.is_some()
             || self
                 .headers
                 .as_ref()
                 .is_some_and(|headers| !headers.is_empty())
-            || self
-                .network
-                .as_ref()
-                .is_some_and(|network| network.proxy.is_some() || network.timeout_ms.is_some())
     }
 
     pub(super) fn apply(self, record: &mut StaticProviderRecord) -> Result<(), ProviderError> {
@@ -361,7 +361,7 @@ impl ProviderService {
                 "Provider patch must not be empty".into(),
             ));
         }
-        let (record, models_listed) = if patch.changes_connection() {
+        let (record, models_listed) = if patch.changes_endpoint() {
             self.update_connection(provider_id.clone(), expected_version, patch, cancel)
                 .await?
         } else {
@@ -380,8 +380,8 @@ impl ProviderService {
         Ok(provider)
     }
 
-    /// Applies a connection patch and, when the record's models are its own,
-    /// replaces them with the new connection's listing in the same
+    /// Applies a patch that changes the endpoint and, when the record's models
+    /// are its own, replaces them with the new endpoint's listing in the same
     /// compare-and-set write. A failed listing fails the update, so a
     /// re-pointing never leaves the old endpoint's models on the new one.
     async fn update_connection(
