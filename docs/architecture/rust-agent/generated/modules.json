@@ -31639,7 +31639,7 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
-      "path": "IsolationEscalation::Ask"
+      "path": "IsolationEscalation::Deny"
     },
     {
       "module": "dim_cli::ui::tui::tests",
@@ -31655,7 +31655,7 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
-      "path": "Sandbox::Workspace"
+      "path": "Sandbox::Host"
     },
     {
       "module": "dim_cli::ui::tui::tests",
