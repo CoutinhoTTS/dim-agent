@@ -34,7 +34,7 @@ use crate::ui::render::Frame;
 use crate::ui::render::panel::{clip, escape_len, strip_escapes};
 use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
-use crate::ui::text::display_width;
+use crate::ui::text::{GUTTER_MARKS, display_width};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
@@ -212,15 +212,11 @@ impl Selection {
 
 /// Columns of chrome before the copyable text of a plain row.
 ///
-/// A committed row opens with one margin space. A user bar (`┃`) or a
-/// thinking bar (`▎`) in the next column is that row's gutter mark.
-/// Selection tests put `◆` in column 0 in place of the margin. Assistant
-/// rows have no mark, so only the margin is skipped: treating every row as
-/// a two-column gutter hid the first column of their text.
+/// A committed row opens with one margin space, then a gutter glyph
+/// ([`GUTTER_MARKS`]). A mark in column 0 is chrome too. Anything else
+/// after the margin is text, including a dash or a wide character.
 fn text_inset(plain: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
-    /// `USER_MARK`, `THINKING_BAR`.
-    const BARS: &[&str] = &["\u{2503}", "\u{258e}"];
     let mut glyphs = plain.graphemes(true);
     let Some(first) = glyphs.next() else {
         return 0;
@@ -228,14 +224,14 @@ fn text_inset(plain: &str) -> usize {
     if display_width(first) != 1 {
         return 0;
     }
-    if first == "\u{25c6}" {
-        return 1;
+    if GUTTER_MARKS.contains(&first) {
+        return display_width(first);
     }
     if first != " " {
         return 0;
     }
     match glyphs.next() {
-        Some(bar) if BARS.contains(&bar) => 1 + display_width(bar),
+        Some(mark) if GUTTER_MARKS.contains(&mark) => 1 + display_width(mark),
         _ => 1,
     }
 }
@@ -1773,6 +1769,34 @@ mod tests {
         assert_eq!(
             click(1, 7),
             MouseOutcome::Copy("n missing-package".to_owned())
+        );
+    }
+
+    #[test]
+    fn selection_on_a_wide_screen_skips_gutter_marks() {
+        let size = (80, 12);
+        let mut screen = FullScreen::new(size, false);
+        let mut emu = Emu::new(size.0 as usize, size.1 as usize);
+        let mut doc = Doc::new();
+        doc.say(&[
+            " \u{25c6} Thought for 3.2s",
+            " \u{25a0} something failed",
+            " \u{25e6} status note",
+            " $ cargo test",
+            " - kept",
+        ]);
+        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
+        let dock = ["> x"];
+        emu.feed(&screen.render(&frame(&[], &dock), size, &palette, &doc));
+        let at = |kind, column, row| MouseEvent { kind, column, row };
+        screen.mouse(at(MouseKind::Press, 0, 6), &doc);
+        screen.mouse(at(MouseKind::Drag, 24, 10), &doc);
+        assert_eq!(
+            screen.mouse(at(MouseKind::Release, 24, 10), &doc),
+            MouseOutcome::Copy(
+                " Thought for 3.2s\n something failed\n status note\n cargo test\n- kept"
+                    .to_owned()
+            )
         );
     }
 
