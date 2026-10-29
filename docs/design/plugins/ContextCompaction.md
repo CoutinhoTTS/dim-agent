@@ -1139,7 +1139,7 @@ Internal Rust changes:
 | Diagnostics | Strategy-neutral: common counts, the summarizer's summed usage and the insufficient-space mark, plus a strategy-owned object (breaking) |
 | Compaction state | Facts: pending = command without start, running = start without result, done = result (§5.7) |
 | Half-finished compaction | Never resumed; settled as `cancelled` (§5.8) |
-| Summarizer reasoning (#170) | `off` (§13.2). The evaluation ([research note](../research/summary-eval.md)) passes `off` on the measured reasoning class and finds no arm better than it, so the value is a strategy constant and `compaction.json` is not introduced |
+| Summarizer reasoning (#170) | `off` (§13.2). The evaluation ([research note](../research/summary-eval.md)) passes `off` on the OpenAI-compatible class, with no other arm's `F` more than `δ` above it, so the value is a strategy constant and `compaction.json` is removed. Decided on the class that ran; provisional for the classes §13.4 requires that did not run (Coverage) |
 | Target summary length (#170) | No instruction (§13.3). Every phase-2 arm passed; the no-instruction arm's cut-offs and failures were no higher than any target arm's, so none is kept. The planning size uses α = 0.5 and β = 0.10 |
 | Window limits | None of compaction's own: the window facts are the model's catalog values with their overrides, and `B`, the threshold, `0.5 × B`, `0.25 × B` and `S` scale with the declared window. A smaller useful window is declared smaller in the catalog (Provider) or by the `contextWindow` override (§5.1) |
 | The `0.5 × B` bound | The tail budget is `min(0.25 × B, 0.5 × B − resident)` with the replacement planned at `replacement_size` (§13.3's `S` at the provisional α = 0.5, β = 0.10); when no kept tail fits, the limit is the cut that replaces everything; a completed result still above the bound is re-planned once at the replacement's actual size before anything is committed, and only that re-plan's outcome is written; the mark is measured from the written result's total, so a result above the bound always carries it (§5.3). The `0.5` share is provisional (#428) |
@@ -1331,21 +1331,22 @@ fix, the smallest choice was made and is recorded here.
 ## 13. Summary quality: reasoning and target length (#170)
 
 Status: approved design for [#170](https://github.com/arcships/dim/issues/170). It designed the
-evaluation and the two knobs; the evaluation has run on the measured classes and its result is
-the [research note](../research/summary-eval.md). §10 records the decisions and §13 is their
-contract: the summarizer's reasoning is `off`, the setting is not introduced, and the prompt
-states no length.
+evaluation and the two knobs; the evaluation has run on the classes it could (§13.4 Coverage)
+and its result is the [research note](../research/summary-eval.md). §10 records the decisions and
+§13 is their contract: the summarizer's reasoning is `off`, decided on the class that ran and
+provisional for the others, the setting is not introduced, and the prompt states no length.
 
 ### 13.1 What is decided here and what is not
 
-The summary strategy has two open choices. Both are prompt and configuration content of the
-strategy layer (§2.2), not mechanism, so neither changes the Loop, ContextPolicy, the record or
-replay ([research §5.4](../research/compaction-trigger.md#54-what-the-reserve-is-for-and-the-summarizers-generation-length-code-maintainer-review)).
+The summary strategy has two choices. Both are prompt and configuration content of the strategy
+layer (§2.2), not mechanism, so neither changes the Loop, ContextPolicy, the record or replay
+([research §5.4](../research/compaction-trigger.md#54-what-the-reserve-is-for-and-the-summarizers-generation-length-code-maintainer-review)).
+Both are decided: §13.2–§13.4 are the contract and the evaluation that decided them.
 
-| Choice | Today [Code] | Why it is open |
+| Choice | Decision [Code] | Basis |
 | --- | --- | --- |
-| Reasoning of summarizer requests | `summary_request` copies `input.request.config` and only sets `maxTokens = output_tokens` ([summary_strategy.rs](../../../crates/dim-agent-capabilities/src/summary_strategy.rs)), so a thinking conversation gets a thinking summarizer | Thinking shares `max_tokens` with the summary text and its length is not controllable on every model; since #169 a reply stopped at `max_tokens` is halved and retried, so thinking costs calls and latency, not correctness. Whether thinking improves summaries is unmeasured |
-| Target length | The fixed `SYSTEM` prompt says "concise" and states no length | A stated length may bound the replacement that every later request carries, and may cut `max_tokens` stops, or it may drop facts. That is a prompt-quality question |
+| Reasoning of summarizer requests | `off`. `summary_request` copies `input.request.config` and sets `maxTokens = output_tokens`; the strategy then maps the copy to the model's off declaration (§13.2), and leaves it as `inherit` where the model and its protocol have none ([summary_strategy.rs](../../../crates/dim-agent-capabilities/src/summary_strategy.rs)) | §13.4's rule on the reasoning class that ran: `off` is non-inferior in `F`, `X`, `V` and failures, at lower latency and cost than `inherit`. Thinking shares `max_tokens` with the summary text and its length is not controllable on every model, so it costs calls and latency on every model; the evaluation found no quality it buys on the class it measured |
+| Target length | No instruction. The fixed `SYSTEM` prompt says "concise" and states no length | §13.3: every phase-2 arm passed, and the no-instruction arm's cut-offs and failures were no higher than any target arm's, so a sentence stating a length adds a constraint the evidence does not support |
 
 Out of scope: a separate summarizer model (§10), summarizer prefix reuse and cache breakpoints
 (#128 follow-ups), and any change to chunking, the cut-off rule, retention or the trigger.
@@ -1371,9 +1372,14 @@ Out of scope: a separate summarizer model (§10), summarizer prefix reuse and ca
 - `low` does not look at the conversation's own reasoning: it asks for effort `low` even when the
   conversation runs with reasoning off. Comparing a request's effective reasoning across protocols
   would need a second interpretation of provider options, which only Provider has.
-- The value applied is written into the summary diagnostics object as `reasoning` (§13.5), so a
-  record shows what the summarizer actually did. A compaction that sends no summarizer request
-  records the requested value.
+- The reasoning value applied to the request is written into the summary diagnostics object as
+  `reasoning` (§13.5). The record says what the summarizer's request carried, not what the reply
+  contained: on an endpoint that ignores the declaration, the record still says `off`. A
+  compaction that sends no summarizer request records the requested value.
+
+**Scope.** The evaluation decided `off` on the OpenAI-compatible class (§13.4 Coverage). For the
+classes §13.4 requires that did not run, the value is provisional: the rule reruns for each of
+them when it can run, and a class whose result fails it changes the default there.
 
 **Where it lives.** There is no `compaction.json`: the value is factory configuration of
 `ProductSummaryStrategyPlugin` (§13.5), and the product profile never sets it, so `off` is the
@@ -1635,12 +1641,19 @@ and one model without reasoning as a control.
 2. Target: with phase 1's reasoning value for each class, arms no instruction and the four
    `(α, β)` candidates.
 
-**Coverage.** The reasoning class for the OpenAI Responses protocol could not run: the request
-builder asks for the encrypted reasoning continuation data, the endpoint returned none, and the
-reply reader rejects a thinking part without it
-(`crates/dim-agent-aimux/src/stream.rs:261-273`), so every recorded run that reasoned failed.
-That class measures the endpoint-driver pairing, not summary quality, so no arm of it enters a
-decision; the rule is rerun for it when it can run.
+**Coverage.** Every class above, with its status in the evaluation and the reason recorded there
+(the [research note](../research/summary-eval.md) has the numbers):
+
+| Class | Status | Reason |
+| --- | --- | --- |
+| OpenAI-compatible | ran, phases 1 and 2 | the protocol above |
+| OpenAI Responses | could not run | the request builder asks for the encrypted reasoning continuation data, the endpoint returned none, and the reply reader rejects a thinking part without it (`crates/dim-agent-aimux/src/stream.rs:261-273`), so every recorded run that reasoned failed. The class measures the endpoint-driver pairing, not summary quality, so no arm of it enters a decision |
+| Anthropic budget thinking | not run | no model of this class was in the evaluation, which used DeepSeek models only. The evaluation's model reached the Anthropic-compatible endpoint as the control, where the protocol probes show effort ignored: `low` and `max` returned no thinking, and thinking appeared only when a request enabled it explicitly. Its three arms therefore never summon thinking there, and it cannot stand in for this class |
+| non-reasoning control | phase 1 ran and counts; phase 2 is not usable | the same model on its Anthropic-compatible endpoint, where no reply carried thinking at any of the three arms' request shapes in phase 1. In phase 2 the endpoint began returning thinking without a signature for every request, so that phase measures the endpoint's change, not summary quality (research note §4.2) |
+
+**Scope.** The default is `off` for every class: decided on the OpenAI-compatible class, which
+ran, and provisional for the other three. The rule reruns for each class when it can run, and a
+class whose result fails the rule changes the default there.
 
 **Decision criteria** (`δ = 0.05`):
 
