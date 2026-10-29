@@ -14,16 +14,20 @@
 //! names. Each arm runs every scenario `--runs` times, one fixed judge reads
 //! each run's exported Timeline, and the report applies the relative rule of
 //! model-prompts §8.1: every probe's pass rate is at least the current arm's
-//! minus 0.05, and the candidate's violations and failed runs are no higher.
-//! There is no absolute pass line.
+//! minus 0.05, the candidate's violations, failed runs and unjudged runs are
+//! no higher, and a probe with no judged run in an arm fails the comparison
+//! by name. There is no absolute pass line.
 //!
-//! The judge's verdicts are read from a JSON array or from one object per
-//! line. A reply that gives no verdict, or leaves a statement without one, is
-//! asked again with what was wrong, at most twice. A run that did not fail on
-//! its own (an error or its wall-clock budget) and that its judge still
-//! cannot answer is unjudged: it adds nothing to its arm's probe rates,
-//! violations or failed runs, and the report lists it. A run that did fail on
-//! its own is a failed run, scored as before, whatever its judge did.
+//! A failed run is one that ended on an error or its wall-clock budget, or
+//! one whose judging did not happen: there was nothing the judge could be
+//! asked, or a judge call failed — the first call, its retry without a
+//! temperature, or a re-ask. The judge's verdicts are read from a JSON array
+//! or from one object per line; a reply that gives no verdict, or leaves a
+//! statement without one, is asked again with what was wrong, at most twice.
+//! A run the judge answered but still gave no usable verdicts for after the
+//! re-asks is unjudged: it adds nothing to its arm's probe rates, violations
+//! or failed runs, and the report counts it and lists it. A run that failed
+//! on its own is a failed run, scored as before, whatever its judge did.
 //!
 //! Both arms load the product's default plugins, from the default
 //! configuration file the product ships (`--defaults FILE`, by default the
