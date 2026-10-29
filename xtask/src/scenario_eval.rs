@@ -17,6 +17,27 @@
 //! minus 0.05, and the candidate's violations and failed runs are no higher.
 //! There is no absolute pass line.
 //!
+//! Both arms load the product's default plugins, from the default
+//! configuration file the product ships (`--defaults FILE`, by default the
+//! one in this repository), through the App Server's own default plugin
+//! configuration, so the TypeScript plugins run in every scenario. Their
+//! rows need Node and the `@arcships/rutis-runtime` packages: the runner
+//! reads `DIM_TEST_NODE` and `DIM_TEST_JS_RUNTIME` from the environment, and
+//! each default plugin's packages must be installed (`npm ci --prefix
+//! <plugin directory>`). For example:
+//!
+//! ```text
+//! DIM_TEST_NODE="$(command -v node)" \
+//! DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
+//! cargo run --locked -p xtask -- scenario-eval ...
+//! ```
+//!
+//! A candidate for a TypeScript plugin's text replaces a member of that
+//! plugin's factory configuration, which is its manifest `config`: the
+//! candidate table names the plugin and the member, and the harness patches
+//! the plugin's row, so both arms run the same plugin code and differ only
+//! in the configured text.
+//!
 //! A scenario directory under `--scenarios` holds `scenario.json` and the
 //! starting workspace beside it, in `workspace/`; the directory name is the
 //! scenario's id:
@@ -25,6 +46,7 @@
 //! {
 //!   "description": "Two independent fixes, one of them on a line",
 //!   "message": "Make the failing tests pass.",
+//!   "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
 //!   "steers": [
 //!     {"afterSeconds": 30.0, "text": "Also update the README."},
 //!     {"whenToolCall": "config.py", "text": "DEFAULT_TIMEOUT is 45 now."}
@@ -39,6 +61,12 @@
 //! }
 //! ```
 //!
+//! - `calls` is the Session state a scenario needs before its message: a
+//!   list of `{method, params}`, sent in order on the scenario's Session
+//!   after it is created and before the message. The runner resolves the
+//!   Session id into `params.sessionId`; a branch defaults to `main` the
+//!   way the methods treat it. A call that fails fails the run, and the
+//!   error names the method.
 //! - `message` is the operator's first message, submitted to `main`. A steer
 //!   is one more operator message to `main`, sent when the run reaches
 //!   `afterSeconds` of wall clock or, for `whenToolCall`, when a
@@ -99,19 +127,45 @@ const IDLE_WAIT: Duration = Duration::from_secs(1);
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
-type TextMember = fn(&mut Overrides, Arc<str>);
+/// Where one text lives in the assembly [`app_server::serve_home`] builds.
+enum TextMember {
+    /// A Rust part's factory configuration member, put in place by this
+    /// function.
+    Rust(fn(&mut Overrides, Arc<str>)),
+    /// A TypeScript plugin's factory configuration member: the plugin's
+    /// name in the default configuration file, and the dotted path of the
+    /// member inside the manifest's `config`. The harness patches that
+    /// plugin's row, so both arms run the same plugin code (model-prompts
+    /// §8.1).
+    /// A plugin entry is added by its text's owner (#553 for Goal, #551 for
+    /// the capabilities); the runner's own test constructs the variant until
+    /// one lands.
+    #[allow(dead_code)]
+    Plugin {
+        plugin: &'static str,
+        member: &'static str,
+    },
+}
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
-/// builds. The summary prompt is the one text exposed at a factory
-/// configuration today (ContextCompaction §13.5); the other owners add their
-/// entries with their own factory members: PromptSources under
-/// [#548](https://github.com/arcships/dim/issues/548), TimelineTree under
-/// [#552](https://github.com/arcships/dim/issues/552), and Goal,
-/// Capabilities and ContextCompaction under their own issues (model-prompts
-/// §9.8).
-const TEXTS: &[(&str, TextMember)] = &[("context-compaction/summary", |overrides, text| {
-    overrides.summary_prompt = Some(text)
-})];
+/// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
+/// description (timeline branches §12.4) are the texts exposed at a Rust
+/// factory configuration today; the other owners add their entries with their
+/// own factory members: Goal under
+/// [#553](https://github.com/arcships/dim/issues/553), and Capabilities under
+/// [#551](https://github.com/arcships/dim/issues/551).
+/// A plugin's text is its manifest `config` member, which the plugin's row
+/// carries into its `apply`.
+const TEXTS: &[(&str, TextMember)] = &[
+    (
+        "context-compaction/summary",
+        TextMember::Rust(|overrides, text| overrides.summary_prompt = Some(text)),
+    ),
+    (
+        "timeline-tree/branch-description",
+        TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
+    ),
+];
 
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
@@ -124,6 +178,14 @@ pub async fn run() -> Result<()> {
 /// Runs the evaluation and writes `runs.jsonl` and `scenario.md`; returns the
 /// report.
 async fn evaluate(options: &Options) -> Result<String> {
+    if options.defaults.is_some() {
+        if options.node.is_none() {
+            return Err("set DIM_TEST_NODE: the default plugins run in Node".into());
+        }
+        if options.js_runtime.is_none() {
+            return Err("set DIM_TEST_JS_RUNTIME: the default plugins import it".into());
+        }
+    }
     let _sockets = Sockets;
     let overrides = overrides(&options.text, options.candidate.clone())?;
     let scenarios = read_scenarios(&options.scenarios)?;
@@ -186,6 +248,11 @@ struct Options {
     out: PathBuf,
     home: PathBuf,
     model_config: Option<PathBuf>,
+    /// The default plugin configuration file both arms load; `None` serves
+    /// the assembly without the product's plugins.
+    defaults: Option<PathBuf>,
+    node: Option<PathBuf>,
+    js_runtime: Option<PathBuf>,
 }
 impl Options {
     fn parse() -> Result<Self> {
@@ -199,11 +266,13 @@ impl Options {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
                      --text ID --candidate FILE --model PROVIDER/MODEL \
                      --judge PROVIDER/MODEL --runs N --home DIR --out DIR \
-                     [--model-config FILE]";
+                     [--model-config FILE] [--defaults FILE]";
+        // Both arms serve the product's default plugins; `--defaults`
+        // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut home, mut out) = (None, None, None);
         let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
-        let (mut runs, mut model_config) = (None, None);
+        let (mut runs, mut model_config, mut defaults) = (None, None, None);
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -216,9 +285,13 @@ impl Options {
                 "--home" => home = Some(PathBuf::from(value)),
                 "--out" => out = Some(PathBuf::from(value)),
                 "--model-config" => model_config = Some(PathBuf::from(value)),
+                "--defaults" => defaults = Some(PathBuf::from(value)),
                 _ => return Err(usage.into()),
             }
         }
+        let defaults = Some(defaults.unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/default-plugins.json")
+        }));
         Ok(Self {
             scenarios: scenarios.ok_or(usage)?,
             text: text.ok_or(usage)?,
@@ -229,8 +302,19 @@ impl Options {
             out: output_directory(&out.ok_or(usage)?)?,
             home: home.ok_or(usage)?,
             model_config,
+            defaults,
+            node: env_path("DIM_TEST_NODE"),
+            js_runtime: env_path("DIM_TEST_JS_RUNTIME"),
         })
     }
+}
+
+/// A path from the environment: the TypeScript plugin rows run in Node,
+/// which the runner reads from `DIM_TEST_NODE` and `DIM_TEST_JS_RUNTIME`.
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Creates `--out` and resolves it: `session.create` takes an absolute cwd,
@@ -259,11 +343,21 @@ fn target(value: &str) -> Result<ModelId> {
     })
 }
 
-/// The overrides that put `candidate` in place of the text `text` names; an
-/// unknown id fails before any run and lists the known ids.
+/// The overrides that put `candidate` in place of the text `text` names in
+/// [`TEXTS`]; an unknown id fails before any run and lists the known ids.
 fn overrides(text: &str, candidate: Arc<str>) -> Result<Overrides> {
-    let Some((_, apply)) = TEXTS.iter().find(|(id, _)| *id == text) else {
-        let known: Vec<_> = TEXTS.iter().map(|(id, _)| *id).collect();
+    overrides_in(TEXTS, text, candidate)
+}
+
+/// [`overrides`] over `table`: a test reaches a member no shipped text
+/// exposes yet with its own entry, through the same injection.
+fn overrides_in(
+    table: &[(&str, TextMember)],
+    text: &str,
+    candidate: Arc<str>,
+) -> Result<Overrides> {
+    let Some((_, member)) = table.iter().find(|(id, _)| *id == text) else {
+        let known: Vec<_> = table.iter().map(|(id, _)| *id).collect();
         return Err(format!(
             "--text {text}: unknown text id; known ids: {}",
             known.join(", ")
@@ -271,7 +365,16 @@ fn overrides(text: &str, candidate: Arc<str>) -> Result<Overrides> {
         .into());
     };
     let mut overrides = Overrides::default();
-    apply(&mut overrides, candidate);
+    match member {
+        TextMember::Rust(apply) => apply(&mut overrides, candidate),
+        TextMember::Plugin { plugin, member } => {
+            let mut value = Value::String(candidate.to_string());
+            for key in member.split('.').rev() {
+                value = Value::Object([(key.to_owned(), value)].into_iter().collect());
+            }
+            overrides.plugin_configs.insert((*plugin).to_owned(), value);
+        }
+    }
     Ok(overrides)
 }
 
@@ -312,10 +415,22 @@ struct ScenarioFile {
     #[serde(default)]
     description: String,
     message: String,
+    /// Session method calls made before the message, in order.
+    #[serde(default)]
+    calls: Vec<Call>,
     #[serde(default)]
     steers: Vec<Steer>,
     budget: Budget,
     probes: Vec<Probe>,
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Call {
+    method: String,
+    /// The method's parameters without the Session id, which the runner
+    /// resolves.
+    #[serde(default)]
+    params: Value,
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -363,6 +478,7 @@ struct Scenario {
     description: String,
     directory: PathBuf,
     message: String,
+    calls: Vec<Call>,
     steers: Vec<Steer>,
     budget: Budget,
     probes: Vec<Probe>,
@@ -428,6 +544,14 @@ fn into_scenario(
             }
         }
     }
+    for call in &raw.calls {
+        if call.method.trim().is_empty() {
+            return Err("a call needs a method".into());
+        }
+        if !call.params.is_object() && !call.params.is_null() {
+            return Err(format!("call {}: params must be an object", call.method));
+        }
+    }
     if raw.probes.is_empty() {
         return Err("a scenario needs at least one probe".into());
     }
@@ -451,6 +575,7 @@ fn into_scenario(
         description: raw.description,
         directory,
         message: raw.message,
+        calls: raw.calls,
         steers: raw.steers,
         budget: raw.budget,
         probes: raw.probes,
@@ -526,6 +651,9 @@ async fn run_once(
         overrides: overrides.clone(),
         model_config: options.model_config.clone(),
         unix_path: Some(endpoint()?),
+        defaults: options.defaults.clone(),
+        node: options.node.clone(),
+        js_runtime: options.js_runtime.clone(),
     };
     let server = app_server::serve_home(
         &run_home,
@@ -634,6 +762,9 @@ async fn drive_once(
     })
     .await
     .map_err(|error| format!("cannot connect to the served App Server: {error}"))?;
+    if settings.defaults.is_some() {
+        wait_for_plugins(&mut client).await?;
+    }
     let mut driven = drive(&mut client, scenario, workspace, model).await;
     if driven.session.is_empty() {
         return Ok(Finished {
@@ -775,6 +906,41 @@ async fn selection(
         .map_err(|error| format!("{}/{}: {error}", target.provider_id, target.model_id).into())
 }
 
+/// Waits until the default plugin rows leave `pending`: they start after
+/// the server is up, and a `calls` step or a plugin's text needs its row
+/// loaded. A failed row fails the run and names itself.
+async fn wait_for_plugins(client: &mut Client) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let items = client
+            .rpc("plugin.list", json!({}))
+            .await
+            .map_err(|error| format!("plugin.list failed: {error}"))?;
+        let items = items
+            .as_array()
+            .ok_or("plugin.list did not answer a list")?;
+        let mut pending = false;
+        for item in items {
+            let name = item["name"].as_str().unwrap_or_default();
+            match item["status"].as_str().unwrap_or_default() {
+                "failed" => {
+                    let error = item["error"].as_str().unwrap_or("no reason given");
+                    return Err(format!("the plugin {name} failed to load: {error}").into());
+                }
+                "pending" => pending = true,
+                _ => {}
+            }
+        }
+        if !pending {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("the default plugins did not start within 60 seconds".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// What one driven run reached.
 struct Driven {
     session: String,
@@ -853,6 +1019,22 @@ async fn drive(
             driven.stop = "error";
             driven.error = Some(format!(
                 "the Session serves no context window to check the scenario's budget against: {error}"
+            ));
+            return driven;
+        }
+    }
+    for (index, call) in scenario.calls.iter().enumerate() {
+        let mut params = match &call.params {
+            Value::Object(params) => params.clone(),
+            _ => serde_json::Map::new(),
+        };
+        params.insert("sessionId".to_owned(), json!(session));
+        if let Err(error) = client.rpc(&call.method, Value::Object(params)).await {
+            driven.stop = "error";
+            driven.error = Some(format!(
+                "the calls step {} ({}) failed: {error}",
+                index + 1,
+                call.method
             ));
             return driven;
         }
@@ -1541,6 +1723,7 @@ mod tests {
             description: String::new(),
             directory: PathBuf::new(),
             message: "message".into(),
+            calls: Vec::new(),
             steers: Vec::new(),
             budget: Budget {
                 turns: 4,
@@ -1606,8 +1789,14 @@ mod tests {
             .to_string();
         assert!(error.contains("no-such-text"), "{error}");
         assert!(error.contains("context-compaction/summary"), "{error}");
+        assert!(
+            error.contains("timeline-tree/branch-description"),
+            "{error}"
+        );
         let known = overrides("context-compaction/summary", Arc::from("candidate")).unwrap();
         assert_eq!(known.summary_prompt.as_deref(), Some("candidate"));
+        let branch = overrides("timeline-tree/branch-description", Arc::from("candidate")).unwrap();
+        assert_eq!(branch.branch_description.as_deref(), Some("candidate"));
     }
 
     /// A candidate exactly at `current − δ` passes the rule; one just below
@@ -2026,6 +2215,9 @@ mod tests {
                 out,
                 home: self.home.clone(),
                 model_config: Some(self.models.clone()),
+                defaults: None,
+                node: None,
+                js_runtime: None,
             }
         }
         fn target(&self) -> ModelId {
@@ -2056,6 +2248,77 @@ mod tests {
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect()
         }
+        /// [`options`](Self::options) with the product's plugins served from
+        /// `defaults`, the way the runner's own command line serves them.
+        fn plugin_options(&self, out: PathBuf, defaults: PathBuf) -> Options {
+            let mut options = self.options(out);
+            options.defaults = Some(defaults);
+            options.node = Some(
+                std::env::var_os("DIM_TEST_NODE")
+                    .expect("DIM_TEST_NODE")
+                    .into(),
+            );
+            options.js_runtime = Some(
+                std::env::var_os("DIM_TEST_JS_RUNTIME")
+                    .expect("DIM_TEST_JS_RUNTIME")
+                    .into(),
+            );
+            options
+        }
+    }
+
+    /// The repository root, whose default plugin configuration and fixtures
+    /// the tests reach.
+    fn repository() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// One arm's run of the fixture's one scenario, as [`evaluate`] runs it.
+    async fn run_arm(
+        fixture: &Fixture,
+        options: &Options,
+        arm: &'static str,
+        overrides: &Overrides,
+        run: usize,
+    ) -> RunRecord {
+        let mut scenarios = read_scenarios(&fixture.scenarios).unwrap();
+        let scenario = scenarios.remove(0);
+        let mut instrument = Instrument {
+            text: options.text.clone(),
+            model: options.model.clone(),
+            judge: options.judge.clone(),
+            runs: options.runs,
+            tokens: 0.,
+            model_configuration: None,
+            judge_configuration: None,
+            judge_temperature_dropped: 0,
+            judge_calls: 0,
+        };
+        run_once(
+            options,
+            &fixture.home,
+            arm,
+            overrides,
+            &scenario,
+            run,
+            &CancellationToken::new(),
+            &mut instrument,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A scenario that sets a goal through `calls` before its message.
+    fn goal_call_scenario() -> Value {
+        json!({
+            "message": "Continue the work.",
+            "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
+            "budget": {"turns": 6, "seconds": 60, "window": 24000},
+            "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+        })
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -2225,7 +2488,7 @@ mod tests {
         std::fs::write(&candidate, CANDIDATE).unwrap();
         let out = fixture.directory.join("out");
         let relative = relative_to_working_directory(&out);
-        let options = Options::parse_from(
+        let mut options = Options::parse_from(
             [
                 "--scenarios",
                 fixture.scenarios.to_str().unwrap(),
@@ -2249,6 +2512,11 @@ mod tests {
             .map(str::to_owned),
         )
         .unwrap();
+        // This test is about the command line's paths; the product's
+        // plugins are the command line's other half and need Node.
+        options.defaults = None;
+        options.node = None;
+        options.js_runtime = None;
         assert!(
             options.out.is_absolute(),
             "a relative --out is resolved: {}",
@@ -2315,5 +2583,121 @@ mod tests {
                 "{arm}: the model reads the refusal"
             );
         }
+    }
+
+    /// Both arms serve the product's default plugins: a Goal method set in
+    /// the scenario's `calls` answers on its Session, so the run reaches its
+    /// turn instead of failing the call (issue #612, acceptance 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_default_plugins_load_and_a_goal_method_answers() {
+        let fixture = Fixture::start(
+            "goal-plugin",
+            summaries_and_judgements,
+            goal_call_scenario(),
+            &[],
+        )
+        .await;
+        let defaults = repository().join("runtime/default-plugins.json");
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        for arm in ["current", "candidate"] {
+            let record = run_arm(&fixture, &options, arm, &Overrides::default(), 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+            assert!(record.turns >= 1, "{arm}: the message's turn ran");
+        }
+    }
+
+    /// A scenario's `calls` run before its message: the goal it sets is in
+    /// the first request of both arms (issue #612, acceptance 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_calls_step_sets_a_goal_before_the_message() {
+        let fixture = Fixture::start(
+            "goal-calls",
+            summaries_and_judgements,
+            goal_call_scenario(),
+            &[],
+        )
+        .await;
+        let defaults = repository().join("runtime/default-plugins.json");
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        for arm in ["current", "candidate"] {
+            let record = run_arm(&fixture, &options, arm, &Overrides::default(), 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            let requests = fixture.arm(arm);
+            assert!(!requests.is_empty(), "{arm}: the turn made a request");
+            assert!(
+                requests[0].contains("dim-goal") && requests[0].contains("Keep the suite green."),
+                "{arm}: the first request carries the goal the call set"
+            );
+        }
+    }
+
+    /// A candidate for a TypeScript plugin's text replaces that member of
+    /// the plugin's factory configuration: the candidate arm's request
+    /// carries it, and the current arm carries the shipped text (issue #612,
+    /// acceptance 3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_plugin_candidate_reaches_the_request() {
+        const SHIPPED: &str = "text-injector fixture: the shipped description";
+        const CANDIDATE: &str = "CANDIDATE PLUGIN TEXT";
+        const FIXTURE_TEXTS: &[(&str, TextMember)] = &[(
+            "fixture/prompt",
+            TextMember::Plugin {
+                plugin: "text-injector",
+                member: "texts.prompt",
+            },
+        )];
+        let fixture = Fixture::start(
+            "plugin-candidate",
+            summaries_and_judgements,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let defaults = fixture.directory.join("plugin-defaults.json");
+        std::fs::write(
+            &defaults,
+            json!({"plugins": {"text-injector": repository().join("runtime/fixtures/text-injector")}})
+                .to_string(),
+        )
+        .unwrap();
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        let candidate =
+            overrides_in(FIXTURE_TEXTS, "fixture/prompt", Arc::from(CANDIDATE)).unwrap();
+        assert_eq!(
+            candidate.plugin_configs["text-injector"]["texts"]["prompt"],
+            json!(CANDIDATE),
+            "the table puts the candidate at the plugin's factory member"
+        );
+        for (arm, overrides) in [("current", Overrides::default()), ("candidate", candidate)] {
+            let record = run_arm(&fixture, &options, arm, &overrides, 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+        }
+        let current = fixture.arm("current");
+        let candidate = fixture.arm("candidate");
+        assert!(
+            current.iter().any(|request| request.contains(SHIPPED)),
+            "the current arm carries the shipped text"
+        );
+        assert!(
+            current.iter().all(|request| !request.contains(CANDIDATE)),
+            "the current arm never carries the candidate text"
+        );
+        assert!(
+            candidate.iter().any(|request| request.contains(CANDIDATE)),
+            "the candidate arm's request carries the candidate text"
+        );
+        assert!(
+            candidate.iter().all(|request| !request.contains(SHIPPED)),
+            "the candidate arm never carries the shipped text"
+        );
     }
 }

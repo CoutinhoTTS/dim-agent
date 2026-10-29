@@ -1557,6 +1557,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::assembly::TimelineFactory@session",
             "scope": null,
             "status": "Ready"
@@ -1573,6 +1578,12 @@
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "scope": null,
+            "provider": 27,
+            "generation": 1
+          },
           {
             "service": "dim_agent_runtime::assembly::TimelineFactory@session",
             "scope": null,
@@ -1593,6 +1604,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "provider": 27,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_agent_runtime::assembly::TimelineFactory@session",
             "provider": 21,

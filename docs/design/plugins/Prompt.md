@@ -104,7 +104,8 @@ Each built-in entry moves verbatim to the capability that writes its markers, an
 | 10 | `dim-notification` | BackgroundExec | branch | The exec notification |
 | 20 | `dim-agent-report` | Collaboration's Session part | session | The report of delegated work |
 | 30 | `dim-agent-message` | Collaboration's Session part | session | A message from another agent |
-| 40 | `dim-branch-line`, `dim-branch-lines` | BranchLine | branch | Which line of the Session this is, and the roster on `main` |
+| 40 | `dim-branch-line` | TimelineTree | session | Which line of the Session this is |
+| 40 | `dim-branch-lines` | BranchLine | branch | The roster on `main`; the tie on `order` leaves the identity's entry first |
 | 50 | `dim-branch-message`, `dim-branch-idle`, `dim-branch-ended` | BranchLine | branch | A message from another line, and the runtime's reports about a line |
 | 60 | `dim-state` | PromptGuide | session | What a state block is |
 | 70 | `dim-rule` | PromptGuide | session | What a rule block is, and how it ends |

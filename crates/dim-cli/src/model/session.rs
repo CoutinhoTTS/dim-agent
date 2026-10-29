@@ -121,7 +121,12 @@ pub enum Command {
     /// Switch to a stored session.
     Resume(String),
     /// List stored sessions (newest first).
-    ListSessions,
+    ListSessions {
+        id: String,
+        query: String,
+        cursor: Option<String>,
+    },
+    CloseSessions,
     /// List the models that can be chosen.
     ListModels,
     ReadIsolation,
@@ -541,7 +546,11 @@ pub enum Update {
         kind: SwitchKind,
     },
     /// The stored sessions, or why they could not be listed.
-    Sessions(Result<Vec<SessionItem>, String>),
+    Sessions {
+        id: String,
+        paged: bool,
+        result: Result<(Vec<SessionItem>, Option<String>), String>,
+    },
     /// A command failed without ending the session.
     Notice(String),
     /// A newer version the user has not skipped, once per start.
