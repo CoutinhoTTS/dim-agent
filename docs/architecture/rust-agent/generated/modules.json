@@ -7522,8 +7522,7 @@
         "path Tree",
         "path Tree::Business",
         "path Tree::Leftover",
-        "path account_lock",
-        "path read"
+        "path account_lock"
       ]
     },
     {
@@ -7554,8 +7553,7 @@
         "path TEMPORARY_DIRECTORY",
         "path Tree",
         "path Tree::Business",
-        "path Tree::Leftover",
-        "path read"
+        "path Tree::Leftover"
       ]
     },
     {

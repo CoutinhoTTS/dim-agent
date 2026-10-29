@@ -1021,7 +1021,7 @@ pub(super) fn process_owns_marker(pid: u32, created_at: u64) -> io::Result<bool>
                 dwLowDateTime: 0,
                 dwHighDateTime: 0,
             }; 4];
-            let read = unsafe {
+            let inspected = unsafe {
                 GetProcessTimes(
                     handle.as_raw_handle(),
                     times.as_mut_ptr(),
@@ -1030,7 +1030,7 @@ pub(super) fn process_owns_marker(pid: u32, created_at: u64) -> io::Result<bool>
                     times.as_mut_ptr().add(3),
                 )
             };
-            if read == 0 {
+            if inspected == 0 {
                 return Err(io::Error::last_os_error());
             }
             let ticks =

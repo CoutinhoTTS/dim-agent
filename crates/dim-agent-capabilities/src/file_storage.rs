@@ -1494,7 +1494,7 @@ mod native {
     fn process_started_at(pid: libc::pid_t) -> io::Result<u64> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of_val(&info) as libc::c_int;
-        let read = unsafe {
+        let inspected = unsafe {
             libc::proc_pidinfo(
                 pid,
                 libc::PROC_PIDTBSDINFO,
@@ -1503,7 +1503,7 @@ mod native {
                 size,
             )
         };
-        if read != size {
+        if inspected != size {
             return Err(io::Error::last_os_error());
         }
         Ok(info.pbi_start_tvsec * 1000 + info.pbi_start_tvusec / 1000)
