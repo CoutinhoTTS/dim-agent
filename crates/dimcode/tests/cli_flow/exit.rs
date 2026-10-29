@@ -80,25 +80,36 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
         "the interface is not in raw mode"
     );
     // Typing repaints the frame; unread, the queue fills and the renderer
-    // blocks on it before the presses. The first press clears the draft, so
-    // the second one exits.
-    for _ in 0..3 {
+    // blocks on it before the presses. The plateau and the burst count vary
+    // by platform, so fill by observation: one silent burst can be a frame
+    // not yet painted, two in a row -- each allowed well past a repaint --
+    // mean the renderer cannot write. The first press clears the draft, the
+    // second one exits.
+    let deadline = Instant::now() + PATIENCE;
+    let mut bursts = 0;
+    let mut waiting = terminal.unread();
+    let mut silent = 0;
+    while silent < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the output queue never stopped growing: {waiting} unread bytes after {bursts} bursts"
+        );
         terminal.raw(&[b'a'; 40]);
-        thread::sleep(Duration::from_millis(100));
+        bursts += 1;
+        thread::sleep(Duration::from_millis(250));
+        let unread = terminal.unread();
+        if unread > waiting {
+            waiting = unread;
+            silent = 0;
+        } else {
+            silent += 1;
+        }
     }
     assert!(
         terminal.child.try_wait().unwrap().is_none(),
         "the CLI left while the queue filled"
     );
-    let waiting = terminal.unread();
     assert!(waiting > 0, "no output was waiting on the terminal");
-    terminal.raw(&[b'a'; 40]);
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(
-        terminal.unread(),
-        waiting,
-        "the output queue was not full: the renderer kept writing"
-    );
     terminal.raw(b"\x03");
     thread::sleep(Duration::from_millis(100));
     terminal.raw(b"\x03");
