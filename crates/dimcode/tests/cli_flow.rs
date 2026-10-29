@@ -3,6 +3,9 @@
 #[path = "cli_flow/acp.rs"]
 mod acp;
 
+#[path = "cli_flow/catalog.rs"]
+mod catalog;
+
 #[path = "cli_flow/context.rs"]
 mod context;
 
