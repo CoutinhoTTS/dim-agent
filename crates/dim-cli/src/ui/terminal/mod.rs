@@ -77,12 +77,12 @@ fn set_title() -> io::Result<()> {
 pub const EXIT_TERMINAL_LOST: i32 = 129;
 
 /// The bound on leaving the terminal: how long the exit may spend flushing
-/// queued output, writing the restore sequence and hearing how the interface
-/// ended. A terminal that stopped reading (a suspended application, a stalled
-/// remote session, a multiplexer client not draining its pane) delays an
-/// exit by this much, never holds it. Short enough that a person does not
-/// wait on a dead terminal, long enough for the frames of a live one.
-pub const EXIT_BUDGET: Duration = Duration::from_millis(1000);
+/// queued output and writing the restore sequence. A terminal that stopped
+/// reading (a suspended application, a stalled remote session, a multiplexer
+/// client not draining its pane) delays an exit by this much, never holds it.
+/// Short enough that a person does not wait on a dead terminal, long enough
+/// for the frames of a live one.
+const EXIT_BUDGET: Duration = Duration::from_millis(1000);
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const FENCE_TIMEOUT: Duration = Duration::from_millis(300);

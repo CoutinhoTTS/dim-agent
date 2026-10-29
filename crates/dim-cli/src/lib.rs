@@ -122,33 +122,14 @@ async fn run_tui_with_connection(
         leave: std::sync::Mutex::new(Some(leave)),
     });
     (&tui).await.map_err(plugin_error)?;
-    let leave = leave_bounded(left).await;
+    let leave = left
+        .await
+        .map_err(|_| "the terminal interface ended without a result")?;
     tui.dispose().await?;
     link.dispose().await?;
     match leave {
-        Some(ui::tui::Leave::Exit(code)) => Ok(code),
-        Some(ui::tui::Leave::Restart(restart)) => relaunch(root, options, restart).await,
-        None => Err("the terminal interface ended without a result".into()),
-    }
-}
-
-/// Waits for how the interface ended, bounded once the event loop returned.
-///
-/// The render thread publishes its exit code before it hands the terminal
-/// back ([`ui::tui::leave_code`]); from then on it has the terminal bound
-/// ([`ui::terminal::EXIT_BUDGET`]) to report, and the process exits with that
-/// code if it does not — a terminal that stopped reading must not hold the
-/// exit open. While the interface is running there is no timeout.
-async fn leave_bounded(
-    mut left: tokio::sync::oneshot::Receiver<ui::tui::Leave>,
-) -> Option<ui::tui::Leave> {
-    let code = tokio::select! {
-        leave = &mut left => return leave.ok(),
-        code = ui::tui::leave_code() => code,
-    };
-    tokio::select! {
-        leave = &mut left => leave.ok(),
-        () = tokio::time::sleep(ui::terminal::EXIT_BUDGET) => Some(ui::tui::Leave::Exit(code)),
+        ui::tui::Leave::Exit(code) => Ok(code),
+        ui::tui::Leave::Restart(restart) => relaunch(root, options, restart).await,
     }
 }
 
@@ -245,7 +226,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         return Err(error);
     }
     let leave = tokio::select! {
-        leave = leave_bounded(left) => leave,
+        leave = left => leave.ok(),
         () = leaf::stopped(&state) => None,
     };
     node.dispose().await?;

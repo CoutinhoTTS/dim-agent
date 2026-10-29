@@ -4357,7 +4357,6 @@
         "matches",
         "print",
         "println",
-        "tokio::pin",
         "vec"
       ]
     },
@@ -21358,7 +21357,6 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::tui",
       "references": [
-        "path ui::tui::Leave",
         "path ui::tui::Leave::Exit",
         "path ui::tui::Leave::Restart",
         "path ui::tui::Restart",
@@ -22609,7 +22607,6 @@
       "from": "dim_cli::plugins",
       "to": "dim_cli::ui::terminal",
       "references": [
-        "path ui::terminal::EXIT_BUDGET",
         "path ui::terminal::restore_if_held"
       ]
     },
