@@ -49,6 +49,17 @@ pub const GUTTER_MARKS: &[&str] = &[
     LINE_MARK,
 ];
 
+/// The gutter glyphs that count as chrome after a row's margin column. The
+/// others (`$`, `·`, `✓`, `✗`, `↑`, `⑂`) can start assistant prose, which has
+/// no gutter, so they are chrome only in column 0.
+pub const MARGIN_MARKS: &[&str] = &[
+    USER_MARK,
+    ASSISTANT_MARK,
+    THINKING_BAR,
+    ERROR_MARK,
+    STATUS_MARK,
+];
+
 pub fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }

@@ -34,7 +34,7 @@ use crate::ui::render::Frame;
 use crate::ui::render::panel::{clip, escape_len, strip_escapes};
 use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
-use crate::ui::text::{GUTTER_MARKS, display_width};
+use crate::ui::text::{GUTTER_MARKS, MARGIN_MARKS, display_width};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
@@ -213,8 +213,9 @@ impl Selection {
 /// Columns of chrome before the copyable text of a plain row.
 ///
 /// A committed row opens with one margin space, then a gutter glyph
-/// ([`GUTTER_MARKS`]). A mark in column 0 is chrome too. Anything else
-/// after the margin is text, including a dash or a wide character.
+/// ([`MARGIN_MARKS`]). Any [`GUTTER_MARKS`] glyph in column 0 is chrome too.
+/// Anything else after the margin is text, including a dash, a wide character
+/// or a `$10` that opens an assistant line.
 fn text_inset(plain: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     let mut glyphs = plain.graphemes(true);
@@ -231,7 +232,7 @@ fn text_inset(plain: &str) -> usize {
         return 0;
     }
     match glyphs.next() {
-        Some(mark) if GUTTER_MARKS.contains(&mark) => 1 + display_width(mark),
+        Some(mark) if MARGIN_MARKS.contains(&mark) => 1 + display_width(mark),
         _ => 1,
     }
 }
@@ -1782,19 +1783,20 @@ mod tests {
             " \u{25c6} Thought for 3.2s",
             " \u{25a0} something failed",
             " \u{25e6} status note",
-            " $ cargo test",
+            "$ cargo test",
+            " $10 kept",
             " - kept",
         ]);
         let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let dock = ["> x"];
         emu.feed(&screen.render(&frame(&[], &dock), size, &palette, &doc));
         let at = |kind, column, row| MouseEvent { kind, column, row };
-        screen.mouse(at(MouseKind::Press, 0, 6), &doc);
+        screen.mouse(at(MouseKind::Press, 0, 5), &doc);
         screen.mouse(at(MouseKind::Drag, 24, 10), &doc);
         assert_eq!(
             screen.mouse(at(MouseKind::Release, 24, 10), &doc),
             MouseOutcome::Copy(
-                " Thought for 3.2s\n something failed\n status note\n cargo test\n- kept"
+                " Thought for 3.2s\n something failed\n status note\n cargo test\n$10 kept\n- kept"
                     .to_owned()
             )
         );

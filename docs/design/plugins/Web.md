@@ -235,7 +235,7 @@ The initial source is the user file `web.json`, read at user scope, with no proj
 | Principles §1 (Capability and App Server boundary) | Web is a built-in Session capability. Its code is the App Server process row `web` and the Session part `Web`. It adds no Web-specific host port. |
 | ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
 | ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
-| ADR 002 D3 (dependencies follow scope) | Settings is a process service; a missing required service leaves Web Pending and reload follows real dependencies while native Sessions continue. |
+| ADR 002 D3 (dependencies follow scope) | Settings is a process service; a missing required service fails the Web part's assembly and the Session continues without it. |
 | ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `web` document is business configuration in Web's own Settings source, read at each call. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
@@ -437,7 +437,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. Web is the built-in process row `web` and its Session part. Product installation of optional packages remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 | HTML to text | A scanner, not a browser. A `<` followed later by `>` starts a tag, including a bare `<` in prose. Script, style and navigation are removed by regular expressions before that scan. |
-| Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. A gzip or deflate stream that fails at finalization is `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. |
+| Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. A gzip or zlib-wrapped deflate stream that fails at finalization is `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. A raw deflate stream (the fallback for servers that omit the zlib wrapper) carries no trailer, so a truncated one cannot be told from a complete one. |
 | User-Agent | `dim-web/` plus the `dim-app-server` package version |
 
 ## Appendix G. Rust binding

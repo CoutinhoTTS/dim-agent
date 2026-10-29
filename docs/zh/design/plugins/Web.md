@@ -235,7 +235,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 | 原则 §1（Capability 与 App Server 边界） | Web 是内置 Session Capability。代码是 App Server 进程 row `web` 与 Session 部件 `Web`。不增加 Web 专属宿主端口。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
-| ADR 002 D3（依赖跟随作用域） | Settings 在外层进程作用域；必需服务缺失则 Web Pending，重载只沿真实依赖传播，原生 Session 仍可运行。 |
+| ADR 002 D3（依赖跟随作用域） | Settings 在外层进程作用域；必需服务缺失则 Web 部件装配失败，Session 在没有它的情况下继续运行。 |
 | ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web` 文档是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
@@ -437,7 +437,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址（`198.
 | 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。Web 是内置进程 row `web` 及其 Session 部件。可选包的产品安装仍属于 PluginManager。 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 | HTML 转文本 | 扫描器，不是浏览器。后面出现 `>` 的 `<` 即开始一个标签，正文里单独的 `<` 也算。script、style 与导航在这次扫描之前用正则去掉。 |
-| 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。gzip 或 deflate 在收尾时失败是 `connect_failed`；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。 |
+| 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。gzip 或带 zlib 封装的 deflate 在收尾时失败是 `connect_failed`；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。原始 deflate 流（服务器省略 zlib 封装时的回退）没有尾部校验，截断的流无法与完整的流区分。 |
 | User-Agent | `dim-web/` 加上 `dim-app-server` 的包版本 |
 
 ## 附录 G. Rust 绑定
