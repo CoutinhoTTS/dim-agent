@@ -70,7 +70,7 @@ Verification exercises fresh native startup independently of `./dev`: default in
 approval displays `network`/`host`, allow runs and deny prevents the payload; version 2 omission
 uses `ask`, explicit deny and version 1 remain restrictive. Flow coverage also exercises `full-access`, allowed tools
 and command rules; local-only management, absence, saves preserving lists, reset, invalid
-fields/roots, revision conflicts and unchanged running-shell boundaries. A Homebrew executable
+fields/roots and revision conflicts. A Homebrew executable
 control distinguishes network from executable access without using real credentials.
 
 ## Commands
