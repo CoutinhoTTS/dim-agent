@@ -2051,6 +2051,7 @@
       "parent": "dim_app_server::provider",
       "file": "crates/dim-app-server/src/provider/editing.rs",
       "unexpandedMacros": [
+        "matches",
         "params"
       ]
     },
@@ -18793,6 +18794,7 @@
         "path StaticProviderRecord",
         "path StaticRecordKind::Custom",
         "path failure",
+        "path optional_non_null",
         "path read_static",
         "path validate_static_record"
       ]

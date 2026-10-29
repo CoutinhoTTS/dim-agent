@@ -174,7 +174,7 @@ says which of these happened.
 | `displayName` | Nonempty string | Custom only |
 | `baseUrl` | Validated URL string | Static-authority builtin/custom |
 | `enabled` | Boolean | Local builtin/custom records |
-| `credential` | Existing keep/clear/set/set_aws/set_ref; omitted keeps | Static authority only |
+| `credential` | Existing keep/clear/set/set_aws/set_ref; `keep` changes nothing, exactly as an omitted credential does, so a keep-only patch is the empty patch | Static authority only |
 | `headers` | `{name, action:"set", value}` / `{name, action:"remove"}` array; omitted names keep | Static-authority builtin/custom |
 | `network.proxy` | `{action:"set", value:URL}` / `{action:"clear"}` | Local builtin/custom; existing authority validation applies |
 | `network.timeoutMs` | `{action:"set", value:positive integer}` / `{action:"clear"}` | Local builtin/custom |

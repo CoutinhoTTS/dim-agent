@@ -55,7 +55,10 @@ pub struct ProviderPatch {
     pub base_url: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub enabled: Option<bool>,
-    #[serde(default, deserialize_with = "optional_non_null")]
+    /// `{"action": "keep"}` is the boundary's "no change", the same as an
+    /// omitted credential, so `is_empty`, `changes_endpoint` and `apply` never
+    /// read a kept credential as a change.
+    #[serde(default, deserialize_with = "credential_change")]
     pub credential: Option<CredentialUpdate>,
     #[serde(default, deserialize_with = "header_updates")]
     pub headers: Option<Vec<HeaderUpdate>>,
@@ -101,6 +104,15 @@ pub struct NetworkPatch {
     pub proxy: Option<FieldUpdate<String>>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub timeout_ms: Option<FieldUpdate<std::num::NonZeroU64>>,
+}
+
+/// Reads a patch's credential, where a kept one is no change: the field is
+/// `None` for `{"action": "keep"}` and for an omitted credential alike.
+fn credential_change<'de, D>(deserializer: D) -> Result<Option<CredentialUpdate>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(optional_non_null(deserializer)?.filter(|update| !matches!(update, CredentialUpdate::Keep)))
 }
 
 fn credential_update(

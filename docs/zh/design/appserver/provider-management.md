@@ -148,7 +148,7 @@ bundled catalog（bundled 未定义该 Provider，或 `remoteModels` 已为真�
 | `displayName` | 非空字符串 | 仅 custom |
 | `baseUrl` | 已校验 URL 字符串 | 静态 authority 的 builtin/custom |
 | `enabled` | boolean | 本地 builtin/custom |
-| `credential` | 既有 keep/clear/set/set_aws/set_ref；省略保留 | 仅静态 authority |
+| `credential` | 既有 keep/clear/set/set_aws/set_ref；`keep` 与省略同等，均不改动，因此只含 keep 的 patch 即空 patch | 仅静态 authority |
 | `headers` | `{name,action:"set",value}` / `{name,action:"remove"}` 数组；未提及名称保留 | 静态 authority 的 builtin/custom |
 | `network.proxy` | `{action:"set",value:URL}` / `{action:"clear"}` | 本地 builtin/custom，沿用 authority 校验 |
 | `network.timeoutMs` | `{action:"set",value:正整数}` / `{action:"clear"}` | 本地 builtin/custom |
