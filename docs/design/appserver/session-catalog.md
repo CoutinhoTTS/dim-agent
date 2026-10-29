@@ -68,7 +68,8 @@ order.
 
 A search with a rare match scans the catalog's rows: the filters read the projection, the stored title and the stored
 model, and no filter decodes an event. Registering that function needs rusqlite's `functions` feature and no new
-dependency, and nothing is stored folded: a title rename or a model change adds no projection write.
+dependency. The fold runs at query time, so no folded value is stored and none has to be kept in step with the title
+or the model.
 
 ### 3.2 Order, cursor and paging
 
