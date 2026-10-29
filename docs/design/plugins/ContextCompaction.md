@@ -1599,6 +1599,14 @@ files are the command's own data, not the assembly, crate boundaries or generate
   summary and the probe list only, not the transcript, and answers per probe `present`, `absent`
   or `contradicted` with a supporting quote. A `fact` scores when `present`; an `absent` probe is
   a violation when `present`. The judge prompt is part of the runner.
+- The judge is the instrument. Within one evaluation every arm and run uses one judge
+  configuration, the saved preferences of the isolated `--home` the evaluator set up, and the run
+  record and the report write it down, so two evaluations compare only when their judge
+  configurations match. They record the judge's reasoning effort, its service tier, and whether a
+  request fell back to no temperature after the model rejected the temperature.
+- The run record and the report also write down, per arm, the reasoning effort and service tier
+  its summarizer requests carried: the built configuration of the eval home, with the reasoning
+  the strategy applied in place of the effort (`off` is written as `none`).
 - Before recording a decision, the operator reads the lowest-scoring summaries of each arm and
   corrects judge errors by hand; corrections are listed in the research note.
 
