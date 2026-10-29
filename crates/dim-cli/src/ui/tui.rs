@@ -751,6 +751,9 @@ struct App {
     /// Committed groups (history ids) whose delegation cards still change:
     /// fullscreen redraws them from the snapshot.
     card_blocks: Vec<usize>,
+    /// Committed user rows (history ids) the model had not consumed yet:
+    /// fullscreen redraws them once it does.
+    message_blocks: Vec<usize>,
     /// The second their running time was last drawn for.
     card_second: u64,
     session_id: String,
@@ -954,6 +957,7 @@ impl App {
             rewrites: 0,
             rewrite_log: Default::default(),
             card_blocks: Vec::new(),
+            message_blocks: Vec::new(),
             card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
@@ -2910,6 +2914,7 @@ impl App {
                 frame.commits.push(text);
             }
         }
+        self.refresh_messages();
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
             if let Block::ToolGroup(group) = &source
@@ -2917,6 +2922,11 @@ impl App {
                 && self.fullscreen
             {
                 self.card_blocks.push(self.dropped + self.history.len());
+            }
+            if let Block::User { pending: true, .. } = &source
+                && self.fullscreen
+            {
+                self.message_blocks.push(self.dropped + self.history.len());
             }
             match placement {
                 Placement::New => self.record(source),
@@ -3438,7 +3448,9 @@ impl App {
                 {
                     live_items.push(LiveItem::Row(index));
                 }
-                RowKind::UserMessage if row.pending => live_items.push(LiveItem::Row(index)),
+                RowKind::UserMessage if row.pending && !self.fullscreen => {
+                    live_items.push(LiveItem::Row(index));
+                }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
                         live_text.push(TextBlock {
@@ -3642,6 +3654,7 @@ impl App {
         self.line_draft = None;
         self.fork_confirm = None;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3693,6 +3706,7 @@ impl App {
             self.composer.set_draft(&text);
         }
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3799,6 +3813,7 @@ impl App {
         self.history_request = None;
         self.load_more = true;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         self.dropped += self.history.len();
         self.history.clear();
         self.stream_block = None;
@@ -3863,6 +3878,58 @@ impl App {
         if self.rewrite_log.len() > REWRITE_LOG {
             self.rewrite_log.pop_front();
         }
+    }
+
+    /// Fullscreen redraws a committed user row the model has consumed since;
+    /// scrollback keeps what it printed (timeline UI §4.8).
+    fn refresh_messages(&mut self) {
+        if !self.fullscreen || self.message_blocks.is_empty() {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let settled: Vec<usize> = self
+            .message_blocks
+            .iter()
+            .copied()
+            .filter(|index| {
+                let Some(Block::User {
+                    text,
+                    cut,
+                    pending: true,
+                }) = index
+                    .checked_sub(self.dropped)
+                    .and_then(|at| self.history.get(at))
+                else {
+                    return false;
+                };
+                snapshot.rows.iter().any(|row| {
+                    row.kind == RowKind::UserMessage
+                        && row.cut == *cut
+                        && row.text == *text
+                        && !row.pending
+                })
+            })
+            .collect();
+        for index in settled {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            if let Some(Block::User { text, cut, .. }) = self.history.get(at).cloned() {
+                self.history[at] = Block::User {
+                    text,
+                    cut,
+                    pending: false,
+                };
+            }
+        }
+        self.message_blocks.retain(|index| {
+            index
+                .checked_sub(self.dropped)
+                .and_then(|at| self.history.get(at))
+                .is_some_and(|block| matches!(block, Block::User { pending: true, .. }))
+        });
     }
 
     /// Fullscreen redraws committed delegation cards as their facts and
@@ -5580,43 +5647,50 @@ mod tests {
         drawn.draw();
     }
 
-    #[test]
-    fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
+    /// Draws one user message, in the state `pending` gives it.
+    fn show_message(drawn: &mut Drawn, pending: bool) {
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows: vec![std::sync::Arc::new(ViewRow {
+                row_id: "u1".into(),
+                kind: RowKind::UserMessage,
+                text: "find the leak".into(),
+                streaming: false,
+                elapsed_ms: None,
+                tone: None,
+                tool_name: None,
+                tool_input: None,
+                batch: None,
+                pending,
+                parked: false,
+                result_text: None,
+                result_is_error: false,
+                diff: None,
+                exit_code: None,
+                member: None,
+                cut: None,
+                line: None,
+                compaction: None,
+            })],
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+    }
+
+    fn attached() -> Drawn {
         let mut drawn = Drawn::new((80, 40), None, true);
         drawn
             .app
             .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
-        let show = |drawn: &mut Drawn, pending: bool| {
-            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
-                session_id: "s1".into(),
-                rows: vec![std::sync::Arc::new(ViewRow {
-                    row_id: "u1".into(),
-                    kind: RowKind::UserMessage,
-                    text: "find the leak".into(),
-                    streaming: false,
-                    elapsed_ms: None,
-                    tone: None,
-                    tool_name: None,
-                    tool_input: None,
-                    batch: None,
-                    pending,
-                    parked: false,
-                    result_text: None,
-                    result_is_error: false,
-                    diff: None,
-                    exit_code: None,
-                    member: None,
-                    cut: None,
-                    line: None,
-                    compaction: None,
-                })],
-                focus: "main".into(),
-                history_complete: true,
-                ..ViewSnapshot::default()
-            })));
-            drawn.draw();
-        };
-        show(&mut drawn, true);
+        drawn
+    }
+
+    #[test]
+    fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
+        let mut drawn = attached();
+        show_message(&mut drawn, true);
         assert!(
             drawn.transcript().contains("find the leak"),
             "a pending message is drawn"
@@ -5627,9 +5701,9 @@ mod tests {
                 .history
                 .iter()
                 .any(|block| matches!(block, Block::User { .. })),
-            "a pending message has no settled appearance to commit"
+            "scrollback prints a message only once it has settled"
         );
-        show(&mut drawn, false);
+        show_message(&mut drawn, false);
         assert!(
             drawn
                 .app
@@ -5637,6 +5711,36 @@ mod tests {
                 .iter()
                 .any(|block| matches!(block, Block::User { text, .. } if text == "find the leak")),
             "a consumed message settles into scrollback"
+        );
+    }
+
+    #[test]
+    fn fullscreen_settles_a_committed_message_in_place() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        show_message(&mut drawn, true);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: true, .. } if text == "find the leak"
+            )),
+            "fullscreen commits the message where it was said"
+        );
+        show_message(&mut drawn, false);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: false, .. } if text == "find the leak"
+            )),
+            "fullscreen redraws the same row once the model reads it"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { pending: true, .. })),
+            "no pending copy is left behind"
         );
     }
 

@@ -164,7 +164,7 @@ A user message is written, applied and then consumed. The client draws it from `
 | applied | `input/applied`, waiting for Loop's next request | no | a pending message row |
 | consumed | `input/consumed`, in the request that carries it | yes | a user message row |
 
-A pending row keeps its text and its cut, and draws in the faint colour without the band. Scrollback is append-only, so a row that can still change stays in the live tail (as a streaming answer and a running tool group do) and enters scrollback only when `input/consumed` settles it, in the user colour. A message that waits for the next request therefore never reads as one the model has answered:
+A pending row keeps its text and its cut, and draws in the faint colour without the band. In fullscreen the row is committed where the message was said, and `input/consumed` redraws that block in place. Scrollback is append-only, so there a row that can still change stays in the live tail (as a streaming answer and a running tool group do) and enters scrollback only when it settles, in the user colour. A message that waits for the next request therefore never reads as one the model has answered:
 
 ```
  › how do we fix this deadlock                       the model has read this
@@ -215,7 +215,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 - New interaction: `b`/`f` on a pick, the composer's line draft and fork question, the path border, `/branch` and `/fork`. Each serves one rule of §2.
 - The side panel (§4.7) is the one new surface: following a line without leaving the parent needs a view of the line that the parent's Timeline cannot hold. It folds nothing new; the CLI already keeps a transcript per opened line. Its collapsed form is the existing `⑂` marker, so dismissal writes nothing.
 - Considered and dropped: a `b` key in the lines panel (needs each line's head; `/branch` on the shown line covers it), greyed hints per point (a notice on the key says the same with less state), end markers (§4.4), a one-row summary of the inherited prefix and `Esc Esc` back to the parent (§5 and the marker already lead there).
-- The pending message (§4.8) adds no list of its own: it is the same row, keyed by input id, and the queue strip is that row's earlier state. Its live-tail drawing reuses the rule a streaming answer and a running tool group already follow, and the three states come from events the client already receives — no timer, no new event, no second transcript.
+- The pending message (§4.8) adds no list of its own: it is the same row, keyed by input id, and the queue strip is that row's earlier state. Scrollback's live tail and fullscreen's in-place redraw are the rules a streaming answer, a running tool group and a delegation card already follow, and the three states come from events the client already receives — no timer, no new event, no second transcript.
 
 ## 10. Decisions
 
