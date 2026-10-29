@@ -1821,3 +1821,101 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         agent.close().await.unwrap();server.close().await;
     }).await.unwrap();
 }
+
+/// A tool whose result carries a text block and a PNG, as an MCP image result
+/// does (mcp/server.rs maps an image content block into `ToolContent::Blocks`).
+struct ImageEcho;
+impl ToolDriver for ImageEcho {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            risk: Some("session".into()),
+            ..dim_agent_capabilities::tool_registry::definition(
+                "echo",
+                "Return a text block and a PNG image.",
+                json!({"type":"object","required":["text"],"additionalProperties":false,"properties":{"text":{"type":"string"}}}),
+            )
+        }]
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        assert_eq!(call.name, "echo");
+        Box::pin(async move {
+            Ok(ToolResult {
+                content: ToolContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "result text".into(),
+                    },
+                    ContentBlock::Image {
+                        source: ImageSource {
+                            source_type: ImageSourceType::Base64,
+                            media_type: "image/png".into(),
+                            data: Some(IMAGE.into()),
+                            url: None,
+                        },
+                    },
+                ]),
+                structured_content: None,
+                is_error: None,
+                blob_refs: None,
+                background_task: None,
+                context_messages: None,
+                effects: None,
+            })
+        })
+    }
+}
+
+fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(&data.results[0].result.content),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let server = NativeServer::start("openai-chat").await;
+        let models = server.models();
+        let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho))));
+        let mut config = server.session_config();
+        config.model.capability_snapshot = Some(ModelCapabilitySnapshot {
+            target: ModelId {
+                provider_id: "local".into(),
+                model_id: server.model_id().into(),
+            },
+            capabilities: ModelCapabilities { vision: false, ..Default::default() },
+            reasoning: None,
+            service_tier: None,
+        });
+        let session = agent.create_session(config).await.unwrap();
+        session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
+        session.idle("main").await.unwrap();
+        let events = session.history("main", None).await.unwrap();
+        assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
+        for content in tool_result_events(&events) {
+            assert!(
+                matches!(content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))),
+                "the stored tool result keeps the image the request replaced"
+            );
+        }
+        let requests = server.endpoint.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        let next = &requests[1].2;
+        let tool = next["messages"].as_array().unwrap().iter().find(|message| message["role"] == "tool").unwrap();
+        assert!(
+            tool["content"].as_str().unwrap().contains("[Image omitted: the current model does not accept images.]"),
+            "{tool}"
+        );
+        assert!(!next.to_string().contains("image_url") && !next.to_string().contains("data:image"), "no image in the wire body: {next}");
+        agent.close().await.unwrap();
+        server.close().await;
+    }).await.unwrap();
+}

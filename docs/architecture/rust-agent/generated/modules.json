@@ -8320,12 +8320,17 @@
       "from": "dim_agent_capabilities::model_provider::images",
       "to": "dim_agent_types::content",
       "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
         "path ImageSource",
         "path ImageSourceType::Base64",
         "path Message",
         "path MessageContent::Parts",
         "path MessagePart::Image",
-        "path MessagePart::Text"
+        "path MessagePart::Text",
+        "path MessagePart::ToolResult",
+        "path ToolContent::Blocks",
+        "path content"
       ]
     },
     {
