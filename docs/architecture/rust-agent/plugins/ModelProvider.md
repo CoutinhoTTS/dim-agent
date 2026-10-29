@@ -23,8 +23,10 @@ Consumes `model/call`, `stop/interrupt`, `step/model-start`, `input/applied`,
 `step/tool-use-start`, `step/tool-use`, `step/model-content`, `model/usage`
 and `step/model-output-end`; see Output for block commit boundaries.
 The first event of each text/thinking block is preassigned its block id as the
-event `id`; later deltas are grouped by the open block. `ModelProgress` exposes
-the same ids as `text_part_id` / `thinking_part_id` while the block is open.
+event `id`; later same-kind deltas are grouped by the open block until a
+thinking/text/tool event starts the next one. Provider `TextEnd`/`ThinkingEnd`
+are not durable boundaries. `ModelProgress` exposes the same ids as
+`text_part_id` / `thinking_part_id` while the block is open.
 Progress state is transient. Only one call runs at a time. Steer may replace a
 request before irreversible output; stop cancels and drains native work.
 Cleanup cancels, joins tasks and aggregates failures. Replay fails unended

@@ -291,13 +291,11 @@ impl Output {
         }
         Ok(())
     }
-    /// Ends the current text block. Its committed chunks keep their part id
-    /// in progress until handoff, but the next text starts a new part.
+    /// Ends the provider's text block. The block identity stays open because
+    /// `TextEnd` is not durable: adjacent text events with no thinking or tool
+    /// event between them are one block in history.
     fn end_text(&mut self) -> Result<(), HostError> {
-        self.flush_text()?;
-        self.text_part_id = None;
-        self.text_part_committed = false;
-        Ok(())
+        self.flush_text()
     }
     /// Commits the buffered text as one `step/text`.
     pub fn flush_text(&mut self) -> Result<(), HostError> {
@@ -377,8 +375,6 @@ impl Output {
         };
         self.committed_thinking.push_str(&data.delta);
         self.replace_tail(true, &data.delta);
-        self.thinking_part_id = None;
-        self.thinking_part_committed = false;
         self.hand_off(event.sequence, Handoff::Thinking(data.delta.len()));
         Ok(())
     }

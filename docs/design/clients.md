@@ -60,7 +60,7 @@ The CLI requires protocol v3 and the `session.create` and `session.history` feat
 
 ### Timeline block identity
 
-- A text/thinking block is identified by the `id` of its **first raw event**. Every later delta of the same contiguous block is folded into that block; a new block after text/thinking/tool interruption gets the id of its own first event. Replay, history and storage preserve the event ids.
+- A text/thinking block is identified by the `id` of its **first raw event**. Following same-kind events belong to that block until a durable event of the other kind (thinking for text, text for thinking) or a tool event starts the next block. Provider `TextEnd`/`ThinkingEnd` are not durable and do not split a block. Replay, history and storage preserve the event ids.
 - Tools use `call_id`; user inputs use the `input/message` event id.
 - `session.model.progress` carries `textPartId` / `thinkingPartId` for the open blocks. They equal the first-event id that will publish that block.
 - Clients must key timeline blocks/groups by that first-event id (or `call_id` for tools), not by local ordinals, request ids or synthetic `:progress` ids. UI-only group/expansion keys may derive from those stable ids.
