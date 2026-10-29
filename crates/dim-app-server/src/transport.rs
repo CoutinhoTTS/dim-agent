@@ -55,6 +55,7 @@ impl Drop for SocketFile {
         }) {
             let _ = std::fs::remove_file(&self.path);
         }
+        let _ = self._lock.unlock();
     }
 }
 #[cfg(unix)]
