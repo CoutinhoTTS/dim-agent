@@ -1981,24 +1981,11 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
         connection.execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session").unwrap();
         drop(connection);
-        let _ = agent.close().await;
-        drop(bad);
-        drop(good);
-        drop(agent);
-        store.close().await.unwrap();
-        db.close().await.unwrap();
-        drop(builder);
-        drop(store);
-        drop(db);
-
-        let db = SqliteStorage::open(database.0.clone()).unwrap();
-        let store = SqliteTimelineStore::new(db.clone());
-        let mut builder = AgentBuilder::new(AgentConfig::default());
-        dim_agent_capabilities::defaults::mock_hosts(&mut builder);
-        dim_agent_capabilities::defaults::install(&mut builder);
-        builder.timeline_store(store.clone());
-        let restored = builder.build();
-        let session = restored.restore_session(bad_id).await.unwrap();
+        let session = agent.restore_session(bad_id).await.unwrap();
+        assert!(bad.submit("old generation".into(), InputMode::Queue, "main").await.is_err());
+        good.submit("still healthy".into(), InputMode::Queue, "main").await.unwrap();
+        good.idle("main").await.unwrap();
+        assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
         session.idle("main").await.unwrap();
         let history = session.history("main", None).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))));
@@ -2012,7 +1999,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         let id = session.id().to_owned();
         drop(session);
         assert_eq!(store.writer_memo_requests(&id), 0);
-        restored.close().await.unwrap();
+        agent.close().await.unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
     }).await.expect("Session failure and recovery completed");

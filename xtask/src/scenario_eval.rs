@@ -134,7 +134,8 @@ fn delta() -> f64 {
     DELTA.0 as f64 / DELTA.1 as f64
 }
 /// How long the driver waits after the last event before it asks whether
-/// every line is idle.
+/// every line is idle. The quiet period follows the last notice the driver
+/// reads, including the notices it reads while it waited on `session.idle`.
 const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
@@ -939,9 +940,9 @@ fn unparsed(scenario: &Scenario) -> Vec<ProbeRecord> {
 }
 
 /// The run's turns as the exported Timeline records them, and the first failed
-/// turn's error. The export is the account of record: a turn that ends while
-/// the idle probe waits can be missing from the notice stream, because the
-/// probe returns when the line becomes idle, before that notice is read.
+/// turn's error. The export is the account of record: a run that ends on a
+/// budget or an error stops reading the notice stream with notices still
+/// queued, so that stream can hold fewer turn ends than the Timeline does.
 fn turns_in_export(export: &str) -> (u32, Option<String>) {
     let mut turns = 0;
     let mut failed = None;
@@ -1358,8 +1359,12 @@ fn notice(method: &str, params: &Value) -> Notice {
     }
 }
 
-/// Whether every known line is idle. `session.idle` returns when the line is
-/// idle; a short deadline keeps a busy line from holding the driver.
+/// Whether every known line is idle and no notice arrived while it asked.
+/// `session.idle` returns when the line is idle; a short deadline keeps a busy
+/// line from holding the driver. A notice that arrives while a call waits is
+/// left in the client's queue, and the driver reads every queued notice before
+/// its next quiet check, so `false` here means the quiet period follows that
+/// notice's read.
 async fn idle(
     client: &mut Client,
     session: &str,
@@ -1376,7 +1381,10 @@ async fn idle(
             Err(_) => return Ok(false),
         }
     }
-    Ok(true)
+    Ok(!client
+        .notices
+        .iter()
+        .any(|message| matches!(message, WireMessage::Notice { .. })))
 }
 
 /// The judge's answer for one run: a record per probe, the judge's error,
@@ -2808,12 +2816,20 @@ mod tests {
     /// The provider's answer to one request: the stream event to send, or
     /// `None` for a plain text reply.
     type Reply = fn(&str) -> Option<Value>;
+    /// How long the provider holds a request's whole answer back before it
+    /// sends the first byte of it; `None` sends the answer at once.
+    type Hold = fn(&str) -> Option<Duration>;
+    /// The hold of a provider that answers every request at once.
+    fn holds_nothing(_: &str) -> Option<Duration> {
+        None
+    }
 
-    /// One loopback OpenAI-compatible provider that answers by `reply` and
-    /// records every request it receives.
+    /// One loopback OpenAI-compatible provider that answers by `reply`, holds
+    /// an answer by `hold`, and records every request it receives.
     struct Provider {
         requests: Mutex<Vec<String>>,
         reply: Reply,
+        hold: Hold,
     }
     async fn completion(
         axum::extract::State(provider): axum::extract::State<Arc<Provider>>,
@@ -2821,6 +2837,9 @@ mod tests {
     ) -> String {
         let text = body.to_string();
         provider.requests.lock().unwrap().push(text.clone());
+        if let Some(hold) = (provider.hold)(&text) {
+            tokio::time::sleep(hold).await;
+        }
         let event = (provider.reply)(&text).unwrap_or_else(|| content("ok"));
         format!("data: {event}\n\ndata: [DONE]\n\n")
     }
@@ -2870,16 +2889,28 @@ mod tests {
     }
     impl Fixture {
         /// `scenario` is the scenario file's content and `workspace` the
-        /// starting files beside it.
+        /// starting files beside it; no answer is held.
         async fn start(
             label: &str,
             reply: Reply,
             scenario: Value,
             workspace: &[(&str, &str)],
         ) -> Self {
+            Self::holding(label, reply, holds_nothing, scenario, workspace).await
+        }
+        /// [`start`](Self::start) with a provider that holds the answers
+        /// [`Hold`] names before it sends them.
+        async fn holding(
+            label: &str,
+            reply: Reply,
+            hold: Hold,
+            scenario: Value,
+            workspace: &[(&str, &str)],
+        ) -> Self {
             let provider = Arc::new(Provider {
                 requests: Mutex::default(),
                 reply,
+                hold,
             });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = listener.local_addr().unwrap();
@@ -3326,6 +3357,88 @@ mod tests {
         }
     }
 
+    /// The `create_at` of the last `turn/end` on `main` and of the close the
+    /// runner's own `session.close` writes, a `stop/interrupt` with reason
+    /// `timeline closed`.
+    fn last_turn_end_and_close(export: &str) -> (u64, u64) {
+        let mut turn_end = None;
+        let mut closed = None;
+        for line in export.lines() {
+            let Ok(line) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if line["kind"] != "event" || line["branch_id"] != "main" {
+                continue;
+            }
+            let event = &line["event"];
+            let create_at = event["create_at"].as_u64().unwrap_or_default();
+            if event["type"] == "turn" && event["name"] == "end" {
+                turn_end = Some(create_at);
+            }
+            if event["type"] == "stop"
+                && event["name"] == "interrupt"
+                && event["data"]["reason"] == "timeline closed"
+            {
+                closed = Some(create_at);
+            }
+        }
+        (
+            turn_end.expect("a turn ended on main"),
+            closed.expect("the run closed main"),
+        )
+    }
+
+    /// A turn that ends while the driver waits on `session.idle` is read like
+    /// any other notice: the quiet period follows it, and the run closes at
+    /// least `QUIET` after the turn's end instead of at it (issue #643).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_ending_during_the_idle_call_delays_the_close_by_the_quiet_period() {
+        // QUIET plus half of IDLE_WAIT: the turn ends inside the driver's
+        // `session.idle` call, whose deadline it beats.
+        const HELD: Duration = Duration::from_millis(1500);
+        /// The judge's verdict, and plain text for a run request.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        /// Holds a run request's whole answer back for [`HELD`]; the judge
+        /// answers at once.
+        fn holds_the_turn(text: &str) -> Option<Duration> {
+            (!text.contains("You check statements")).then_some(HELD)
+        }
+        let fixture = Fixture::holding(
+            "late-turn",
+            answers,
+            holds_the_turn,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        for arm in ["current", "candidate"] {
+            let export = std::fs::read_to_string(
+                options
+                    .out
+                    .join(arm)
+                    .join("case")
+                    .join("run-0")
+                    .join("timeline.jsonl"),
+            )
+            .unwrap();
+            let (turn_end, closed) = last_turn_end_and_close(&export);
+            assert!(
+                closed >= turn_end + QUIET.as_millis() as u64,
+                "{arm}: the run closed {} ms after its last turn ended, short of QUIET",
+                closed.saturating_sub(turn_end)
+            );
+        }
+    }
+
     /// Both arms serve the product's default plugins: a Goal method set in
     /// the scenario's `calls` answers on its Session, so the run reaches its
     /// turn instead of failing the call (issue #612, acceptance 1).
@@ -3371,6 +3484,84 @@ mod tests {
             assert!(
                 requests[0].contains("dim-goal") && requests[0].contains("Keep the suite green."),
                 "{arm}: the first request carries the goal the call set"
+            );
+        }
+    }
+
+    /// A turn that ends after the quiet period has passed hands its notices to
+    /// the driver: Goal's continuation, written at that turn's end, drives a
+    /// turn of its own in the same run, and the budget counts it (issue #643).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_continuation_after_a_held_turn_runs_in_the_same_run() {
+        // QUIET plus half of IDLE_WAIT: a held turn ends inside the driver's
+        // `session.idle` call, whose deadline it beats.
+        const HELD: Duration = Duration::from_millis(1500);
+        /// The judge's verdict, and plain text for a run request.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        /// Holds a run request's whole answer back for [`HELD`], except one
+        /// that carries Goal's continuation, which is answered at once; the
+        /// judge answers at once.
+        fn holds_the_turn(text: &str) -> Option<Duration> {
+            (!text.contains("You check statements")
+                && !text.contains("Continue working toward the active goal"))
+            .then_some(HELD)
+        }
+        let fixture = Fixture::holding(
+            "goal-continuation",
+            answers,
+            holds_the_turn,
+            json!({
+                "message": "Continue the work.",
+                "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
+                // The goal the calls step sets drives a turn of its own before
+                // the message's, so the continuation is the run's third turn
+                // and the budget stops there, not at the turn that wrote it.
+                "budget": {"turns": 3, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let defaults = repository().join("runtime/default-plugins.json");
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        for arm in ["current", "candidate"] {
+            let record = run_arm(&fixture, &options, arm, &Overrides::default(), 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert_eq!(record.stop, "turns", "{arm}");
+            assert_eq!(record.turns, 3, "{arm}: Goal's continuation ran");
+            let export = std::fs::read_to_string(
+                options
+                    .out
+                    .join(arm)
+                    .join("case")
+                    .join("run-0")
+                    .join("timeline.jsonl"),
+            )
+            .unwrap();
+            let continuation = export.lines().any(|line| {
+                let Ok(line) = serde_json::from_str::<Value>(line) else {
+                    return false;
+                };
+                line["kind"] == "event"
+                    && line["branch_id"] == "main"
+                    && line["event"]["type"] == "input"
+                    && line["event"]["name"] == "message"
+                    && line["event"]["data"]["blocks"]
+                        .as_array()
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block["text"]
+                                    .as_str()
+                                    .is_some_and(|text| text.contains(r#"kind="continuation""#))
+                            })
+                        })
+            });
+            assert!(
+                continuation,
+                "{arm}: Goal's continuation input is in the export"
             );
         }
     }

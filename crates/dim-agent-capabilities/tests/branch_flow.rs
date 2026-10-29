@@ -9,6 +9,7 @@ use dim_agent_capabilities::{
         StrategyDiagnostics, StrategyOutcome, ToolHost,
     },
     timeline_tree::TreeCommands,
+    workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
@@ -143,6 +144,8 @@ struct Probe {
     commands: Mutex<Option<Arc<TreeCommands>>>,
     /// main's Timeline as its capabilities receive it, for direct writes.
     main_timeline: Mutex<Option<Arc<Timeline>>>,
+    /// A line's own Timeline: the binding its file tools keep reads in.
+    child_timeline: Mutex<Option<Arc<Timeline>>>,
     /// When set, main's apply reads its first atomic batch while it opens,
     /// after a rebuild read; the outcomes go to `opening_reads`.
     read_while_opening: AtomicBool,
@@ -218,6 +221,7 @@ impl DynPlugin for ProbePlugin {
                     probe.opening_reads.lock().unwrap().push(reads);
                 }
             } else {
+                *probe.child_timeline.lock().unwrap() = Some(timeline.clone());
                 probe.child_builds.fetch_add(1, Ordering::SeqCst);
                 let cleanups = probe.child_cleanups.clone();
                 ctx.effect(|| async move {
@@ -2940,7 +2944,7 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
 /// even where no branch part is loaded. `<dim-branch-lines>` stays with
 /// BranchLine, which writes the roster.
 const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 fn system_text(prompt: &SystemPrompt) -> String {
     match prompt {
@@ -2998,6 +3002,83 @@ async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     let line = last_system(&session, &child).await;
     assert_eq!(line.matches(IDENTITY_ENTRY).count(), 1, "{line:?}");
     soon(agent.close()).await.unwrap();
+}
+
+/// #637: the workspace rule names the stale copy in the words the result
+/// carries. The tool's side is a write through the line's own read binding,
+/// the guard the design relies on (§8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_names_the_stale_file_failure_the_way_the_tool_reports_it() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    let history = session.history(&child, None).await.unwrap();
+    let (identity, _) = line_block(&history).unwrap();
+    assert!(
+        identity.contains(
+            "If edit or write fails because the file was modified after it was last read"
+        ),
+        "{identity:?}"
+    );
+
+    let root = std::env::temp_dir().join(format!("dim-branch-workspace-{}", uuid::Uuid::new_v4()));
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let tools = FileTools::new(work.clone(), root.clone(), root.join("outputs"));
+    let timeline = probe
+        .child_timeline
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the line's Timeline");
+    let reads = FileReads::new(timeline);
+    std::fs::write(work.join("shared.txt"), "first\n").unwrap();
+    let read = file_call(
+        &tools,
+        &reads,
+        "read",
+        serde_json::json!({"path": "shared.txt"}),
+    )
+    .await;
+    assert_eq!(read.is_error, None, "{:?}", read.content);
+    std::fs::write(work.join("shared.txt"), "changed elsewhere\n").unwrap();
+    let stale = file_call(
+        &tools,
+        &reads,
+        "write",
+        serde_json::json!({"path": "shared.txt", "content": "mine\n"}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    assert_eq!(
+        stale.content,
+        ToolContent::Text(
+            "File was modified after it was last read. Use the read tool again before writing."
+                .into()
+        )
+    );
+    soon(agent.close()).await.unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn file_call(
+    tools: &FileTools,
+    reads: &FileReads,
+    name: &str,
+    input: serde_json::Value,
+) -> ToolResult {
+    let call = ToolCall {
+        id: "call".into(),
+        name: name.into(),
+        input: input.as_object().unwrap().clone(),
+    };
+    tools
+        .execute(&call, reads, CancellationToken::new())
+        .await
+        .unwrap()
 }
 
 /// #552: the branch tool's actions, modes and schema are protocol, so they

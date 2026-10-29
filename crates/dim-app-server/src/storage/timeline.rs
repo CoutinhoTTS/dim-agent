@@ -44,6 +44,10 @@ enum Command {
         session_id: String,
         done: tokio::sync::oneshot::Sender<Result<()>>,
     },
+    Release {
+        session_id: String,
+        done: tokio::sync::oneshot::Sender<Result<()>>,
+    },
     Close,
 }
 
@@ -190,6 +194,13 @@ impl SqliteTimelineStore {
                     Command::Rollback { session_id, done } => {
                         let Some(store) = weak.upgrade() else { break };
                         let _ = done.send(store.rollback_creation(&session_id));
+                        continue;
+                    }
+                    Command::Release { session_id, done } => {
+                        let Some(store) = weak.upgrade() else { break };
+                        store.forget(&session_id);
+                        store.admission.lock().unwrap().failures.remove(&session_id);
+                        let _ = done.send(Ok(()));
                         continue;
                     }
                     Command::Close => break,
@@ -1707,6 +1718,25 @@ impl TimelineStore for SqliteTimelineStore {
                 admission
                     .sender
                     .send(Command::Rollback {
+                        session_id: session_id.into(),
+                        done,
+                    })
+                    .map_err(error)?;
+            }
+            wait.await.map_err(error)?
+        })
+    }
+    fn release_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let (done, wait) = tokio::sync::oneshot::channel();
+            {
+                let admission = self.admission.lock().unwrap();
+                if admission.closed {
+                    return Err(error("Timeline storage is closed"));
+                }
+                admission
+                    .sender
+                    .send(Command::Release {
                         session_id: session_id.into(),
                         done,
                     })

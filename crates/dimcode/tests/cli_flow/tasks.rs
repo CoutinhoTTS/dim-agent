@@ -1711,7 +1711,7 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
     let home = Home::new();
     let (opened, wait_opened) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["agent.list"]);
+        wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
@@ -1807,10 +1807,15 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
         events.push(delivered(9, "req-6", "running", "member-running"));
         wire.reply(&history, json!({"events":events,"through":9,"nextAfter":9,"done":true}));
         wire.no_context();
-        let attach = wire.read("session.attach");
+        let mut requests = [wire.read_any(), wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, names, attach] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(names["method"], "agent.list");
+        assert_eq!(attach["method"], "session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member-running"}));
-        let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
+        wire.reply(&names, json!([]));
         wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32000,"message":"member unavailable"}}));
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected observation: {line}");
@@ -1832,7 +1837,7 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
 fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["agent.list"]);
+        wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
@@ -1872,6 +1877,122 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     terminal.until("Agent: unlisted-agent");
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("agent_not_found"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+/// `agent.list` is a built-in method, so no `hello` advertises it: the card
+/// still asks for the Agent's name.
+#[test]
+fn tui_member_cards_name_a_native_agent_the_hello_does_not_announce() {
+    let home = Home::new();
+    let (named, wait_named) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        let events = agent_request(
+            1,
+            "r1",
+            "call-1",
+            json!({"kind":"agent","agent_id":"reviewer"}),
+            "Check crate dependencies",
+        );
+        wire.reply(
+            &history,
+            json!({"events":events,"through":3,"nextAfter":3,"done":true}),
+        );
+        wire.no_context();
+        let mut requests = [wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, list] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(list["method"], "agent.list");
+        wire.reply(&providers, json!([]));
+        wire.reply(
+            &list,
+            json!([{"agentId":"reviewer","name":"Code Reviewer"}]),
+        );
+        wait_named.recv_timeout(PATIENCE).unwrap();
+        wire.quiet(Duration::from_millis(150));
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Agent: Code Reviewer");
+    named.send(()).unwrap();
+    daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+/// A failed shared read keeps the id on the card it covered, a later card for
+/// the same Agent asks nothing again, and the transcript keeps drawing.
+#[test]
+fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
+    let home = Home::new();
+    let (drawn, wait_drawn) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        let events = agent_request(
+            1,
+            "r1",
+            "call-1",
+            json!({"kind":"agent","agent_id":"reviewer"}),
+            "First review",
+        );
+        wire.reply(
+            &history,
+            json!({"events":events,"through":3,"nextAfter":3,"done":true}),
+        );
+        wire.no_context();
+        let mut requests = [wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, list] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(list["method"], "agent.list");
+        wire.reply(&providers, json!([]));
+        wire.send(json!({"jsonrpc":"2.0","id":list["id"],"error":{"code":-32000,"message":"agent list unavailable"}}));
+        for value in agent_request(
+            4,
+            "r2",
+            "call-2",
+            json!({"kind":"agent","agent_id":"reviewer"}),
+            "Second review",
+        ) {
+            event(wire, "main", value);
+        }
+        wire.quiet(Duration::from_millis(1000));
+        event(
+            wire,
+            "main",
+            fact(
+                "result-7",
+                7,
+                7000,
+                "collaboration",
+                "result",
+                json!({"request_event_id":"req-4","agent_id":"reviewer","session_id":"member",
+                    "status":"completed","text":"second review is complete"}),
+            ),
+        );
+        wait_drawn.recv_timeout(PATIENCE).unwrap();
+        wire.quiet(Duration::from_millis(150));
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Agent: reviewer");
+    terminal.until("Second review");
+    terminal.until("agent result: second review is complete");
+    drawn.send(()).unwrap();
+    daemon.join().unwrap();
     terminal.signal(libc::SIGKILL);
     terminal.wait();
 }
@@ -1951,8 +2072,13 @@ fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
             json!({"events":events,"through":34,"nextAfter":34,"done":true}),
         );
         wire.no_context();
-        let providers = wire.read("account.providers");
+        let mut requests = [wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, names] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(names["method"], "agent.list");
         wire.reply(&providers, json!([]));
+        wire.reply(&names, json!([]));
         wire.quiet(Duration::from_millis(1000));
     });
     let mut command = home.command();

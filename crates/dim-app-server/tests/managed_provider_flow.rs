@@ -236,7 +236,7 @@ async fn setup() -> (
     let fixture = Arc::new(Fixture::default());
     *fixture.recovered_generation.lock().unwrap() = 1;
     let captured = Arc::new(OnceLock::new());
-    let owner_plugin = root.plugin(ManagedProvidersPlugin::new(&names).unwrap());
+    let owner_plugin = root.plugin(ManagedProvidersPlugin);
     let fixture_plugin = root.plugin(FixturePlugin(fixture.clone()));
     let binding = root.plugin(ManagedProviderBinding::new(&names).unwrap());
     let capture = root.plugin(Capture::new(&names, captured.clone()).unwrap());
@@ -345,7 +345,7 @@ async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
         let build = rutis_loader::resolve::Build::default();
         let names = Names::copy(&catalog, &build);
         root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
-        let owner_plugin = root.plugin(ManagedProvidersPlugin::new(&names).unwrap());
+        let owner_plugin = root.plugin(ManagedProvidersPlugin);
         let first_plugin = root.plugin(FixturePlugin(first.clone()));
         let binding = root.plugin(ManagedProviderBinding::new(&names).unwrap());
         let capture = root.plugin(Capture::new(&names, captured.clone()).unwrap());
