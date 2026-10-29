@@ -205,6 +205,9 @@ impl TimelineStore for CountContextReads {
     fn rollback_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
         self.memory.rollback_session(id)
     }
+    fn release_session<'a>(&'a self, id: &'a str) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
     fn session_config<'a>(
         &'a self,
         id: &'a str,

@@ -575,10 +575,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(managed_provider::ManagedProvidersPlugin::new(
-            names,
-        )?))
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(managed_provider::ManagedProvidersPlugin))
     })?);
     if let Some(home_root) = plugin_root {
         rows.push(register_part(
@@ -592,6 +590,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         )?);
     }
     if let Some(home_root) = product_root {
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(
+                managed_provider::ManagedProviderMethodsPlugin::new(names)?,
+            ))
+        })?);
         if let Some(provider) = &config.managed_provider {
             rows.push((provider.0)(&mut builtins, home_root));
             rows.push(register_part(&mut builtins, builder.catalog(), |names| {
