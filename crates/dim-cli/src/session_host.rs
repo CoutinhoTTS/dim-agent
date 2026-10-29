@@ -247,6 +247,15 @@ struct Worker {
     context_stale: bool,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
+    /// Providers whose catalog this connection already tried to refill, so a
+    /// provider that cannot be listed costs one request, not one per open.
+    refilled_catalogs: std::collections::HashSet<String>,
+    /// The outstanding `provider.refresh` requests `models()` sent for those
+    /// catalogs; a reply schedules one re-read of the list.
+    refill_requests: Vec<u64>,
+    /// Set when a refill succeeded: the next loop pass reads the list again,
+    /// so no reply waits on the listing it answers.
+    models_at: Option<tokio::time::Instant>,
 }
 
 struct OutputWatch {
@@ -335,6 +344,9 @@ async fn run(
         login_callbacks: unbounded_channel(),
         context_stale: false,
         compact_requests: Vec::new(),
+        refilled_catalogs: Default::default(),
+        refill_requests: Vec::new(),
+        models_at: None,
     };
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
@@ -399,6 +411,13 @@ async fn run(
                 if login_poll.is_some() => worker.poll_login().await,
             _ = tokio::time::sleep_until(workflow_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if workflow_poll.is_some() => {},
+            _ = tokio::time::sleep_until(worker.models_at.unwrap_or_else(tokio::time::Instant::now)),
+                if worker.models_at.is_some() => {
+                    worker.models_at = None;
+                    if let Ok(models) = worker.models().await {
+                        worker.send(Update::Models(Ok(models)));
+                    }
+                },
             _ = tokio::time::sleep_until(worker.publish_at.unwrap_or_else(tokio::time::Instant::now)),
                 if worker.publish_at.is_some() => worker.publish(),
         }
@@ -2059,10 +2078,16 @@ impl Worker {
 
     /// The selectable models: every enabled static provider with
     /// credentials and every signed-in managed provider (`provider.list`
-    /// lists static ones only), less unavailable and disabled models. A
-    /// provider whose catalog cannot be read is left out; one that lists
-    /// unavailable models but has none selectable is reported for its picker
-    /// row. Models the user disabled make no row.
+    /// lists static ones only), less unavailable and disabled models.
+    ///
+    /// A provider whose catalog is missing or lists no models is asked to
+    /// refill it once per connection through `provider.refresh` when
+    /// `provider.list` says its models can be listed. The request is sent,
+    /// not awaited: the picker opens with what the catalogs hold, a provider
+    /// still listing none shows its row meanwhile, and a reply makes the
+    /// worker read the list again. A provider whose catalog cannot be read is
+    /// left out; one that lists unavailable models but has none selectable is
+    /// reported for its picker row. Models the user disabled make no row.
     async fn models(&mut self) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         struct Providers {
@@ -2073,6 +2098,10 @@ impl Worker {
         struct Provider {
             provider_id: String,
             display_name: String,
+            /// Absent from a daemon that cannot say, and such a daemon cannot
+            /// be asked to list a provider's models either.
+            #[serde(default)]
+            remote_model_list: bool,
             enabled: bool,
         }
         #[derive(Deserialize)]
@@ -2113,12 +2142,18 @@ impl Worker {
             reasoning: Option<dim_agent_types::ModelReasoning>,
         }
         let listed: Providers = self.client.typed("provider.list", json!({})).await?;
-        let mut usable: Vec<(String, String)> = listed
+        let mut usable: Vec<(String, String)> = Vec::new();
+        let mut listable = std::collections::HashSet::new();
+        for provider in listed
             .providers
             .into_iter()
             .filter(|provider| provider.enabled)
-            .map(|provider| (provider.provider_id, provider.display_name))
-            .collect();
+        {
+            if provider.remote_model_list {
+                listable.insert(provider.provider_id.clone());
+            }
+            usable.push((provider.provider_id, provider.display_name));
+        }
         let managed: Vec<Managed> = self
             .client
             .typed("account.providers", json!({}))
@@ -2143,7 +2178,21 @@ impl Worker {
                 .client
                 .typed::<Snapshot>("provider.catalog", json!({"providerId": provider_id}))
                 .await;
-            let Some(catalog) = snapshot.ok().and_then(|snapshot| snapshot.catalog) else {
+            let catalog = snapshot.ok().and_then(|snapshot| snapshot.catalog);
+            let missing = catalog
+                .as_ref()
+                .is_none_or(|catalog| catalog.models.is_empty());
+            if missing
+                && listable.contains(&provider_id)
+                && self.refilled_catalogs.insert(provider_id.clone())
+                && let Ok(request) = self
+                    .client
+                    .send("provider.refresh", json!({"providerId": provider_id}))
+                    .await
+            {
+                self.refill_requests.push(request);
+            }
+            let Some(catalog) = catalog else {
                 continue;
             };
             let preferences = self.saved_preferences(&provider_id).await;
@@ -2786,6 +2835,21 @@ impl Worker {
         {
             self.compact_requests.remove(index);
             self.send(Update::Compacted(compact_reply(result)));
+            return Ok(());
+        }
+        if let Some(index) = self
+            .refill_requests
+            .iter()
+            .position(|request| *request == id)
+        {
+            self.refill_requests.remove(index);
+            if result.is_ok() {
+                // The refresh stored the catalog; reading the list again
+                // shows it, and `refilled_catalogs` keeps the read from
+                // asking a second time. The loop runs the read, so this
+                // reply never waits on a listing.
+                self.models_at.get_or_insert_with(tokio::time::Instant::now);
+            }
             return Ok(());
         }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {

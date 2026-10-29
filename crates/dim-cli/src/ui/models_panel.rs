@@ -19,10 +19,13 @@
 //! ```
 //!
 //! ←/→ cycles the highlighted model's advertised reasoning efforts and wraps.
-//! The choice stays on that row until the list is replaced. Enter adopts the
-//! model; a cycled effort is saved as its `reasoningEffort` and sent with the
-//! model's other saved preferences. A model with no advertised effort ignores
-//! the arrows. Typing in the filter keeps ←/→ for the cursor.
+//! The choice stays on that row while the list keeps it: a replaced list — a
+//! re-read after a finished refill included — keeps the choices whose model is
+//! still listed and still advertises that effort, and drops the others; Ctrl+X
+//! drops the highlighted row's choice with its saved preferences. Enter adopts
+//! the model; a cycled effort is saved as its `reasoningEffort` and sent with
+//! the model's other saved preferences. A model with no advertised effort
+//! ignores the arrows. Typing in the filter keeps ←/→ for the cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
@@ -69,7 +72,8 @@ pub struct ModelsPanel {
     listed: Option<Result<ModelList, String>>,
     /// `None` while the daemon does not manage the policy: no action.
     policy: Option<Policy>,
-    /// Effort ←/→ chose for `provider::model`, until the list is replaced.
+    /// Effort ←/→ chose for `provider::model`, kept across list replacements
+    /// while the row is listed and advertises it.
     chosen: BTreeMap<String, String>,
 }
 
@@ -85,7 +89,17 @@ impl ModelsPanel {
     }
 
     pub fn set_models(&mut self, models: Result<ModelList, String>) {
-        self.chosen.clear();
+        // A replaced list keeps the choices its rows still offer: a cycled
+        // effort survives the re-read a finished refill triggers, while a row
+        // that is gone, or no longer advertises it, drops it.
+        self.chosen.retain(|id, effort| {
+            models.as_ref().is_ok_and(|list| {
+                list.models.iter().any(|model| {
+                    key(&model.provider_id, &model.model_id) == *id
+                        && model.efforts.iter().any(|advertised| advertised == effort)
+                })
+            })
+        });
         self.listed = Some(models);
         self.rebuild(None);
     }
@@ -264,14 +278,18 @@ impl ModelsPanel {
             && key.code == KeyCode::Char('x')
             && key.mods.contains(Modifiers::CTRL)
         {
+            // Clearing the saved preferences drops the row's cycled effort
+            // too: the notice asks for the model to be selected again so it
+            // adopts its defaults, and that only holds if the cycle is gone.
+            let Some(id) = self.list.selected_id() else {
+                return Effect::None;
+            };
+            self.chosen.remove(&id);
+            self.rebuild(None);
             return self
-                .list
-                .selected_id()
-                .and_then(|id| {
-                    self.models()
-                        .iter()
-                        .find(|model| id == self::key(&model.provider_id, &model.model_id))
-                })
+                .models()
+                .iter()
+                .find(|model| id == self::key(&model.provider_id, &model.model_id))
                 .map(|model| Effect::ClearModelPreferences {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
@@ -501,9 +519,20 @@ mod tests {
         saved: Option<&str>,
         default_effort: Option<&str>,
     ) -> ModelItem {
+        item_for("dim", "Dim OAuth", id, efforts, saved, default_effort)
+    }
+
+    fn item_for(
+        provider: &str,
+        provider_name: &str,
+        id: &str,
+        efforts: &[&str],
+        saved: Option<&str>,
+        default_effort: Option<&str>,
+    ) -> ModelItem {
         ModelItem {
-            provider_id: "dim".into(),
-            provider_name: "Dim OAuth".into(),
+            provider_id: provider.into(),
+            provider_name: provider_name.into(),
             provider_version: 1,
             model_id: id.into(),
             display_name: id.into(),
@@ -578,21 +607,89 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_keeps_left_and_right_and_a_fresh_list_drops_the_cycle() {
+    fn the_filter_keeps_left_and_right_for_the_cursor() {
         let mut panel = panel();
         panel.handle_key(key_of(KeyCode::Char('f')));
         assert_eq!(panel.handle_key(key_of(KeyCode::Left)), Effect::None);
         assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
         assert!(drawn(&panel).contains("> f"));
-        panel.handle_key(key_of(KeyCode::Esc));
-        panel.handle_key(key_of(KeyCode::Right));
+    }
+
+    /// A re-read replaces the list while the picker is open; the effort the
+    /// user cycled on a row that is still listed survives it.
+    #[test]
+    fn a_replaced_list_keeps_a_choice_its_row_still_offers() {
+        let mut panel = panel();
+        assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(drawn(&panel).contains("‹ high ›"));
         panel.set_models(Ok(ModelList {
-            models: vec![item("flash", &["low", "high"], Some("low"), Some("low"))],
+            models: vec![
+                item("flash", &["low", "high"], Some("low"), Some("low")),
+                item("plain", &[], None, None),
+                item_for(
+                    "other",
+                    "Other",
+                    "model-x",
+                    &["low", "high"],
+                    None,
+                    Some("low"),
+                ),
+            ],
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
         }));
-        assert!(drawn(&panel).contains("‹ low ›"));
+        assert!(drawn(&panel).contains("‹ high ›"), "{}", drawn(&panel));
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                ref model_id,
+                ref reasoning_effort,
+                ..
+            } if model_id == "flash" && reasoning_effort.as_deref() == Some("high")
+        ));
+    }
+
+    /// A row whose model no longer advertises the chosen effort drops it.
+    #[test]
+    fn a_replaced_list_drops_a_choice_the_model_no_longer_offers() {
+        let mut panel = panel();
+        assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
+        assert!(drawn(&panel).contains("‹ high ›"));
+        panel.set_models(Ok(ModelList {
+            models: vec![item("flash", &["low"], Some("low"), Some("low"))],
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+        }));
+        assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                reasoning_effort: None,
+                ..
+            }
+        ));
+    }
+
+    /// Ctrl+X drops the row's cycled effort, so the model adopts its defaults
+    /// when it is selected again after the re-read.
+    #[test]
+    fn clearing_saved_preferences_drops_the_cycled_effort() {
+        let mut panel = panel();
+        assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
+        assert!(drawn(&panel).contains("‹ high ›"));
+        assert!(matches!(
+            panel.handle_key(KeyEvent::new(KeyCode::Char('x'), Modifiers::CTRL)),
+            Effect::ClearModelPreferences { ref model_id, .. } if model_id == "flash"
+        ));
+        assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
+        panel.set_models(Ok(ModelList {
+            models: vec![
+                item("flash", &["low", "high"], None, Some("low")),
+                item("plain", &[], None, None),
+            ],
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+        }));
         assert!(matches!(
             panel.handle_key(key_of(KeyCode::Enter)),
             Effect::SelectModel {
