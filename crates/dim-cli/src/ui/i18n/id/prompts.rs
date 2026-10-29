@@ -80,6 +80,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "Belum dijawab",
         // approvals_panel.rs
         "Tool Approvals" => "Persetujuan Tool",
+        "Approval" => "Persetujuan",
+        "Ask" => "Tanya",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "Tanya sebelum perintah, jaringan, tulis di luar ruang kerja, dan alat yang tidak terklasifikasi"
+        }
         "full access" => "akses penuh",
         "All tools run automatically, bypass permissions" => {
             "Semua tool jalan otomatis, lewati izin"

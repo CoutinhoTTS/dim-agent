@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, type Component } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue"
 import { useI18n } from "vue-i18n"
 import { FilePen, Globe, Search, Terminal, Wrench } from "lucide-vue-next"
 import type { ApprovalDecision, ApprovalRequest } from "../../rpc/protocol"
@@ -10,7 +10,7 @@ import { diffLines, resolveToolDisplay, type ToolRenderer } from "./tool-display
  * The tool approval prompt: it takes the composer's place, names the action,
  * shows the call's input, and answers Deny or Allow (Enter/y, Escape/n).
  */
-const props = defineProps<{ sessionId: string; request: ApprovalRequest }>()
+const props = defineProps<{ sessionId: string; request: ApprovalRequest; keyboard?: boolean }>()
 const { t } = useI18n()
 const chat = useChatStore()
 const pending = ref(false)
@@ -58,8 +58,22 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-onMounted(() => window.addEventListener("keydown", onKeydown))
-onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown))
+let listening = false
+function attach(): void {
+  if (listening || props.keyboard === false) return
+  window.addEventListener("keydown", onKeydown)
+  listening = true
+}
+
+function detach(): void {
+  if (!listening) return
+  window.removeEventListener("keydown", onKeydown)
+  listening = false
+}
+
+onMounted(attach)
+onBeforeUnmount(detach)
+watch(() => props.keyboard, () => props.keyboard === false ? detach() : attach())
 </script>
 
 <template>

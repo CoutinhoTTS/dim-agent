@@ -337,11 +337,14 @@ the user retries. The native `dimcode models PROVIDER --clear-preferences MODEL`
 command rereads the management version and performs the same partial update.
 Neither action changes an adopted Session model. Discovery and adoption errors
 keep historical preferences until this explicit user action.
+`←` and `→` cycle the selected model's advertised reasoning efforts. Enter
+adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
+with the model's other saved preferences.
 
 ```text
 Select a model
-> Provider / model
-Enter select · Ctrl+X clear saved · Esc clear/close
+> Provider / model          ‹ high ›
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 
 ```text

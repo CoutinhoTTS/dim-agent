@@ -145,6 +145,8 @@ pub enum Effect {
     SelectModel {
         provider_id: String,
         model_id: String,
+        /// Set when ←/→ cycled this model's reasoning effort.
+        reasoning_effort: Option<String>,
     },
     /// Reread the subagent model policy before another save.
     ReadModelPolicy,

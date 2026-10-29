@@ -8,7 +8,7 @@
 
 export const PROTOCOL_VERSION = 3
 
-/** The only branch the web workspace drives; other branches are subagents. */
+/** The Session's main line; other branches are its lines. */
 export const MAIN_BRANCH = "main"
 
 export type ModelId = { providerId: string; modelId: string }
@@ -68,6 +68,9 @@ export type ProviderCatalog = {
 
 export type ApprovalDecision = "allow" | "deny"
 
+export type BranchSource =
+  | { kind: "tool"; turnId: string; requestId: string; callId: string }
+  | { kind: "host"; operationId: string }
 
 export type ToolResult = {
   /** Text the model read; image blocks are dropped at the boundary. */
@@ -80,6 +83,12 @@ export type ToolResult = {
 /** The Timeline facts the projection folds; every other kind is `other`. */
 export type EventContent =
   | { kind: "input"; text?: string }
+  | { kind: "source-input"; text: string; mode?: string }
+  | { kind: "input-deleted"; inputId: string }
+  | { kind: "branch-create"; branchId: string; at: number | undefined; prompt: string; source: BranchSource }
+  | { kind: "branch-create-failed"; branchId: string; status: "failed" | "cancelled"; error: string }
+  | { kind: "branch-end"; source: BranchSource; ancestor?: string }
+  | { kind: "branch-ended"; branchId: string; source: BranchSource; ancestor?: string }
   | { kind: "turn-end"; outcome: "completed" | "failed" | "cancelled"; error?: string }
   | { kind: "model-start"; requestId: string }
   | { kind: "thinking"; requestId: string; delta: string }
@@ -92,10 +101,19 @@ export type EventContent =
   | { kind: "other" }
 
 export type SessionEvent = {
+  id: string
   sequence: number
   /** Unix milliseconds the runtime wrote the event at. */
   createAt: number
   content: EventContent
+}
+
+/** `session.branch_create`: the new line and where it was cut. */
+export type BranchCreateResult = {
+  branchId: string
+  parentBranchId?: string
+  branchPoint?: number
+  createEvent?: number
 }
 
 

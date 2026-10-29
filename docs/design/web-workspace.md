@@ -153,9 +153,36 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs` |
 | Sidebar | Workspaces are Session summaries grouped by `cwd`; new Session by `session.create {cwd}` with a typed path or a known workspace |
 | Chat | Timeline (markdown, Shiki), composer (submit, stop, model menu), approval prompt (`approval.request` → `approval.respond`) |
+| Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
 
 Features of the TypeScript UI with no v3 backend yet are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, fork, archive, rename, goal, workflows, subagent panes, settings pages, directory picker, git branch menu. Each returns when its backend method exists (Attachments, SessionTitle, Goal, Workflow, ShellInput and so on).
+
+### 4.1 Lines and branch
+
+A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace keeps the main transcript in the center and follows lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
+
+```
+┌──────────────┬────────────────────────────────┬─────────────────────────────────┐
+│ sessions     │ main Timeline                  │ [Lines] [parser ×] [docs ×] + × │
+│              │ ⑂ parser race · b-7c            │ ⑂ parser race · b-7c            │
+│              │ ◂ from b-7c (steer) …           │ from main · after message 3     │
+│              │ [main composer]                │ … line transcript …             │
+│              │                                │ ⑂ working · [message this line] │
+└──────────────┴────────────────────────────────┴─────────────────────────────────┘
+```
+
+| Item | Contract |
+| --- | --- |
+| Input | v3 `branch/create`, `branch/create-failed`, `branch/end`, `branch/ended` facts; `session.state` for every branch; each branch's own `session.history` pages |
+| Derived data | `web/src/lines.ts` owns the tree, line state and `after message N` count; `projection.ts` owns each line's transcript; `stores/chat.ts` owns one history cursor and live queue per branch |
+| Actions | `session.branch_create {parentBranchId, at, prompt}`, `session.branch_end {branchId}`, `session.submit`/`session.stop` with the line's `branchId`; approvals use the request's `branchId` |
+| Points | A user message's cut is its sequence minus one; a line's end is its newest `turn-end`. `session.branch_create` remains the validator; its refusal is shown in the dialog or line tab |
+| Switching | Opening a line adds or activates a tab; closing a tab does not end the line; main stays the center transcript |
+| Errors | `branch_missing`, `branch_ended`, `input_blocked`, an invalid cut and a disabled Branch tool are shown at the action that raised them; an ended line is read-only |
+| State | Line tabs are per Session and live in `stores/ui.ts`; the tree is rebuilt from facts on reload and reconnect. No line list method or storage format is added |
+
+**Not in this phase:** session fork, a drawn DAG, compare/adopt, per-line model selection and questions (`ask_user`). Each needs its own client design.
 
 ## 5. Build and release
 

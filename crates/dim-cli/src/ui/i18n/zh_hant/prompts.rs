@@ -74,6 +74,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "未回答",
         // approvals_panel.rs
         "Tool Approvals" => "工具核准",
+        "Approval" => "核准",
+        "Ask" => "詢問",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "執行命令、存取網路、工作區外寫入與未分類工具前先詢問"
+        }
         "full access" => "完整存取",
         "All tools run automatically, bypass permissions" => "所有工具自動執行，略過權限確認",
         "approve for me" => "智慧權限",

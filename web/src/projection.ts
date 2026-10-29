@@ -1,6 +1,6 @@
 /**
- * Folds a session's main-branch events into the timeline rows the chat page
- * draws, following the TUI's `crates/dim-cli/src/projection.rs`:
+ * Folds one branch's events into the timeline rows the chat page draws,
+ * following the TUI's `crates/dim-cli/src/projection.rs`:
  *
  * - events apply once, in sequence order; a replayed or duplicate one is skipped;
  * - reasoning and answer text stream into one row per model request, and the
@@ -14,10 +14,15 @@
 import type { ModelId, ModelProgress, SessionEvent, ToolResult } from "./rpc/protocol"
 
 export type TimelineRow =
-  | { kind: "user"; key: string; text: string; at: number }
+  | { kind: "user"; key: string; text: string; at: number; sequence: number; cut: number }
   | { kind: "assistant"; key: string; text: string; streaming: boolean }
   | { kind: "thinking"; key: string; text: string; streaming: boolean; elapsedMs?: number }
   | { kind: "tool"; key: string; callId: string; name: string; input: Record<string, unknown>; pending: boolean; result?: ToolResult }
+  | { kind: "line"; key: string; branchId: string; purpose: string; before?: string }
+  | { kind: "line-ended"; key: string; issuer: "itself" | "operation" | "ancestor"; ancestor?: string }
+  | { kind: "source-message"; key: string; from: string; steer: boolean; final: boolean; body: string }
+  | { kind: "source-idle"; key: string; branch: string; status: string }
+  | { kind: "source-ended"; key: string; branch: string }
   | { kind: "error"; key: string; text: string }
   | { kind: "stopped"; key: string }
 
@@ -36,6 +41,8 @@ export class Projection {
   rows: TimelineRow[] = []
   /** Highest event sequence applied. */
   cursor = 0
+  /** The newest turn end on this line, the cut `/branch` and `+` use. */
+  lastTurnEnd: number | undefined
   /** The model the branch last adopted (`context/configured`). */
   model: ModelId | undefined
   private answers = new Map<string, Stream>()
@@ -50,8 +57,45 @@ export class Projection {
     const content = event.content
     switch (content.kind) {
       case "input":
-        if (content.text !== undefined) this.push({ kind: "user", key: `user-${event.sequence}`, text: content.text, at: event.createAt })
+        if (content.text !== undefined) {
+          this.push({
+            kind: "user",
+            key: `user-${event.sequence}`,
+            text: content.text,
+            at: event.createAt,
+            sequence: event.sequence,
+            cut: Math.max(0, event.sequence - 1),
+          })
+        }
         break
+      case "source-input": {
+        const notice = branchNotice(content.text, content.mode)
+        if (notice !== undefined) this.push({ ...notice, key: `notice-${event.sequence}` })
+        break
+      }
+      case "branch-create": {
+        const at = content.at ?? event.sequence
+        const message = this.rows.find((row) => row.kind === "user" && row.cut === at)
+        const before = message?.kind === "user" ? clipFirstLine(message.text) : undefined
+        this.push({
+          kind: "line",
+          key: `line-${event.sequence}`,
+          branchId: content.branchId,
+          purpose: firstLine(content.prompt),
+          ...(before === undefined ? {} : { before }),
+        })
+        break
+      }
+      case "branch-end": {
+        const ancestor = content.ancestor
+        this.push({
+          kind: "line-ended",
+          key: `line-ended-${event.sequence}`,
+          issuer: ancestor !== undefined ? "ancestor" : content.source.kind === "tool" ? "itself" : "operation",
+          ...(ancestor === undefined ? {} : { ancestor }),
+        })
+        break
+      }
       case "model-start":
         this.requestStarts.set(content.requestId, event.createAt)
         break
@@ -88,6 +132,7 @@ export class Projection {
         if (content.error !== undefined) this.push({ kind: "error", key: `error-${event.sequence}`, text: content.error })
         break
       case "turn-end":
+        this.lastTurnEnd = event.sequence
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
         this.requestStarts.clear()
@@ -167,6 +212,69 @@ export class Projection {
     this.tools.delete(callId)
     this.update(index, { pending: false, result })
   }
+}
+
+type BranchNotice =
+  | { kind: "source-message"; from: string; steer: boolean; final: boolean; body: string }
+  | { kind: "source-idle"; branch: string; status: string }
+  | { kind: "source-ended"; branch: string }
+
+function branchNotice(text: string, mode: string | undefined): BranchNotice | undefined {
+  if (text.startsWith("<dim-branch-message")) {
+    const from = attr(text, "from")
+    if (from === undefined) return undefined
+    return {
+      kind: "source-message",
+      from,
+      steer: mode === "steer",
+      final: attr(text, "final") !== undefined,
+      body: oneLine(unescape(elementBody(text, "</dim-branch-message>"))),
+    }
+  }
+  if (text.startsWith("<dim-branch-idle")) {
+    const branch = attr(text, "branch")
+    if (branch === undefined) return undefined
+    return { kind: "source-idle", branch, status: attr(text, "status") ?? "idle" }
+  }
+  if (text.startsWith("<dim-branch-ended")) {
+    const branch = attr(text, "branch")
+    return branch === undefined ? undefined : { kind: "source-ended", branch }
+  }
+  return undefined
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0]?.trim() ?? ""
+}
+
+function clipFirstLine(text: string): string {
+  const line = firstLine(text)
+  const characters = [...line]
+  return characters.length <= 40 ? line : `${characters.slice(0, 40).join("")}…`
+}
+
+function oneLine(text: string): string {
+  return text.split(/\s+/u).filter(Boolean).join(" ")
+}
+
+function unescape(text: string): string {
+  return text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&")
+}
+
+function attr(text: string, name: string): string | undefined {
+  const needle = `${name}="`
+  const start = text.indexOf(needle)
+  if (start < 0) return undefined
+  const from = start + needle.length
+  const end = text.indexOf("\"", from)
+  return end < 0 ? undefined : text.slice(from, end)
+}
+
+function elementBody(text: string, close: string): string {
+  const newline = text.indexOf("\n")
+  const body = newline < 0 ? "" : text.slice(newline + 1)
+  const end = body.indexOf(close)
+  return end < 0 ? body : body.slice(0, end)
 }
 
 function commit(stream: Stream, delta: string): void {

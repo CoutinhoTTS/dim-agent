@@ -1365,10 +1365,7 @@ impl App {
             Update::Approvals(mode) => match mode {
                 Ok(mode) => {
                     if std::mem::take(&mut self.approvals_toast) {
-                        let title = crate::ui::approvals_panel::MODES
-                            .iter()
-                            .find(|(m, ..)| *m == mode)
-                            .map_or("", |(_, title, ..)| t(title));
+                        let title = crate::ui::approvals_panel::announced_title(&mode);
                         match crate::ui::config::save_permission(&self.home, &mode) {
                             Some(error) => self.set_notice(error),
                             None => self.set_notice(tf(
@@ -2259,11 +2256,13 @@ impl App {
             Effect::SelectModel {
                 provider_id,
                 model_id,
+                reasoning_effort,
             } => {
                 self.prompt = None;
                 self.host.send(Command::SelectModel {
                     provider_id,
                     model_id,
+                    reasoning_effort,
                 });
             }
             Effect::ReadModelPolicy => self.host.send(Command::ReadModelPolicy),
@@ -2621,6 +2620,10 @@ impl App {
                         &context.active,
                     )));
                 }
+                Outcome::Continue
+            }
+            "approval" => {
+                self.prompt = Some(Prompt::Approvals(ApprovalsPanel::choice(&self.approvals)));
                 Outcome::Continue
             }
             "approvals" => {
