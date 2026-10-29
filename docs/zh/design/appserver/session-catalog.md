@@ -6,10 +6,10 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 客户端用 `session.summaries` 列 Session，而这个回复是从历史构造的：App Server 为每个 Session 读前 256 个事件找预览，再整条读最后一个事件取时间，一个接一个，回复一个没有页边界的数组。导入 Session 的最后一个事件是一个完整的 `context/compaction`，所以一次列目录会解码整个目录的历史，客户端还要排序并转换全部内容才能画出一行。
 
-目录读取改为有界的工作。SessionStore 保存一份列目录所需的投影——每个 Session 的最后活动时间、作为预览的第一条用户输入、以及工作区——并在提交 `main` 每个批次的事务里写入。新的内建方法 `session.catalog` 分页读取这份投影：缺省 50 行、不透明的键集游标，`query` 与 `cwd` 在页边界之前的查询里应用。`session.summaries` 保留合同并读同一份投影，因此两个方法都不读历史。
+目录读取改为有界的工作。SessionStore 保存一份列目录所需的投影——每个 Session 的最后活动时间、作为预览的第一条用户输入、以及工作区——由创建事务写入，之后在提交 `main` 每个批次的事务里写入。新的内建方法 `session.catalog` 分页读取这份投影：缺省 50 行、不透明的键集游标，`query`、`cwd` 与 `withPreview` 在页边界之前的查询里应用。`session.summaries` 保留合同并读同一份投影，因此两个方法都不读历史。
 
-- **投影。** 归 SessionStore，随它的批次写入；本页只拥有目录如何被读取（§4）。
-- **方法。** `session.catalog {limit?, cursor?, query?, cwd?} -> {sessions, nextCursor?}`（§3.1）。
+- **投影。** 归 SessionStore，随它的批次、并从创建起写入；本页只拥有目录如何被读取（§4）。
+- **方法。** `session.catalog {limit?, cursor?, query?, cwd?, withPreview?} -> {sessions, nextCursor?}`（§3.1）。
 - **无租约。** 列目录不装载、不恢复任何 Session，也不启动模型、工具或 MCP 服务器（§3.4）。
 - **客户端。** 选择面板分页、在服务端搜索，并放弃未完成的读取（§6）。
 
@@ -28,29 +28,34 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 ### 3.1 `session.catalog`
 
-`session.catalog {limit?, cursor?, query?, cwd?} -> {sessions: SessionSummary[], nextCursor?: string}`
+`session.catalog {limit?, cursor?, query?, cwd?, withPreview?} -> {sessions: SessionSummary[], nextCursor?: string}`
 
 | 项 | 规则 |
 | --- | --- |
 | 形态 | Rpc 内建方法。Agents 像回答目录读取那样，从目录投影联结 `agent_sessions` 行与标题元数据来回答；Rpc 校验信封 |
 | 协议 | v3。v1 与 v2 回复 `unknown_method`（"Method requires protocol v3"），与 `session.summaries` 相同 |
-| 发现 | `hello.features` 在列出 `session.summaries` 的条件下列出它，因此看不到它的客户端继续用那个方法 |
+| 发现 | `hello.features` 只在原生存储打开时列出它，条件与 `session.fork` 相同，因此看不到它的客户端继续用 `session.summaries`。没有存储就没有可读取的投影，`session.summaries` 与今天一样从已装载的 Session 回答（§3.3） |
 | `limit` | 1 到 200，缺省 50。更大的值被拒绝而不是截断，与 `history` 的 `limit` 相同 |
-| `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)`，按键集分页；调用方原样回传，它不是 Session ID |
+| `cursor` | 不透明。它编码上一行返回的 `(updatedAt, sessionId)` 与请求的 `query`、`cwd`、`withPreview` 的摘要，按键集分页；调用方原样回传，它不是 Session ID |
 | 顺序 | `updatedAt` 降序，再 `sessionId` 升序 |
-| `query` | 对标题与预览做大小写不敏感的子串匹配，在目录查询里、页边界之前应用 |
+| `query` | 对今天选择面板搜索的五个字段做大小写不敏感的字面子串匹配——标题、预览、Session ID、工作区，以及模型的 provider ID 与 model ID——在目录查询里、页边界之前应用。`%`、`_` 与转义字符都被转义，值只匹配它本身（`LIKE … ESCAPE`）。模型取自存储的 Session 配置，即 `session.list` 报告的值，因此查询不解码任何事件 |
 | `cwd` | 工作区精确匹配，在页边界之前应用 |
+| `withPreview` | 布尔，缺省 `false`。`true` 只保留预览不为 NULL 的行，在页边界之前应用，因此隐藏无预览行的客户端拿到的是整页它显示的行；投影按预览建的局部索引让这条读取保持有界（[原生存储格式](../../../design/appserver/native-storage-format.md#556-格式决定)） |
 | 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`session.list` 记录的字段加上 `preview` 与 `updatedAt`。最后一页不带 `nextCursor` |
 
-读不出的 `cursor` 被拒绝，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录。
+读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
+
+很少命中的搜索扫描目录的行：过滤只读投影、存储的标题与存储的模型，不解码任何事件。
 
 ### 3.2 顺序、游标与分页
 
-顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。
+顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。它还带着取得它时的过滤（§3.1），因此一条页边界只能由同样的 `query`、`cwd` 与 `withPreview` 接着读。
 
 ### 3.3 `session.summaries`
 
-`session.summaries` 保留参数、回复类型与按连接判定的协议 v3 规则，改为从同一份投影回答而不是读历史。找不到 `session.catalog` 的客户端靠它列目录，比本变更更旧的守护进程上的客户端也靠它；两者继续可用，因为该方法的形态不变。
+`session.summaries` 保留参数、回复类型与按连接判定的协议 v3 规则。原生存储打开时，它改为从同一份投影回答而不是读历史，内容不变：投影原样应用下面的预览规则，而且它的行从 Session 创建起就存在（§5）。没有存储的守护进程没有投影，与今天一样从已装载的 Session 回答；它也不列出 `session.catalog`（§3.1）。所以找不到 `session.catalog` 的客户端靠它列目录，比本变更更旧的守护进程上的客户端也靠它；两者继续可用，因为该方法的形态不变。
+
+**预览保持今天的规则，包括上限。** 在 Session `main` 上前 256 个事件里，第一条带用户部分的 `input/message` 决定预览：该部分的文本块以换行连接，截到 120 个字符，更长时以 `…` 结尾。这个决定是最终的——第一条用户消息的文字为空时（例如只有图片）`preview` 为 NULL，之后的消息不再填它；前 256 个事件里没有这样的消息时也保持 NULL。投影对实时写入和回填应用同一条规则：批次只在行的预览仍未决定、且决定它的消息的 `main` 序号在前 256 个事件内时才写 `preview`，一旦决定就不再改变。因此回填行与实时行逐列相同（[原生存储格式](../../../design/appserver/native-storage-format.md#556-格式决定)）。去掉这个上限是对 `session.summaries` 所列内容的另一次可见变更。
 
 ### 3.4 无租约
 
@@ -68,9 +73,9 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 | 依赖 | 本部分要求什么 |
 | --- | --- |
-| SessionStore 目录投影 | 每个 Session 一行，带最后活动时间、预览与工作区，与它所描述的事件在同一事务里出现，不存在的 Session 没有行 |
+| SessionStore 目录投影 | 每个 Session 一行，带最后活动时间、预览与工作区：创建事务以创建时间和空预览写下它，之后每个 `main` 批次的事务维护它，不存在的 Session 没有行。这一行从创建起就与 `agent_sessions` 一一对应，因此新 Session 的列出与今天的 `session.summaries` 相同 |
 | [标题元数据](session-title-metadata.md) | 存储的标题，用于显示与 `query`，从不从 Session 读取 |
-| `hello.features`（App Server） | 客户端发现目录所用的方法清单，与发现 `session.summaries` 相同 |
+| `hello.features`（App Server） | 客户端发现目录所用的方法清单：目录在列出 `session.summaries` 的条件下列出，再加上 `session.fork` 同样要求的原生存储条件 |
 | Agents 的目录 | 目录应用的协议版本与 Agent 过滤，与 `session.list` 相同 |
 | Agents 的索引与连接 hub | 列出 Session 的实时 `running` 与 `attachedClients`，从进程状态读取、不取租约，与 `session.list` 相同 |
 
@@ -81,8 +86,8 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 `/resume` 背后的选择面板是第一个使用方，本页写明它对客户端的要求；客户端自己的设计拥有它的交互。
 
 - **首页。** 首页是不过滤 `cwd` 的目录：`/resume` 今天列出所有工作区。
-- **分页。** 选择接近已装载行的末尾时取下一页，跨页保持服务端的顺序。
-- **搜索。** 过滤以去抖的 `query` 发到服务端，而不是只缩小它已经持有的行。
+- **分页。** 选择接近已装载行的末尾时取下一页，跨页保持服务端的顺序。它发送 `withPreview`，因为它今天隐藏没有预览的行，于是首页是它显示的整页行，末尾附近的触发始终有行可取。每次冷启动都创建一个可能永远收不到消息的 Session，没有这个过滤，最新的若干行往往正是它隐藏的那些。
+- **搜索。** 过滤以去抖的 `query` 发到服务端，而不是只缩小它已经持有的行；服务端匹配今天选择面板搜索的同一组五个字段——标题、预览、Session ID、工作区和模型——因此还没取的页上的匹配也会出现。
 - **取消。** 关闭或刷新面板放弃它未完成的读取，之后输入的命令立即执行。
 - **回落。** 不宣告该方法的守护进程经 `session.summaries` 列出。
 
@@ -98,10 +103,13 @@ project/all 开关是另一个客户端决定：`cwd` 为本合同为它而存�
 | C4 | `query` 与 `cwd` 在目录查询里应用 | 过滤客户端已装载的行 | 它会隐藏客户端还没取的页上的匹配 |
 | C5 | `session.summaries` 保留合同并读同一份投影 | 让它继续读历史；删除它 | 没有新方法的客户端靠它列目录；投影同时回答两者后，保留合同不花代价 |
 | C6 | 两个方法都不取 Session 租约 | 为列出的每个 Session 取一个租约 | 租约会恢复并钉住每个列出的 Session；投影、以及进程为 `running` 与 `attachedClients` 提供的实时状态，都不需要租约就能回答 |
+| C7 | 预览即今天的规则，含 256 个事件的上限，实时批次与回填应用得完全相同 | 无上限的实时规则，随带第一条用户输入的批次写入预览 | 对第一条用户消息出现在 256 个 `main` 事件之后的 Session，它会改变 `session.summaries` 列出的内容，并让回填行与实时行不同。去掉上限是另一次可见的变更 |
+| C8 | `withPreview` 在目录查询里丢掉无预览的行，走投影的局部索引 | 客户端一直取页，直到凑够它显示的行 | 冷启动创建的 Session 可能永远收不到消息，最新的行往往没有预览，那种循环会读到无界的一串；局部索引让服务端的读取保持有界 |
 
 ## 8. 对其他文档的修改
 
-- [原生存储格式](../../../design/appserver/native-storage-format.md#556-格式决定)：目录表、它的索引、同一事务的写入、删除与分叉维护，以及升级回填与它的一次性代价。
+- [原生存储格式](../../../design/appserver/native-storage-format.md#556-格式决定)：目录表、它的两个索引、从创建起的同一事务写入、删除与分叉维护，以及升级回填与它的一次性代价。
+- [Session 删除与分叉](session-deletion-and-fork.md#32-顺序)：它的删除与分叉行清单在各自移除与写入的行旁列出 `session_catalog`。
 - [文档索引](../../../INDEX.md)列出本页。
 - [客户端](../clients.md#32-session-管理) §5 在实时 Session 列表那一行用 `session.catalog` 取代 `session.summaries`；CLI 文档记录 `/resume` 的分页、服务端搜索与取消。两者描述的行为只在客户端实现后才存在，所以由客户端的实现做这两处修改。
 
@@ -125,7 +133,13 @@ project/all 开关是另一个客户端决定：`cwd` 为本合同为它而存�
 
 - 缺省首页 50 行，显式的 `limit` 在 1 到 200 内，最后一页不带 `nextCursor`。
 - 用返回的游标继续分页时，按声明的顺序不重不漏地返回其余每个 Session，包括两页之间有 Session 被更新时。
-- `query` 大小写不敏感地匹配标题与预览，并能找到只在后面页上的 Session；`cwd` 精确匹配工作区；两者都在页边界之前应用。
+- `query` 能按五个字段中的任一个找到 Session——标题、预览、Session ID、工作区、provider ID 或 model ID——大小写不敏感，并能找到只在后面页上的 Session；`cwd` 精确匹配工作区；`withPreview` 去掉没有预览的 Session；三者都在页边界之前应用。
+- `query` 里的 `%` 或 `_` 只匹配该字符本身，其中的转义字符不会结束模式。
+- 带 `withPreview` 的一页即使前面有许多无预览的 Session，也返回 `limit` 行。
+- 为一种 `query`、`cwd`、`withPreview` 组合取得的游标，换另一种重放时被拒绝为 `invalid_params`。
+- 创建后从未写入的 Session 从创建起就列出，`updatedAt` 等于创建时间、没有预览，与今天的 `session.summaries` 相同。
+- 预览保持它的上限与最终性：第一条用户消息出现在 256 个 `main` 事件之后的 Session 列出时没有预览；第一条用户消息只有图片的 Session 也列出为没有预览，之后的消息不会填它。
+- 没有原生存储的守护进程不列出 `session.catalog`，其 `session.summaries` 与今天一样从已装载的 Session 回答。
 - `main` 末尾是完整 `context/compaction` 的 Session 用存储的预览列出，不解码那个事件。
 - Session 空闲已卸载时列出的存储字段与已装载时相同，读作未运行，且不启动模型、工具或 MCP 服务器。
 - `session.summaries` 对协议 v3 保持回复形态与内容。
