@@ -112,6 +112,15 @@ impl ToolDriver for HoldTool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn process_plugin_reloads_keep_sessions() {
+    use std::{
+        io::{Read, Write},
+        os::{fd::AsRawFd, unix::net::UnixStream, unix::process::CommandExt},
+    };
+    unsafe extern "C" {
+        fn read(fd: i32, buffer: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buffer: *const u8, count: usize) -> isize;
+    }
+
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let tool = HoldTool {
@@ -169,7 +178,37 @@ async fn process_plugin_reloads_keep_sessions() {
     let listed = observer.rpc("session.list", json!({})).await;
     assert_eq!(listed["result"][0]["sessionId"], sid);
 
-    server.restart("Connection").await.unwrap();
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let spawning = std::thread::spawn(move || {
+        let fd = child.as_raw_fd();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--list").stdout(std::process::Stdio::null());
+        // SAFETY: the child uses only async-signal-safe read/write before exec;
+        // its socket and both one-byte buffers remain live throughout the calls.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                if write(fd, &byte, 1) != 1 || read(fd, &mut byte, 1) != 1 {
+                    return Err(std::io::Error::from_raw_os_error(5));
+                }
+                Ok(())
+            });
+        }
+        command.spawn().unwrap().wait().unwrap()
+    });
+    let mut ready = [0];
+    parent.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [1]);
+    let reloaded =
+        tokio::time::timeout(Duration::from_secs(10), server.restart("Connection")).await;
+    parent.write_all(&[1]).unwrap();
+    assert!(spawning.join().unwrap().success());
+    reloaded
+        .expect("Connection reload must settle while a child holds inherited descriptors")
+        .unwrap();
     let mut reconnected = Client::new(&server, false).await;
     assert_eq!(reconnected.instance, client.instance);
     assert_ok(

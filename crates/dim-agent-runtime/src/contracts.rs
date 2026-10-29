@@ -16,6 +16,10 @@ pub struct InputSnapshot {
 pub struct ModelProgress {
     pub turn_id: Option<String>,
     pub request_id: Option<String>,
+    /// Stable identity of the open text block, when one is being produced.
+    pub text_part_id: Option<String>,
+    /// Stable identity of the open thinking block, when one is being produced.
+    pub thinking_part_id: Option<String>,
     /// Text of this request not yet published as `step/text`: committed
     /// and unpublished, then received and not yet committed.
     pub text: String,

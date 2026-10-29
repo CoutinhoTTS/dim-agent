@@ -1,6 +1,6 @@
 # Local development and managed provider boundary
 
-The repository root `./dev` builds the native CLI and App Server with locked Cargo dependencies and runs them against a separate, stable development home. Use `--model-config PATH` for API-key development without the private account plugin. See the root [README](../../README.md) for complete setup and run commands.
+The repository root `./dev` builds the native CLI and App Server with locked Cargo dependencies and runs ordinary commands against a separate, stable development home. Migration follows its [distribution routing](../design/cli-commands.md#migration-interaction). Use `--model-config PATH` for API-key development without the private account plugin. See the root [README](../../README.md) for complete setup and run commands.
 
 ## Entry points
 
@@ -8,6 +8,7 @@ The repository root `./dev` builds the native CLI and App Server with locked Car
 | --- | --- |
 | `./dev --model-config PATH [CLI arguments]` | Incrementally build both Rust binaries, normally stop the development daemon, then run the new CLI with the configured provider |
 | `./dev [CLI arguments]` | Use the model configuration selected in `.env.dev` or the inherited environment |
+| `./dev migration` | Import Global `.dim/v2` into `.dim` and CN `.dimcode/v2` into `.dimcode` separately, showing progress and results; do not inject the chat development home or restart a daemon |
 | `./dev restart [CLI arguments]` | Perform the same build and restart flow explicitly |
 | `./dev stop` | Stop an existing development daemon without building or starting one |
 | `./dev check` | Run explicit formatting and compilation checks; tests do not run on startup |

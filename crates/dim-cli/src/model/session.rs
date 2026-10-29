@@ -385,6 +385,15 @@ pub struct ModelItem {
     pub display_name: String,
 }
 
+/// A usable provider with unavailable models and none selectable.
+#[derive(Debug, Clone)]
+pub struct EmptyProvider {
+    pub provider_id: String,
+    pub provider_name: String,
+    /// How many of its models it lists as unavailable.
+    pub unavailable: usize,
+}
+
 /// Which model new Collaboration members use (`collaboration.model_policy`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
@@ -414,6 +423,9 @@ pub enum ModelPolicyUpdate {
 pub struct ModelList {
     pub models: Vec<ModelItem>,
     pub current: Option<(String, String)>,
+    /// The providers with unavailable models and none selectable, so the
+    /// picker can say why they are missing.
+    pub empty: Vec<EmptyProvider>,
 }
 
 /// One stored session as the picker shows it.

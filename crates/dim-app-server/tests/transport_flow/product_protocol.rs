@@ -1524,6 +1524,8 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     let progress = |text: &str| ModelProgress {
         turn_id: Some("turn-1".into()),
         request_id: Some("request-1".into()),
+        text_part_id: Some("text-part-1".into()),
+        thinking_part_id: Some("thinking-part-1".into()),
         text: text.into(),
         text_offset: 3,
         thinking: "weighing".into(),
@@ -1550,6 +1552,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
     assert_eq!(
         last["params"],
         json!({"sessionId":sid,"branchId":"main","turnId":"turn-1","requestId":"request-1",
+            "textPartId":"text-part-1","thinkingPartId":"thinking-part-1",
             "text":"x".repeat(updates),"textOffset":3,"thinking":"weighing","thinkingOffset":5,
             "tools":[{"callId":"call-1","name":"echo","arguments":"{\"text\":\"he"}]})
     );

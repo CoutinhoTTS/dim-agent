@@ -49,9 +49,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y allow · n reject · ←→/Tab move · Enter confirm" => {
             "y 許可 · n 拒否 · ←→/Tab 移動 · Enter 確定"
         }
-        "Enter submit · Tab edit · Esc decline" => "Enter 送信 · Tab 編集 · Esc 断る",
-        "Space toggle · Tab next · Esc decline" => "Space 切替 · Tab 次へ · Esc 断る",
-        "1-9 select · Tab next · Esc decline" => "1-9 選択 · Tab 次へ · Esc 断る",
+        "Enter submit · Tab edit · / commands · Esc decline" => {
+            "Enter 送信 · Tab 編集 · / コマンド · Esc 断る"
+        }
+        "Space toggle · Tab next · / commands · Esc decline" => {
+            "Space 切替 · Tab 次へ · / コマンド · Esc 断る"
+        }
+        "1-9 select · Tab next · / commands · Esc decline" => {
+            "1-9 選択 · Tab 次へ · / コマンド · Esc 断る"
+        }
         "Question" => "質問",
         "Question on branch {branch}" => "ブランチ {branch} からの質問",
         "Permission on branch {branch}" => "ブランチ {branch} への許可",
@@ -60,14 +66,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // prompts.rs: AskUser
         "Confirm" => "確定",
         "Enter save · Esc back" => "Enter 保存 · Esc 戻る",
-        "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
-            "Enter 送信 · 1-9 編集 · Tab/←→ 戻る · Esc 断る"
+        "Enter submit · 1-9 edit · Tab/←→ back · / commands · Esc decline" => {
+            "Enter 送信 · 1-9 編集 · Tab/←→ 戻る · / コマンド · Esc 断る"
         }
-        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 移動 · Space 切替 · Enter 次へ · Tab/←→ 質問切替 · Esc 断る"
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 移動 · Space 切替 · Enter 次へ · Tab/←→ 質問切替 · / コマンド · Esc 断る"
         }
-        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc decline" => {
-            "↑↓ 移動 · 1-9 選択 · Enter 次へ · Tab/←→ 質問切替 · Esc 断る"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · / commands · Esc decline" => {
+            "↑↓ 移動 · 1-9 選択 · Enter 次へ · Tab/←→ 質問切替 · / コマンド · Esc 断る"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion のデータが無効。",
         "Missing answer for Q{index}" => "Q{index} の回答がありません",

@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DraftPart, ModelItem, ModelList,
+    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, ModelItem, ModelList,
     ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction,
     ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind, Update,
 };
@@ -412,6 +412,14 @@ struct Created {
     model: ModelId,
 }
 
+/// The record `session.attach` replies for the Session it opened. A server
+/// from before the record existed replies `{}`.
+#[derive(Deserialize)]
+struct Attached {
+    #[serde(default)]
+    model: Option<ModelId>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WebToggled {
@@ -564,7 +572,7 @@ impl Worker {
             .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
         self.enter(
             created.session_id,
-            created.model,
+            Some(created.model),
             SwitchKind::New,
             attached_session,
         )
@@ -596,7 +604,7 @@ impl Worker {
             Ok(created) => {
                 self.enter(
                     created.session_id,
-                    created.model,
+                    Some(created.model),
                     SwitchKind::New,
                     attached_session,
                 )
@@ -622,7 +630,7 @@ impl Worker {
     async fn enter(
         &mut self,
         session_id: String,
-        model: ModelId,
+        model: Option<ModelId>,
         kind: SwitchKind,
         attached_session: String,
     ) -> crate::Result<()> {
@@ -640,9 +648,16 @@ impl Worker {
                 .await?;
             self.ui_id = None;
         }
-        self.client
-            .rpc("session.attach", json!({"sessionId": session_id}))
+        let attached: Attached = self
+            .client
+            .typed("session.attach", json!({"sessionId": session_id}))
             .await?;
+        // Without a record, find the model in the catalog: this is the only
+        // caller of `list()` besides `/resume`, and only for an older server.
+        let model = match model.or(attached.model) {
+            Some(model) => model,
+            None => self.model_of(&session_id).await?,
+        };
         self.session_id = session_id.clone();
         self.register_ui().await;
         self.mcp_required.clear();
@@ -724,17 +739,22 @@ impl Worker {
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let listed = self.list().await?;
-        let session = listed
-            .into_iter()
-            .find(|session| session.session_id == session_id)
-            .ok_or_else(|| format!("Session {session_id} was not found"))?;
-        self.enter(session_id, session.model, kind, attached_session)
-            .await
+        self.enter(session_id, None, kind, attached_session).await
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
         self.client.typed("session.summaries", json!({})).await
+    }
+
+    /// The model of one Session, found in the catalog. Only a server whose
+    /// `session.attach` reply carries no record needs this.
+    async fn model_of(&mut self, session_id: &str) -> crate::Result<ModelId> {
+        let sessions = self.list().await?;
+        sessions
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .map(|session| session.model)
+            .ok_or_else(|| format!("Session {session_id} is absent from the catalog").into())
     }
 
     async fn submit(&mut self, text: String, mode: &str) {
@@ -1626,9 +1646,9 @@ impl Worker {
     }
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
-    /// `/mcp logout ID`.
+    /// `/mcp logout ID`, `/mcp enable ID`, `/mcp disable ID`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|enable ID|disable ID]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -1667,6 +1687,27 @@ impl Worker {
                     format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
                     false,
                 );
+            }
+            // The ID is the rest of the line, spaces included.
+            ["enable", ..] | ["disable", ..] => {
+                let (command, id) = args
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((args.trim(), ""));
+                let id = id.trim();
+                if id.is_empty() {
+                    return Err(USAGE.into());
+                }
+                let (rows, notes) = crate::mcp_command::set_enabled(
+                    &mut self.client,
+                    &self.options,
+                    id,
+                    command == "enable",
+                )
+                .await?;
+                let mut lines = rows;
+                lines.extend(notes);
+                self.report(lines.join("\n"), false);
             }
             _ => return Err(USAGE.into()),
         }
@@ -2000,7 +2041,9 @@ impl Worker {
     /// The selectable models: every enabled static provider with
     /// credentials and every signed-in managed provider (`provider.list`
     /// lists static ones only), less unavailable and disabled models. A
-    /// provider whose catalog cannot be read is left out.
+    /// provider whose catalog cannot be read is left out; one that lists
+    /// unavailable models but has none selectable is reported for its picker
+    /// row. Models the user disabled make no row.
     async fn models(&mut self) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         struct Providers {
@@ -2066,6 +2109,7 @@ impl Worker {
             }
         }
         let mut models = Vec::new();
+        let mut empty = Vec::new();
         for (provider_id, provider_name) in usable {
             let snapshot = self
                 .client
@@ -2074,6 +2118,12 @@ impl Worker {
             let Some(catalog) = snapshot.ok().and_then(|snapshot| snapshot.catalog) else {
                 continue;
             };
+            let unavailable = catalog
+                .models
+                .iter()
+                .filter(|model| model.unavailable_reason.is_some())
+                .count();
+            let before = models.len();
             models.extend(
                 catalog
                     .models
@@ -2090,12 +2140,23 @@ impl Worker {
                         display_name: model.name,
                     }),
             );
+            if models.len() == before && unavailable > 0 {
+                empty.push(EmptyProvider {
+                    provider_id,
+                    provider_name,
+                    unavailable,
+                });
+            }
         }
         let current = self
             .model
             .as_ref()
             .map(|model| (model.provider_id.clone(), model.model_id.clone()));
-        Ok(ModelList { models, current })
+        Ok(ModelList {
+            models,
+            current,
+            empty,
+        })
     }
 
     /// Reports the subagent model policy, only to a daemon that manages it.

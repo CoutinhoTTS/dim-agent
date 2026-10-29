@@ -14,6 +14,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::{IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
+    summary_strategy::ProductSummaryStrategyConfig,
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
@@ -24,6 +25,39 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 /// enter here.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     run_with(args, None)
+}
+
+/// Reads a development model configuration, `--model-config PATH`, as the
+/// profile's model catalog with the profile hash a client checks it by.
+pub fn model_profile(
+    path: &std::path::Path,
+) -> Result<(Arc<AimuxModels>, crate::protocol::DaemonProfile), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let file: ModelConfigFile = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "Invalid model configuration {} at line {}, column {}",
+            path.display(),
+            error.line(),
+            error.column()
+        )
+    })?;
+    let models = Arc::new(AimuxModels::from_config(file)?);
+    let profile = crate::protocol::DaemonProfile::Configured {
+        model_config_sha256: {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))
+        },
+    };
+    Ok((models, profile))
+}
+
+/// The Session defaults a product home and a development model configuration
+/// serve: `tools` unset, so a Session declares every host tool and every tool
+/// a part registers (#364), under the workspace-write preset. Every caller
+/// that serves this assembly takes them from here, so the two cannot drift.
+pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig) {
+    defaults.tools = None;
+    defaults.permission_policy.preset = dim_agent_types::PermissionPreset::WorkspaceWrite;
 }
 
 /// [`run`] with a managed provider plugin, which an account build's own
@@ -226,28 +260,14 @@ pub fn run_with(
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
     }
     if config.product_home.is_some() || model_config.is_some() {
-        config.session_defaults.tools = None;
-        config.session_defaults.permission_policy.preset =
-            dim_agent_types::PermissionPreset::WorkspaceWrite;
+        product_session_defaults(&mut config.session_defaults);
     } else {
         config.session_defaults.permission_policy.allowed_tools =
             vec!["echo".into(), "wait".into()];
     }
     let models = if let Some(path) = model_config.as_deref() {
-        let bytes = std::fs::read(path)?;
-        let file: ModelConfigFile = serde_json::from_slice(&bytes).map_err(|error| {
-            format!(
-                "Invalid model configuration {} at line {}, column {}",
-                path.display(),
-                error.line(),
-                error.column()
-            )
-        })?;
-        let models = Arc::new(AimuxModels::from_config(file)?);
-        use sha2::{Digest, Sha256};
-        config.daemon_profile = crate::protocol::DaemonProfile::Configured {
-            model_config_sha256: format!("{:x}", Sha256::digest(&bytes)),
-        };
+        let (models, profile) = model_profile(path)?;
+        config.daemon_profile = profile;
         Some(models)
     } else {
         config.daemon_profile = if config.product_home.is_some() {
@@ -305,10 +325,18 @@ pub fn run_with(
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
             if let Some(models) = &models {
-                defaults::install_compaction(&mut builder, models.clone());
+                defaults::install_compaction(
+                    &mut builder,
+                    models.clone(),
+                    ProductSummaryStrategyConfig::default(),
+                );
                 dim_agent_aimux::install(&mut builder);
             } else {
-                defaults::install_compaction(&mut builder, Arc::new(ProductContextModel));
+                defaults::install_compaction(
+                    &mut builder,
+                    Arc::new(ProductContextModel),
+                    ProductSummaryStrategyConfig::default(),
+                );
                 builder.require_feature(
                     dim_agent_runtime::Feature::new("PrepareModelHost")
                         .session("PrepareModelHost", |names| {

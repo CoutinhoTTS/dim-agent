@@ -19,7 +19,7 @@ async fn both_transports_encode_the_v1_branch_create_boundary_live() {
         session.stop("main", "control cursor".into()).await.unwrap();
         let high = session.sequence("main").unwrap();
         let initial = live.rpc("session.attach", json!({"sessionId":id})).await;
-        assert_eq!(initial["result"], json!({}));
+        assert_eq!(initial["result"]["sessionId"], id);
         let child = session
             .branch(
                 "main".into(),

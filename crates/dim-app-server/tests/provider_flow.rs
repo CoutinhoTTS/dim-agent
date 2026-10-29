@@ -195,6 +195,8 @@ const HANG: &str = "00000000-0000-4000-8000-000000000015";
 const PAGED_ANTHROPIC: &str = "00000000-0000-4000-8000-000000000017";
 const PAGED_ANTHROPIC_UNVERSIONED: &str = "00000000-0000-4000-8000-000000000018";
 const PAGED_GOOGLE: &str = "00000000-0000-4000-b000-000000000000";
+const REMOTE_KIND: &str = "00000000-0000-4000-8000-000000000019";
+const STORED_KIND: &str = "00000000-0000-4000-8000-000000000020";
 
 fn input(
     id: &str,
@@ -1269,7 +1271,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         } else {
             assert!(
                 page.models.iter().all(|m| m.unavailable_reason.is_none()),
-                "Anthropic's `type: \"model\"` is an object discriminator, not a modality; the refresh removes it from raw so every remote Anthropic model stays non-media"
+                "Anthropic's `type: \"model\"` is an object discriminator, not a modality; every remote Anthropic model stays non-media"
             );
         }
         let refresh = spawn(id, cancel.clone());
@@ -1702,6 +1704,170 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     );
     drop(db);
     assert!(provider.refresh_for(REMOTE.into(), &cancel).await.is_err());
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A listing item's `type: "model"` names the object, not a model kind: an
+/// OpenAI-compatible provider lists those models available and a Session
+/// adopts one, an already stored catalog keeps them available without a
+/// refresh, and an `embedding` item stays unavailable.
+#[tokio::test]
+async fn object_kind_listings_classify_their_models_as_chat() {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(8);
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |uri: Uri| {
+            let send = send.clone();
+            async move {
+                let (reply, response) = oneshot::channel();
+                send.send((uri, reply)).await.unwrap();
+                response
+                    .await
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-kind-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let mut config = input(
+        REMOTE_KIND,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some("kind-key"),
+        "kind",
+        17,
+    );
+    config.models = Vec::new();
+    provider.create(config, &cancel).await.unwrap();
+    let refresh = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { provider.refresh_for(REMOTE_KIND.into(), &cancel).await })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"vendor/model-a","object":"model","type":"model","context_window":64000,"max_output_tokens":512},
+                {"id":"vendor/embed-a","object":"model","type":"embedding","context_window":8000}
+            ]})),
+        ))
+        .unwrap();
+    let catalog = refresh.await.unwrap().unwrap();
+    let listed = catalog
+        .models
+        .iter()
+        .find(|model| model.id == "vendor/model-a")
+        .unwrap();
+    assert!(
+        listed.unavailable_reason.is_none(),
+        "`type: \"model\"` names the listing object, not a model kind"
+    );
+    assert!(
+        catalog
+            .models
+            .iter()
+            .find(|model| model.id == "vendor/embed-a")
+            .unwrap()
+            .unavailable_reason
+            .is_some()
+    );
+    provider
+        .configuration(
+            Some(ModelId {
+                provider_id: REMOTE_KIND.into(),
+                model_id: "vendor/model-a".into(),
+            }),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+    let mut stored = input(
+        STORED_KIND,
+        &format!("{base}/stored/v1"),
+        StaticAuth::Anonymous,
+        None,
+        "stored",
+        23,
+    );
+    stored.models[0].metadata =
+        Some(serde_json::from_value(json!({"raw":{"type":"model"}})).unwrap());
+    stored.models.push(model("same-embedding", 29));
+    stored.models[1].metadata =
+        Some(serde_json::from_value(json!({"raw":{"type":"embedding"}})).unwrap());
+    provider.create(stored, &cancel).await.unwrap();
+    let catalog = provider
+        .catalog_for(STORED_KIND.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        catalog
+            .models
+            .iter()
+            .find(|model| model.id == "same")
+            .unwrap()
+            .unavailable_reason
+            .is_none(),
+        "a stored catalog keeps `type: \"model\"` models available with no refresh"
+    );
+    assert!(
+        catalog
+            .models
+            .iter()
+            .find(|model| model.id == "same-embedding")
+            .unwrap()
+            .unavailable_reason
+            .is_some()
+    );
+    provider
+        .configuration(
+            Some(ModelId {
+                provider_id: STORED_KIND.into(),
+                model_id: "same".into(),
+            }),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
     root.shutdown().await.unwrap();
     server.abort();
     let _ = server.await;
