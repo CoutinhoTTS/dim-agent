@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 /// Tables that hold rows of a Session, in the order a delete clears them.
-const SESSION_TABLES: [&str; 8] = [
+const SESSION_TABLES: [&str; 9] = [
     "session_file_owners",
     "timeline_snapshots",
     "timeline_events",
     "timeline_branches",
     "timeline_content",
     "session_metadata",
+    "session_catalog",
     "session_owners",
     "agent_sessions",
 ];

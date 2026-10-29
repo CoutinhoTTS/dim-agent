@@ -3,6 +3,8 @@
 #[path = "cli_flow/acp.rs"]
 mod acp;
 
+#[path = "cli_flow/catalog.rs"]
+mod catalog;
 #[path = "cli_flow/migration.rs"]
 mod migration;
 #[path = "cli_flow/permission.rs"]

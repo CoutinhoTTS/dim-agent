@@ -2224,6 +2224,17 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::storage::catalog",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/catalog.rs",
+      "unexpandedMacros": [
+        "format",
+        "params",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::codec",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -2448,6 +2459,16 @@
         "json",
         "matches",
         "println"
+      ]
+    },
+    {
+      "id": "dim_cli::client::isolation_policy_file_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "format"
       ]
     },
     {
@@ -3412,6 +3433,27 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::isolation",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/isolation.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::isolation::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::isolation",
+      "file": "crates/dim-cli/src/ui/isolation.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::ui::keys",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -3818,6 +3860,16 @@
         "format",
         "matches",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::settings_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::settings_panel",
+      "file": "crates/dim-cli/src/ui/settings_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -14006,6 +14058,8 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentInfo",
+        "path crate::protocol::Catalog",
+        "path crate::protocol::CatalogResult",
         "path crate::protocol::SessionInfo",
         "use crate::protocol::AgentInfo"
       ]
@@ -14016,6 +14070,13 @@
       "references": [
         "path SettingsService",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_app_server::storage::catalog",
+      "references": [
+        "path crate::storage::truncate_preview"
       ]
     },
     {
@@ -15410,6 +15471,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::Storage",
         "use dim_agent_runtime::AgentError"
       ]
@@ -15567,6 +15629,7 @@
         "path Call::Attach",
         "path Call::BranchCreate",
         "path Call::BranchEnd",
+        "path Call::Catalog",
         "path Call::Close",
         "path Call::Contributed",
         "path Call::Create",
@@ -15602,6 +15665,7 @@
         "path Call::WebOpen",
         "path Call::WebStatus",
         "path Call::WebToggle",
+        "path Catalog::default",
         "path ConfigurationResult",
         "path Create",
         "path CreateResult",
@@ -15617,6 +15681,7 @@
         "path Reply::AgentCreated",
         "path Reply::Agents",
         "path Reply::Barrier",
+        "path Reply::Catalog",
         "path Reply::Configuration",
         "path Reply::Contributed",
         "path Reply::Create",
@@ -19625,6 +19690,15 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::catalog",
+      "references": [
+        "mod catalog",
+        "use catalog::initialize_session_catalog",
+        "use catalog::truncate_preview"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::codec",
       "references": [
         "mod codec",
@@ -19682,6 +19756,83 @@
         "use timeline::SessionStore",
         "use timeline::SessionStorePlugin",
         "use timeline::SqliteTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::InvalidInput",
+        "path Result",
+        "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Text",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "use dim_agent_types::InputMessageData"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Catalog",
+        "path CatalogResult",
+        "path SessionInfo",
+        "path SessionSummary",
+        "use crate::protocol::Catalog",
+        "use crate::protocol::CatalogResult",
+        "use crate::protocol::SessionInfo",
+        "use crate::protocol::SessionSummary"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path metadata::decode",
+        "use super::metadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path Row",
+        "path Row::Event",
+        "path SessionStore",
+        "path read_sequence",
+        "use super::SessionStore",
+        "use super::timeline::Row",
+        "use super::timeline::read_sequence"
       ]
     },
     {
@@ -20018,6 +20169,13 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::catalog",
+      "references": [
+        "path super::catalog::backfill"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -20135,6 +20293,15 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path crate::protocol::SessionInfo"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::catalog",
+      "references": [
+        "path super::catalog::create",
+        "path super::catalog::initialize_session_catalog",
+        "path super::catalog::refresh"
       ]
     },
     {
@@ -20578,6 +20745,7 @@
         "mod client",
         "path client",
         "path client::connect_inner",
+        "path client::isolation_policy_file",
         "path client::shutdown",
         "path client::stop"
       ]
@@ -20925,6 +21093,13 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_cli::client::isolation_policy_file_tests",
+      "references": [
+        "mod isolation_policy_file_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
@@ -20949,6 +21124,21 @@
         "use dim_client::RpcError",
         "use dim_client::Server",
         "use dim_client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::client::isolation_policy_file_tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options::parse",
+        "use super::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::client::isolation_policy_file_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::isolation_policy_file"
       ]
     },
     {
@@ -21411,6 +21601,13 @@
         "path UiIdentity",
         "use crate::args::Options",
         "use crate::args::UiIdentity"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::isolation_policy_file"
       ]
     },
     {
@@ -22705,6 +22902,7 @@
         "path Command::AskAnswers",
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
+        "path Command::CloseSessions",
         "path Command::CloseSide",
         "path Command::Compact",
         "path Command::Configure",
@@ -23262,6 +23460,13 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "mod i18n"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::isolation",
+      "references": [
+        "mod isolation"
       ]
     },
     {
@@ -24552,6 +24757,20 @@
       "references": [
         "mod providers",
         "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::isolation",
+      "to": "dim_cli::ui::isolation::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::isolation::tests",
+      "to": "dim_cli::ui::isolation",
+      "references": [
+        "path set_enabled"
       ]
     },
     {
@@ -26152,9 +26371,7 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
-        "path gutter_width",
-        "use crate::ui::text::display_width",
-        "use crate::ui::text::gutter_width"
+        "use crate::ui::text::display_width"
       ]
     },
     {
@@ -26502,7 +26719,10 @@
       "from": "dim_cli::ui::sessions_panel",
       "to": "dim_cli::model::session",
       "references": [
+        "path Command",
+        "path Command::ListSessions",
         "path SessionItem",
+        "use crate::model::session::Command",
         "use crate::model::session::SessionItem"
       ]
     },
@@ -26524,6 +26744,7 @@
         "path Event::None",
         "path Event::Pick",
         "path Event::Refresh",
+        "path Item",
         "path Item::new",
         "path ListPanel",
         "path ListPanel::new",
@@ -26626,6 +26847,7 @@
         "path Event::None",
         "path Event::Pick",
         "path Event::Refresh",
+        "path Item::heading",
         "path Item::new",
         "path ListPanel",
         "path ListPanel::new",
@@ -26647,6 +26869,13 @@
     },
     {
       "from": "dim_cli::ui::settings_panel",
+      "to": "dim_cli::ui::settings_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyEvent",
@@ -26660,6 +26889,44 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::settings_panel",
+      "references": [
+        "path Setting::Isolation",
+        "path Setting::Theme",
+        "path SettingsPanel::new",
+        "path Values"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::settings_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
@@ -28156,6 +28423,7 @@
         "path Command::AskAnswers",
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
+        "path Command::CloseSessions",
         "path Command::CloseSide",
         "path Command::Compact",
         "path Command::Configure",
@@ -28166,7 +28434,6 @@
         "path Command::ListModels",
         "path Command::ListPlugins",
         "path Command::ListProviders",
-        "path Command::ListSessions",
         "path Command::LoginStatus",
         "path Command::LoginUsage",
         "path Command::Logout",
@@ -28391,6 +28658,14 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::isolation",
+      "references": [
+        "path crate::ui::isolation::enabled",
+        "path crate::ui::isolation::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::keys",
       "references": [
         "path crate::ui::keys::report"
@@ -28610,6 +28885,7 @@
       "references": [
         "path Setting",
         "path Setting::Approvals",
+        "path Setting::Isolation",
         "path Setting::Language",
         "path Setting::Model",
         "path Setting::Mouse",
@@ -29900,6 +30176,13 @@
     },
     {
       "from": "dim_migration::native",
+      "to": "dim_app_server::storage::catalog",
+      "references": [
+        "path dim_app_server::storage::initialize_session_catalog"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path SqliteStorage::open",
@@ -31103,6 +31386,10 @@
     {
       "module": "dim_cli::ui::composer",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::ui::isolation::tests",
+      "path": "AtomicU64::new"
     },
     {
       "module": "dim_cli::ui::lines_panel::tests",

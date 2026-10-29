@@ -49,7 +49,7 @@ enum Command {
 
 /// One process writer batches every Session; only pending events reside here.
 pub struct SqliteTimelineStore {
-    db: Arc<SqliteStorage>,
+    pub(super) db: Arc<SqliteStorage>,
     /// Bytes of decoded request content each read or validation pass keeps.
     content_budget: usize,
     /// Schedules a Session-file sweep after a commit released owner rows.
@@ -660,6 +660,7 @@ impl SqliteTimelineStore {
             "timeline_branches",
             "timeline_content",
             "session_metadata",
+            "session_catalog",
             "session_owners",
             "agent_sessions",
         ] {
@@ -717,7 +718,7 @@ impl SqliteTimelineStore {
 /// Session directory service; Agent hosting owns the profile and owner meaning.
 #[derive(Clone)]
 pub struct SessionStore {
-    timeline: Arc<SqliteTimelineStore>,
+    pub(super) timeline: Arc<SqliteTimelineStore>,
     /// The file steps on the Session's resource node: Session files and the
     /// command output a delete removes.
     files: SessionFiles,
@@ -1079,6 +1080,7 @@ impl SessionStore {
                     )
                     .map_err(error)?;
                 }
+                super::catalog::initialize_session_catalog(&tx, &fork)?;
                 files::share(&tx, &source, &fork).map_err(error)?;
                 tx.commit().map_err(error)
             })
@@ -1176,7 +1178,8 @@ fn create_session(connection: &Connection, session: &str, config: &SessionConfig
         branch_point: None,
         create_anchor: None,
     };
-    insert_branch(connection, session, &info)
+    insert_branch(connection, session, &info)?;
+    super::catalog::create(connection, session)
 }
 fn insert_branch(connection: &Connection, session: &str, info: &BranchRecord) -> Result<()> {
     connection
@@ -1234,7 +1237,7 @@ fn transaction<'a>(
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "encoding", rename_all = "lowercase", deny_unknown_fields)]
-enum Row {
+pub(super) enum Row {
     Event {
         record: Box<WireEvent>,
     },
@@ -1246,7 +1249,7 @@ enum Row {
     },
 }
 impl Row {
-    fn wires(&self) -> &[WireEvent] {
+    pub(super) fn wires(&self) -> &[WireEvent] {
         match self {
             Row::Event { record } => std::slice::from_ref(record),
             Row::Output { records, .. } => records,
@@ -1268,7 +1271,7 @@ fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
         )
         .map_err(error)
 }
-fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
@@ -1364,6 +1367,21 @@ fn write_batch(
             ],
         )
         .map_err(error)?;
+    if batch.key.branch_id == "main" {
+        if let Some(last) = batch.events.last() {
+            connection
+                .execute(
+                    "UPDATE session_catalog SET updated_at_ms=?2 WHERE session_id=?1",
+                    params![batch.key.session_id, sql_sequence(last.event.create_at)?],
+                )
+                .map_err(error)?;
+        }
+        if batch.events.first().is_some_and(|record| record.event.sequence <= 256)
+            && batch.events.iter().any(|record| matches!(&record.event.kind, EventKind::InputMessage(input) if input.user.is_some()))
+        {
+            super::catalog::refresh(connection, &batch.key.session_id)?;
+        }
+    }
     Ok(())
 }
 fn insert_event(

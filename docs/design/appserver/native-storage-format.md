@@ -1,33 +1,33 @@
 # Rust 会话存储格式
 
-The current native format is **v21**, with source-owned `settings_documents`,
+The current native format is **v22**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
-branch end events, and the tool-effect and digest fields. Startup requires the
-exact v21 SQL schema and a single format marker of 21 before writable PRAGMAs,
-or the exact v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v21 one step after
+branch end events, the tool-effect and digest fields, and the Session catalog projection. Startup requires the
+exact v22 SQL schema and a single format marker of 22 before writable PRAGMAs,
+or the exact v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
+which the same startup transaction upgrades in place to v22 one step after
 another ([S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
-[#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定)).
+[#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定), [#556 v22 decision](#556-v22-格式决定)).
 Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20 or v21.
+migrated, downgraded or interpreted as a supported native format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v21, and v16 request rows stay readable as written.
+valid in v22, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v21 tables
+## Current v22 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 21)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 22)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -47,6 +47,10 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `agents.agent_id` | `TEXT` | **SQL 允许** | — | 主键；正常写入必须是非空 Agent ID |
 | `agents.profile` | `TEXT` | 否 | — | `AgentProfile` JSON，创建后固定 |
 | `agents.is_default` | `INTEGER` | 否 | — | `CHECK(is_default IN (0, 1))`；唯一的 1 由 `agents_default_unique` 保证至多一个，至少一个由目录校验保证 |
+| `session_catalog.session_id` | `TEXT` | No | — | Primary key, foreign key to `agent_sessions`; one row from creation |
+| `session_catalog.updated_at_ms` | `INTEGER` | No | — | Last committed `main` event time, or creation time for an empty Session |
+| `session_catalog.preview` | `TEXT` | Yes | — | First user text in the batch-complete preview window |
+| `session_catalog.cwd` | `TEXT` | No | — | Creation configuration workspace |
 | `agent_sessions.session_id` | `TEXT` | 否 | — | 主键，原 Session ID |
 | `agent_sessions.created_at_ms` | `INTEGER` | 否 | — | `CHECK(created_at_ms >= 0)`；创建事务写入真实 Unix 毫秒 |
 | `agent_sessions.config` | `TEXT` | 否 | — | `SessionConfig` JSON，创建时的配置 |
@@ -409,7 +413,7 @@ ProjectionCheckpoint = {
 
 ### #556 v22 格式决定
 
-[客户端 Session 目录](session-catalog.md#31-sessioncatalog)（#556）的格式决定：升级到 **v22**，从 v21 原地升级。若在实现之前另有格式变更先合入，实现取当时的下一个编号，本节其余内容不随编号改变。这是本文件第一个读取已有行的升级。
+[客户端 Session 目录](session-catalog.md#31-sessioncatalog)（#556）的格式决定：升级到 **v22**，从 v21 原地升级。
 
 - **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为 `CHECK (version = 22)`。
   - 每个 Session 至多一行，从创建起与 `agent_sessions` 一一对应；写入、回滚与删除见下面的规则。
@@ -458,6 +462,8 @@ ProjectionCheckpoint = {
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
 | v15 `session_file_owners_by_file` | `(file_id)` | 清扫判断文件是否已无 owner |
+| v22 `session_catalog_by_activity` | `(updated_at_ms DESC, session_id)` | 目录键集分页 |
+| v22 `session_catalog_with_preview` | `(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL` | 过滤无预览行的目录分页 |
 | v16 主键 `session_metadata` | `(session_id)` | `read`、`setTitle`、列表联结标题、删除与创建回滚按 Session 删除 |
 
 ## 分页查询
@@ -475,7 +481,7 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v21）
+## 完整记录示例（v22）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -488,7 +494,8 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 21}],
+  "agent_store_format": [{"version": 22}],
+  "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],
