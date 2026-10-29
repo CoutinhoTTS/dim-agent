@@ -129,9 +129,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{count} tasks" => "{count} タスク",
         "1 tool" => "1 ツール",
         "{count} tools" => "{count} ツール",
+        "1 delegation rejected" => "1 件の委譲を拒否",
+        "{count} delegations rejected" => "{count} 件の委譲を拒否",
         "{files} and {pages}" => "{files}と{pages}",
         ", " => "、",
         " · {count} failed" => " · {count} 件失敗",
+        " · {count} rejected" => " · {count} 件拒否",
         // transcript/tool_group.rs: call rows
         "Read" => "読取",
         "List" => "一覧",

@@ -666,6 +666,15 @@ fn last_error(events: &[Arc<AgentEvent>]) -> String {
     text
 }
 
+/// The refusal an unaddressable Agent gets. An id no Agent has and an id of an
+/// Agent the caller cannot see read the same, so the text says nothing about
+/// hidden Agents.
+fn agent_not_found() -> String {
+    "agent_not_found: no visible Agent has this agentId; call list and use an exact \
+     agents[].agentId, or give a profile to create a temporary Agent"
+        .to_owned()
+}
+
 fn agent_results(events: &[Arc<AgentEvent>]) -> Vec<String> {
     events
         .iter()
@@ -956,6 +965,10 @@ async fn leader_delegates_and_team_members_communicate() {
         agent_results(&timeline)[1].contains("Status: completed.\nResult preview:\nEcho: again\n")
     );
 
+    let sessions_before = client.rpc("session.list", json!({})).await["result"]
+        .as_array()
+        .unwrap()
+        .len();
     say(
         &mut client,
         &lead,
@@ -996,6 +1009,13 @@ async fn leader_delegates_and_team_members_communicate() {
     say(
         &mut client,
         &lead,
+        tool(json!({"action": "request", "agentId": "default", "prompt": "x"})),
+        "queue",
+    )
+    .await;
+    say(
+        &mut client,
+        &lead,
         tool(json!({"action": "request", "agentId": default_agent, "profile": {}, "prompt": "x"})),
         "queue",
     )
@@ -1030,10 +1050,46 @@ async fn leader_delegates_and_team_members_communicate() {
             "busy",
             "team_member_not_found",
             "agent_not_found",
+            "agent_not_found",
             "invalid_input",
             "invalid_input"
         ]
     );
+    let not_found: Vec<String> = results(&timeline)
+        .into_iter()
+        .filter(|(error, text)| *error && text.starts_with("agent_not_found"))
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(not_found, [agent_not_found(), agent_not_found()]);
+    assert_eq!(
+        client.rpc("session.list", json!({})).await["result"]
+            .as_array()
+            .unwrap()
+            .len(),
+        sessions_before,
+        "a refused request creates no member Session"
+    );
+    let unaddressable: Vec<String> = timeline
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::CollaborationRequest(data)
+                if matches!(&data.target, dim_agent_types::CollaborationTarget::Agent { agent_id }
+                    if agent_id == "default" || agent_id == "missing") =>
+            {
+                Some(event.id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unaddressable.len(), 2);
+    for op in &unaddressable {
+        assert!(
+            timeline.iter().any(|event| matches!(&event.kind,
+                EventKind::CollaborationDelivered(data) if data.op_event_id == *op
+                    && matches!(data.delivery, CollaborationDelivery::Error { .. }))),
+            "{op} dispatched nothing and was delivered as its refusal"
+        );
+    }
     let (_, profile_refusal) = results(&timeline)
         .into_iter()
         .rfind(|(error, _)| *error)
@@ -1056,6 +1112,10 @@ async fn leader_delegates_and_team_members_communicate() {
     assert_eq!(
         listed["agents"],
         json!([{"agentId": default_agent, "name": "default", "description": ""}])
+    );
+    assert_ne!(
+        listed["agents"][0]["agentId"], listed["agents"][0]["name"],
+        "the Agent's name is not its id"
     );
     let participants = listed["participants"].as_array().unwrap();
     assert_eq!(participants.len(), 2);
@@ -1193,6 +1253,31 @@ async fn leader_delegates_and_team_members_communicate() {
         schema["properties"]["action"]["enum"],
         json!(["message", "read", "list"])
     );
+    assert_eq!(
+        schema["properties"]["agentId"]["description"],
+        json!(
+            "An Agent's opaque id, copied exactly from list's agents[].agentId, or from \
+             participants[].agentId for a team member. A name such as \"default\" is not an id."
+        )
+    );
+    let leader_tools = events(&lead_session)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.clone(),
+            _ => None,
+        })
+        .unwrap();
+    let guidance = &leader_tools
+        .iter()
+        .find(|t| t.name == "agent")
+        .unwrap()
+        .description;
+    assert!(
+        guidance.contains("agentId is copied exactly from list's agents[].agentId")
+            && guidance.contains("is not an agentId"),
+        "{guidance}"
+    );
 
     server.shutdown();
     server.join().await.unwrap();
@@ -1328,6 +1413,33 @@ async fn members_cancel_close_and_leave_the_team() {
     .await;
     idle(&mut client, &foreign).await;
     assert!(last_error(&events(&foreign_session).await).starts_with("agent_not_found"));
+    let foreign_sessions = client.rpc("session.list", json!({})).await["result"]
+        .as_array()
+        .unwrap()
+        .len();
+    for agent_id in [temporary.clone(), "no-such-agent".to_owned()] {
+        say(
+            &mut client,
+            &foreign,
+            tool(json!({"action": "request", "agentId": agent_id, "prompt": "x"})),
+            "queue",
+        )
+        .await;
+        idle(&mut client, &foreign).await;
+        assert_eq!(
+            last_error(&events(&foreign_session).await),
+            agent_not_found(),
+            "an Agent this leader cannot see reads as one that does not exist"
+        );
+    }
+    assert_eq!(
+        client.rpc("session.list", json!({})).await["result"]
+            .as_array()
+            .unwrap()
+            .len(),
+        foreign_sessions,
+        "a refused request creates no member Session"
+    );
     say(
         &mut client,
         &lead,

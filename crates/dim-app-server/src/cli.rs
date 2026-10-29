@@ -305,18 +305,10 @@ pub fn run_with(
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
             if let Some(models) = &models {
-                defaults::install_compaction(
-                    &mut builder,
-                    models.clone(),
-                    config.target_home.clone(),
-                );
+                defaults::install_compaction(&mut builder, models.clone());
                 dim_agent_aimux::install(&mut builder);
             } else {
-                defaults::install_compaction(
-                    &mut builder,
-                    Arc::new(ProductContextModel),
-                    Some(product_home.clone()),
-                );
+                defaults::install_compaction(&mut builder, Arc::new(ProductContextModel));
                 builder.require_feature(
                     dim_agent_runtime::Feature::new("PrepareModelHost")
                         .session("PrepareModelHost", |names| {

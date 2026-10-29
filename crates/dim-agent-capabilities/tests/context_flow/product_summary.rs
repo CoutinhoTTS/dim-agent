@@ -7,7 +7,9 @@ use dim_agent_capabilities::{
     agent_loop::AgentLoop,
     context_model::ProductContextModel,
     history::{context_messages, project_context_history},
-    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
+    summary_strategy::{
+        ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin, SummaryReasoning,
+    },
 };
 use serde_json::Value;
 use std::{
@@ -177,6 +179,33 @@ impl ResolveModelConnection for Local {
     }
 }
 
+/// An HTTP connection on the OpenAI-compatible protocol, so the summarizer's
+/// reasoning value goes through Provider's mapping.
+struct Compatible;
+impl ResolveModelConnection for Compatible {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ResolvedModelConnection> {
+        Box::pin(async {
+            Ok(ResolvedModelConnection {
+                connection: ModelConnection::Http(HttpModelConnection {
+                    protocol: ModelProtocol::OpenaiCompatible,
+                    base_url: "http://127.0.0.1:9".into(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    bearer: None,
+                    api_key: None,
+                    preset: None,
+                }),
+                failure_policy: None,
+                recovery: None,
+            })
+        })
+    }
+}
+
 fn cjk(count: usize) -> String {
     "压缩上下文".chars().cycle().take(count).collect()
 }
@@ -204,11 +233,13 @@ async fn product_session_with(
         output,
         config,
         SessionConfig::default(),
+        Arc::new(Local),
+        None,
     )
     .await
 }
 
-/// The same Session on another window and tool host.
+#[expect(clippy::too_many_arguments)]
 async fn product_session_on(
     window: u64,
     tools: Arc<dyn ToolDriver>,
@@ -216,10 +247,12 @@ async fn product_session_on(
     output: u64,
     config: ProductSummaryStrategyConfig,
     config_session: SessionConfig,
+    connection: Arc<dyn ResolveModelConnection>,
+    reasoning: Option<serde_json::Value>,
 ) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
     let root = Ctx::root().unwrap();
     root.provide(ModelHost(driver.clone())).unwrap();
-    root.provide(ProviderConnectionResolver(Arc::new(Local)))
+    root.provide(ProviderConnectionResolver(connection))
         .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
@@ -243,13 +276,17 @@ async fn product_session_on(
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
-    let snapshot: ModelCapabilitySnapshot = serde_json::from_value(serde_json::json!({
+    let mut snapshot = serde_json::json!({
         "target": {"providerId": "local", "modelId": "small"},
         "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
             "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
             "contextWindow": window, "maxOutputTokens": output}
-    }))
-    .unwrap();
+    });
+    if let Some(reasoning) = reasoning {
+        snapshot["capabilities"]["reasoning"] = serde_json::json!(true);
+        snapshot["reasoning"] = reasoning;
+    }
+    let snapshot: ModelCapabilitySnapshot = serde_json::from_value(snapshot).unwrap();
     defaults::install_with_prompt(
         &mut builder,
         Arc::new(EmptyPromptHost),
@@ -927,6 +964,83 @@ async fn a_blank_summary_fails_the_compaction_without_applying_it() {
     root.shutdown().await.unwrap();
 }
 
+/// The summarizer's factory value reaches its request through Provider's
+/// mapping, and a model whose protocol has no reasoning-off declaration falls
+/// back to `inherit` (ContextCompaction §13.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
+    let cases = [
+        (
+            serde_json::json!({
+                "supported": true,
+                "off": {"kind": "thinking_type", "value": "disabled"}
+            }),
+            "off",
+            true,
+        ),
+        (serde_json::json!({"supported": true}), "inherit", false),
+    ];
+    for (declared, expected, mapped) in cases {
+        let recorder = Arc::new(Recorder::default());
+        let (root, agent, session) = product_session_on(
+            WINDOW,
+            Arc::new(MockTools),
+            recorder.clone(),
+            OUTPUT,
+            ProductSummaryStrategyConfig {
+                reasoning: SummaryReasoning::Off,
+                ..Default::default()
+            },
+            SessionConfig::default(),
+            Arc::new(Compatible),
+            Some(declared),
+        )
+        .await;
+        for text in [cjk(3_000), cjk(1_800)] {
+            session
+                .submit(text, InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+        }
+        let (command, events) = compact_now(&session).await;
+        let diagnostics = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextCompaction(ContextCompactionData {
+                    outcome: ContextCompactionResult::Completed { diagnostics, .. },
+                    command: Some(fact),
+                    ..
+                }) if *fact == command => Some(diagnostics),
+                _ => None,
+            })
+            .expect("the compaction completed");
+        assert_eq!(diagnostics.strategy.details["reasoning"], expected);
+        let requests = recorder.requests.lock().unwrap().clone();
+        let request = requests.last().expect("a summarizer request");
+        let thinking = request
+            .config
+            .as_ref()
+            .and_then(|config| config.provider_options.as_ref())
+            .and_then(|options| options.openai_compatible.as_ref())
+            .and_then(|options| options.thinking.as_ref());
+        if mapped {
+            assert_eq!(
+                thinking.and_then(|thinking| thinking.thinking_type),
+                Some(ThinkingType::Disabled),
+                "the summarizer carries the model's reasoning-off fields"
+            );
+        } else {
+            assert!(
+                thinking.is_none(),
+                "the request keeps the conversation's config"
+            );
+        }
+        agent.close().await.unwrap();
+        root.shutdown().await.unwrap();
+    }
+}
+
 /// The previous digest is never sent to the summarizer: the strategy carries
 /// the previous summary part and the newly cut entries, and the digest part
 /// rolls forward from the record instead (ContextCompaction §5.10).
@@ -952,6 +1066,8 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
             },
             ..SessionConfig::default()
         },
+        Arc::new(Local),
+        None,
     )
     .await;
     // The first turn declares an effect; the second is the one a manual step

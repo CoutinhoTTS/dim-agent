@@ -159,6 +159,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "結果：{result}",
         "Controlled by the leader" => "リーダーが管理",
         "› Open member conversation" => "› メンバーの会話を開く",
+        "Not started" => "未開始",
+        "Reason: {reason}" => "理由：{reason}",
         "Copied to clipboard" => "コピーしました",
         "Opened link" => "リンクを開きました",
         "Link: {url}" => "リンク：{url}",

@@ -137,9 +137,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{count} tasks" => "{count} tarefas",
         "1 tool" => "1 ferramenta",
         "{count} tools" => "{count} ferramentas",
+        "1 delegation rejected" => "1 delegação rejeitada",
+        "{count} delegations rejected" => "{count} delegações rejeitadas",
         "{files} and {pages}" => "{files} e {pages}",
         ", " => ", ",
         " · {count} failed" => " · {count} falharam",
+        " · {count} rejected" => " · {count} rejeitado",
         // transcript/tool_group.rs: call rows
         "Read" => "Ler",
         "List" => "Listar",

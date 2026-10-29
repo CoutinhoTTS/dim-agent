@@ -7157,7 +7157,7 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::summary_strategy",
       "references": [
-        "path ProductSummaryStrategyConfig",
+        "path ProductSummaryStrategyConfig::default",
         "path ProductSummaryStrategyPlugin::new",
         "use crate::summary_strategy::ProductSummaryStrategyConfig",
         "use crate::summary_strategy::ProductSummaryStrategyPlugin"
@@ -9771,16 +9771,6 @@
         "path EventKind::InputApplied",
         "path EventKind::ModelStart",
         "path InputMode::Append"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::summary_strategy",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorage",
-        "path FileStorageError::Io",
-        "use crate::file_storage::FileStorage",
-        "use crate::file_storage::FileStorageError"
       ]
     },
     {
