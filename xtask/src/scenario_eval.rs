@@ -101,8 +101,8 @@
 //! included, which the judge reads), `home/` and `workspace/`. The App
 //! Server's local endpoint sits under the system temporary directory, because
 //! a Unix socket's path is short and a run's directory is not; each run
-//! removes its socket when its server stops, and the evaluation removes the
-//! directory when it ends, on success and on error, so nothing is left there.
+//! owns its endpoint directory and removes it when the run ends, on success
+//! and on error, without affecting other runs.
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
 use dim_agent_capabilities::{
@@ -709,11 +709,11 @@ async fn run_once(
     copy_tree(home, &run_home)?;
     let workspace = run_directory.join("workspace");
     copy_tree(&scenario.directory.join("workspace"), &workspace)?;
-    let sockets = SocketDirectory::new()?;
+    let sockets = Sockets::new()?;
     let settings = RunSettings {
         overrides: overrides.clone(),
         model_config: options.model_config.clone(),
-        unix_path: Some(sockets.0.join("server.sock")),
+        unix_path: Some(sockets.0.join("rpc.sock")),
         defaults: options.defaults.clone(),
         node: options.node.clone(),
         js_runtime: options.js_runtime.clone(),
@@ -1834,12 +1834,14 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     text
 }
 
-struct SocketDirectory(PathBuf);
-impl SocketDirectory {
+/// One run's private endpoint directory, short enough for Unix socket addresses.
+/// Dropping it removes only that run's endpoints.
+struct Sockets(PathBuf);
+impl Sockets {
     fn new() -> Result<Self> {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "dim-eval-{}-{}",
+            "dim-scenario-eval-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
@@ -1847,7 +1849,7 @@ impl SocketDirectory {
         Ok(Self(directory))
     }
 }
-impl Drop for SocketDirectory {
+impl Drop for Sockets {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
@@ -3494,6 +3496,33 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completing_an_evaluation_preserves_another_runs_endpoint() {
+        let peer = Sockets::new().unwrap();
+        let address = peer.0.join("rpc.sock");
+        let _listener = tokio::net::UnixListener::bind(&address).unwrap();
+        let fixture = Fixture::start(
+            "endpoint-isolation",
+            summaries_and_judgements,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate passes"),
+            "{report}\nrecords: {:?}",
+            fixture.records(&options.out)
+        );
+        tokio::net::UnixStream::connect(address).await.unwrap();
+    }
+
     /// A turn that ends while the driver waits on `session.idle` is read like
     /// any other notice: the quiet period follows it, and the run closes at
     /// least `QUIET` after the turn's end instead of at it (issue #643).
@@ -3527,7 +3556,7 @@ mod tests {
         let report = evaluate(&options).await.unwrap();
         assert!(
             report.contains("candidate passes"),
-            "{report}\nrun records: {:#?}",
+            "{report}\nrecords: {:?}",
             fixture.records(&options.out)
         );
         for arm in ["current", "candidate"] {

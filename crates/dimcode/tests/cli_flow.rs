@@ -9,6 +9,9 @@ mod catalog;
 #[path = "cli_flow/context.rs"]
 mod context;
 
+#[path = "cli_flow/exit.rs"]
+mod exit;
+
 #[path = "cli_flow/migration.rs"]
 mod migration;
 #[path = "cli_flow/permission.rs"]
@@ -1366,6 +1369,28 @@ impl Terminal {
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
     }
+    /// Bytes the child wrote that the terminal has not consumed yet. A pty
+    /// master reports the queue on its other side through `TIOCOUTQ` on
+    /// macOS, while `FIONREAD` there always answers zero; Linux has no
+    /// `TIOCOUTQ` for terminals and answers through `FIONREAD`.
+    fn unread(&self) -> libc::c_int {
+        #[cfg(target_os = "macos")]
+        const WAITING_BYTES: libc::c_ulong = 0x4004_7473; // TIOCOUTQ
+        #[cfg(not(target_os = "macos"))]
+        const WAITING_BYTES: libc::c_ulong = libc::FIONREAD as libc::c_ulong;
+        let mut waiting: libc::c_int = 0;
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::ioctl(fd, WAITING_BYTES, &mut waiting) }, 0);
+        waiting
+    }
+    /// The terminal's local mode. Both ends of a pty share one termios, so
+    /// the master reads what raw mode set on the slave.
+    fn local_mode(&self) -> libc::tcflag_t {
+        let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut mode) }, 0);
+        mode.c_lflag
+    }
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -1386,6 +1411,23 @@ impl Terminal {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// Waits for the child without reading its output: the terminal stopped
+    /// consuming it, as a suspended application's or a stalled remote
+    /// session's terminal does, and stays that way until the child is gone.
+    fn wait_without_reading(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "CLI did not exit with its terminal unread: {}",
+                self.transcript
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }
