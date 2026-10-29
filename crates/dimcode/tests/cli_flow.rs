@@ -3642,8 +3642,21 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             assert_eq!(
                 names,
                 [
-                    "agent", "ask_user", "branch", "edit", "exec", "glob", "grep", "plugin",
-                    "read", "recall", "skill", "wait", "write"
+                    "agent",
+                    "ask_user",
+                    "branch",
+                    "edit",
+                    "exec",
+                    "glob",
+                    "grep",
+                    "plugin",
+                    "read",
+                    "recall",
+                    "skill",
+                    "wait",
+                    "web_fetch",
+                    "web_search",
+                    "write"
                 ]
             );
             let frame = |delta, finish| {
