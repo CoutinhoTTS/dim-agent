@@ -6,6 +6,9 @@ mod acp;
 #[path = "cli_flow/context.rs"]
 mod context;
 
+#[path = "cli_flow/exit.rs"]
+mod exit;
+
 #[path = "cli_flow/migration.rs"]
 mod migration;
 #[path = "cli_flow/permission.rs"]
@@ -1323,6 +1326,23 @@ impl Terminal {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// Waits for the child without reading its output: the terminal stopped
+    /// consuming it, as a suspended application's or a stalled remote
+    /// session's terminal does, and stays that way until the child is gone.
+    fn wait_without_reading(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "CLI did not exit with its terminal unread: {}",
+                self.transcript
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }

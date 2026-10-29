@@ -4346,6 +4346,7 @@
         "matches",
         "print",
         "println",
+        "tokio::pin",
         "vec"
       ]
     },
@@ -21231,6 +21232,7 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path ui::tui::Leave",
         "path ui::tui::Leave::Exit",
         "path ui::tui::Leave::Restart",
         "path ui::tui::Restart",
@@ -22481,6 +22483,7 @@
       "from": "dim_cli::plugins",
       "to": "dim_cli::ui::terminal",
       "references": [
+        "path ui::terminal::EXIT_BUDGET",
         "path ui::terminal::restore_if_held"
       ]
     },
@@ -27634,8 +27637,10 @@
         "path sys::rearm_restore_guard",
         "path sys::remove_signal_guard",
         "path sys::restore_terminal_once",
+        "path sys::restore_terminal_once_until",
         "path sys::window_size",
         "path sys::write_all",
+        "path sys::write_until",
         "use unix"
       ]
     },
@@ -27656,8 +27661,10 @@
         "path sys::rearm_restore_guard",
         "path sys::remove_signal_guard",
         "path sys::restore_terminal_once",
+        "path sys::restore_terminal_once_until",
         "path sys::window_size",
         "path sys::write_all",
+        "path sys::write_until",
         "use windows"
       ]
     },
@@ -27741,6 +27748,13 @@
     },
     {
       "from": "dim_cli::ui::terminal::unix",
+      "to": "dim_cli::ui::terminal",
+      "references": [
+        "path super::EXIT_BUDGET"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::terminal::unix",
       "to": "dim_cli::ui::terminal::modes",
       "references": [
         "path MAX_RESTORE_LEN",
@@ -27748,6 +27762,13 @@
         "path modes::restore_into",
         "use super::modes",
         "use super::modes::MAX_RESTORE_LEN"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::terminal::windows",
+      "to": "dim_cli::ui::terminal",
+      "references": [
+        "path super::EXIT_BUDGET"
       ]
     },
     {
