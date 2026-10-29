@@ -30,10 +30,13 @@ if [[ "$action" == help ]]; then
   cat <<'USAGE'
 Usage: ./dev [CLI arguments]
        ./dev restart [CLI arguments] | stop | check
+       ./dev migration
 
 With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
 built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
+Migration imports Global .dim/v2 into .dim and CN .dimcode/v2 into .dimcode.
+Other commands use the isolated development home.
 Optional local configuration: .env.dev (see .env.example).
 A new development home runs commands without OS isolation: a new
 host-isolation.json with {"version": 2, "sandbox": "host"} is written to the
@@ -57,6 +60,8 @@ product_home=${DIMCODE_HOME:-}
 explicit_model_config=false
 explicit_selection=false
 chat=true
+migration=false
+explicit_home=false
 native_help=false
 resumed=false
 while [[ $# -gt 0 ]]; do
@@ -68,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         explicit_model_config=true
       else
         product_home=$2
+        explicit_home=true
       fi
       shift
       ;;
@@ -81,11 +87,16 @@ while [[ $# -gt 0 ]]; do
       resumed=true
       shift
       ;;
+    --source)
+      [[ $# -ge 2 ]] || { echo "$1 requires a path." >&2; exit 1; }
+      shift
+      ;;
     --prompt|-p|--cwd|--server|--directory|--redirect-uri)
       [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
       shift
       ;;
     login|account|logout|models|daemon|web) chat=false ;;
+    migration) chat=false; migration=true ;;
     --help|-h|--version|-V) native_help=true ;;
   esac
   shift
@@ -110,8 +121,11 @@ if [[ "$action" == stop ]]; then
   exec "$binary" --home "$product_home" daemon stop
 fi
 
-options=(--home "$product_home")
-if [[ "$native_help" == false && -n "$model_config" && "$explicit_model_config" == false ]]; then
+options=()
+if [[ "$migration" == false || "$explicit_home" == true ]]; then
+  options+=(--home "$product_home")
+fi
+if [[ "$native_help" == false && "$migration" == false && -n "$model_config" && "$explicit_model_config" == false ]]; then
   options+=(--model-config "$model_config")
 fi
 if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]]; then
@@ -125,7 +139,7 @@ if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]
 fi
 
 (cd -- "$repository" && cargo build --locked -p dimcode) >&2
-if [[ "$native_help" == false ]]; then
+if [[ "$native_help" == false && "$migration" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)
   policy_root=$product_home
@@ -139,4 +153,4 @@ if [[ "$native_help" == false ]]; then
   "$binary" --home "$product_home" daemon stop >&2
 fi
 # Bash 3.2 (macOS) treats an empty array as unset under `set -u`.
-exec "$binary" "${options[@]}" ${caller_args[@]+"${caller_args[@]}"}
+exec "$binary" ${options[@]+"${options[@]}"} ${caller_args[@]+"${caller_args[@]}"}

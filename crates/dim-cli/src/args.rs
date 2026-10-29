@@ -38,6 +38,14 @@ Commands:\n\
   runtime list                     List the plugin runtimes and their state\n\
   runtime install node|python      Turn a plugin runtime on and acquire it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
+  migration [run|inspect] [--source OLD_HOME]\n\
+                                   Import or inspect Global and CN separately;\n\
+                                   Global stays in ~/.dim, CN in ~/.dimcode;\n\
+                                   confirm stopped clients or use --source-stopped\n\
+  migration list|show TASK|cancel TASK\n\
+                                   Read tasks or request cancellation\n\
+  migration retry TASK [--source OLD_HOME]\n\
+                                   Resume a task, reconciling imported objects\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
 web --off                        Turn off the daemon-owned Web switch
 web install                      Install this version's Web workspace\n\
@@ -81,6 +89,7 @@ pub enum Action {
     Chat,
     Tui,
     Exec,
+    Migration(crate::migration_command::Command),
     Acp {
         agent_id: Option<String>,
         auth_setup: Option<String>,
@@ -150,6 +159,7 @@ pub struct Options {
     pub json: bool,
     pub resume: Option<String>,
     pub home: PathBuf,
+    pub home_explicit: bool,
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
@@ -183,6 +193,7 @@ impl Options {
             json: false,
             resume: None,
             home: default_home(),
+            home_explicit: false,
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,
@@ -228,6 +239,24 @@ impl Options {
                     }
                 }
                 "--json" => options.json = true,
+                "--source" => {
+                    let Action::Migration(command) = &mut options.action else {
+                        return Err("--source requires migration".into());
+                    };
+                    if command
+                        .source
+                        .replace(PathBuf::from(value(&mut args)?))
+                        .is_some()
+                    {
+                        return Err("Supply --source only once".into());
+                    }
+                }
+                "--source-stopped" => {
+                    let Action::Migration(command) = &mut options.action else {
+                        return Err("--source-stopped requires migration".into());
+                    };
+                    command.source_stopped = true;
+                }
                 "--image" => options.images.push(PathBuf::from(value(&mut args)?)),
                 "--format" => {
                     let Action::Export { format, .. } = &mut options.action else {
@@ -257,7 +286,10 @@ impl Options {
                         return Err("Supply the database path only once".into());
                     }
                 }
-                "--home" => options.home = PathBuf::from(value(&mut args)?),
+                "--home" => {
+                    options.home = PathBuf::from(value(&mut args)?);
+                    options.home_explicit = true;
+                }
                 "--cwd" => options.cwd = PathBuf::from(value(&mut args)?),
                 "--server" => options.server = Some(PathBuf::from(value(&mut args)?)),
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),
@@ -352,6 +384,12 @@ impl Options {
                 "plugin" if matches!(options.action, Action::Chat) => {
                     let (method, params) = crate::plugin_command::parse(&mut args)?;
                     options.action = Action::Plugin { method, params };
+                }
+                "migration" if matches!(options.action, Action::Chat) => {
+                    options.action = crate::migration_command::parse(&mut args)?;
+                    if matches!(options.action, Action::Help) {
+                        return Ok(options);
+                    }
                 }
                 "runtime" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
@@ -482,8 +520,8 @@ impl Options {
         if matches!(options.action, Action::Tui) && options.prompt.is_some() {
             return Err("tui does not accept --prompt; use exec".into());
         }
-        if options.json && !matches!(options.action, Action::Exec) {
-            return Err("--json requires exec".into());
+        if options.json && !matches!(options.action, Action::Exec | Action::Migration(_)) {
+            return Err("--json requires exec or migration".into());
         }
         if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
             return Err("--image requires exec".into());
