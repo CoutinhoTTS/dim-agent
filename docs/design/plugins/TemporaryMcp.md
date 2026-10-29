@@ -51,7 +51,9 @@ model tool calls.
 Bindings add namespaced tool sources; they never replace user/project MCP
 entries or another client's binding. Server/tool identities include the binding
 id to avoid collisions. Tool definitions, calls, result conversion, cancellation
-and list-change observation reuse existing MCP implementation. Static headers
+and list-change observation reuse existing MCP implementation. Schemas follow
+the shared [tool declaration contract](../contracts/session-boundary.md#a5-tool-contribution),
+including composition nodes without a `type`. Static headers
 and stdio environment are connection inputs; this surface does not start OAuth
 login or persist credentials.
 

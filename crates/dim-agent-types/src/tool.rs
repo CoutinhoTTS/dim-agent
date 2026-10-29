@@ -64,8 +64,13 @@ pub enum BlobKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonSchema {
-    #[serde(rename = "type")]
-    pub schema_type: SchemaType,
+    #[serde(
+        rename = "type",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub schema_type: Option<SchemaType>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -501,6 +501,9 @@ impl Gateway {
                             .into_string()
                             .map_err(|_| Error::invalid_params())?;
                         let mut args = json!({"cwd":cwd});
+                        if let Some(mode) = controls.mode {
+                            args["permissionPolicy"] = json!({"preset":mode});
+                        }
                         let explicit = if let Some(model) = controls.startup {
                             if !rpc.supports("provider.catalog") {
                                 return Err(Error::invalid_params());

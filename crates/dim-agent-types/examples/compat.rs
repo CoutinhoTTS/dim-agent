@@ -24,7 +24,7 @@ fn native_events() -> Vec<AgentEvent> {
                 description: "Echo".into(),
                 source: ToolSource::Builtin,
                 input_schema: JsonSchema {
-                    schema_type: SchemaType::Object,
+                    schema_type: Some(SchemaType::Object),
                     properties: None,
                     items: None,
                     required: None,
