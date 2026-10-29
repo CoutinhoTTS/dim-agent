@@ -425,6 +425,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "표시된 라인의 컨텍스트 압축",
         "Kept verbatim" => "원문 그대로 유지",
+        "Tool effects" => "도구 작업 기록",
         "insufficient space: {parts}" => "공간 부족: {parts}",
         "system prompt" => "시스템 프롬프트",
         "tools" => "도구",

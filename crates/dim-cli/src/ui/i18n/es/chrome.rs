@@ -473,6 +473,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "comprimir el contexto de la línea mostrada",
         "Kept verbatim" => "Conservado tal cual",
+        "Tool effects" => "Acciones de las herramientas",
         "insufficient space: {parts}" => "espacio insuficiente: {parts}",
         "system prompt" => "indicación del sistema",
         "tools" => "herramientas",
