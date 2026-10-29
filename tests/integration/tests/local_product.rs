@@ -152,7 +152,7 @@ async fn the_product_assembly_passes_the_assembly_check() {
         )
         .await
         .unwrap();
-    let findings = product.agent.check_assembly();
+    let findings = product.agent.check_assembly().unwrap();
     assert!(findings.is_empty(), "{findings:?}");
     product.agent.close().await.unwrap();
 }

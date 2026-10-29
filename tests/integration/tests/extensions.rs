@@ -217,6 +217,19 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     agent.close().await.unwrap();
 }
 
+/// A check that inspected nothing does not look like a pass: an Agent that
+/// never placed its Sessions has no diagnostics snapshot to inspect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_assembly_check_with_nothing_to_inspect_is_an_error() {
+    let agent = builder().build();
+    let error = agent.check_assembly().unwrap_err();
+    assert!(
+        error.to_string().contains("no diagnostics snapshot"),
+        "{error}"
+    );
+    agent.close().await.unwrap();
+}
+
 /// The findings as `(plugin, rule)` pairs, sorted by plugin, so a test asserts
 /// the whole list rather than the presence of one entry.
 fn pairs(findings: &[AssemblyFinding]) -> Vec<(String, AssemblyRule)> {
@@ -245,7 +258,7 @@ async fn unawaited_children_are_reported() {
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        let findings = agent.check_assembly();
+        let findings = agent.check_assembly().unwrap();
         assert_eq!(
             pairs(&findings),
             vec![("unawaited-child".to_string(), AssemblyRule::Ready)],
@@ -275,7 +288,7 @@ async fn undeclared_reads_are_reported() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    let findings = agent.check_assembly();
+    let findings = agent.check_assembly().unwrap();
     // Each plugin is checked once, by the innermost scope that contains it, so
     // the reader's branch reports this read once.
     assert_eq!(
@@ -339,7 +352,7 @@ async fn reads_of_a_withdrawn_generation_are_reported() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(pending, "the reader loses its provider");
-    let findings = agent.check_assembly();
+    let findings = agent.check_assembly().unwrap();
     assert_eq!(
         pairs(&findings),
         vec![
@@ -653,7 +666,7 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_are_reported
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    let findings = agent.check_assembly();
+    let findings = agent.check_assembly().unwrap();
     assert_eq!(
         pairs(&findings),
         vec![("test.scope-probe".to_string(), AssemblyRule::InstanceKey)],

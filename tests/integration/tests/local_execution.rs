@@ -511,7 +511,7 @@ async fn the_local_execution_assembly_passes_the_assembly_check() {
         )
         .await
         .unwrap();
-    let findings = harness.agent.check_assembly();
+    let findings = harness.agent.check_assembly().unwrap();
     assert!(findings.is_empty(), "{findings:?}");
     harness.shutdown().await;
 }

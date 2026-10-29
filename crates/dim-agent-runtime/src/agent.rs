@@ -297,9 +297,14 @@ impl Agent {
     /// Creation does not run this. A test that wants the check creates the
     /// Session, branch or scope it wants covered, then calls this once; a
     /// plugin's own tests do the same for the assembly they build.
-    pub fn check_assembly(&self) -> Vec<AssemblyFinding> {
+    ///
+    /// A check that could not inspect anything is an `Err`, never an empty
+    /// list: no diagnostics snapshot, or a Session whose loaded assembly is
+    /// already gone. `Ok` with no findings means every live scope was
+    /// inspected and is sound.
+    pub fn check_assembly(&self) -> Result<Vec<AssemblyFinding>> {
         let Some(snapshot) = self.diagnostics() else {
-            return Vec::new();
+            return Err(AgentError::fault("assembly check", "no diagnostics snapshot"));
         };
         let parents: std::collections::HashMap<_, _> = snapshot
             .plugins
@@ -309,9 +314,12 @@ impl Agent {
         let mut findings = Vec::new();
         for session in self.sessions() {
             let owner = &session.0.owner;
-            let Ok(loaded) = owner.loaded() else {
-                continue;
-            };
+            let loaded = owner.loaded().map_err(|_| {
+                AgentError::fault(
+                    "assembly check",
+                    format!("Session {} has no loaded assembly", session.id()),
+                )
+            })?;
             let branches: Vec<_> = session
                 .0
                 .tree
@@ -340,7 +348,7 @@ impl Agent {
                 );
             }
         }
-        findings
+        Ok(findings)
     }
     pub fn sessions(&self) -> Vec<Session> {
         self.0
