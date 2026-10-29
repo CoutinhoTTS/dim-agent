@@ -230,14 +230,22 @@ async fn an_assembly_check_with_nothing_to_inspect_is_an_error() {
     agent.close().await.unwrap();
 }
 
-/// The findings as `(plugin, rule)` pairs, sorted by plugin, so a test asserts
-/// the whole list rather than the presence of one entry.
-fn pairs(findings: &[AssemblyFinding]) -> Vec<(String, AssemblyRule)> {
+/// The findings with their scope, as `(session, branch, plugin, rule)` tuples
+/// sorted by that prefix, so a test asserts the whole list rather than the
+/// presence of one entry.
+fn pairs(findings: &[AssemblyFinding]) -> Vec<(String, Option<String>, String, AssemblyRule)> {
     let mut pairs: Vec<_> = findings
         .iter()
-        .map(|finding| (finding.plugin.clone(), finding.rule))
+        .map(|finding| {
+            (
+                finding.session.clone(),
+                finding.branch.clone(),
+                finding.plugin.clone(),
+                finding.rule,
+            )
+        })
         .collect();
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
     pairs
 }
 
@@ -261,12 +269,67 @@ async fn unawaited_children_are_reported() {
         let findings = agent.check_assembly().unwrap();
         assert_eq!(
             pairs(&findings),
-            vec![("unawaited-child".to_string(), AssemblyRule::Ready)],
+            vec![(
+                session.id().to_string(),
+                (scope == PartScope::Branch).then(|| "main".to_string()),
+                "unawaited-child".to_string(),
+                AssemblyRule::Ready,
+            )],
             "{findings:?}"
         );
         session.close().await.unwrap();
         agent.close().await.unwrap();
     }
+}
+
+/// Two branches of one Session carry the same faulty plugin: the findings are
+/// told apart by the branch they name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn findings_name_their_branch() {
+    let mut b = builder();
+    b.require_feature(
+        Feature::new("test.required-owner")
+            .branch("test.required-owner", |_| Ok(Box::new(UnawaitedChild))),
+    );
+    let agent = b.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let fork = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "fork".into(),
+                source: BranchSource::Host {
+                    operation_id: "fork".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = agent.check_assembly().unwrap();
+    let expected_branch = |branch: &str| {
+        (
+            session.id().to_string(),
+            Some(branch.to_string()),
+            "unawaited-child".to_string(),
+            AssemblyRule::Ready,
+        )
+    };
+    let mut expected = vec![expected_branch("main"), expected_branch(fork.as_str())];
+    expected.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    assert_eq!(pairs(&findings), expected, "{findings:?}");
+    let fork_scope = format!("session {} branch {}: ", session.id(), fork.as_str());
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.to_string().starts_with(&fork_scope)),
+        "{findings:?}"
+    );
+    session.close().await.unwrap();
+    agent.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -294,6 +357,8 @@ async fn undeclared_reads_are_reported() {
     assert_eq!(
         pairs(&findings),
         vec![(
+            session.id().to_string(),
+            Some("main".to_string()),
             "test.undeclared-reader".to_string(),
             AssemblyRule::UndeclaredRead
         )],
@@ -356,8 +421,18 @@ async fn reads_of_a_withdrawn_generation_are_reported() {
     assert_eq!(
         pairs(&findings),
         vec![
-            ("test.declared-reader".to_string(), AssemblyRule::Ready),
-            ("test.declared-reader".to_string(), AssemblyRule::Generation),
+            (
+                session.id().to_string(),
+                Some("main".to_string()),
+                "test.declared-reader".to_string(),
+                AssemblyRule::Ready
+            ),
+            (
+                session.id().to_string(),
+                Some("main".to_string()),
+                "test.declared-reader".to_string(),
+                AssemblyRule::Generation
+            ),
         ],
         "{findings:?}"
     );
@@ -669,7 +744,12 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_are_reported
     let findings = agent.check_assembly().unwrap();
     assert_eq!(
         pairs(&findings),
-        vec![("test.scope-probe".to_string(), AssemblyRule::InstanceKey)],
+        vec![(
+            session.id().to_string(),
+            None,
+            "test.scope-probe".to_string(),
+            AssemblyRule::InstanceKey
+        )],
         "{findings:?}"
     );
     session.close().await.unwrap();

@@ -291,8 +291,9 @@ impl Agent {
     /// reads an external service it does not declare, that every declared read
     /// is among the reader's resolved dependencies, and that no scoped service
     /// is provided without an instance key. Each plugin is checked once, by the
-    /// innermost scope that contains it. It reports every finding rather than
-    /// the first, and nothing for a sound assembly.
+    /// innermost scope that contains it, and names the Session it belongs to
+    /// and, for a branch plugin, the branch. It reports every finding rather
+    /// than the first, and nothing for a sound assembly.
     ///
     /// Creation does not run this. A test that wants the check creates the
     /// Session, branch or scope it wants covered, then calls this once; a
@@ -327,16 +328,20 @@ impl Agent {
                 .into_iter()
                 .filter_map(|info| session.0.tree.get(&info.id))
                 .collect();
-            let mut scopes: Vec<(&FiberView, &[String])> =
-                vec![(&session.0.view, &loaded.required[..])];
+            let mut scopes: Vec<(&FiberView, &[String], Option<&str>)> =
+                vec![(&session.0.view, &loaded.required[..], None)];
             for branch in &branches {
-                scopes.push((branch.0.scope_view(), branch.0.required_rows()));
+                scopes.push((
+                    branch.0.scope_view(),
+                    branch.0.required_rows(),
+                    Some(branch.id()),
+                ));
             }
-            for (view, required) in scopes.iter().copied() {
+            for (view, required, branch) in scopes.iter().copied() {
                 let nested: Vec<FiberView> = scopes
                     .iter()
-                    .filter(|(other, _)| other.id != view.id && below(&parents, other.id, view.id))
-                    .map(|(other, _)| (*other).clone())
+                    .filter(|(other, _, _)| other.id != view.id && below(&parents, other.id, view.id))
+                    .map(|(other, _, _)| (*other).clone())
                     .collect();
                 check_scope(
                     &snapshot,
@@ -344,6 +349,7 @@ impl Agent {
                     view,
                     required,
                     &nested,
+                    (session.id(), branch),
                     &mut findings,
                 );
             }

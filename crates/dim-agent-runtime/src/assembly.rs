@@ -1830,7 +1830,12 @@ pub enum AssemblyRule {
 
 /// One problem [`Agent::check_assembly`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AssemblyFinding {
+    /// The Session the finding is about.
+    pub session: String,
+    /// The branch the plugin belongs to, when its scope is a branch.
+    pub branch: Option<String>,
     /// The plugin the finding is about.
     pub plugin: String,
     /// The rule the plugin breaks.
@@ -1840,6 +1845,11 @@ pub struct AssemblyFinding {
 }
 impl std::fmt::Display for AssemblyFinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "session {}", self.session)?;
+        if let Some(branch) = &self.branch {
+            write!(f, " branch {branch}")?;
+        }
+        write!(f, ": ")?;
         match self.rule {
             AssemblyRule::Ready => write!(
                 f,
@@ -1866,17 +1876,29 @@ impl std::fmt::Display for AssemblyFinding {
 /// Checks one live scope of `snapshot`: its `required` rows, their descendants
 /// and everything else in the scope, as creation used to. `view` is the scope
 /// instance, `required` the loader row ids its profile requires and `nested`
-/// the scopes nested inside it. Each plugin is checked once, by the innermost
-/// scope that contains it: a nested scope's subtree is left to that scope's
-/// own pass.
+/// the scopes nested inside it. `scope` names the Session the scope belongs
+/// to and, for a branch scope, the branch. Each plugin is checked once, by the
+/// innermost scope that contains it: a nested scope's subtree is left to that
+/// scope's own pass.
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
     loader: &Loader,
     view: &FiberView,
     required: &[String],
     nested: &[FiberView],
+    scope: (&str, Option<&str>),
     findings: &mut Vec<AssemblyFinding>,
 ) {
+    let (session, branch) = scope;
+    let mut report = |plugin: String, rule: AssemblyRule, detail: String| {
+        findings.push(AssemblyFinding {
+            session: session.to_string(),
+            branch: branch.map(str::to_string),
+            plugin,
+            rule,
+            detail,
+        });
+    };
     let rows = required_rows(loader, view, required);
     let excluded: HashSet<_> = nested
         .iter()
@@ -1889,19 +1911,19 @@ pub(crate) fn check_scope(
     let required: HashSet<_> = rows.iter().flat_map(|id| subtree(snapshot, *id)).collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
         if required.contains(&plugin.id) && plugin.state != FiberState::Active {
-            findings.push(AssemblyFinding {
-                plugin: plugin.name.clone(),
-                rule: AssemblyRule::Ready,
-                detail: format!("{:?}", plugin.state),
-            });
+            report(
+                plugin.name.clone(),
+                AssemblyRule::Ready,
+                format!("{:?}", plugin.state),
+            );
         }
         for access in &plugin.accesses {
             if access.external && !access.declared {
-                findings.push(AssemblyFinding {
-                    plugin: plugin.name.clone(),
-                    rule: AssemblyRule::UndeclaredRead,
-                    detail: access.key.describe(),
-                });
+                report(
+                    plugin.name.clone(),
+                    AssemblyRule::UndeclaredRead,
+                    access.key.describe(),
+                );
             }
             if access.external
                 && access.provider.is_some()
@@ -1913,11 +1935,11 @@ pub(crate) fn check_scope(
                         && Some(r.generation) == access.generation
                 })
             {
-                findings.push(AssemblyFinding {
-                    plugin: plugin.name.clone(),
-                    rule: AssemblyRule::Generation,
-                    detail: access.key.describe(),
-                });
+                report(
+                    plugin.name.clone(),
+                    AssemblyRule::Generation,
+                    access.key.describe(),
+                );
             }
         }
     }
@@ -1926,16 +1948,16 @@ pub(crate) fn check_scope(
         .iter()
         .filter(|b| members.contains(&b.provider) && b.key.instance_id().is_none())
     {
-        findings.push(AssemblyFinding {
-            plugin: snapshot
+        report(
+            snapshot
                 .plugins
                 .iter()
                 .find(|p| p.id == binding.provider)
                 .map(|p| p.name.clone())
                 .unwrap_or_default(),
-            rule: AssemblyRule::InstanceKey,
-            detail: binding.key.describe(),
-        });
+            AssemblyRule::InstanceKey,
+            binding.key.describe(),
+        );
     }
 }
 
