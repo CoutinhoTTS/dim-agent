@@ -1,6 +1,6 @@
 # Web
 
-状态：已实现为可选的 [Session TypeScript 包](../../../../runtime/plugins/web/README.md)。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+状态：已实现为 `dim-app-server` 内置 Rust 插件。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
 Web 是一个 Session 插件，向模型提供 `web_search` 与 `web_fetch`，这两个工具由它注册到本 Session 的 `toolRegistry`（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)；[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。
 
@@ -10,6 +10,7 @@ Web 是一个 Session 插件，向模型提供 `web_search` 与 `web_fetch`，�
 flowchart LR
   subgraph PROC["进程"]
     Settings["Settings：web 业务来源"]
+    Managed["ManagedProviders：账号 web_search"]
   end
   subgraph SESS["Session"]
     Web["Web：工具 web_search、web_fetch"]:::new
@@ -19,6 +20,7 @@ flowchart LR
     Exec["ToolBinding、ToolExecutor、Approval、Permission"]
   end
   Web -->|"使用时读取来源 web"| Settings
+  Web -->|"默认 / dim-oauth 搜索"| Managed
   Web -->|"注册自己的工具"| ToolRegistry
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall)、取消请求"| Web
@@ -27,11 +29,11 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Web` | Session（仅启用时安装） | 已具名的 `settings` 与 `toolRegistry`；缺失保持既有 Pending 语义 | 把 `web_search` 与 `web_fetch` 注册到 `toolRegistry`；不提供任何名称 |
+| `Web` | Session（仅启用时安装） | 已具名的 `settings`、`toolRegistry` 与 `managedProviders`；缺失保持既有 Pending 语义 | 把 `web_search` 与 `web_fetch` 注册到 `toolRegistry`；不提供任何名称 |
 
-**依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
+**依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)、[托管 Provider 契约](../../../../crates/dim-app-server/README.md#managed-provider-contract)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
-Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 row 入口；不在 App Server 增加业务代码、注册表或宿主端口。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
+Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 row 入口；不在 App Server 增加 Web 专属注册表或宿主端口。当 `searchService` 缺省（默认）或为 `{"kind": "dim-oauth"}` 时，`web_search` 通过 `managedProviders` 发起带认证的 relay 查询，使 OAuth 令牌留在 Rust 托管 Provider 内；当 `searchService` 显式配置为 `brave` 等适配器时，Web 直接请求该适配器。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
@@ -95,19 +97,31 @@ sequenceDiagram
   participant X as ToolExecutor
   participant W as Web handler
   participant S as Settings
+  participant M as ManagedProviders
   participant Q as 搜索服务
   X->>W: execute(ToolCall：query、filters)
   W->>S: 读取 searchService
-  alt 无可用服务
-    W-->>X: 错误 search_unavailable
-  else 已配置适配器
+  alt 缺省（默认）或 dim-oauth
+    W->>M: webSearch(query, count)
+    alt 已登录且可用
+      M->>Q: 带认证 POST /web-search
+      Q-->>M: 命中结果
+      M-->>W: 命中结果
+      W-->>X: 编号结果列表，域名过滤由 Web 应用
+    else 未登录或无托管 Provider
+      M-->>W: unavailable
+      W-->>X: 错误 search_unavailable
+    end
+  else 已配置适配器（如 brave）
     W->>Q: 经 HTTPS 查询
     Q-->>W: 命中结果
     W-->>X: 编号结果列表，域名过滤由 Web 应用
+  else 无可用服务
+    W-->>X: 错误 search_unavailable
   end
 ```
 
-Web 启用时 `web_search` 始终被声明；在配置可用服务之前它以 `search_unavailable` 失败（A3）。更换服务在下一次调用生效。
+Web 启用时 `web_search` 始终被声明；默认（`searchService` 缺省或为 `{"kind": "dim-oauth"}`）经 `managedProviders` 使用已登录的 Dim 账号搜索，在有可用账号或配置可用服务之前以 `search_unavailable` 失败（A3）。更换服务或账号登录状态变化在下一次调用生效。
 
 ## 4. 时序与冲突
 
@@ -160,7 +174,7 @@ sequenceDiagram
 
 ### 6.1 C4 row 与来源
 
-Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `inject` 与 `provides`，宿主使用同一份 row。该行在 `apply` 中经 `partRegistry` 把 Session 部分注册为 Session 定义；每个 Session 挂载一份副本，副本注入 `settings` 与 `toolRegistry`。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
+Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `inject` 与 `provides`，宿主使用同一份 row。该行在 `apply` 中经 `partRegistry` 把 Session 部分注册为 Session 定义；每个 Session 挂载一份副本，副本注入 `settings`、`toolRegistry` 与 `managedProviders`。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
 
 ```json
 {
@@ -220,7 +234,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `in
 }
 ```
 
-Session 部分声明 `inject: ["settings", "toolRegistry"]`，其 apply 只登记资源清理，并以 `toolRegistry.register(declaration, execute)` 注册两个工具，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；API 密钥取自该文档的 `searchService.apiKey`。不重复校验或填充已交付的文档。
+Session 部分声明 `inject: ["settings", "toolRegistry", "managedProviders"]`，其 apply 只登记资源清理，并以 `toolRegistry.register(declaration, execute)` 注册两个工具，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；配置了 API 密钥适配器时，API 密钥取自该文档的 `searchService.apiKey`。当 `searchService` 缺省或为 `{"kind":"dim-oauth"}` 时，`web_search` 调用 `managedProviders.webSearch({query, count})`，不把 OAuth 令牌读入 Node。不重复校验或填充已交付的文档。
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
@@ -245,8 +259,8 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 | 原则 §4 第 4 条（核心不带业务含义） | 不改核心；工具使用通用的工具注册合同。 |
 | 原则 §4 第 5 条（批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
-| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolRegistry` 和 Settings 业务来源。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4 与 Settings 绑定；API 密钥是 Web 自己的仅用户字段，因此不增加凭据服务、core、rutis 或 loader 能力。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolRegistry`、`managedProviders` 和 Settings 业务来源。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4、`managedProviders` 与 Settings 绑定；适配器 API 密钥是 Web 自己的仅用户字段，账号 OAuth 令牌留在 Rust 托管 Provider 内。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
 | 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
@@ -342,13 +356,13 @@ Characters: <start>-<end> of <total>
 | 例外 | `allowPrivateHosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
 | 代理 | 使用 `proxy` 时，Web 照上面解析并校验，再向代理发 HTTP `CONNECT <已校验 IP>:<端口>`，`http` 和 `https` 都如此；TLS SNI 和 `Host` 头用原主机名；代理从不收到作为连接目标的主机名。代理拒绝 `CONNECT` 时调用以 `connect_failed` 失败（A15） |
 
-Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认封禁；按[包 README](../../../../runtime/plugins/web/README.md#fake-ip-dns)配置真实地址 DNS 答案，或显式添加可信主机例外。搜索端点与已配置的代理均不会隐式绕过地址校验。
+Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址（`198.18.0.0/15`）默认封禁；请配置真实地址 DNS 答案，或在 `allowPrivateHosts` 中显式添加可信主机例外。搜索端点与已配置的代理均不会隐式绕过地址校验。
 
 ### A.5 业务配置（Settings 来源 `web`）
 
 | 字段 | 类型 | 默认值 |
 | --- | --- | --- |
-| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` 或缺省；仅用户 | 缺省（`web_search` 返回 `search_unavailable`） |
+| `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` 或缺省；仅用户 | 缺省（已登录时经 `managedProviders` 使用 `dim-oauth`；否则 `web_search` 返回 `search_unavailable`） |
 | `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string（URL） | 缺省 |
 
@@ -402,7 +416,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认�
 | `http_status` | 最终状态非 2xx |
 | `too_many_redirects` | 同主机跳转超过 5 次 |
 | `unsupported_content_type` | 类型不在 A.3 中 |
-| `search_unavailable` | 未配置服务、端点或代理无法解析、适配器不可用或缺少所需的 API 密钥 |
+| `search_unavailable` | 无可用服务或已登录账号、端点或代理无法解析、适配器不可用或缺少所需的 API 密钥 |
 | `search_failed` | 服务错误或数据无效；消息经缩短并去除秘密 |
 | `cancelled` | 调用被取消 |
 

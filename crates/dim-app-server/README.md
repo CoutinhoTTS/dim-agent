@@ -381,13 +381,14 @@ with byte preservation and unchanged transaction/backup/lifecycle behavior.
 
 ## Managed provider contract
 
-`ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed service a managed provider plugin publishes. `ManagedProviderBinding` hands it to the process-owned `ManagedProviders`, which the account RPC and the provider service use. Without a binding the process lists no managed providers. The contract is Rust-only.
+`ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed service a managed provider plugin publishes. `ManagedProviderBinding` hands it to the process-owned `ManagedProviders`, which the account RPC, the provider service and `webSearch` (exported via `#[rutis::service]` for the `Web` plugin) use. Without a binding the process lists no managed providers and `webSearch` fails with `unavailable`.
 
 | Method | Input | Value |
 | --- | --- | --- |
 | `providers` | — | `ProviderDescriptor[]` (`providerId`, `displayName`, `loginMethods`) |
 | `status`, `recover`, `logout` | provider ID | `AccountSnapshot` |
 | `usage` | provider ID | `Usage` |
+| `web_search` | `{query,count}` | `{results: Array<{title,url,snippet,publishedAt?}>}` |
 | `begin_browser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
 | `begin_device` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
 | `complete_browser` | `{providerId,attemptId,callbackUrl}` | `AccountSnapshot` |

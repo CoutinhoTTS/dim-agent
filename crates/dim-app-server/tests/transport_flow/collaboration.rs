@@ -2233,6 +2233,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
         WorkspaceToolsConfig {
             output_root: home.0.join("command-output"),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     defaults::mock_model_hosts(&mut builder);
     dim_app_server::permission_rules::install(&mut builder);

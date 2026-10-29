@@ -688,6 +688,7 @@ pub(super) async fn launch_configured(
                 .0
                 .join(dim_app_server::storage::COMMAND_OUTPUT_DIRECTORY),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);

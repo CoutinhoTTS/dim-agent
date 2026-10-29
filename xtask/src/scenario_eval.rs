@@ -102,16 +102,21 @@ const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline o
 type TextMember = fn(&mut Overrides, Arc<str>);
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
-/// builds. The summary prompt is the one text exposed at a factory
-/// configuration today (ContextCompaction §13.5); the other owners add their
-/// entries with their own factory members: PromptSources under
-/// [#548](https://github.com/arcships/dim/issues/548), TimelineTree under
-/// [#552](https://github.com/arcships/dim/issues/552), and Goal,
+/// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
+/// description (timeline branches §12.4) are the texts exposed at a factory
+/// configuration today; the other owners add their entries with their own
+/// factory members: PromptSources under
+/// [#548](https://github.com/arcships/dim/issues/548), and Goal,
 /// Capabilities and ContextCompaction under their own issues (model-prompts
 /// §9.8).
-const TEXTS: &[(&str, TextMember)] = &[("context-compaction/summary", |overrides, text| {
-    overrides.summary_prompt = Some(text)
-})];
+const TEXTS: &[(&str, TextMember)] = &[
+    ("context-compaction/summary", |overrides, text| {
+        overrides.summary_prompt = Some(text)
+    }),
+    ("timeline-tree/branch-description", |overrides, text| {
+        overrides.branch_description = Some(text)
+    }),
+];
 
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
@@ -1606,8 +1611,14 @@ mod tests {
             .to_string();
         assert!(error.contains("no-such-text"), "{error}");
         assert!(error.contains("context-compaction/summary"), "{error}");
+        assert!(
+            error.contains("timeline-tree/branch-description"),
+            "{error}"
+        );
         let known = overrides("context-compaction/summary", Arc::from("candidate")).unwrap();
         assert_eq!(known.summary_prompt.as_deref(), Some("candidate"));
+        let branch = overrides("timeline-tree/branch-description", Arc::from("candidate")).unwrap();
+        assert_eq!(branch.branch_description.as_deref(), Some("candidate"));
     }
 
     /// A candidate exactly at `current − δ` passes the rule; one just below

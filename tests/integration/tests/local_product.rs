@@ -67,6 +67,7 @@ async fn product(dirs: &Dirs) -> Product {
         WorkspaceToolsConfig {
             output_root: dirs.dir("outputs"),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     Product {

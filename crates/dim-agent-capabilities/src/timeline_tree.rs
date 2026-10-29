@@ -1588,6 +1588,7 @@ pub struct TimelineTreePlugin {
     factory: Key<TimelineFactory>,
     store: Key<dyn TimelineStore>,
     identity: Key<SessionIdentity>,
+    guide: Key<GuideEntries>,
 }
 impl TimelineTreePlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -1598,6 +1599,7 @@ impl TimelineTreePlugin {
             factory: names.key()?,
             store: names.key()?,
             identity: names.key()?,
+            guide: names.key()?,
         })
     }
 }
@@ -1610,6 +1612,7 @@ impl DynPlugin for TimelineTreePlugin {
             self.factory.erase(),
             self.store.erase(),
             self.identity.erase(),
+            self.guide.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -1617,6 +1620,16 @@ impl DynPlugin for TimelineTreePlugin {
             let factory = ctx.require_at(&self.factory)?;
             let store = ctx.require_at(&self.store)?;
             let identity = ctx.require_at(&self.identity)?;
+            let guide = ctx.require_at(&self.guide)?;
+            guide.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-branch-line".into()],
+                    order: 40,
+                    text: IDENTITY_ENTRY.into(),
+                },
+            )?;
             let tree = TimelineTree::new(factory, store, identity.session_id.clone());
             let owner = tree.clone();
             ctx.effect(move || async move { owner.close().await.map_err(Into::into) })?;
@@ -1635,12 +1648,19 @@ impl DynPlugin for TimelineTreePlugin {
 pub struct BranchToolPlugin {
     tree: Key<TreeCommands>,
     tools: Key<ToolRegistry>,
+    config: BranchToolConfig,
 }
 impl BranchToolPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Self::with_config(names, BranchToolConfig::default())
+    }
+    /// The plugin with a candidate's policy text at its factory
+    /// configuration ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+    pub fn with_config(names: &Names<'_>, config: BranchToolConfig) -> rutis::Result<Self> {
         Ok(Self {
             tree: names.key()?,
             tools: names.key()?,
+            config,
         })
     }
 }
@@ -1658,7 +1678,12 @@ impl DynPlugin for BranchToolPlugin {
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: branch_definition(),
+                    definition: branch_definition(
+                        self.config
+                            .description
+                            .as_deref()
+                            .unwrap_or(BRANCH_TOOL_DESCRIPTION),
+                    ),
                     handler: Arc::new(BranchTool { tree }),
                 },
             )?;
@@ -1703,8 +1728,11 @@ struct LineView {
     /// The line committed its own `branch/end`: it is ending.
     ending: bool,
 }
-/// `<dim-branch-line>` and `<dim-branch-lines>`.
-const BRANCH_LINE_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. On main, dim-branch-lines lists the lines you opened that are still open. A later block of either name replaces the earlier one; both are state about the lines, not requests."#;
+/// `<dim-branch-line>`, written by TimelineTree at the start of every child.
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
+
+/// `<dim-branch-lines>`, the roster BranchLine writes on main.
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
 const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
@@ -1751,11 +1779,7 @@ impl DynPlugin for BranchLinePlugin {
             let guide = ctx.require_at(&self.guide)?;
             let scope = GuideScope::Branch(identity.branch_id.clone());
             for (markers, order, text) in [
-                (
-                    vec!["dim-branch-line", "dim-branch-lines"],
-                    40,
-                    BRANCH_LINE_ENTRY,
-                ),
+                (vec!["dim-branch-lines"], 40, ROSTER_ENTRY),
                 (
                     vec!["dim-branch-message", "dim-branch-idle", "dim-branch-ended"],
                     50,
@@ -2666,12 +2690,25 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
     )
 }
 
-fn branch_definition() -> ToolDefinition {
+/// The `branch` tool's description: its policy sentences are the coordination
+/// text for `main` ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
+/// replaceable at [`BranchToolConfig`].
+const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work.\n- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nLines talk only with the line that opened them and the lines they opened.";
+
+/// Factory configuration of the branch tool ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+/// The product sets none of it, so the built-in text is in force.
+#[derive(Clone, Default)]
+pub struct BranchToolConfig {
+    /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`].
+    pub description: Option<Arc<str>>,
+}
+
+fn branch_definition(description: &str) -> ToolDefinition {
     ToolDefinition {
         risk: Some("session".into()),
         ..crate::tool_registry::definition(
             "branch",
-            "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work.\n- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nLines talk only with the line that opened them and the lines they opened.",
+            description,
             serde_json::json!({"type":"object","required":["action"],"additionalProperties":false,"properties":{
                 "action":{"type":"string","enum":["create","message","read","end"],"description":"What the call does."},
                 "prompt":{"type":"string","description":"create: the purpose of the new line."},

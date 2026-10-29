@@ -356,7 +356,7 @@ These refusals are the tool's own rules. `TreeCommands.end` itself checks only t
 | Ended notice | `P`, no key, in the roster's input, for any end of a tool line other than its own `end` | Steer | `<dim-branch-ended branch="C">` / `Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
 | Tool description | Every line | — | `Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work.` / `- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.` / `- message: send content to a line you opened, or to the line that opened you. Mode "append" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use "steer" when the receiver must act now or is idle.` / `- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.` / `- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.` / `Lines talk only with the line that opened them and the lines they opened.` |
 
-These texts replace the delegation wording in the code today: the `dim-branch-task` block in `first_input` ("That branch delegated this task to you") and the tool description ("works on prompt as a task you delegate").
+These texts replace the delegation wording in the code today: the `dim-branch-task` block in `first_input` ("That branch delegated this task to you") and the tool description ("works on prompt as a task you delegate"). Their classes are in [§12.4](#124-texts-and-their-classes).
 
 ### 12.2 Items for the prompt layer ([#429](https://github.com/arcships/dim/issues/429))
 
@@ -388,6 +388,28 @@ These are run locally on real models, and the results are reported in the implem
 | Identity after compaction | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
 | Ping-pong | Steer exchanges that do not move the work forward |
 | Asking the user | A line asks the user directly when it should, and does not route through `main` |
+
+### 12.4 Texts and their classes
+
+Every model-facing text of the branch mechanism, with its class ([model-facing prompts §4](model-prompts.md#4-protocol-and-policy)). [§12.1](#121-context-mapping) holds the exact text; a sentence is named here by its opening words, and a mixed text is marked sentence by sentence.
+
+**Protocol.**
+
+- **Marker names and attributes.** `dim-branch-line` with `branch`, `parent` and `source`, keyed `branch:line`; `dim-branch-lines` with `branch`; `dim-branch-message` with `from`, `to` and, on a final message, `final`; `dim-branch-idle` with `branch` and `status` (`completed`, `failed` or `cancelled`); `dim-branch-ended` with `branch`. The modes are the InputQueue's: Queue for the identity, Append for the roster, Steer for the notices and for a final message.
+- **The identity blocks' factual sentences.** In a tool line, "You are line C of this session" through "are P's, not yours.", and the label "Your purpose, as P wrote it:"; in a host line, the block's whole sentence. A purpose after the label is the creator's own words, carried as content.
+- **The roster's factual sentences.** "Lines you opened that are still open. Each is you …" and "All lines you opened have ended."; each listed line carries its id and the first line of its purpose.
+- **The notices' factual sentences.** "Line C's turn ended (<status>) without a message to you, and C is waiting." and "Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages".
+- **The branch tool's actions and modes.** The actions `create`, `message`, `read` and `end` and what each one does; `mode` `append` or `steer` and what it does to the receiver; the fields each action takes, with `action` required and nothing else accepted; and the sentences that state a guarantee: "Returns the line's id", "Pass nextCursor as after to continue", "It is your last action" and "Lines talk only with the line that opened them and the lines they opened."
+- **The results and refusals.** `Line created: C`, `Sent to C.`, the page `{items, nextCursor, done}`, `Line C is ending; your final message was sent to P.` and `Line C ends with this message.`; the codes `branch_not_main`, `branch_not_kin`, `branch_not_tool_line`, `branch_ended` and `branch_cannot_end`, with the text each one returns; and `Invalid branch arguments: …`.
+- **The guide entries.** An entry states what its marker is, whose words or which facts it carries, and that it is state or information and never a request. The `<dim-branch-line>` entry states that a later block of that name replaces it, and it belongs to TimelineTree, which writes every identity block, so it is in force in every execution profile. The entries of `<dim-branch-lines>`, `<dim-branch-idle>` and `<dim-branch-ended>` belong to BranchLine, which writes the roster and both notices; the `<dim-branch-message>` entry registers with them, and BranchLine is loaded exactly where BranchTool, which writes a message, is.
+
+**Policy.**
+
+- **The coordination text for `main`.** The `branch` tool description's guidance: the opening paragraph on what a line is, the `create` rule for when to open a line and what the brief carries, the `message` rule for choosing a mode and for not repeating what the receiver knows, and the roster's closing sentence, "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them." It covers [§12.2](#122-items-for-the-prompt-layer-429)'s first item: how `main` briefs a line, assigning areas, answering steers, ending its own wait, and not redoing a line's work.
+- **The line's working rules.** The five bullets of "How you work with P:", on the purpose, the messages, the workspace, the user and the end, apart from the clauses that name a mechanism: "You cannot open lines", the action and mode names and the `file_modified_since_read` code are protocol, as above.
+- **The notices' guidance.** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." and "read it if you need what it did."
+
+The coordination text for `main` is judged with [§12.3](#123-evaluation-scenarios)'s scenarios — redone work, over-splitting, flooding, never ending, sibling relay, ping-pong, identity after compaction and asking the user — current against candidate ([model-facing prompts §8](model-prompts.md#8-judging-a-change)).
 
 ## 13. Interactions
 

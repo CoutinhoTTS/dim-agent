@@ -248,6 +248,27 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
     assert_eq!(usage.features.len(), 1);
     assert_eq!(usage.features[0].key, "web_search");
 
+    let searched = providers
+        .search(
+            dim_app_server::managed_provider::WebSearchRequest {
+                query: "dim query".into(),
+                count: 5,
+            },
+            &cancel(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(searched.results.len(), 2);
+    assert_eq!(searched.results[0].title, "Dim OAuth hit");
+    assert_eq!(searched.results[0].url, "https://docs.example.com/oauth");
+    assert_eq!(searched.results[0].snippet, "Account search snippet");
+    assert_eq!(
+        searched.results[0].published_at.as_deref(),
+        Some("2026-10-28T00:00:00Z")
+    );
+    assert_eq!(searched.results[1].snippet, "Fallback description");
+    assert_eq!(fixture.service.calls("POST /v1/web-search dim query:5"), 1);
+
     let out = providers.logout(PROVIDER, &cancel()).await.unwrap();
     assert!(out.account.is_none());
     assert_eq!(out.generation, account.generation + 1);
