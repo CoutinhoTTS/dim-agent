@@ -8,6 +8,7 @@ mod collaboration_model_policy;
 mod connection;
 mod control;
 pub mod grok_oauth;
+mod isolation_policy;
 mod managed_oauth;
 pub mod managed_provider;
 pub mod mcp;
@@ -638,6 +639,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 ))
             },
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(isolation_policy::IsolationPolicyPlugin::new(
+                names,
+            )?))
+        })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(skills_management::SkillsCatalogPlugin::new(
                 names,
