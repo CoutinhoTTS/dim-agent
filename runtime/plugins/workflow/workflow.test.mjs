@@ -172,6 +172,7 @@ async function fixture(t, options = {}) {
     tool = await load(part.definition, { services: {
       workflowRuns: loaded.service('workflowRuns'),
       toolRegistry: { async register(declaration, execute) { contribution = { declaration, execute } } },
+      guideEntries: { async register() {} },
     } })
   }
   await open()
