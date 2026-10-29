@@ -149,11 +149,12 @@ Prompt 自己的两个调用点留在原处：ContextPreparation 放置它发布
 
 ### 6.3 ContextPreparation：条目与已发布的 System
 
-§3.4 的目标需要 Prompt 之外的一处改动，它归 [ContextPreparation](../../../architecture/rust-agent/plugins/ContextPreparation.md)，随 [#555](../model-prompts.md#97-loop-与-contextpreparation) 落地。今天指南只在渲染 System 的采用处组合：第一次配置或来源变化。只更新工具或模型的采用保留上一次采用的 System，连同其中的指南，因此随这类采用装载的写入者，要到下一次渲染 System 的采用才把条目带进 System。
+§3.4 的目标需要 Prompt 之外的一处改动，它归 [ContextPreparation](../../../architecture/rust-agent/plugins/ContextPreparation.md)（[#555](../model-prompts.md#97-loop-与-contextpreparation)）。发布器在每次发布 System 的采用处组合指南：渲染 System 的提示词变化，用新来源文字与生效的条目组合；只更新工具或模型的采用，则在分支已采用的来源文字上重新渲染指南。
 
-- 只更新工具或模型的采用，若改变了生效的条目，就重新渲染指南并保留已采用的来源文字。
-- 为做到这一点，已发布的配置把来源文字与指南分开记录，恢复的 Session 才能重新渲染它。
-- 这个拆分是恢复的 Session 需要的：`restoring_a_session_keeps_its_adopted_system_and_model`（`tests/integration/tests/prompt_lifecycle.rs`）从 `context/configured` 恢复已采用的 System，而它的文字没有可重建的来源；只按快照里的来源重新组合，已采用的 System 的位置就只剩指南。
+- 已发布的配置把该来源文字与它携带的指南分开记录（`context/configured.system_source`），因此指南可以重新组合，而来源始终是分支已采用的那份文字。
+- 只更新工具或模型的采用若改变了生效的条目，就按当前生效的条目组合指南、放在记录的来源文字上：随这类采用装载的写入者，在该采用处就把条目带进 System，而不必等到下一次渲染 System 的采用。
+- 在来源被记录之前写下的配置没有可重新渲染的来源：它保留已采用的 System，连同其中的指南，直到下一次渲染 System 的采用替换它。`restoring_a_session_keeps_its_adopted_system_and_model`（`tests/integration/tests/prompt_lifecycle.rs`）恢复的就是这样的 System；只按快照里的提示词来源重新组合，已采用的 System 的位置就只剩指南。
+- 请求原样读取已采用的 System：由配置构建的请求里，Loop 承载 `context/configured.system`；宿主准备的请求承载 Prompt 组合出的 System。两者都不追加自己的文字。
 
 对这条要求，Prompt 与条目表不需要改动：组合已经可以在那里调用，生效的条目也已经随写入者的代变化。
 

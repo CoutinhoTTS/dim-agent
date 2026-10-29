@@ -2838,6 +2838,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
                 metadata: None,
             }),
             system: None,
+            system_source: None,
         }),
     );
     let mut request = ModelRequest::new("mock", "test", vec![Message::text(Role::User, "Hi")]);

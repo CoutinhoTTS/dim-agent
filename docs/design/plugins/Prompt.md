@@ -149,11 +149,12 @@ Each capability in §4 adds one dependency, its Session's `guideEntries`, and re
 
 ### 6.3 ContextPreparation: the entries and the published System
 
-The target in §3.4 needs one change outside Prompt, and it is [ContextPreparation](../../architecture/rust-agent/plugins/ContextPreparation.md)'s, landing with [#555](../model-prompts.md#97-loop-and-contextpreparation). Today the guide is composed only at an adoption that renders the System: the first configuration or a change of sources. A tools-only or model-only adoption keeps the previously adopted System, and with it the guide, so a writer that loads with one has its entry in force only at the next adoption that renders the System.
+The target in §3.4 needs one change outside Prompt, and it is [ContextPreparation](../../architecture/rust-agent/plugins/ContextPreparation.md)'s ([#555](../model-prompts.md#97-loop-and-contextpreparation)). The publisher composes the guide at every adoption that publishes a System: a prompt change that renders the System composes the new source text with the entries in force, and a tools-only or model-only adoption re-renders the guide over the source text the branch adopted.
 
-- A tools-only or model-only adoption that changes the entries in force re-renders the guide and keeps the adopted source text.
-- To do that, the published configuration records the source text apart from the guide, so a restored Session can re-render it.
-- The split is what a restored Session needs: `restoring_a_session_keeps_its_adopted_system_and_model` (`tests/integration/tests/prompt_lifecycle.rs`) restores the adopted System from `context/configured`, whose text has no source it can be rebuilt from; recomposing from the snapshot's sources alone would put the guide where the adopted System stands.
+- The published configuration records that source text apart from the guide it carried (`context/configured.system_source`), so the source stays what the branch adopted even as the guide is composed again.
+- A tools-only or model-only adoption that changes the entries in force composes the guide as it reads now, over the recorded source text: a writer that loads with such an adoption has its entry in force at that adoption, not only at the next adoption that renders the System.
+- A configuration written before the source was recorded has none to re-render from: it keeps its adopted System, guide included, and only a later adoption that renders the System replaces it. `restoring_a_session_keeps_its_adopted_system_and_model` (`tests/integration/tests/prompt_lifecycle.rs`) restores such a System from `context/configured`; recomposing it from the snapshot's prompt sources alone would put the guide where the adopted System stands.
+- The request reads the adopted System as it is: Loop carries `context/configured.system` into a request built from it, and a host-prepared request carries the composition Prompt composes. Neither appends text of its own.
 
 Prompt and the table need no change for this: the composition is already there to call, and the entries in force already follow their writers' generations.
 

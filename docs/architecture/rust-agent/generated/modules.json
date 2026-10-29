@@ -7118,6 +7118,7 @@
       "references": [
         "path BaselineSource",
         "path ModelRequest",
+        "path SystemPrompt",
         "path SystemPrompt::Text",
         "path model"
       ]

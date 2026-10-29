@@ -44,8 +44,9 @@ impl ConfigurationPublisher {
     /// returns blocks committed in the same batch, each as its own Append
     /// input, in order. The System it publishes is the System Prompt
     /// composes: a prompt change that renders it composes the new source
-    /// text, and a model- or tool-only update keeps the previously adopted
-    /// System.
+    /// text, and a model- or tool-only update re-renders the guide over the
+    /// previously adopted source text, so an entry a loading writer
+    /// registered is in force at the adoption that loads it.
     pub(crate) async fn publish(
         &self,
         changes: Vec<PromptChange>,
@@ -167,6 +168,7 @@ impl ConfigurationPublisher {
                             &self.identity.branch_id,
                             Some(SystemPrompt::Text(after.system.clone())),
                         )),
+                        system_source: Some(after.system.clone()),
                     })
                     .into(),
                 );
@@ -180,6 +182,7 @@ impl ConfigurationPublisher {
                 .iter()
                 .any(|draft| matches!(draft.kind, EventKind::ContextConfigured(_)))
         {
+            let (system, system_source) = self.rerendered(&before, previous_configuration.as_ref());
             drafts.push(
                 EventKind::ContextConfigured(ContextConfiguredData {
                     timeline: self.identity.branch_id.clone(),
@@ -190,15 +193,8 @@ impl ConfigurationPublisher {
                     }),
                     prompt: before.system_revision.clone(),
                     settings: Box::new(settings),
-                    system: previous_configuration
-                        .as_ref()
-                        .and_then(|data| data.system.clone())
-                        .or_else(|| {
-                            Some(self.guide.compose_system(
-                                &self.identity.branch_id,
-                                Some(SystemPrompt::Text(before.system.clone())),
-                            ))
-                        }),
+                    system,
+                    system_source,
                 })
                 .into(),
             );
@@ -222,6 +218,31 @@ impl ConfigurationPublisher {
             })?;
         }
         Ok(Some(sequence))
+    }
+
+    /// The System and its source text for a model- or tool-only adoption:
+    /// the adopted source text re-rendered with the entries in force now. A
+    /// configuration written before the source was recorded keeps its
+    /// adopted System, and one without a System composes from the prompt
+    /// state's current source.
+    fn rerendered(
+        &self,
+        before: &PromptSnapshot,
+        previous: Option<&ContextConfiguredData>,
+    ) -> (Option<SystemPrompt>, Option<String>) {
+        let source = match previous {
+            Some(previous) => match (&previous.system_source, &previous.system) {
+                (Some(source), _) => source.clone(),
+                (None, Some(_)) => return (previous.system.clone(), None),
+                (None, None) => before.system.clone(),
+            },
+            None => before.system.clone(),
+        };
+        let system = Some(self.guide.compose_system(
+            &self.identity.branch_id,
+            Some(SystemPrompt::Text(source.clone())),
+        ));
+        (system, Some(source))
     }
 }
 
