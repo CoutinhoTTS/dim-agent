@@ -2173,7 +2173,9 @@ fn refusal(error: Refusal, explanation: &str) -> ToolResult {
 fn explain(error: Refusal) -> &'static str {
     match error {
         Refusal::InvalidInput => "the arguments do not match the agent tool schema",
-        Refusal::AgentNotFound => "no Agent with this agentId exists",
+        Refusal::AgentNotFound => {
+            "no visible Agent has this agentId; call list and use an exact agents[].agentId, or give a profile to create a temporary Agent"
+        }
         Refusal::MemberCreateFailed => "the Agent could not create a member Session",
         Refusal::TeamMemberNotFound => {
             "the participant is not in your team or does not belong to this agentId; use list"
@@ -2232,9 +2234,11 @@ enum Input {
 
 const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
-  (agentId + sessionId). Returns immediately; the member's final result arrives later
-  as an input. One task per member at a time. The user's subagent model policy may
-  override the model a new member's profile requests.
+  (agentId + sessionId). An agentId is copied exactly from list's agents[].agentId; an
+  Agent's name, such as \"default\", is not an agentId. A profile creates a temporary
+  Agent. Returns immediately; the member's final result arrives later as an input. One
+  task per member at a time. The user's subagent model policy may override the model a
+  new member's profile requests.
 - cancel / close: stop a member's current task / remove the member from your team.
 - message: send information to a team member. Default mode \"append\" adds context the
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
@@ -2255,7 +2259,8 @@ as a message.";
 
 fn agent_definition(role: CollaborationRole) -> ToolDefinition {
     let mut properties = json!({
-        "agentId": {"type": "string"},
+        "agentId": {"type": "string",
+            "description": "An Agent's opaque id, copied exactly from list's agents[].agentId, or from participants[].agentId for a team member. A name such as \"default\" is not an id."},
         "sessionId": {"type": "string"},
         "content": {"type": "string"},
         "mode": {"type": "string", "enum": ["append", "steer"]},
