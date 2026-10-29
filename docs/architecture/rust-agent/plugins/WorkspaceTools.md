@@ -145,6 +145,27 @@ events, acquire Session holds or start background work.
 
 None (§4 rule 8). S7 uses the existing host and storage contracts.
 
+### Model-facing texts
+
+The `read`, `write`, `edit`, `glob`, `grep` and `exec` declarations are built-in
+declarations and their marks are [#549](https://github.com/arcships/dim/issues/549)'s.
+Of their results, one text carries a handle and is protocol
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+the `exec` result that moved to the background writes `Task ID: <id>` and
+`Output: <path>`, and a task whose owner restarted reports
+"Background task <id> did not survive a restart of its owner; its final result is
+unknown. Output so far: <path>." The model carries the task id to `wait` and the
+path to `read`, so a change to either format changes what the model can do.
+
+The other tools' refusal codes (`invalid_input`, `not_regular_file`,
+`is_directory`, `file_modified_since_read`, `text_binding_required`,
+`permission_denied`, `write_error`, `exec_invalid_request`,
+`exec_terminate_failed`, `exec_wait_failed`, `exec_output_offload_failed`) reach
+clients and persistence in `structuredContent`; `ToolResult.content` carries the
+sentence the model reads, and HistoryRenderer renders the content alone, so no
+code reaches the model. A tool that starts writing one into `content` moves that
+text into this section.
+
 ### Tests
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs),
@@ -254,6 +275,21 @@ terminal append attempt settles, including on failure. `output(task_id)` reads
 that preview after releasing the task-table guard. Ended and replayed entries
 have no capture; a historical path never reconstructs one. WorkspaceTools exposes
 this finite read through its existing Session methods contribution.
+
+### Model-facing texts
+
+One text reaches the model, and it is mixed
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+the notice's element `dim-notification`, its attributes `source="exec"` and `task`,
+the `Background command "<name>" <status>.` line, the `Output preview:` line and
+the full-result hint are protocol; "It is information, not a new request." and
+"If the work it belongs to is no longer wanted, note the result and do not restart
+that work." are policy. The entry's text stays code
+([Prompt §5](../../../design/plugins/Prompt.md#5-facts-that-reproduce-it)).
+
+The notice carries its guide entry: this part registers it from `apply`,
+branch-scoped, and a request on that branch after the notice carries the entry
+([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)).
 
 ### Tests
 

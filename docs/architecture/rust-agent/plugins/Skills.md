@@ -77,6 +77,26 @@ Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/
 Selects content from the catalog, owns Session loader content instances and
 aggregates their contributions into the skill tool and instructions/list prompt sources.
 
+### Model-facing texts
+
+Skills writes two texts for the model. Each is protocol or policy as
+[model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy) decides;
+the instructions are mixed.
+
+| Text | Class and sentences |
+| --- | --- |
+| `dim/skills/instructions`, in the system prefix | Protocol: "A skill is a local instruction bundle stored in a SKILL.md file." states what a skill is, "Discovery: The latest `<dim-state source="dim/skills/list">` lists the skills available in this session, each with a name and, when space allows, a description." names the state source the list arrives in, "A `$skill: name` marker names the exact skill to load." names a marker, and "Use `skill({ "skill_name": "<name>" })` to load the full SKILL.md instructions." states the call shape. Policy: the trigger rules, loading, multiple-match, missing-or-blocked, context-hygiene and safety guidance, and "Use the `skill` tool to load the full instructions before applying a skill." |
+| `dim/skills/list`, as a `<dim-state>` block | Protocol: the format — one `- <name>: <description>` or `- <name>` line per enabled skill, names listed always and descriptions added cheapest first within the character budget, escaped — and the source name the block carries. The names and descriptions are the skills' own data |
+
+The list arrives in a `<dim-state>` block, so its guide entry is Prompt's
+([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)):
+Skills writes no marker of its own and contributes no entry. The `skill` tool's
+declaration is a built-in declaration and its marks are [#549](https://github.com/arcships/dim/issues/549)'s;
+its result is Skills' own: the `Skill:`, `Description:`, `File:`, `Allowed tools:`
+and `Instructions:` layout and the refusals "Invalid input: skill_name must be a
+string", "Skills unavailable: …", "Skill is disabled: …" and "Unknown skill: …" are
+protocol, and the loaded body is the skill author's own text.
+
 ### Dependencies
 
 | Service | Purpose |
