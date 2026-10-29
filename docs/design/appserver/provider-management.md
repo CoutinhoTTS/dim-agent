@@ -355,7 +355,9 @@ without discarding it.
 The `/models` picker clears both saved preferences for its selected model with
 `Ctrl+X`, using the displayed catalog version for CAS. It keeps the picker open;
 Enter separately adopts catalog defaults. On conflict it refreshes the list and
-the user retries. The native `dimcode models PROVIDER --clear-preferences MODEL`
+the user retries. The refreshed list reaches the picker before the operation's
+result notice, so a retry after that notice uses the refreshed catalog version.
+The native `dimcode models PROVIDER --clear-preferences MODEL`
 command rereads the management version and performs the same partial update.
 Neither action changes an adopted Session model. Discovery and adoption errors
 keep historical preferences until this explicit user action.

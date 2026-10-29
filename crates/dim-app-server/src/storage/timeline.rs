@@ -44,6 +44,10 @@ enum Command {
         session_id: String,
         done: tokio::sync::oneshot::Sender<Result<()>>,
     },
+    Release {
+        session_id: String,
+        done: tokio::sync::oneshot::Sender<Result<()>>,
+    },
     Close,
 }
 
@@ -190,6 +194,13 @@ impl SqliteTimelineStore {
                     Command::Rollback { session_id, done } => {
                         let Some(store) = weak.upgrade() else { break };
                         let _ = done.send(store.rollback_creation(&session_id));
+                        continue;
+                    }
+                    Command::Release { session_id, done } => {
+                        let Some(store) = weak.upgrade() else { break };
+                        store.forget(&session_id);
+                        store.admission.lock().unwrap().failures.remove(&session_id);
+                        let _ = done.send(Ok(()));
                         continue;
                     }
                     Command::Close => break,
@@ -1715,6 +1726,26 @@ impl TimelineStore for SqliteTimelineStore {
             wait.await.map_err(error)?
         })
     }
+    fn release_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let (done, wait) = tokio::sync::oneshot::channel();
+            {
+                let admission = self.admission.lock().unwrap();
+                if admission.closed
+                    || admission
+                        .sender
+                        .send(Command::Release {
+                            session_id: session_id.into(),
+                            done,
+                        })
+                        .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            wait.await.unwrap_or(Ok(()))
+        })
+    }
     fn session_config<'a>(
         &'a self,
         session_id: &'a str,
@@ -2132,4 +2163,87 @@ pub(super) async fn validate_session(
         }
     }
     Ok(branches.into_values().collect())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn release_flow_preserves_history_and_tolerates_a_stopped_writer() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let directory = std::env::temp_dir().join(format!("dim-release-{}", uuid::Uuid::new_v4()));
+    let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let record = |sequence| StoredEvent {
+        event: Arc::new(AgentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            sequence,
+            create_at: dim_agent_runtime::core::unix_millis(),
+            tags: None,
+            kind: EventKind::InputMessage(dim_agent_types::InputMessageData::text("saved", None)),
+        }),
+        trace: None,
+        batch_end: sequence,
+    };
+    let (done, published) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key.clone(),
+            vec![record(1)],
+            Box::new(move |result| {
+                let _ = done.send(result);
+            }),
+        )
+        .unwrap();
+    published.await.unwrap().unwrap();
+    store.release_session("session").await.unwrap();
+    store.release_session("session").await.unwrap();
+    store.release_session("unknown").await.unwrap();
+    let mut release = Box::pin(store.release_session("session"));
+    let (done, pending) = tokio::sync::oneshot::channel();
+    {
+        let _connection = db.connection.lock().unwrap();
+        store
+            .append(
+                key.clone(),
+                vec![record(2)],
+                Box::new(move |result| {
+                    let _ = done.send(result);
+                }),
+            )
+            .unwrap();
+        assert!(
+            store
+                .admission
+                .lock()
+                .unwrap()
+                .sender
+                .send(Command::Close)
+                .is_ok()
+        );
+        assert!(
+            release
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    release.await.unwrap();
+    pending.await.unwrap().unwrap();
+    store.release_session("session").await.unwrap();
+    assert_eq!(store.head(&key).await.unwrap(), 2);
+    assert_eq!(store.read(&key, 1..=2).await.unwrap().len(), 2);
+    assert!(store.close().await.is_err());
+    store.release_session("session").await.unwrap();
+    db.close().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
 }
