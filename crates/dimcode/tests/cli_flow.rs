@@ -3899,6 +3899,67 @@ fn tui_mcp_says_when_no_server_is_configured() {
     daemon.join().unwrap();
 }
 
+/// The Session already knows why a server failed and what it refused;
+/// `/mcp` shows those under the server's row, sanitized, and the catalog
+/// error once. `auth_required` keeps its single sign-in hint.
+#[test]
+fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,json!({"userRevision":"user:1","projectRevision":null,"servers":[
+            {"id":"docs","source":"project","transport":"http","enabled":true,"auth":{"status":"required"}},
+            {"id":"team","source":"user","transport":"http","enabled":true}
+        ],"userApplication":{},"projectApplication":null}));
+        let state = wire.read("session.mcp");
+        wire.reply(&state,json!({"sessionId":"session","servers":[
+            {"id":"docs","state":"auth_required","message":"authorization required"},
+            {"id":"team","state":"failed","message":"connection refused\u{1b}[31m"},
+            {"id":"wiki","state":"ready","version":"v1","rejection":{"version":"v2","reason":"duplicate tool name"}}
+        ],"catalogError":"project MCP configuration is not active","closed":false}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp\r");
+    terminal.until("connection refused");
+    terminal.until("Version v2 rejected: duplicate tool name");
+    terminal.until("MCP catalog: project MCP configuration is not active");
+    assert!(
+        terminal
+            .transcript
+            .contains("Sign in with mcp login \"docs\""),
+        "{}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("authorization required"),
+        "the sign-in hint already says it: {}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("[31m"),
+        "the failure message is sanitized: {}",
+        terminal.transcript
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 #[test]
 fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_next_command() {
     let home = Home::new();
