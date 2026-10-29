@@ -969,7 +969,7 @@ fn tui_commands_run_over_a_pending_question() {
         terminal.until("Review your answers");
 
         terminal.write(b"\x0f");
-        terminal.write(b"approvals\r");
+        terminal.write(b"permissions\r");
         terminal.until("Tool Approvals");
         terminal.write(&[0x1b]);
         terminal.until("production");

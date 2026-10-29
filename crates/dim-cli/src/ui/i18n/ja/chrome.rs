@@ -335,8 +335,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permissions" => "権限",
         "Tool approvals" => "ツール承認",
         "Command isolation" => "コマンド分離",
-        "Command isolation not saved: {error}" => "コマンド分離を保存できません：{error}",
-        "Command isolation not read: {error}" => "コマンド分離を読めません：{error}",
         "Models" => "モデル",
         "Model" => "モデル",
         "not set" => "未設定",

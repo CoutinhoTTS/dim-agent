@@ -3257,6 +3257,72 @@ impl Drop for OwnedDaemon {
 
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn fresh_native_startup_uses_workspace_and_ask_without_policy_file() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let output = home
+        .command()
+        .arg("--server")
+        .arg(&binary)
+        .arg("--model-config")
+        .arg(&config)
+        .args(["mcp", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stream = UnixStream::connect(home.0.join("rust/daemon.sock")).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut wire = Wire(BufReader::new(stream));
+    wire.send(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":3,"clientKind":"cli"}}));
+    let mut line = String::new();
+    wire.0.read_line(&mut line).unwrap();
+    let hello: Value = serde_json::from_str(&line).unwrap();
+    assert!(hello.get("result").is_some(), "{hello}");
+    wire.send(json!({"jsonrpc":"2.0","id":2,"method":"host.isolation.get","params":{}}));
+    line.clear();
+    wire.0.read_line(&mut line).unwrap();
+    let snapshot: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(snapshot["result"]["source"], "defaults", "{snapshot}");
+    assert_eq!(
+        snapshot["result"]["effective"],
+        json!({"sandbox":"workspace","escalation":"ask"})
+    );
+    assert_eq!(
+        snapshot["result"]["path"],
+        home.0
+            .canonicalize()
+            .unwrap()
+            .join("rust/host-isolation.json")
+            .to_str()
+            .unwrap()
+    );
+    assert!(!home.0.join("rust/host-isolation.json").exists());
+    assert!(!home.0.join("host-isolation.json").exists());
+    assert!(
+        home.command()
+            .arg("--server")
+            .arg(&binary)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
     let home = Home::new();
