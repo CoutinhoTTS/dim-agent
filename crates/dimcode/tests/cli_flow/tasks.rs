@@ -355,13 +355,13 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
             if !resume_on_launch {
                 wire.created();
                 let attach = wire.read("session.attach");
-                wire.reply(&attach, json!({}));
+                wire.reply(&attach, attach_record(&attach));
                 let history = wire.read("session.history");
                 wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
                 let providers = wire.read("account.providers");
                 wire.reply(&providers, json!([]));
             }
-            for _ in 0..if resume_on_launch { 1 } else { 2 } {
+            if !resume_on_launch {
                 let summaries = wire.read("session.summaries");
                 wire.reply(&summaries, json!([{"sessionId":"paged","cwd":"/workspace",
                     "preview":"Paged history","model":{"providerId":"test","modelId":"restored-model"},"updatedAt":1}]));
@@ -373,7 +373,9 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
             }
             let attach = wire.read("session.attach");
             assert_eq!(attach["params"]["sessionId"], "paged");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, json!({"sessionId":"paged","cwd":"/workspace",
+                "model":{"providerId":"test","modelId":"restored-model"},"createdAt":1,
+                "running":false,"sequence":0,"attachedClients":1}));
             let first = wire.read("session.history");
             if resume_on_launch {
                 let providers = wire.read("account.providers");
@@ -449,10 +451,8 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     let (proceed, control) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        let summaries = wire.read("session.summaries");
-        wire.reply(&summaries, json!([{"sessionId":"session","cwd":"/workspace","model":{"providerId":"test","modelId":"model"},"updatedAt":1}]));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
         assert_eq!(main["params"]["branchId"], "main");
         wire.reply(&main, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
@@ -551,7 +551,7 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
         wire.reply(
             &main,
@@ -580,12 +580,10 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
                 "model":{"providerId":"test","modelId":"model"},"updatedAt":2},
         ]);
         let picker = wire.read("session.summaries");
-        wire.reply(&picker, summaries.clone());
-        let selected = wire.read("session.summaries");
-        wire.reply(&selected, summaries);
+        wire.reply(&picker, summaries);
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "session");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         wire.quiet(Duration::from_millis(150));
         wire.reply(
             &held,
@@ -684,7 +682,7 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[
             command("main-command",1,1000,"main running command"),
@@ -761,7 +759,7 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
         wire.reply(&main, json!({"events":[command("captured",1,1000,"captured command")],
             "through":1,"nextAfter":1,"done":true}));
@@ -819,7 +817,7 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
         wire.reply(
             &main,
@@ -866,7 +864,7 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
         wire.reply(
             &main,
@@ -925,7 +923,7 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         let mut events = Vec::new();
         for index in 0..52 {
@@ -990,14 +988,14 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         assert_eq!(created["params"]["permissionPolicy"], json!({"preset":"full-access"}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "session");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[delegation("leader-member",1,"Inspect member code"),delivery("leader-delivery",2,"leader-member")],"through":2,"nextAfter":2,"done":true}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member"}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let first = wire.read("session.history");
         assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
         wire.reply(&first, json!({"events":[fact("member-input",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"member user\u{1b}]52;c;never-copy\u{7}"}]}}))],"through":2,"nextAfter":1,"done":false}));
@@ -1092,7 +1090,7 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             wire.hello(&[]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[
                 delegation("request-a",1,"old member detail"),delivery("delivery-a",2,"request-a"),
@@ -1116,7 +1114,7 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             assert_eq!(attach["params"], json!({"sessionId":"member-b"}));
             ready.send(()).unwrap();
             wire.reply(&held, if close_during_attach { json!({}) } else { json!({"events":[fact("obsolete-text",1,1000,"step","text",json!({"turn_id":"old","request_id":"old","delta":"obsolete member history"}))],"through":1,"nextAfter":1,"done":true}) });
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let mut requests = [wire.read_any(), wire.read_any()];
             requests.sort_by_key(|request| request["method"].as_str().unwrap().to_owned());
             let [detach, history] = requests;
@@ -1162,7 +1160,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             wire.hello(&[]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[delegation("request",1,"member detail"),delivery("delivered",2,"request"),ended("result",3,"request")],"through":3,"nextAfter":3,"done":true}));
             let providers = wire.read("account.providers");
@@ -1172,7 +1170,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             if outcome == 3 {
                 wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32000,"message":"member attachment refused"}}));
             } else {
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             if outcome == 0 {
                 wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
@@ -1200,7 +1198,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             if outcome != 0 {
                 let attach = wire.read("session.attach");
                 assert_eq!(attach["params"], json!({"sessionId":"member"}));
-                wire.reply(&attach, json!({}));
+                wire.reply(&attach, attach_record(&attach));
                 let history = wire.read("session.history");
                 assert_eq!(history["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
                 wire.reply(&history, json!({"events":[fact("fresh-text",1,1000,"step","text",json!({"turn_id":"fresh","request_id":"fresh","delta":"fresh member after retry"}))],"through":1,"nextAfter":1,"done":true}));
@@ -1255,14 +1253,14 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[delegation("request",1,"member approval detail"),delivery("delivered",2,"request"),ended("result",3,"request")],"through":3,"nextAfter":3,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member"}));
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let held = wire.read("session.history");
         wire.notice("approval.request", json!({"sessionId":"member","branchId":"main","requestId":"member-approval","call":{"name":"exec","input":{"command":"member must not be approved here"}},"reason":"member approval is read-only"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"leader-approval","call":{"name":"exec","input":{"command":"leader command"}},"reason":"leader approval takes priority"}));
@@ -1317,10 +1315,8 @@ fn tui_main_history_failure_is_visible_and_disables_submission() {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            let summaries = wire.read("session.summaries");
-            wire.reply(&summaries,json!([{"sessionId":"session","cwd":"/workspace","model":{"providerId":"test","modelId":"model"},"updatedAt":1}]));
             let attach = wire.read("session.attach");
-            wire.reply(&attach,json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             assert_eq!(history["params"]["branchId"],"main");
             if malformed {
@@ -1441,7 +1437,7 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
         wire.hello(&["workflow.status", "workflow.stop"]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[fact("old-report",1,1000,"input","message",json!({
             "mode":"steer","blocks":[{"type":"raw","text":"<dim-workflow kind=\"report\" run=\"run-old\" status=\"completed\">Workflow run-old: completed.</dim-workflow>"}],
@@ -1521,7 +1517,7 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
         wire.hello(&["workflow.status", "workflow.stop"]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[command("main-command",1,1000,"main running command")],"through":1,"nextAfter":1,"done":true}));
         let providers = wire.read("account.providers");
@@ -1701,7 +1697,7 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
         wire.hello(&["agent.list"]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         let mut events = Vec::new();
         events.extend(agent_request(1, "r1", "call-1", json!({"kind":"agent","agent_id":"reviewer"}), "Check crate dependencies"));
@@ -1720,8 +1716,8 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wire.reply(&list, json!([{"agentId":"reviewer","default":false,"name":"Code Reviewer","description":"","sessions":1}]));
-        wire.reply(&attach_a, json!({}));
-        wire.reply(&attach_b, json!({}));
+        wire.reply(&attach_a, attach_record(&attach_a));
+        wire.reply(&attach_b, attach_record(&attach_b));
         for _ in 0..2 {
             let page = wire.read("session.history");
             wire.quiet(Duration::from_millis(150));
@@ -1783,7 +1779,7 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         let mut events = Vec::new();
         events.extend(agent_request(1, "r1", "call-1", json!({"kind":"agent","agent_id":"finished"}), "Restored ended delegation"));
@@ -1820,7 +1816,7 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
         wire.hello(&["agent.list"]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         let mut events = Vec::new();
         events.extend(refused_request(
@@ -1990,7 +1986,7 @@ fn tui_new_creates_the_session_on_the_first_message() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let main = wire.read("session.history");
         wire.reply(
             &main,
@@ -2017,7 +2013,7 @@ fn tui_new_creates_the_session_on_the_first_message() {
         wire.reply(&detach, json!({}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "fresh");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         loop {
             let request = wire.read_any();
             match request["method"].as_str() {
