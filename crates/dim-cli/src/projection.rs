@@ -1789,7 +1789,24 @@ mod tests {
             main.snapshot().queued.is_empty(),
             "an applied message leaves the queue strip"
         );
-        apply(&mut main, &[control(5, "consumed", "in-2")]);
+        // A cancelled turn settles its own row after the applied message
+        // (timeline UI §4.8): the message has to be committed first.
+        apply(
+            &mut main,
+            &[serde_json::json!({
+                "id": "end-5", "sequence": 5, "create_at": 5000,
+                "type": "turn", "name": "end",
+                "data": {"turn_id": "t1", "status": "cancelled", "reason": "user stop"},
+            })],
+        );
+        let rows = main.snapshot().rows;
+        assert_eq!(rows.last().map(|row| row.text.as_str()), Some("stopped"));
+        assert!(
+            rows.iter()
+                .any(|row| row.text == "and the test" && row.pending),
+            "a stop leaves the applied message pending"
+        );
+        apply(&mut main, &[control(6, "consumed", "in-2")]);
         assert!(
             !main.snapshot().rows[1].pending,
             "a consumed message settles out of pending"
@@ -1797,8 +1814,8 @@ mod tests {
         apply(
             &mut main,
             &[
-                input(6, "in-3", "withdrawn", "queue"),
-                control(7, "deleted", "in-3"),
+                input(7, "in-3", "withdrawn", "queue"),
+                control(8, "deleted", "in-3"),
             ],
         );
         assert!(
