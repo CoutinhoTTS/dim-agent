@@ -159,7 +159,10 @@ in one compare-and-set write. The listing is taken outside the write and keeps
 `refresh`'s user-model conflict rule. An invalid patch is rejected before
 anything is listed, as `provider_invalid_config` with its reason. A failed
 listing fails the update and writes nothing, so re-pointing never leaves the old
-endpoint's models on the new one. A `network`-only change — a proxy or a timeout
+endpoint's models on the new one. A disabled record whose models are its own
+drops them in the same write, without a request: they are the old endpoint's,
+and the empty, listable catalog is what the picker's refill fills after the
+record is enabled. A `network`-only change — a proxy or a timeout
 — saves alone and lists nothing: it changes how the endpoint is reached, not
 what it serves, and requiring a listing would make those settings unsavable
 whenever listing fails. A driver that cannot list saves the connection alone. A

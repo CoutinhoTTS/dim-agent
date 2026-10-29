@@ -137,6 +137,8 @@ bundled catalog（bundled 未定义该 Provider，或 `remoteModels` 已为真�
 新 endpoint 的模型，并与连接在同一次 CAS 写入中提交；用户模型冲突规则与 `refresh` 相同。
 非法 patch 在列举之前就被拒绝，返回带原因的 `provider_invalid_config`。列举
 失败则更新失败、不写入任何内容，重新指向不会把旧 endpoint 的模型留在新 endpoint 上。
+记录已停用而模型属于自身时，同一次写入丢弃这些模型、不发送请求：它们属于旧 endpoint，
+空的、可列举的 catalog 由记录启用后选择器的填充补齐。
 只改 `network`（代理或超时）时单独保存、不列举：它改变到达 endpoint 的方式而非其内容，
 若要求列举成功，列举失败时这些设置就无法保存。driver 不能列举时只保存连接。
 模型属于 bundled catalog 的记录在连接改动后仍保留它们，

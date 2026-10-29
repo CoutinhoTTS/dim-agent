@@ -474,6 +474,13 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 .unwrap()
                 .version
                 .unwrap();
+            // The re-point dropped the old endpoint's models, so the model
+            // the request below names is added back as a user model.
+            version = provider
+                .create_model(PROXY.into(), version, model("same", 21), &cancel)
+                .await
+                .unwrap()
+                .version;
             assert!(
                 tokio::time::timeout(
                     std::time::Duration::from_secs(3),
@@ -2381,6 +2388,234 @@ async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing()
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A connection change that lands on a disabled record drops the record's own
+/// models in the same write, without a request, so enabling it leaves an empty
+/// listable catalog that the picker's refresh fills from the new endpoint. A
+/// bundled catalog and a driver that cannot list stay as they are.
+#[tokio::test]
+async fn a_disabled_re_point_drops_an_own_catalog_and_the_refill_lists_the_new_endpoint() {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(8);
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |uri: Uri| {
+            let send = send.clone();
+            async move {
+                let (reply, response) = oneshot::channel();
+                send.send((uri, reply)).await.unwrap();
+                response
+                    .await
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-disabled-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+
+    let mut create = input(
+        REMOTE,
+        &format!("{base}/old/v1"),
+        StaticAuth::Bearer,
+        Some("first-key"),
+        "first",
+        21,
+    );
+    create.models = vec![model("old", 21)];
+    provider.create(create, &cancel).await.unwrap();
+    let disabled = provider
+        .update(
+            REMOTE.into(),
+            1,
+            serde_json::from_value(json!({
+                "enabled":false,
+                "baseUrl":format!("{base}/new/v1")
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&disabled).unwrap()["modelsListed"],
+        json!("disabled")
+    );
+    assert_eq!(disabled.version, Some(2));
+    assert_eq!(
+        disabled.connection.as_ref().unwrap().base_url,
+        format!("{base}/new/v1")
+    );
+    assert!(
+        disabled.models.as_ref().unwrap().is_empty(),
+        "the old endpoint's models are dropped"
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "a disabled re-point sends no listing request"
+    );
+
+    let enabled = provider
+        .update(
+            REMOTE.into(),
+            2,
+            serde_json::from_value(json!({"enabled":true})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.version, Some(3));
+    assert_eq!(
+        serde_json::to_value(&enabled).unwrap().get("modelsListed"),
+        None
+    );
+    assert!(enabled.models.as_ref().unwrap().is_empty());
+
+    // What the picker's refill sends: `provider.refresh` lists the new
+    // endpoint and stores it.
+    let refresh = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { provider.refresh_for(REMOTE.into(), &cancel).await })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/new/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"new-model","context_window":64000,"max_output_tokens":512}
+            ]})),
+        ))
+        .unwrap();
+    let refreshed = refresh.await.unwrap().unwrap();
+    assert_eq!(
+        refreshed
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["new-model"],
+        "the old endpoint's model is gone and the new one is listed"
+    );
+
+    // A builtin's models are the bundled catalog's, not the endpoint's.
+    let seeded = provider
+        .management(Some("deepseek".into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    let bundled: Vec<String> = seeded
+        .models
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|model| model.model.model_id.clone())
+        .collect();
+    let kept = provider
+        .update(
+            "deepseek".into(),
+            seeded.version.unwrap(),
+            serde_json::from_value(json!({
+                "enabled":false,
+                "credential":{"action":"set","value":"builtin-key"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&kept).unwrap()["modelsListed"],
+        json!("disabled")
+    );
+    assert_eq!(
+        kept.models
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|model| model.model.model_id.clone())
+            .collect::<Vec<_>>(),
+        bundled,
+        "a disabled re-point keeps a builtin's bundled models"
+    );
+    assert!(requests.try_recv().is_err());
+
+    // A driver that cannot list keeps what the user declared.
+    let mut azure = input(
+        INVALID_AZURE,
+        "https://fixture.services.ai.azure.com/openai/",
+        StaticAuth::ApiKey {
+            header_name: "api-key".into(),
+            prefix: String::new(),
+        },
+        Some("azure-key"),
+        "azure",
+        11,
+    );
+    azure.connection.driver_kind = "azure-openai".into();
+    provider.create(azure, &cancel).await.unwrap();
+    let azure = provider
+        .update(
+            INVALID_AZURE.into(),
+            1,
+            serde_json::from_value(json!({
+                "enabled":false,
+                "credential":{"action":"set","value":"next-azure-key"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&azure).unwrap()["modelsListed"],
+        json!("disabled")
+    );
+    assert_eq!(
+        azure
+            .models
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|model| model.model.model_id.as_str())
+            .collect::<Vec<_>>(),
+        ["same"],
+        "an unlistable record keeps its user-declared models"
+    );
+    assert!(requests.try_recv().is_err());
+
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// A listing item's `type: "model"` names the object, not a model kind: an
 /// OpenAI-compatible provider lists those models available and a Session
 /// adopts one, an already stored catalog keeps them available without a
@@ -3482,7 +3717,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     }
     // The connection edit runs on a disabled record: an enabled custom
     // record lists the new endpoint, and this fixture answers completions
-    // only.
+    // only. The edit drops the endpoint's own models, so the model the rest
+    // of the flow selects is added back as a user model.
     let disabled = provider
         .update(
             managed_id.into(),
@@ -3502,6 +3738,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         serde_json::to_value(&edited).unwrap()["modelsListed"],
         json!("disabled")
     );
+    assert!(edited.models.as_ref().unwrap().is_empty());
     let edited = provider
         .update(
             managed_id.into(),
@@ -3516,10 +3753,18 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert!(connection.credential_configured && connection.proxy_auth_configured);
     assert_eq!(connection.header_names, ["X-Preserved"]);
     assert_eq!(connection.timeout_ms, None);
-    let preferred = provider.update_preferences(managed_id.into(), 4, "editable".into(), serde_json::from_value(json!({
+    let re_added = provider
+        .create_model(managed_id.into(), 4, editable.clone(), &cancel)
+        .await
+        .unwrap();
+    assert!(
+        re_added.models.iter().any(|model| model.id == "editable"),
+        "the dropped model is a user model now"
+    );
+    let preferred = provider.update_preferences(managed_id.into(), 5, "editable".into(), serde_json::from_value(json!({
         "reasoningEffort":{"action":"set","value":"high"},"serviceTier":{"action":"set","value":"priority"}
     })).unwrap(), &cancel).await.unwrap();
-    assert_eq!(preferred.version, Some(5));
+    assert_eq!(preferred.version, Some(6));
     let preference_target = ModelId {
         provider_id: managed_id.into(),
         model_id: "editable".into(),
@@ -3550,7 +3795,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let preferred = provider
         .update_preferences(
             managed_id.into(),
-            5,
+            6,
             "editable".into(),
             serde_json::from_value(json!({
                 "reasoningEffort":{"action":"clear"}
@@ -3569,7 +3814,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         provider
             .update_preferences(
                 managed_id.into(),
-                6,
+                7,
                 "editable".into(),
                 serde_json::from_value(json!({
                     "reasoningEffort":{"action":"set","value":"unsupported"}
@@ -3583,14 +3828,14 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let disconnected = provider
         .update(
             managed_id.into(),
-            6,
+            7,
             serde_json::from_value(json!({"credential":{"action":"clear"},"enabled":false}))
                 .unwrap(),
             &cancel,
         )
         .await
         .unwrap();
-    assert_eq!(disconnected.version, Some(7));
+    assert_eq!(disconnected.version, Some(8));
     assert!(
         !disconnected
             .connection
@@ -3602,7 +3847,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         provider
             .update(
                 managed_id.into(),
-                7,
+                8,
                 serde_json::from_value(json!({"enabled":true})).unwrap(),
                 &cancel
             )
@@ -3616,7 +3861,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(management_snapshot["providers"][0]["version"], 7);
+    assert_eq!(management_snapshot["providers"][0]["version"], 8);
     assert_eq!(
         management_snapshot["providers"][0]["preferences"]["editable"],
         json!({"serviceTier":"priority"})
