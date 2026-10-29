@@ -221,7 +221,8 @@ async fn evaluate(options: &Options) -> Result<String> {
         model_configuration: None,
         judge_configuration: None,
         judge_temperature_dropped: 0,
-        judge_calls: 0,
+        judge_asked_runs: 0,
+        judge_reasks: 0,
     };
     for (arm, overrides) in [("current", Overrides::default()), ("candidate", overrides)] {
         for scenario in &scenarios {
@@ -238,7 +239,9 @@ async fn evaluate(options: &Options) -> Result<String> {
                 )
                 .await?;
                 instrument.judge_temperature_dropped += usize::from(record.temperature_dropped);
-                instrument.judge_calls += usize::from(record.judge_error.is_none());
+                instrument.judge_asked_runs +=
+                    usize::from(record.judge_outcome != JudgeOutcome::NotAsked);
+                instrument.judge_reasks += record.judge_reasks as usize;
                 records.push(record);
             }
         }
@@ -749,11 +752,7 @@ async fn run_once(
         turns: driven.turns,
         window: driven.window,
         duration_ms: started.elapsed().as_secs_f64() * 1000.,
-        failed: failed(
-            driven.stop,
-            error.as_deref(),
-            finished.judging.outcome,
-        ),
+        failed: failed(driven.stop, error.as_deref(), finished.judging.outcome),
         judge_outcome: finished.judging.outcome,
         error,
         judge_error: finished.judging.error,
@@ -1664,7 +1663,10 @@ struct Instrument {
     model_configuration: Option<Configuration>,
     judge_configuration: Option<Configuration>,
     judge_temperature_dropped: usize,
-    judge_calls: usize,
+    /// Runs the judge was asked about: every outcome but `not_asked`.
+    judge_asked_runs: usize,
+    /// How many re-asks the judge was asked for over every run.
+    judge_reasks: usize,
 }
 
 /// The reasoning effort and service tier a request carries (model-prompts
@@ -1725,8 +1727,14 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     }
     if instrument.judge_temperature_dropped > 0 {
         text += &format!(
-            "| judge temperature | dropped in {} of {} judge calls |\n",
-            instrument.judge_temperature_dropped, instrument.judge_calls
+            "| judge temperature | dropped in {} of {} runs the judge was asked |\n",
+            instrument.judge_temperature_dropped, instrument.judge_asked_runs
+        );
+    }
+    if instrument.judge_reasks > 0 {
+        text += &format!(
+            "| judge re-asks | {} across all runs |\n",
+            instrument.judge_reasks
         );
     }
     text.push('\n');
@@ -1964,7 +1972,8 @@ mod tests {
             model_configuration: None,
             judge_configuration: None,
             judge_temperature_dropped: 0,
-            judge_calls: 0,
+            judge_asked_runs: 0,
+            judge_reasks: 0,
         }
     }
 
@@ -2326,6 +2335,44 @@ mod tests {
         );
     }
 
+    /// The report names the runs its judge counts are over, and shows the
+    /// re-asks over every run beside the dropped-temperature count
+    /// (model-prompts §8.1).
+    #[test]
+    fn the_report_counts_asked_runs_and_re_asks() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let run = record(
+            "current",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        let quiet = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&run),
+        );
+        assert!(!quiet.contains("| judge temperature |"), "{quiet}");
+        assert!(!quiet.contains("| judge re-asks |"), "{quiet}");
+        let mut instrument = instrument(model());
+        instrument.judge_asked_runs = 3;
+        instrument.judge_temperature_dropped = 2;
+        instrument.judge_reasks = 5;
+        let text = report(
+            &instrument,
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&run),
+        );
+        assert!(
+            text.contains("| judge temperature | dropped in 2 of 3 runs the judge was asked |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| judge re-asks | 5 across all runs |"),
+            "{text}"
+        );
+    }
+
     struct Local;
     impl ResolveModelConnection for Local {
         fn resolve(
@@ -2659,6 +2706,10 @@ mod tests {
             );
         }
         assert_eq!(fixture.judge().len(), 4, "two calls per arm");
+        assert!(
+            report.contains("| judge temperature | dropped in 2 of 2 runs the judge was asked |"),
+            "a run whose first call failed is a run the judge was asked: {report}"
+        );
         assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
         assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
         assert!(
@@ -2978,7 +3029,8 @@ mod tests {
             model_configuration: None,
             judge_configuration: None,
             judge_temperature_dropped: 0,
-            judge_calls: 0,
+            judge_asked_runs: 0,
+            judge_reasks: 0,
         };
         run_once(
             options,
