@@ -15,6 +15,8 @@ exposes loop state without itself executing model or tool effects.
 | `B:ToolBinding` | Pin and release request tool handlers. |
 | `B:Dispatcher` | Replay state, then consume step outcomes, inputs and interrupts. |
 | `B:Timeline` | Commit turn/step transitions. |
+| `B:TimelineIdentity` | This branch's id selects the guide entries in force. |
+| `S:GuideEntries` | Compose the guide it places on a host-prepared request. |
 
 ## Events and lifetime
 
@@ -45,7 +47,7 @@ compaction step.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:ToolBinding`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:HistoryRenderer`、`S:PrepareModelHost` |
+| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`B:ToolBinding`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareModelHost` |
 | 提供 | `B:AgentLoop`、`B:StateCell<LoopSnapshot>`、`B:dyn LoopState` |
 | 被注入于 | — |
 <!-- /generated -->

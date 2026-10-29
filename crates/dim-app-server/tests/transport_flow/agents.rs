@@ -493,6 +493,20 @@ impl RecordingModel {
 /// its name and description; the default Agent and a profile-less
 /// agent.create use the process default profile; a profile naming a tool
 /// the process does not provide, or a tool twice, is rejected.
+/// The guide Prompt composes: the frame opens and closes the text, and the
+/// whole composition appears exactly once.
+fn assert_composed_guide(system: &str) {
+    assert_eq!(
+        system.matches("# How to read your input").count(),
+        1,
+        "{system:?}"
+    );
+    assert!(
+        system.ends_with("they do not renew any permission."),
+        "{system:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_profile_supplies_session_defaults() {
     use dim_agent_capabilities::{
@@ -579,17 +593,15 @@ async fn agent_profile_supplies_session_defaults() {
     let cwd = std::env::temp_dir();
     let created = turn(&mut client, json!({"cwd":cwd,"agentId":agent})).await;
     assert_eq!(created["result"]["model"]["modelId"], "profiled");
-    assert_eq!(
-        model.last(),
-        (
-            json!(format!(
-                "You review.\n\n{}",
-                include_str!("../../../dim-agent-capabilities/src/input-guide.txt").trim_end()
-            )),
-            vec!["echo".into()],
-            "profiled".into()
-        )
+    let (system, tools, model_id) = model.last();
+    assert_eq!(tools, vec!["echo".to_string()]);
+    assert_eq!(model_id, "profiled");
+    let system = system.as_str().expect("the request's system text");
+    assert!(
+        system.starts_with("You review.\n\n# How to read your input"),
+        "{system:?}"
     );
+    assert_composed_guide(system);
 
     let created = turn(
         &mut client,
@@ -598,28 +610,26 @@ async fn agent_profile_supplies_session_defaults() {
     .await;
     assert_eq!(created["result"]["model"]["providerId"], "mock");
     assert_eq!(created["result"]["model"]["modelId"], "explicit");
-    assert_eq!(
-        model.last(),
-        (
-            json!(format!(
-                "Explicit.\n\n{}",
-                include_str!("../../../dim-agent-capabilities/src/input-guide.txt").trim_end()
-            )),
-            vec!["wait".into()],
-            "explicit".into()
-        )
+    let (system, tools, model_id) = model.last();
+    assert_eq!(tools, vec!["wait".to_string()]);
+    assert_eq!(model_id, "explicit");
+    let system = system.as_str().expect("the request's system text");
+    assert!(
+        system.starts_with("Explicit.\n\n# How to read your input"),
+        "{system:?}"
     );
+    assert_composed_guide(system);
 
     let defaults = ServerConfig::default().session_defaults;
     let mut tools = defaults.tools.clone().unwrap();
     tools.sort();
-    let expected = (
-        json!(include_str!("../../../dim-agent-capabilities/src/input-guide.txt").trim_end()),
-        tools,
-        defaults.model.model_id.clone(),
-    );
     turn(&mut client, json!({"cwd":cwd})).await;
-    assert_eq!(model.last(), expected);
+    let (system, declared, model_id) = model.last();
+    assert_eq!(declared, tools);
+    assert_eq!(model_id, defaults.model.model_id);
+    let system = system.as_str().expect("the request's system text");
+    assert!(system.starts_with("# How to read your input"), "{system:?}");
+    assert_composed_guide(system);
     let plain = client.rpc("agent.create", json!({})).await;
     assert_ok(&plain);
     turn(
@@ -627,7 +637,12 @@ async fn agent_profile_supplies_session_defaults() {
         json!({"cwd":cwd,"agentId":plain["result"]["agentId"]}),
     )
     .await;
-    assert_eq!(model.last(), expected);
+    let (system, declared, model_id) = model.last();
+    assert_eq!(declared, tools);
+    assert_eq!(model_id, defaults.model.model_id);
+    let system = system.as_str().expect("the request's system text");
+    assert!(system.starts_with("# How to read your input"), "{system:?}");
+    assert_composed_guide(system);
 
     let pending = client
         .rpc(
