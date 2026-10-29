@@ -536,8 +536,12 @@ impl Connection {
         Ok(())
     }
     /// A Session belongs to the protocol version that created it. A Session
-    /// without a readable owner row has no recorded version.
+    /// without a readable owner row has no recorded version. An empty id
+    /// names no Session at all: it is invalid input, not a closed Session.
     fn authorize_version(&self, rpc: &RpcService, id: &str) -> Result<(), RpcError> {
+        if id.is_empty() {
+            return Err(RpcError::invalid("sessionId must not be empty"));
+        }
         let known = rpc.index.version_of(id);
         if known.is_some_and(|version| version != self.protocol_version())
             || (known.is_none() && rpc.index.session(id).is_some())
