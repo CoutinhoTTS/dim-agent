@@ -59,7 +59,7 @@ continues to exclude private account implementations and credentials from this r
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
-| `provider.list` | `{}` | Existing `{providers, errors}` summary; retained unchanged for compatibility | false | `Drain` |
+| `provider.list` | `{}` | Existing `{providers, errors}` summary; each provider adds `remoteModelList`, whether `provider.refresh` can list its models | false | `Drain` |
 | `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version | false | `Drain` |
 | `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
 

@@ -1769,6 +1769,18 @@ async fn object_kind_listings_classify_their_models_as_chat() {
     );
     config.models = Vec::new();
     provider.create(config, &cancel).await.unwrap();
+    let listed = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .find(|entry| entry.provider_id == REMOTE_KIND)
+        .unwrap();
+    assert!(
+        listed.remote_model_list,
+        "provider.list says whether provider.refresh can list a provider's models"
+    );
     let refresh = {
         let provider = provider.clone();
         let cancel = cancel.clone();

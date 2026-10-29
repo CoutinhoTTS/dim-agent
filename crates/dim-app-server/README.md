@@ -82,7 +82,9 @@ Local protocol-v3 clients read `provider.management {providerId?}` for one safe
 editing snapshot containing the record version, connection fields, full model
 descriptors, available actions and saved preferences. Credentials, secret
 references, header values and proxy authentication are never returned.
-`provider.list`, `provider.catalog` and `provider.selection` retain their read shapes.
+`provider.list`, `provider.catalog` and `provider.selection` retain their read shapes;
+`provider.list` additionally reports `remoteModelList` per provider, whether
+`provider.refresh` can list that provider's models.
 
 `provider.create` takes a fresh canonical UUID; `provider.update` applies only the
 supplied fields with record CAS. `provider.probe` tests a complete new connection

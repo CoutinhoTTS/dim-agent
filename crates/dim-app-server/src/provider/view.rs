@@ -81,13 +81,7 @@ impl ProviderService {
         provider_id: &str,
         record: &StaticProviderRecord,
     ) -> bool {
-        record.credential_authority == CredentialAuthority::Static
-            && drivers::remote_model_list(&record.driver_kind)
-            && !self
-                .bundled
-                .provider(provider_id)
-                .and_then(|provider| provider.metadata.as_ref())
-                .is_some_and(|metadata| metadata.remote_model_list == Some(false))
+        super::can_list_models(&self.bundled, provider_id, record)
     }
 
     pub(super) async fn static_management(
