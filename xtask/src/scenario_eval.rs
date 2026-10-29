@@ -207,7 +207,6 @@ async fn evaluate(options: &Options) -> Result<String> {
             return Err("set DIM_TEST_JS_RUNTIME: the default plugins import it".into());
         }
     }
-    let _sockets = Sockets;
     let overrides = overrides(&options.text, options.candidate.clone())?;
     let scenarios = read_scenarios(&options.scenarios)?;
     let home = isolated_home(&options.home)?;
@@ -710,10 +709,11 @@ async fn run_once(
     copy_tree(home, &run_home)?;
     let workspace = run_directory.join("workspace");
     copy_tree(&scenario.directory.join("workspace"), &workspace)?;
+    let sockets = SocketDirectory::new()?;
     let settings = RunSettings {
         overrides: overrides.clone(),
         model_config: options.model_config.clone(),
-        unix_path: Some(endpoint()?),
+        unix_path: Some(sockets.0.join("server.sock")),
         defaults: options.defaults.clone(),
         node: options.node.clone(),
         js_runtime: options.js_runtime.clone(),
@@ -744,11 +744,7 @@ async fn run_once(
         Err(error) => Finished::failed(scenario, error.to_string()),
     };
     server.shutdown();
-    let joined = server.join().await;
-    if let Some(socket) = &settings.unix_path {
-        let _ = std::fs::remove_file(socket);
-    }
-    joined?;
+    server.join().await?;
     if let Some(export) = &finished.export {
         std::fs::write(run_directory.join("timeline.jsonl"), export)?;
     }
@@ -1838,29 +1834,22 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     text
 }
 
-/// The App Server endpoint one run serves: under the system temporary
-/// directory, because a run's own directory sits deeper than a Unix socket's
-/// short address allows and the endpoint needs a 0700 directory.
-fn socket_directory() -> PathBuf {
-    std::env::temp_dir().join(format!("dim-scenario-eval-sockets-{}", std::process::id()))
+struct SocketDirectory(PathBuf);
+impl SocketDirectory {
+    fn new() -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "dim-eval-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        private_directory(&directory)?;
+        Ok(Self(directory))
+    }
 }
-fn endpoint() -> Result<PathBuf> {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let directory = socket_directory();
-    private_directory(&directory)?;
-    Ok(directory.join(format!(
-        "{}.sock",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )))
-}
-/// Removes the endpoint directory when the evaluation ends, however it ends:
-/// every run removes its own socket once its server stops, and this removes
-/// the directory that held them, so nothing is left in the system temporary
-/// directory.
-struct Sockets;
-impl Drop for Sockets {
+impl Drop for SocketDirectory {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(socket_directory());
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -3536,7 +3525,11 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate passes"),
+            "{report}\nrun records: {:#?}",
+            fixture.records(&options.out)
+        );
         for arm in ["current", "candidate"] {
             let export = std::fs::read_to_string(
                 options
