@@ -155,6 +155,38 @@ pub struct Restart {
     pub fullscreen: bool,
 }
 
+/// No code published yet: the interface is still running.
+const NO_CODE: i32 = i32::MIN;
+
+/// The exit code the interface leaves the terminal with, published before the
+/// terminal is handed back: a terminal that stopped reading delays the exit by
+/// the terminal bound, never holds it ([`leave_code`]).
+static LEAVE_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(NO_CODE);
+static LEAVE_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Publishes the code the interface is leaving with. Called once the event
+/// loop returned and before the terminal is left, so the composition root
+/// knows the code even when handing the terminal back is what is slow.
+fn report_leave(code: i32) {
+    LEAVE_CODE.store(code, std::sync::atomic::Ordering::SeqCst);
+    LEAVE_NOTIFY.notify_waiters();
+}
+
+/// Waits until the interface published its exit code — it is about to leave
+/// the terminal — and returns it. Never completes while the interface runs.
+pub(crate) async fn leave_code() -> i32 {
+    loop {
+        let notified = LEAVE_NOTIFY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let code = LEAVE_CODE.load(std::sync::atomic::Ordering::SeqCst);
+        if code != NO_CODE {
+            return code;
+        }
+        notified.await;
+    }
+}
+
 pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
     let mut restart = None;
     let code = run_terminal(host, surroundings, &mut restart);
@@ -651,6 +683,7 @@ fn run_terminal(
         bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
     }
     let _ = terminal.write(&bytes);
+    report_leave(code);
     terminal.leave();
     app.host.shutdown();
     code
