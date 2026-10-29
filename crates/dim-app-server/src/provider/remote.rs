@@ -300,9 +300,6 @@ fn project(
     };
     descriptor.insert("id".into(), Value::String(id.into()));
     let mut raw = descriptor.clone();
-    if driver == "anthropic" && raw.get("type").and_then(Value::as_str) == Some("model") {
-        raw.remove("type");
-    }
     if driver == "gemini"
         && let Some(methods) = item.get("supportedGenerationMethods")
     {

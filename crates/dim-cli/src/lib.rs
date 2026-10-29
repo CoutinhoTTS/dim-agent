@@ -647,66 +647,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         }
         Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
-            let catalog: mcp::Catalog = match client
-                .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
-                .await
-            {
-                Ok(catalog) => catalog,
-                Err(error) if !*enabled && error.downcast_ref::<client::RpcError>().is_some() => {
-                    client
-                        .rpc(
-                            "mcp.set_enabled",
-                            serde_json::json!({"cwd":options.cwd,"id":id,"source":"project","expectedVersion":"","enabled":false}),
-                        )
-                        .await?;
-                    println!("Disabled {:?} (project).", id);
-                    eprintln!(
-                        "The MCP catalog could not be read ({}); withdrew this workspace's enablement of {:?}. A user entry with this ID is unchanged.",
-                        crate::sanitize::safe(&error.to_string()),
-                        id
-                    );
-                    return Ok(0);
-                }
-                Err(error) => return Err(error),
-            };
-            let (source, listed) = match catalog.servers.into_iter().find(|server| server.id == *id)
-            {
-                Some(server) => (server.source, true),
-                None if !*enabled && catalog.project_revision.is_some() => {
-                    ("project".into(), false)
-                }
-                None => return Err(format!("No MCP server {:?} in mcp list", id).into()),
-            };
-            let expected = if source == "project" {
-                catalog
-                    .project_revision
-                    .ok_or("Invalid mcp.catalog response")?
-            } else {
-                catalog.user_revision
-            };
-            client
-                .rpc(
-                    "mcp.set_enabled",
-                    serde_json::json!({"cwd":options.cwd,"id":id,"source":source,"expectedVersion":expected,"enabled":enabled}),
-                )
-                .await?;
-            println!(
-                "{} {:?} ({}).",
-                if *enabled { "Enabled" } else { "Disabled" },
-                id,
-                crate::sanitize::safe(&source)
-            );
-            if *enabled && source == "project" {
-                eprintln!(
-                    "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions."
-                );
-            }
-            if !listed {
-                eprintln!(
-                    "{:?} is not in mcp list; withdrew any stored enablement of it in this workspace.",
-                    id
-                );
-            }
+            let (rows, notes) =
+                mcp_command::set_enabled(&mut client, &options, id, *enabled).await?;
+            mcp_command::print_report(rows, notes);
             Ok(0)
         }
         Action::Chat | Action::Tui | Action::Exec => {

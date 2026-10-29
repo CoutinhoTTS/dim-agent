@@ -750,8 +750,7 @@ fn static_models(
                         && entry
                             .metadata
                             .as_ref()
-                            .and_then(|m| m.raw.get("type"))
-                            .and_then(Value::as_str)
+                            .and_then(crate::model_catalog::model_kind)
                             .is_some_and(|kind| kind != "chat"))
                     || !record.enabled
                     || !record.routes.contains_key(&entry.model_id)

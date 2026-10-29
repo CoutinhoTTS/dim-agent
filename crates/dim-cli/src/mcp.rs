@@ -71,9 +71,14 @@ pub async fn catalog_report(
             rows.push(format!("  Missing scopes: {}", safe(&scopes.join(", "))));
         }
     }
-    let mut notes = vec![
-        "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.".to_owned(),
-    ];
+    // The columns describe rows: with no server, the report says so instead.
+    let mut notes = if rows.is_empty() {
+        vec!["No MCP server is configured.".to_owned()]
+    } else {
+        vec![
+            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.".to_owned(),
+        ]
+    };
     for (source, application) in [
         ("user", Some(catalog.user_application)),
         ("project", catalog.project_application),
@@ -148,7 +153,9 @@ pub struct Started {
     pub expires_at: u64,
 }
 
-/// Each server's state in the Session, with a hint where it needs sign-in.
+/// Each server's state in the Session, with the reason under it: a failure's
+/// message, a refused tool-source version, or the catalog error for the
+/// whole Session.
 pub async fn session_report(client: &mut Client, session: &str) -> Result<Vec<String>> {
     let state: State = client
         .typed("session.mcp", json!({"sessionId":session}))
@@ -161,7 +168,20 @@ pub async fn session_report(client: &mut Client, session: &str) -> Result<Vec<St
                 "  Sign in with mcp login {:?} or /mcp login {:?}.",
                 server.id, server.id
             ));
+        } else if let Some(message) = &server.message {
+            // `auth_required` says the same thing through its hint above.
+            lines.push(format!("  {}", safe(message)));
         }
+        if let Some(rejection) = &server.rejection {
+            lines.push(format!(
+                "  Version {} rejected: {}",
+                safe(&rejection.version),
+                safe(&rejection.reason)
+            ));
+        }
+    }
+    if let Some(error) = &state.catalog_error {
+        lines.push(format!("MCP catalog: {}", safe(error)));
     }
     Ok(lines)
 }
@@ -171,11 +191,25 @@ pub async fn session_report(client: &mut Client, session: &str) -> Result<Vec<St
 pub struct State {
     pub session_id: String,
     pub servers: Vec<Status>,
+    #[serde(default)]
+    pub catalog_error: Option<String>,
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub id: String,
     pub state: String,
+    /// Why the server failed, from `session.mcp`.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// The last tool-source version the Session refused.
+    #[serde(default)]
+    pub rejection: Option<Rejection>,
+}
+#[derive(Deserialize)]
+pub struct Rejection {
+    pub version: String,
+    pub reason: String,
 }
 
 pub use dim_client::callback::Capture;

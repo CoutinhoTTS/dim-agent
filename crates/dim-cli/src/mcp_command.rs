@@ -8,7 +8,7 @@ use crate::{
     client::Client,
     input::Input,
     login::open_browser,
-    mcp::{Capture, Started, catalog_report, error, session_report, target},
+    mcp::{Capture, Catalog, Started, catalog_report, error, session_report, target},
     sanitize::safe,
 };
 use serde::Deserialize;
@@ -22,13 +22,89 @@ use url::Url;
 
 pub async fn list(client: &mut Client, options: &Options) -> Result<()> {
     let (rows, notes) = catalog_report(client, options).await?;
+    print_report(rows, notes);
+    Ok(())
+}
+
+/// Writes a report: its rows on stdout, its notes on stderr.
+pub fn print_report(rows: Vec<String>, notes: Vec<String>) {
     for row in rows {
         println!("{row}");
     }
     for note in notes {
         eprintln!("{note}");
     }
-    Ok(())
+}
+
+/// `mcp enable ID` and `mcp disable ID`: the request the standalone command
+/// sends. Both `/mcp` clients call it too, so the form works where the
+/// report names it.
+pub async fn set_enabled(
+    client: &mut Client,
+    options: &Options,
+    id: &str,
+    enabled: bool,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let catalog: Catalog = match client
+        .typed("mcp.catalog", json!({"cwd":options.cwd}))
+        .await
+    {
+        Ok(catalog) => catalog,
+        Err(error) if !enabled && error.downcast_ref::<crate::client::RpcError>().is_some() => {
+            client
+                .rpc(
+                    "mcp.set_enabled",
+                    json!({"cwd":options.cwd,"id":id,"source":"project","expectedVersion":"","enabled":false}),
+                )
+                .await?;
+            return Ok((
+                vec![format!("Disabled {id:?} (project).")],
+                vec![format!(
+                    "The MCP catalog could not be read ({}); withdrew this workspace's enablement of {id:?}. A user entry with this ID is unchanged.",
+                    safe(&error.to_string())
+                )],
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let (source, listed) = match catalog.servers.into_iter().find(|server| server.id == id) {
+        Some(server) => (server.source, true),
+        None if !enabled && catalog.project_revision.is_some() => ("project".into(), false),
+        None => return Err(format!("No MCP server {id:?} in mcp list").into()),
+    };
+    let expected = if source == "project" {
+        catalog
+            .project_revision
+            .ok_or("Invalid mcp.catalog response")?
+    } else {
+        catalog.user_revision
+    };
+    client
+        .rpc(
+            "mcp.set_enabled",
+            json!({"cwd":options.cwd,"id":id,"source":source,"expectedVersion":expected,"enabled":enabled}),
+        )
+        .await?;
+    let mut notes = Vec::new();
+    if enabled && source == "project" {
+        notes.push(
+            "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions."
+                .to_owned(),
+        );
+    }
+    if !listed {
+        notes.push(format!(
+            "{id:?} is not in mcp list; withdrew any stored enablement of it in this workspace."
+        ));
+    }
+    Ok((
+        vec![format!(
+            "{} {id:?} ({}).",
+            if enabled { "Enabled" } else { "Disabled" },
+            safe(&source)
+        )],
+        notes,
+    ))
 }
 
 async fn settle<T>(
@@ -257,9 +333,9 @@ pub async fn command(
         list(client, options).await?;
         return session_status(client, session).await;
     }
-    let (action, mut id) = rest
-        .split_once(char::is_whitespace)
-        .ok_or("Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID]")?;
+    let (action, mut id) = rest.split_once(char::is_whitespace).ok_or(
+        "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|enable ID|disable ID]",
+    )?;
     id = id.trim_start();
     match action {
         "login" => {
@@ -284,6 +360,16 @@ pub async fn command(
             sign_out(client, options, id).await?;
             Ok(())
         }
-        _ => Err("Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID]".into()),
+        "enable" | "disable"
+            if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) =>
+        {
+            let (rows, notes) = set_enabled(client, options, id, action == "enable").await?;
+            print_report(rows, notes);
+            Ok(())
+        }
+        _ => Err(
+            "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|enable ID|disable ID]"
+                .into(),
+        ),
     }
 }
