@@ -117,11 +117,12 @@ are Rust methods over the native store, not services: only Agents calls them.
    only while its database has rows of S: `command-output/` is shared by every database in the directory, so the
    directory of an id without rows here may belong to another database's Session (§4).
 4. **Rows.** One `IMMEDIATE` transaction removes every row of S: `session_file_owners`, `timeline_snapshots`,
-   `timeline_events`, `timeline_branches`, `timeline_content`, `session_owners` and `agent_sessions`, in this order
-   because of the foreign keys, plus S5b's title metadata (§14). This is the operation a creation rollback runs
-   today ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) `rollback_creation`), extended by S5a
-   with the owner rows; delete and rollback share it. It runs on the Timeline writer, as a rollback does, so it
-   follows every append already queued for S and clears S's recorded write failure.
+   `timeline_events`, `timeline_branches`, `timeline_content`, `session_owners`, `session_catalog` and
+   `agent_sessions`, in this order because of the foreign keys, plus S5b's title metadata (§14). `session_catalog` is
+   the derived row of [#556's catalog projection](native-storage-format.md#556-格式决定). This is the operation a
+   creation rollback runs today ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)
+   `rollback_creation`), extended by S5a with the owner rows; delete and rollback share it. It runs on the Timeline
+   writer, as a rollback does, so it follows every append already queued for S and clears S's recorded write failure.
 5. **Sweep.** SessionStore schedules S5a's sweep ([Session files §5.4](session-files.md#54-sweep)). Files whose last
    owner was S are removed there; files a fork still owns stay.
 6. **Forget.** Agents removes S's protocol version and unavailable-Session entry, marks S's slot closed and deleted,
@@ -308,6 +309,7 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2), no byte copied
  agent_sessions.config: stored text                      the same text
  session_owners: (S, Agent A, v3)                        (F, Agent A, v3)
+ session_catalog: derived row                            one row, as a backfill over F's events
  S5b title metadata                                      not copied
 ```
 
@@ -315,6 +317,7 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | --- | --- |
 | `agent_sessions` | A new id (UUID v4), `created_at_ms` at the fork, and the source's `config` text unchanged. That is the whole `SessionConfig`, including `interactive` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), `permissionPolicy`, `collaborationRole`, `cwd`, `model`, `systemPrompt` and `tools`. Copying the text instead of re-serializing it keeps `interactive`'s omission rule as written |
 | `session_owners` | The source's Agent and protocol version |
+| `session_catalog` | One row for F, with the values a backfill over F's events writes: `updated_at_ms` the `create_at` of the last copied event, and `preview` the first user input among the copied events under the same 256-event rule — F's creation time and no preview at a cut of `0` ([#556's catalog projection](native-storage-format.md#556-格式决定)) |
 | `timeline_branches` | `main` with head `at + 1` (its `session/forked`; `0` for a fork at `0`), and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
 | `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored, then one new `session/forked` row at `at + 1` (none for a fork at `0`). No row of a child branch |
 | `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17). The `session/forked` row references no content |
@@ -500,10 +503,11 @@ transactions order them (S5a §6); no in-memory lock is added.
 **Decision: no format change of its own** (S5c itself added no change; #222 added one event row at v16 without a version
 bump, and format v17 keeps it). Recorded in [native-storage-format.md](native-storage-format.md#s5c-格式决定).
 
-- A delete removes rows from existing tables.
+- A delete removes rows from existing tables and, since [#556's catalog projection](native-storage-format.md#556-格式决定),
+  the derived `session_catalog` row.
 - A fork inserts rows into existing tables and copies stored text byte for byte, then inserts one `session/forked` row
-  (empty data) at `at + 1`. A child directory with head 0 and no events is a state the store already accepts: a
-  creation whose child never started.
+  (empty data) at `at + 1`, and writes F's `session_catalog` row from the events it copied. A child directory with head
+  0 and no events is a state the store already accepts: a creation whose child never started.
 - An event id is unique within its Session, and a fork repeats the source's ids in another Session. The store already
   checks and indexes ids per Session; S5c states this as an invariant, not as a change.
 - No provenance column and no tombstone, for the reasons in §4 and §6.6.
