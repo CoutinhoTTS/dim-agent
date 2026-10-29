@@ -9,16 +9,18 @@ use std::sync::Arc;
 
 use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
-    CollaborationOutcome, CollaborationTarget, ContentBlock, ExecStatus, InputMode, JsonObject,
-    ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
+    CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
+    InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
+    ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, LineCut, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
-    QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow,
-    ViewSnapshot, WorkflowView,
+    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView, LineCut,
+    LineState, LineView, MemberCard, MemberConversationState, MemberTarget, QueuedInput, RowKind,
+    RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot,
+    WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -51,6 +53,9 @@ pub struct Projection {
     thinking_rows: HashMap<String, OpenThought>,
     /// The tool row each call id opened.
     tool_rows: HashMap<String, usize>,
+    /// The compaction row each `context/compaction-start` opened, by its
+    /// sequence: the result names that start.
+    compaction_rows: HashMap<u64, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
     pub questions: crate::question::Pending,
@@ -235,7 +240,13 @@ impl Projection {
                 self.held.retain(|(id, _, _)| *id != data.input_id);
             }
             EventContent::BranchCreate(data) => {
-                let mut text = format!("line {}", data.branch.get(..8).unwrap_or(&data.branch));
+                let id = data.branch.get(..8).unwrap_or(&data.branch);
+                let purpose = data.prompt.lines().next().unwrap_or_default().trim();
+                let mut text = if purpose.is_empty() {
+                    format!("line {id}")
+                } else {
+                    purpose.to_owned()
+                };
                 let at = match data.at {
                     BranchCreateAt::Sequence { sequence } => sequence,
                     BranchCreateAt::Create {} => sequence,
@@ -248,9 +259,8 @@ impl Projection {
                     }
                     text.push_str(&format!(" · before “{quoted}”"));
                 }
-                let purpose = data.prompt.lines().next().unwrap_or_default().trim();
                 if !purpose.is_empty() {
-                    text.push_str(&format!(" · {purpose}"));
+                    text.push_str(&format!(" · {id}"));
                 }
                 let index = self.push(format!("opened-{sequence}"), RowKind::Status, text);
                 self.row(index).line = Some(data.branch.clone());
@@ -536,6 +546,34 @@ impl Projection {
                     self.complete_tool(&result.call_id, &result.result);
                 }
             }
+            EventContent::CompactionStart(_) => {
+                let index = self.push(
+                    format!("compaction-{sequence}"),
+                    RowKind::Compaction,
+                    String::new(),
+                );
+                self.row(index).compaction = Some(CompactionView {
+                    state: CompactionState::Running,
+                    text: String::new(),
+                    kept: None,
+                    insufficient: Vec::new(),
+                });
+                self.compaction_rows.insert(sequence, index);
+            }
+            EventContent::Compaction(data) => {
+                let index = match data
+                    .start
+                    .and_then(|start| self.compaction_rows.remove(&start))
+                {
+                    Some(index) => index,
+                    None => self.push(
+                        format!("compaction-{sequence}"),
+                        RowKind::Compaction,
+                        String::new(),
+                    ),
+                };
+                self.row(index).compaction = Some(compaction_view(&data.outcome));
+            }
             EventContent::ModelEnd(data) => {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
@@ -564,8 +602,6 @@ impl Projection {
             | EventContent::ModelUsage(_)
             | EventContent::ToolUseStart(_)
             | EventContent::ToolStart(_)
-            | EventContent::CompactionStart(_)
-            | EventContent::Compaction(_)
             | EventContent::Other => {}
         }
         if matches!(
@@ -696,6 +732,10 @@ impl Projection {
     /// Whether this transcript's turn runs.
     pub fn running(&self) -> bool {
         self.running
+    }
+
+    pub fn rows(&self) -> &[Arc<ViewRow>] {
+        &self.rows
     }
 
     /// The lines `main` recorded, without `main` itself (design §14).
@@ -959,6 +999,7 @@ impl Projection {
             member: None,
             cut: None,
             line: None,
+            compaction: None,
         }));
         self.rows.len() - 1
     }
@@ -1040,6 +1081,107 @@ impl Projection {
             .map(str::to_owned);
         row.exit_code = structured("exitCode").and_then(Value::as_i64);
     }
+}
+
+/// A compaction result as its row shows it. A completed one carries the
+/// summary that replaced the cut history, the inputs it kept verbatim, and
+/// the parts the record names as keeping it above its bound; the rest carry
+/// the reason they record.
+fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
+    let (state, text, kept, insufficient) = match outcome {
+        ContextCompactionResult::Completed {
+            replacement,
+            diagnostics,
+            replacement_parts,
+            ..
+        } => {
+            let (text, kept) = replacement_text(replacement, *replacement_parts);
+            let insufficient = diagnostics
+                .insufficient_space
+                .as_ref()
+                .map(|space| {
+                    space
+                        .parts
+                        .iter()
+                        .map(|part| CompactionPartSize {
+                            part: compaction_part(part.part),
+                            tokens: part.tokens,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (CompactionState::Completed, text, kept, insufficient)
+        }
+        ContextCompactionResult::Skipped { reason, .. } => {
+            (CompactionState::Skipped, reason.clone(), None, Vec::new())
+        }
+        ContextCompactionResult::Failed { error, .. } => {
+            (CompactionState::Failed, error.clone(), None, Vec::new())
+        }
+        ContextCompactionResult::Cancelled { reason } => {
+            (CompactionState::Cancelled, reason.clone(), None, Vec::new())
+        }
+    };
+    CompactionView {
+        state,
+        text,
+        kept,
+        insufficient,
+    }
+}
+
+/// A part of the insufficient-space mark, as this client names it.
+fn compaction_part(part: InsufficientSpacePartName) -> CompactionPart {
+    match part {
+        InsufficientSpacePartName::SystemPrompt => CompactionPart::SystemPrompt,
+        InsufficientSpacePartName::Tools => CompactionPart::Tools,
+        InsufficientSpacePartName::AppendedMessages => CompactionPart::AppendedMessages,
+        InsufficientSpacePartName::KeyedBaseline => CompactionPart::KeyedBaseline,
+        InsufficientSpacePartName::PinnedInputs => CompactionPart::PinnedInputs,
+        InsufficientSpacePartName::Digest => CompactionPart::Digest,
+        InsufficientSpacePartName::Summary => CompactionPart::Summary,
+    }
+}
+
+/// The parts of a completed compaction's replacement, split where the record
+/// says they are: its strategy's messages are the summary, and the pinned
+/// inputs are what follows the strategy and the digest, shown apart. A
+/// record without `replacement_parts` reads as one part (the strategy's), so
+/// the whole replacement is the summary and nothing is pinned.
+fn replacement_text(
+    replacement: &[Message],
+    parts: Option<ReplacementParts>,
+) -> (String, Option<String>) {
+    let length = replacement.len();
+    let (strategy, digest) = parts.map_or((length, 0), |parts| {
+        (
+            usize::try_from(parts.strategy)
+                .unwrap_or(usize::MAX)
+                .min(length),
+            usize::try_from(parts.digest).unwrap_or(0),
+        )
+    });
+    let pinned_from = strategy.saturating_add(digest).min(length);
+    let summary = messages_text(&replacement[..strategy]);
+    let kept = messages_text(&replacement[pinned_from..]);
+    (summary, (!kept.is_empty()).then_some(kept))
+}
+
+/// The text of a run of messages, one per line.
+fn messages_text(messages: &[Message]) -> String {
+    let mut texts: Vec<&str> = Vec::new();
+    for message in messages {
+        match &message.content {
+            MessageContent::Text(text) => texts.push(text),
+            MessageContent::Parts(parts) => texts.extend(parts.iter().filter_map(|part| {
+                let MessagePart::Text { text, .. } = part else {
+                    return None;
+                };
+                Some(text.as_str())
+            })),
+        }
+    }
+    texts.join("\n")
 }
 
 pub(crate) fn result_text(result: &ToolResult) -> String {
@@ -1126,6 +1268,53 @@ mod tests {
             "type": "step",
             "name": name,
             "data": { "turn_id": "t1", "request_id": "r1", "delta": delta },
+        })
+    }
+
+    /// The strategy-neutral diagnostics every compaction record carries.
+    fn diagnostics() -> serde_json::Value {
+        serde_json::json!({
+            "reason": "auto",
+            "trigger": "threshold",
+            "estimatedInputTokens": 300.0,
+            "entriesReplaced": 3,
+            "modelCallCount": 1,
+            "durationMs": 10,
+            "strategy": {"kind": "summary"},
+        })
+    }
+
+    fn compaction_start(sequence: u64) -> serde_json::Value {
+        serde_json::json!({
+            "sequence": sequence,
+            "create_at": sequence * 1000,
+            "type": "context",
+            "name": "compaction-start",
+            "data": {"through": 2, "trigger": "threshold", "strategy": "summary"},
+        })
+    }
+
+    fn compaction(
+        sequence: u64,
+        start: Option<u64>,
+        outcome: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut data = serde_json::json!({"through": 2});
+        if let Some(start) = start {
+            data["start"] = serde_json::json!(start);
+        }
+        let serde_json::Value::Object(outcome) = outcome else {
+            panic!("an outcome is an object")
+        };
+        for (key, value) in outcome {
+            data[key] = value;
+        }
+        serde_json::json!({
+            "sequence": sequence,
+            "create_at": sequence * 1000,
+            "type": "context",
+            "name": "compaction",
+            "data": data,
         })
     }
 
@@ -1321,7 +1510,7 @@ mod tests {
             [Some(0), Some(1), None],
             "a message cuts just before itself"
         );
-        assert_eq!(rows[2].text, "line b-7c · parser race hypothesis");
+        assert_eq!(rows[2].text, "parser race hypothesis · b-7c");
         let mut picked = Projection::default();
         apply(
             &mut picked,
@@ -1342,7 +1531,7 @@ mod tests {
         );
         assert_eq!(
             picked.snapshot().rows[2].text,
-            "line 70560552 · before “try the parser” · try the cache",
+            "try the cache · before “try the parser” · 70560552",
             "a line cut before a message names it, wherever its marker lands"
         );
         assert_eq!(
@@ -1539,5 +1728,130 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].kind, RowKind::Shell);
         assert_eq!(rows[0].text, marker);
+    }
+
+    #[test]
+    fn a_compaction_row_runs_until_its_result_shows_what_replaced_the_context() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[compaction_start(3)]);
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, RowKind::Compaction);
+        assert_eq!(
+            rows[0].compaction,
+            Some(CompactionView {
+                state: CompactionState::Running,
+                text: String::new(),
+                kept: None,
+                insufficient: Vec::new(),
+            })
+        );
+
+        apply(
+            &mut projection,
+            &[compaction(
+                4,
+                Some(3),
+                serde_json::json!({
+                    "status": "completed",
+                    "retain_from": "event-7",
+                    "strategy": "summary",
+                    "replacement": [{"role": "user", "content": "<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
+                    "diagnostics": diagnostics(),
+                }),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows.len(), 1, "the result settles the row its start opened");
+        assert_eq!(
+            rows[0].compaction,
+            Some(CompactionView {
+                state: CompactionState::Completed,
+                text: "<dim-summary>\nThe parser is half done.\n</dim-summary>".into(),
+                kept: None,
+                insufficient: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_outcome_that_is_not_completed_carries_its_reason() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                compaction_start(2),
+                compaction(
+                    3,
+                    Some(2),
+                    serde_json::json!({
+                        "status": "skipped",
+                        "reason": "nothing to cut",
+                        "diagnostics": diagnostics(),
+                    }),
+                ),
+                compaction_start(5),
+                compaction(
+                    6,
+                    Some(5),
+                    serde_json::json!({
+                        "status": "failed",
+                        "error": "the summarizer returned nothing",
+                    }),
+                ),
+                compaction_start(8),
+                compaction(
+                    9,
+                    Some(8),
+                    serde_json::json!({
+                        "status": "cancelled",
+                        "reason": "the capability was reloading",
+                    }),
+                ),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let states: Vec<(CompactionState, &str)> = rows
+            .iter()
+            .map(|row| {
+                let compaction = row.compaction.as_ref().expect("a compaction row");
+                (compaction.state, compaction.text.as_str())
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (CompactionState::Skipped, "nothing to cut"),
+                (CompactionState::Failed, "the summarizer returned nothing"),
+                (CompactionState::Cancelled, "the capability was reloading"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_result_no_start_opened_still_gets_its_row() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[compaction(
+                4,
+                None,
+                serde_json::json!({
+                    "status": "failed",
+                    "error": "context is not configured",
+                }),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].compaction,
+            Some(CompactionView {
+                state: CompactionState::Failed,
+                text: "context is not configured".into(),
+                kept: None,
+                insufficient: Vec::new(),
+            })
+        );
     }
 }

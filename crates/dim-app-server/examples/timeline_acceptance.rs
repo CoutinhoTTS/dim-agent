@@ -163,6 +163,13 @@ impl CompactionStrategy for FixedSummary {
     fn name(&self) -> &str {
         "fixed"
     }
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        model.count_tokens(&ModelRequest::new(
+            "",
+            "",
+            vec![summary_message("Prior turns completed.")],
+        ))
+    }
     fn compact(
         &self,
         input: CompactionInput,
@@ -170,6 +177,7 @@ impl CompactionStrategy for FixedSummary {
     ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
             let diagnostics = StrategyDiagnostics {
+                model_usage: None,
                 model_call_count: 0,
                 record: CompactionStrategyRecord {
                     kind: "fixed".into(),

@@ -36,7 +36,8 @@
     {
       "id": "earlier",
       "kind": "fact",
-      "text": "The setting is read through FileStorage at the start of each compaction."
+      "text": "The setting is read through FileStorage at the start of each compaction.",
+      "item": "decision"
     },
     {
       "id": "new",
@@ -51,7 +52,14 @@
     {
       "id": "target",
       "kind": "fact",
-      "text": "The target summary length is not shipped until the evaluation has run."
+      "text": "The target summary length is not shipped until the evaluation has run.",
+      "item": "decision"
+    },
+    {
+      "id": "task",
+      "kind": "fact",
+      "item": "task",
+      "text": "The task is to add the compaction.json setting to the product summary strategy, and the work in progress is its flow test."
     }
   ]
 }

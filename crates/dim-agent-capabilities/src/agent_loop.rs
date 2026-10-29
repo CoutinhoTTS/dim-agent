@@ -908,6 +908,8 @@ impl AgentLoop {
                                         entries_replaced: 0,
                                         model_call_count: 0,
                                         duration_ms: 0,
+                                        model_usage: None,
+                                        insufficient_space: None,
                                         strategy: CompactionStrategyRecord {
                                             kind: self.policy.as_ref().map_or_else(
                                                 || "none".to_owned(),

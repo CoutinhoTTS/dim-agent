@@ -13,6 +13,24 @@ const HINT: &str = "Enter show the line · x end it · Esc close";
 /// The rows in tree order: the session itself, then each line under the line
 /// that opened it, children by where they were cut from it and then in the
 /// order the snapshot lists them (design §14, timeline UI §6).
+/// A line's id as the screen names it: its first eight characters.
+pub fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+/// How a line stands, as the panels say it.
+pub fn state_label(state: &LineState) -> String {
+    match state {
+        LineState::Main => t("the session itself").to_owned(),
+        LineState::Working => t("working").to_owned(),
+        LineState::Waiting => t("waiting").to_owned(),
+        LineState::EndedItself => t("ended itself").to_owned(),
+        LineState::EndedByOperation => t("ended by an operation").to_owned(),
+        LineState::EndedWith(ancestor) => tf("ended with {id}", &[("id", ancestor)]),
+        LineState::CreationFailed => t("creation failed").to_owned(),
+    }
+}
+
 fn tree_order(lines: &[LineView]) -> Vec<(usize, usize)> {
     fn walk(
         lines: &[LineView],
@@ -98,15 +116,7 @@ impl LinesPanel {
             .into_iter()
             .map(|(index, depth)| {
                 let line = &snapshot.lines[index];
-                let state = match &line.state {
-                    LineState::Main => t("the session itself").to_owned(),
-                    LineState::Working => t("working").to_owned(),
-                    LineState::Waiting => t("waiting").to_owned(),
-                    LineState::EndedItself => t("ended itself").to_owned(),
-                    LineState::EndedByOperation => t("ended by an operation").to_owned(),
-                    LineState::EndedWith(ancestor) => tf("ended with {id}", &[("id", ancestor)]),
-                    LineState::CreationFailed => t("creation failed").to_owned(),
-                };
+                let state = state_label(&line.state);
                 let viewed = if line.id == self.focus {
                     format!(" · {}", t("shown"))
                 } else {
@@ -120,15 +130,18 @@ impl LinesPanel {
                     );
                     detail.push_str(" · ");
                 }
-                if !line.purpose.is_empty() {
-                    detail.push_str(&safe(&line.purpose));
+                let title = if line.purpose.is_empty() {
+                    safe(short_id(&line.id))
+                } else {
+                    detail.push_str(&safe(short_id(&line.id)));
                     detail.push_str(" · ");
-                }
+                    safe(&line.purpose)
+                };
                 detail.push_str(&state);
                 detail.push_str(&viewed);
                 Item::new(
                     line.id.clone(),
-                    format!("{}{}", "  ".repeat(depth), safe(&line.id)),
+                    format!("{}{title}", "  ".repeat(depth)),
                     detail,
                 )
             })
@@ -357,7 +370,12 @@ mod tests {
                 .position(|row| row.contains(id))
                 .unwrap_or_else(|| panic!("{id} is listed: {rows:#?}"))
         };
-        assert!(rows.iter().any(|row| row.contains("    b-91")), "{rows:#?}");
+        let review = &rows[position("b-91")];
+        assert!(review.contains("    review"), "{rows:#?}");
+        assert!(
+            review.find("review") < review.find("b-91"),
+            "the title leads, the id follows: {review}"
+        );
         assert!(position("b-7c") < position("b-91"), "{rows:#?}");
         assert!(
             position("b-91") < position("b-02"),

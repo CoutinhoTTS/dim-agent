@@ -51,10 +51,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main é a própria sessão; uma linha termina, main não"
         }
         "Line has ended:" => "A linha terminou:",
+        "Esc close" => "Esc fechar",
+        "/{name} needs {argument}" => "/{name} precisa de {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} aceita só texto; remova {label} para enviar"
+        }
         "e edit · b branch · f fork" => "e editar · b ramo · f fork",
         "e edit" => "e editar",
-        "Fork the session before this message? (y/N)" => {
-            "Fazer fork da sessão antes desta mensagem? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "Fazer fork da sessão antes de “{message}”? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "Fazer fork da sessão após o último turno? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ nova linha a partir de {id} · Esc cancelar",
         "A fork copies main; b opens a line here" => "Um fork copia main; b abre uma linha aqui",
@@ -303,8 +311,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details and thoughts" => {
-            "recolher ou expandir detalhes de ferramentas e pensamentos"
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "recolher/expandir detalhes de ferramentas, pensamentos e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => {
             "alternar entre ecrã inteiro e histórico do terminal"
@@ -454,6 +462,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "cópia do terminal",
         "drag to select" => "arrastar para selecionar",
         "drag or {shortcut}" => "arrastar ou {shortcut}",
+        "Compacting context…" => "A compactar o contexto…",
+        "Context compacted" => "Contexto compactado",
+        "Context compaction skipped" => "Compactação do contexto ignorada",
+        "Context compaction failed" => "Falha na compactação do contexto",
+        "Context compaction cancelled" => "Compactação do contexto cancelada",
+        "near the compaction threshold" => "perto do limite de compactação",
+        "This daemon does not support context compaction" => {
+            "Este daemon não suporta a compactação do contexto"
+        }
+        "compact the context of the shown line" => "compactar o contexto da linha apresentada",
+        "Kept verbatim" => "Mantido literalmente",
+        "insufficient space: {parts}" => "espaço insuficiente: {parts}",
+        "system prompt" => "prompt do sistema",
+        "tools" => "ferramentas",
+        "appended messages" => "mensagens anexadas",
+        "keyed baseline" => "linha de base com chaves",
+        "pinned inputs" => "entradas fixadas",
+        "digest" => "compêndio",
+        "summary" => "resumo",
         _ => return None,
     })
 }

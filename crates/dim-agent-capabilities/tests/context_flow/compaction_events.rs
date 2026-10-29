@@ -59,10 +59,18 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
                 _ => None,
             })
             .collect();
+        // One compaction replaces everything: the summary, then the running
+        // turn's pinned input (ContextCompaction §5.3, §5.9). A later
+        // preparation does not compact again on the regrowth rule (§5.6).
         assert!(matches!(compactions.as_slice(), [
-                ContextCompactionResult::Skipped { .. },
-                ContextCompactionResult::Completed { replacement, .. },
-            ] if *replacement == [dim_agent_capabilities::history::summary_message("short")]));
+                ContextCompactionResult::Completed {
+                    replacement,
+                    replacement_parts,
+                    ..
+                },
+            ] if replacement.len() == 2
+                && replacement[0] == dim_agent_capabilities::history::summary_message("short")
+                && *replacement_parts == Some(ReplacementParts { strategy: 1, digest: 0 })));
         let saved = store
             .latest_snapshot(
                 &TimelineKey {
@@ -237,6 +245,8 @@ impl DynPlugin for RewriteCompaction {
                                 strategy: "test".into(),
                                 diagnostics,
                                 context_baseline: Vec::new(),
+                                replacement_parts: None,
+                                pinned_inputs: None,
                             };
                         }
                         Edit::Failed => {
@@ -260,6 +270,8 @@ impl DynPlugin for RewriteCompaction {
                                 strategy: "test".into(),
                                 diagnostics,
                                 context_baseline: Vec::new(),
+                                replacement_parts: None,
+                                pinned_inputs: None,
                             };
                         }
                     }
@@ -435,6 +447,7 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
                 Context {
                     foreign_cursor: matches!(edit, Edit::Completed),
                     threshold: (!recovery).then_some(300.),
+                    ..Context::default()
                 },
             );
             builder.require_feature(

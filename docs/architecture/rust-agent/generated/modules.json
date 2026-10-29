@@ -2782,6 +2782,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "panic",
         "serde_json::json"
       ]
     },
@@ -4242,6 +4243,7 @@
         "format",
         "matches",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -6656,12 +6658,16 @@
         "path context_configuration",
         "path context_messages",
         "path retained_entry",
+        "path truncate_middle",
+        "path user_message",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::context_messages",
-        "use crate::history::retained_entry"
+        "use crate::history::retained_entry",
+        "use crate::history::truncate_middle",
+        "use crate::history::user_message"
       ]
     },
     {
@@ -6683,6 +6689,7 @@
         "path ResolveContextModel",
         "path StrategyDiagnostics",
         "path StrategyOutcome::Completed",
+        "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
         "path crate::host::HostErrorKind::Other"
       ]
@@ -6702,9 +6709,12 @@
       "to": "dim_agent_types::content",
       "references": [
         "path Message",
+        "path Message::text",
         "path MessageContent::Parts",
         "path MessageContent::Text",
-        "path MessagePart::ToolUse"
+        "path MessagePart::Text",
+        "path MessagePart::ToolUse",
+        "path Role::User"
       ]
     },
     {
@@ -6714,6 +6724,7 @@
         "path AgentEvent",
         "path ContextBudgetData",
         "path ContextCompactionData",
+        "path ContextCompactionResult",
         "path ContextCompactionResult::Cancelled",
         "path ContextCompactionResult::Completed",
         "path ContextCompactionResult::Failed",
@@ -6723,9 +6734,14 @@
         "path EventKind::ContextBudget",
         "path EventKind::ContextCompaction",
         "path EventKind::ContextCompactionStart",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputMessage",
         "path EventKind::ModelCall",
         "path EventKind::ModelUsage",
+        "path InputBlock::Raw",
+        "path InputMessageData",
         "path ModelUsageData",
+        "path ReplacementParts",
         "path events"
       ]
     },
@@ -6743,9 +6759,13 @@
         "path CompactionTrigger::Manual",
         "path CompactionTrigger::ProviderOutputBudgetExhausted",
         "path CompactionTrigger::Threshold",
+        "path InsufficientSpace",
+        "path InsufficientSpacePart",
+        "path InsufficientSpacePartName",
         "path ModelRequest",
         "path ModelRequest::new",
         "path ProviderOutputBudgetFacts",
+        "path SystemPrompt",
         "path model"
       ]
     },
@@ -6754,6 +6774,13 @@
       "to": "dim_agent_types::prompt",
       "references": [
         "path ContextBaselineEntry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolDefinition"
       ]
     },
     {
@@ -7530,7 +7557,8 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_types::events",
       "references": [
-        "path ProviderPresentation"
+        "path ProviderPresentation",
+        "path ReplacementParts"
       ]
     },
     {
@@ -9742,7 +9770,9 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path summary_message",
-        "use crate::history::summary_message"
+        "path truncate_middle",
+        "use crate::history::summary_message",
+        "use crate::history::truncate_middle"
       ]
     },
     {
@@ -9754,12 +9784,15 @@
         "path CompactionStrategyHost",
         "path ContextModel",
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ModelChunk::MessageStop",
         "path ModelChunk::Text",
+        "path ModelChunk::Usage",
         "path ModelConnection",
         "path ModelConnection::Http",
+        "path ModelDriver",
         "path ModelHost",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::ToolUse",
@@ -9768,7 +9801,9 @@
         "path StrategyDiagnostics",
         "path StrategyOutcome",
         "path StrategyOutcome::Completed",
+        "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
+        "path add_usage",
         "path reasoning_config"
       ]
     },
@@ -9825,6 +9860,7 @@
         "path ModelRequest",
         "path ModelRequest::new",
         "path SystemPrompt::Text",
+        "path Usage",
         "path model"
       ]
     },
@@ -21815,9 +21851,16 @@
         "path ContentBlock",
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart::Text",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::Message",
+        "use dim_agent_types::MessageContent",
+        "use dim_agent_types::MessagePart",
         "use dim_agent_types::ToolContent"
       ]
     },
@@ -21839,6 +21882,11 @@
         "path CollaborationTarget::Agent",
         "path CollaborationTarget::Member",
         "path CollaborationTarget::Temporary",
+        "path ContextCompactionResult",
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Completed",
+        "path ContextCompactionResult::Failed",
+        "path ContextCompactionResult::Skipped",
         "path ExecStatus::Cancelled",
         "path ExecStatus::Completed",
         "path ExecStatus::Failed",
@@ -21846,6 +21894,7 @@
         "path InputMode::Append",
         "path InputMode::Steer",
         "path ModelOutputOutcome::Failed",
+        "path ReplacementParts",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
@@ -21858,11 +21907,28 @@
         "use dim_agent_types::CollaborationDelivery",
         "use dim_agent_types::CollaborationOutcome",
         "use dim_agent_types::CollaborationTarget",
+        "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::ExecStatus",
         "use dim_agent_types::InputMode",
         "use dim_agent_types::ModelOutputOutcome",
+        "use dim_agent_types::ReplacementParts",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path InsufficientSpacePartName",
+        "path InsufficientSpacePartName::AppendedMessages",
+        "path InsufficientSpacePartName::Digest",
+        "path InsufficientSpacePartName::KeyedBaseline",
+        "path InsufficientSpacePartName::PinnedInputs",
+        "path InsufficientSpacePartName::Summary",
+        "path InsufficientSpacePartName::SystemPrompt",
+        "path InsufficientSpacePartName::Tools",
+        "use dim_agent_types::InsufficientSpacePartName"
       ]
     },
     {
@@ -21886,6 +21952,21 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path CompactionPart",
+        "path CompactionPart::AppendedMessages",
+        "path CompactionPart::Digest",
+        "path CompactionPart::KeyedBaseline",
+        "path CompactionPart::PinnedInputs",
+        "path CompactionPart::Summary",
+        "path CompactionPart::SystemPrompt",
+        "path CompactionPart::Tools",
+        "path CompactionPartSize",
+        "path CompactionState::Cancelled",
+        "path CompactionState::Completed",
+        "path CompactionState::Failed",
+        "path CompactionState::Running",
+        "path CompactionState::Skipped",
+        "path CompactionView",
         "path LineCut",
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
@@ -21901,6 +21982,7 @@
         "path QueuedInput",
         "path RowKind",
         "path RowKind::AssistantMessage",
+        "path RowKind::Compaction",
         "path RowKind::Error",
         "path RowKind::Shell",
         "path RowKind::Status",
@@ -21924,6 +22006,10 @@
         "path ViewSnapshot::default",
         "path WorkflowView",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::CompactionPart",
+        "use crate::model::view::CompactionPartSize",
+        "use crate::model::view::CompactionState",
+        "use crate::model::view::CompactionView",
         "use crate::model::view::LineCut",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
@@ -22016,6 +22102,13 @@
         "use crate::wire::Event",
         "use crate::wire::EventContent",
         "use crate::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path CompactionState"
       ]
     },
     {
@@ -22388,6 +22481,8 @@
         "path Command::AskAnswers",
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
+        "path Command::CloseSide",
+        "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
         "path Command::FocusLine",
@@ -22429,6 +22524,13 @@
         "path Command::Usage",
         "path Command::WatchMember",
         "path Command::WatchTaskOutput",
+        "path CompactReply",
+        "path CompactReply::Cancelled",
+        "path CompactReply::Completed",
+        "path CompactReply::Failed",
+        "path CompactReply::Skipped",
+        "path CompactReply::Unsupported",
+        "path ContextReading",
         "path DraftPart",
         "path DraftPart::Block",
         "path DraftPart::Paste",
@@ -22460,6 +22562,7 @@
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::Approvals",
+        "path Update::Compacted",
         "path Update::Context",
         "path Update::Failed",
         "path Update::Login",
@@ -22488,6 +22591,8 @@
         "path Update::Web",
         "use crate::model::session::Account",
         "use crate::model::session::Command",
+        "use crate::model::session::CompactReply",
+        "use crate::model::session::ContextReading",
         "use crate::model::session::DraftPart",
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
@@ -22512,6 +22617,7 @@
         "path LineState::Waiting",
         "path LineState::Working",
         "path LineView",
+        "path SideLine",
         "path TaskOutputState::Live",
         "path TaskOutputState::ReadError",
         "path TaskOutputState::Unavailable",
@@ -22519,6 +22625,7 @@
         "path TaskTarget",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
+        "use crate::model::view::SideLine",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::WorkflowInventory"
@@ -23382,6 +23489,7 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_cli::ui::theme::ansi",
       "references": [
+        "path crate::ui::theme::ansi::fg",
         "path crate::ui::theme::ansi::tui_color"
       ]
     },
@@ -24315,6 +24423,7 @@
       "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState",
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
         "path LineState::EndedItself",
@@ -27257,7 +27366,10 @@
       "from": "dim_cli::ui::transcript::block",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionPartSize",
+        "path CompactionState",
         "path RowKind::AssistantMessage",
+        "path RowKind::Compaction",
         "path RowKind::Error",
         "path RowKind::Other",
         "path RowKind::Shell",
@@ -27269,6 +27381,8 @@
         "path RowTone::Danger",
         "path RowTone::Warning",
         "path ViewRow",
+        "use crate::model::view::CompactionPartSize",
+        "use crate::model::view::CompactionState",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
         "use crate::model::view::ViewRow"
@@ -27358,6 +27472,30 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path CompactionPart",
+        "path CompactionPart::AppendedMessages",
+        "path CompactionPart::Digest",
+        "path CompactionPart::KeyedBaseline",
+        "path CompactionPart::PinnedInputs",
+        "path CompactionPart::Summary",
+        "path CompactionPart::SystemPrompt",
+        "path CompactionPart::Tools",
+        "path CompactionPartSize",
+        "path CompactionState",
+        "path CompactionState::Cancelled",
+        "path CompactionState::Completed",
+        "path CompactionState::Failed",
+        "path CompactionState::Running",
+        "path CompactionState::Skipped",
+        "use crate::model::view::CompactionPart",
+        "use crate::model::view::CompactionPartSize",
+        "use crate::model::view::CompactionState"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::sanitize",
       "references": [
         "path crate::sanitize::safe"
@@ -27429,6 +27567,7 @@
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
+        "path Block::Compaction",
         "path Block::Error",
         "path Block::Failure",
         "path Block::Line",
@@ -27672,6 +27811,8 @@
         "path Command::AskAnswers",
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
+        "path Command::CloseSide",
+        "path Command::Compact",
         "path Command::Configure",
         "path Command::EndLine",
         "path Command::FocusLine",
@@ -27711,6 +27852,12 @@
         "path Command::Usage",
         "path Command::WatchMember",
         "path Command::WatchTaskOutput",
+        "path CompactReply::Cancelled",
+        "path CompactReply::Completed",
+        "path CompactReply::Failed",
+        "path CompactReply::Skipped",
+        "path CompactReply::Unsupported",
+        "path ContextReading",
         "path SessionPort",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -27718,6 +27865,7 @@
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::Approvals",
+        "path Update::Compacted",
         "path Update::Context",
         "path Update::Failed",
         "path Update::FilesChanged",
@@ -27749,6 +27897,8 @@
         "path Update::Web",
         "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
+        "use crate::model::session::CompactReply",
+        "use crate::model::session::ContextReading",
         "use crate::model::session::DraftPart",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -27769,23 +27919,36 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionState::Running",
+        "path LineState::Waiting",
         "path LineState::Working",
         "path LineView",
         "path RowKind::AssistantMessage",
+        "path RowKind::Compaction",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
         "path RowKind::Thinking",
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
+        "path SideLine",
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
+        "use crate::model::view::CompactionState",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
         "use crate::model::view::RowKind",
+        "use crate::model::view::SideLine",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -27902,7 +28065,10 @@
       "references": [
         "path LinesPanel",
         "path LinesPanel::new",
-        "use crate::ui::lines_panel::LinesPanel"
+        "path crate::ui::lines_panel::state_label",
+        "path short_id",
+        "use crate::ui::lines_panel::LinesPanel",
+        "use crate::ui::lines_panel::short_id"
       ]
     },
     {
@@ -28287,6 +28453,7 @@
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
+        "path Block::Compaction",
         "path Block::Failure",
         "path Block::Line",
         "path Block::LoadMore",
@@ -28455,8 +28622,11 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState::Waiting",
+        "path LineState::Working",
         "path RowKind::AssistantMessage",
         "path RowKind::UserMessage",
+        "path SideLine",
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default"
@@ -28545,6 +28715,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::transcript::tool_group",
+      "references": [
+        "path Detail::Collapsed"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
         "path App",
@@ -28557,6 +28734,7 @@
         "path chunk",
         "path goodbye_panel",
         "path queue_strip",
+        "path side_reply",
         "path web_panel"
       ]
     },
@@ -29147,13 +29325,11 @@
       "from": "dim_migration::inventory",
       "to": "dim_migration",
       "references": [
-        "path Error::Object",
         "path Migration",
         "path ObjectResult",
         "path Outcome::Deferred",
         "path Result",
         "path TaskState",
-        "use crate::Error",
         "use crate::Migration",
         "use crate::ObjectResult",
         "use crate::Outcome",
@@ -29343,7 +29519,9 @@
       "to": "dim_agent_types::permission",
       "references": [
         "path COMMAND_SEPARATORS",
-        "path CommandRule"
+        "path CommandRule",
+        "path PermissionPolicy",
+        "path PermissionPreset::WorkspaceWrite"
       ]
     },
     {
@@ -29810,6 +29988,7 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path DirectoryEntry",
+        "path FileLease",
         "path FilePath",
         "path FileStorage",
         "path FileStorageError",
@@ -29818,6 +29997,7 @@
         "path FileStorageError::InvalidPath",
         "path FileStorageError::Io",
         "use dim_agent_capabilities::file_storage::DirectoryEntry",
+        "use dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FilePath",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
@@ -30525,6 +30705,14 @@
     },
     {
       "module": "dim_cli::session_host",
+      "path": "Reply::Completed"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "Reply::Skipped"
+    },
+    {
+      "module": "dim_cli::session_host",
       "path": "State::Cancelled"
     },
     {
@@ -30661,6 +30849,10 @@
     },
     {
       "module": "dim_cli::ui::tui",
+      "path": "LiveItem::Compaction"
+    },
+    {
+      "module": "dim_cli::ui::tui",
       "path": "LiveItem::Text"
     },
     {
@@ -30718,6 +30910,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "PluginAction::Enable"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "TurnEnd::Completed"
     },
     {
       "module": "dim_cli::usage",

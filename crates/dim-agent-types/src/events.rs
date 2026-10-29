@@ -340,11 +340,24 @@ pub struct ContextCompactionStartData {
     pub strategy: String,
 }
 
+/// The parts of a completed replacement, as counts of its leading messages:
+/// the strategy's own, then the digest; the rest are the pinned inputs.
+/// Absent reads as one part, the strategy's messages (ContextCompaction §4.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplacementParts {
+    #[serde(with = "crate::safe_integer")]
+    pub strategy: u64,
+    #[serde(with = "crate::safe_integer")]
+    pub digest: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextCompactionResult {
     /// Everything before the Timeline event `retain_from` is replaced by
-    /// `replacement`, stored exactly as the strategy produced it.
+    /// `replacement`, stored exactly as produced, with `replacement_parts`
+    /// locating its strategy, digest and pinned parts.
     Completed {
         retain_from: String,
         replacement: Vec<Message>,
@@ -352,6 +365,21 @@ pub enum ContextCompactionResult {
         diagnostics: Box<CompactionDiagnosticsRecord>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context_baseline: Vec<ContextBaselineEntry>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        replacement_parts: Option<ReplacementParts>,
+        /// The `input/message` id of each pinned message, in order, so a
+        /// later compaction can name an input it carries and must truncate
+        /// (§5.9). Absent reads as no carried ids.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        pinned_inputs: Option<Vec<String>>,
     },
     Skipped {
         reason: String,

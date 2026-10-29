@@ -15,6 +15,8 @@ pub enum RowKind {
     AssistantMessage,
     Thinking,
     ToolCall,
+    /// A `context/compaction-start` and the `context/compaction` that ends it.
+    Compaction,
     Error,
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
@@ -74,6 +76,55 @@ pub struct ViewRow {
     /// A line-opened marker: the line it opened, which a pick enters
     /// (timeline UI §4.4).
     pub line: Option<String>,
+    /// A compaction row's state and detail.
+    pub compaction: Option<CompactionView>,
+}
+
+/// A context compaction as its transcript row shows it (compaction
+/// requirements §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionView {
+    pub state: CompactionState,
+    /// A completed compaction's summary text — the strategy's part of what
+    /// replaced the cut history — or the reason or error of one that did not
+    /// complete.
+    pub text: String,
+    /// The completed compaction's pinned inputs, carried verbatim after the
+    /// summary; none when the record pins nothing.
+    pub kept: Option<String>,
+    /// The parts that keep a completed compaction above its bound, as the
+    /// record names them; empty when the record carries no such mark.
+    pub insufficient: Vec<CompactionPartSize>,
+}
+
+/// One part the record names in a compaction's insufficient-space mark.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionPartSize {
+    pub part: CompactionPart,
+    pub tokens: f64,
+}
+
+/// A part of the context a compaction could not shrink, as the record names
+/// it (`insufficientSpace.parts[].part`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionPart {
+    SystemPrompt,
+    Tools,
+    AppendedMessages,
+    KeyedBaseline,
+    PinnedInputs,
+    Digest,
+    Summary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionState {
+    /// The strategy was called and its result has not arrived.
+    Running,
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
 }
 
 /// A delegation in its leader's transcript, with what this client observed
@@ -267,7 +318,8 @@ pub struct ViewSnapshot {
     pub session_id: String,
     /// Private attachment identity; reopening a panel keeps it.
     pub projection_id: u64,
-    pub main_history_complete: bool,
+    /// The shown line's history has loaded: its transcript can be laid out.
+    pub history_complete: bool,
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
@@ -291,4 +343,16 @@ pub struct ViewSnapshot {
     /// `main` followed by this Session's lines, as the lines panel lists them.
     pub lines: Vec<LineView>,
     pub focus: String,
+    /// The line opened beside the shown one, while its panel is open.
+    pub side: Option<SideLine>,
+}
+
+/// A line the side panel follows (timeline UI §4.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SideLine {
+    pub id: String,
+    pub purpose: String,
+    pub state: LineState,
+    /// Its transcript, shared with the worker's projection.
+    pub rows: Vec<std::sync::Arc<ViewRow>>,
 }

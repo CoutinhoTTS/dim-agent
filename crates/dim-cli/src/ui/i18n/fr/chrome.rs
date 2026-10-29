@@ -49,10 +49,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main est la session elle-même ; une ligne se termine, pas main"
         }
         "Line has ended:" => "La ligne est terminée :",
+        "Esc close" => "Esc fermer",
+        "/{name} needs {argument}" => "/{name} nécessite {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} n’accepte que du texte ; retirez {label} pour envoyer"
+        }
         "e edit · b branch · f fork" => "e modifier · b branche · f fork",
         "e edit" => "e modifier",
-        "Fork the session before this message? (y/N)" => {
-            "Forker la session avant ce message ? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "Forker la session avant « {message} » ? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "Forker la session après le dernier tour ? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ nouvelle ligne depuis {id} · Échap annuler",
         "A fork copies main; b opens a line here" => "Un fork copie main ; b ouvre une ligne ici",
@@ -291,7 +299,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "défiler en haut",
         "scroll to the bottom" => "défiler en bas",
         "pick an earlier message to edit or quote" => "choisir un message à modifier ou citer",
-        "collapse or expand tool details and thoughts" => "replier/déplier outils et réflexions",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "replier/déplier outils, réflexions et résumés de compression"
+        }
         "switch between fullscreen and scrollback" => "basculer plein écran / défilement",
         "switch theme" => "changer de thème",
         "switch language" => "changer de langue",
@@ -438,6 +448,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "copie du terminal",
         "drag to select" => "glisser pour sélectionner",
         "drag or {shortcut}" => "glisser ou {shortcut}",
+        "Compacting context…" => "Compression du contexte…",
+        "Context compacted" => "Contexte compressé",
+        "Context compaction skipped" => "Compression du contexte ignorée",
+        "Context compaction failed" => "La compression du contexte a échoué",
+        "Context compaction cancelled" => "Compression du contexte annulée",
+        "near the compaction threshold" => "proche du seuil de compression",
+        "This daemon does not support context compaction" => {
+            "Ce démon ne prend pas en charge la compression du contexte"
+        }
+        "compact the context of the shown line" => "compresser le contexte de la ligne affichée",
+        "Kept verbatim" => "Conservé tel quel",
+        "insufficient space: {parts}" => "espace insuffisant: {parts}",
+        "system prompt" => "invite système",
+        "tools" => "outils",
+        "appended messages" => "messages ajoutés",
+        "keyed baseline" => "base à clés",
+        "pinned inputs" => "entrées épinglées",
+        "digest" => "condensé",
+        "summary" => "résumé",
         _ => return None,
     })
 }

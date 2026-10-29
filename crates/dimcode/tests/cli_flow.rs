@@ -5937,6 +5937,281 @@ fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
     }
 }
 
+/// The compaction events (§4): one row that runs until its result, then the
+/// summary behind the same disclosure a tool group uses.
+#[test]
+fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let (started, wait_started) = std::sync::mpsc::channel();
+    let (more, wait_more) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        // The composer's first frame is out before the row is sent: `until`
+        // only searches what follows its last match, and a row painted above
+        // the status line in the same frame would be behind that cursor.
+        // The wait carries no deadline of its own: the main thread's `until`
+        // deadlines bound the flow, and a test that fails drops the sender.
+        wait_shown.recv().unwrap();
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-start","sequence":12,"create_at":1,"type":"context","name":"compaction-start",
+             "data":{"through":11,"trigger":"threshold","strategy":"summary"}}}));
+        wait_started.recv().unwrap();
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
+                     "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
+                     "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                                    "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        wait_more.recv().unwrap();
+        // A record that locates its parts: the summary is the strategy's
+        // message, and the pinned input follows it, shown apart.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-start-2","sequence":14,"create_at":1,"type":"context","name":"compaction-start",
+             "data":{"through":11,"trigger":"manual","strategy":"summary"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-2","sequence":15,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"start":14,"status":"completed","retain_from":"dim-2","strategy":"summary",
+                     "replacement":[{"role":"user","content":"<dim-summary>\nThe cache lock moved into a RwLock."},
+                                    {"role":"user","content":"Keep the parser race in mind."}],
+                     "replacement_parts":{"strategy":1,"digest":0},
+                     "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
+                                    "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        // A record whose parts cannot meet its bound: the header names them.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-start-3","sequence":16,"create_at":1,"type":"context","name":"compaction-start",
+             "data":{"through":11,"trigger":"manual","strategy":"summary"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-3","sequence":17,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"start":16,"status":"completed","retain_from":"dim-2","strategy":"summary",
+                     "replacement":[{"role":"user","content":"<dim-summary>\nTrimmed."}],
+                     "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
+                                    "estimatedOutputTokens":6400.0,"entriesReplaced":3,"modelCallCount":1,
+                                    "durationMs":10,"strategy":{"kind":"summary"},
+                                    "insufficientSpace":{"parts":[
+                                        {"part":"summary","tokens":3200.0},
+                                        {"part":"pinnedInputs","tokens":1100.0}]}}}}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.until("Compacting context…");
+    started.send(()).unwrap();
+    terminal.until("Context compacted");
+    terminal.until("The parser is half done.");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.write(b"/tools\r");
+    terminal.until("The parser is half done.");
+    more.send(()).unwrap();
+    terminal.until("Kept verbatim");
+    terminal.until("Keep the parser race in mind.");
+    let transcript = terminal.transcript.clone();
+    let at = |needle: &str| {
+        transcript
+            .find(needle)
+            .unwrap_or_else(|| panic!("no {needle:?}: {transcript}"))
+    };
+    assert!(
+        at("The cache lock moved into a RwLock.") < at("Kept verbatim"),
+        "the summary comes before the kept input: {transcript}"
+    );
+    assert!(
+        at("Kept verbatim") < at("Keep the parser race in mind."),
+        "the kept input follows its label: {transcript}"
+    );
+    terminal.until("insufficient space: summary 3.2K, pinned inputs 1.1K");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// `/compact` calls `session.context.compact` for the shown line and reports
+/// what the method answered, including a daemon without the method.
+#[test]
+fn tui_compact_calls_the_context_method_and_reports_its_reply() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        for attempt in 0..3 {
+            let compact = wire.read("session.context.compact");
+            assert_eq!(
+                compact["params"],
+                json!({"sessionId":"session","branchId":"main"})
+            );
+            match attempt {
+                0 => wire.reply(&compact, json!({"status":"completed","sequence":12})),
+                1 => {
+                    wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+                        {"id":"dim-compaction-start","sequence":14,"create_at":1,"type":"context","name":"compaction-start",
+                         "data":{"through":13,"trigger":"manual","strategy":"summary"}}}));
+                    wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+                        {"id":"dim-compaction","sequence":15,"create_at":1,"type":"context","name":"compaction",
+                         "data":{"through":13,"start":14,"status":"skipped","reason":"nothing to cut",
+                                 "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":120.0,
+                                                "entriesReplaced":0,"modelCallCount":0,"durationMs":1,"strategy":{"kind":"summary"}}}}}));
+                    wire.reply(&compact, json!({"status":"skipped","reason":"nothing to cut"}));
+                }
+                _ => wire.send(json!({"jsonrpc":"2.0","id":compact["id"],"error":
+                    {"code":-32601,"message":"Unknown method: session.context.compact","data":{"appError":"unknown_method"}}})),
+            }
+        }
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/compact\r");
+    terminal.until("Context compacted");
+    terminal.write(b"/compact\r");
+    terminal.until("Context compaction skipped · nothing to cut");
+    terminal.write(b"/compact\r");
+    terminal.until("This daemon does not support context compaction");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// The gauge warns at 90% of the threshold the server returned — not below —
+/// and a compaction result outside a run reads the gauge again (§7.5).
+#[test]
+fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_it() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.context.usage"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let usage = |input: f64| {
+            json!({"contextWindow":256000.0,"outputTokens":32000.0,
+                "thresholdTokens":200000.0,"estimatedInputTokens":input,
+                "baselineSource":"estimate"})
+        };
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => {
+                    assert_eq!(
+                        request["params"],
+                        json!({"sessionId":"session","branchId":"main"})
+                    );
+                    wire.reply(&request, usage(179_999.0));
+                }
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        // No deadline of its own; the main thread's `until` bounds the flow.
+        wait_shown.recv().unwrap();
+        wire.notice(
+            "session.event",
+            json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction","sequence":12,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"status":"failed","error":"the summarizer returned nothing"}}}),
+        );
+        let refresh = wire.read("session.context.usage");
+        wire.reply(&refresh, usage(180_000.0));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(
+                !line.contains("session.context.usage"),
+                "extra read: {line}"
+            );
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("179.9K / 256K");
+    assert!(
+        !terminal
+            .transcript
+            .contains("near the compaction threshold"),
+        "{}",
+        terminal.transcript
+    );
+    shown.send(()).unwrap();
+    terminal.until("the summarizer returned nothing");
+    terminal.until("180K / 256K · near the compaction threshold");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A resumed session rebuilds its compaction rows from history.
+#[test]
+fn tui_rebuilds_compaction_rows_from_history_on_resume() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let summaries = wire.read("session.summaries");
+        wire.reply(&summaries, json!([{"sessionId":"session","cwd":"/workspace","model":{"providerId":"test","modelId":"model"},"updatedAt":1}]));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[
+                {"id":"dim-compaction-start","sequence":3,"create_at":1,"type":"context","name":"compaction-start",
+                 "data":{"through":2,"trigger":"threshold","strategy":"summary"}},
+                {"id":"dim-compaction","sequence":4,"create_at":1,"type":"context","name":"compaction",
+                 "data":{"through":2,"start":3,"status":"completed","retain_from":"dim-1","strategy":"summary",
+                         "replacement":[{"role":"user","content":"<dim-summary>\nRestored summary text.\n</dim-summary>"}],
+                         "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                                        "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.args(["--resume", "session"]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Context compacted");
+    terminal.until("Restored summary text.");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling
 /// App Server's read-only export, live and after stop, without a daemon.
 #[test]

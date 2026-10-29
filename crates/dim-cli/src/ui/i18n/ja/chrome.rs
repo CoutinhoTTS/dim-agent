@@ -43,10 +43,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main はセッション自体です。ラインは終了できますが main は終了しません"
         }
         "Line has ended:" => "ラインは終了しました:",
+        "Esc close" => "Esc 閉じる",
+        "/{name} needs {argument}" => "/{name} には {argument} が必要です",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} はテキストのみです。{label} を削除してから送信してください"
+        }
         "e edit · b branch · f fork" => "e 編集 · b ブランチ · f フォーク",
         "e edit" => "e 編集",
-        "Fork the session before this message? (y/N)" => {
-            "このメッセージの前でセッションをフォークしますか？(y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "「{message}」の前でセッションをフォークしますか？(y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "最後のターンの後でセッションをフォークしますか？(y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id} から新しいライン · Esc キャンセル",
         "A fork copies main; b opens a line here" => {
@@ -273,7 +281,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "先頭へスクロール",
         "scroll to the bottom" => "末尾へスクロール",
         "pick an earlier message to edit or quote" => "過去のメッセージを編集・引用",
-        "collapse or expand tool details and thoughts" => "ツール詳細・思考の開閉",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "ツール詳細・思考・圧縮サマリーの開閉"
+        }
         "switch between fullscreen and scrollback" => "全画面/スクロールバック切替",
         "switch theme" => "テーマを切替",
         "switch language" => "言語を切替",
@@ -416,6 +426,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "端末コピー",
         "drag to select" => "ドラッグで選択",
         "drag or {shortcut}" => "ドラッグまたは {shortcut}",
+        "Compacting context…" => "コンテキストを圧縮しています…",
+        "Context compacted" => "コンテキストを圧縮しました",
+        "Context compaction skipped" => "コンテキストの圧縮をスキップしました",
+        "Context compaction failed" => "コンテキストの圧縮に失敗しました",
+        "Context compaction cancelled" => "コンテキストの圧縮をキャンセルしました",
+        "near the compaction threshold" => "圧縮しきい値に接近",
+        "This daemon does not support context compaction" => {
+            "このデーモンはコンテキストの圧縮に対応していません"
+        }
+        "compact the context of the shown line" => "表示中のラインのコンテキストを圧縮",
+        "Kept verbatim" => "原文のまま保持",
+        "insufficient space: {parts}" => "空き不足：{parts}",
+        "system prompt" => "システムプロンプト",
+        "tools" => "ツール",
+        "appended messages" => "追加メッセージ",
+        "keyed baseline" => "キー付きベースライン",
+        "pinned inputs" => "固定された入力",
+        "digest" => "ダイジェスト",
+        "summary" => "要約",
         _ => return None,
     })
 }

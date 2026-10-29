@@ -45,10 +45,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
         "Line has ended:" => "라인이 종료되었습니다:",
+        "Esc close" => "Esc 닫기",
+        "/{name} needs {argument}" => "/{name}에는 {argument}이(가) 필요합니다",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name}은(는) 텍스트만 받습니다. {label}을(를) 지우고 보내세요"
+        }
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
-        "Fork the session before this message? (y/N)" => {
-            "이 메시지 앞에서 세션을 포크할까요? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "“{message}” 앞에서 세션을 포크할까요? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "마지막 턴 뒤에서 세션을 포크할까요? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id}에서 새 라인 · Esc 취소",
         "A fork copies main; b opens a line here" => {
@@ -263,7 +271,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "맨 위로 스크롤",
         "scroll to the bottom" => "맨 아래로 스크롤",
         "pick an earlier message to edit or quote" => "편집/인용할 이전 메시지 선택",
-        "collapse or expand tool details and thoughts" => "도구 상세·생각 접기/펼치기",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "도구 상세·생각·압축 요약 접기/펼치기"
+        }
         "switch between fullscreen and scrollback" => "전체 화면/스크롤백 전환",
         "switch theme" => "테마 전환",
         "switch language" => "언어 전환",
@@ -404,6 +414,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "터미널 복사",
         "drag to select" => "드래그 선택",
         "drag or {shortcut}" => "드래그 또는 {shortcut}",
+        "Compacting context…" => "컨텍스트 압축 중…",
+        "Context compacted" => "컨텍스트가 압축되었습니다",
+        "Context compaction skipped" => "컨텍스트 압축을 건너뜀",
+        "Context compaction failed" => "컨텍스트 압축 실패",
+        "Context compaction cancelled" => "컨텍스트 압축 취소됨",
+        "near the compaction threshold" => "압축 임계값에 근접",
+        "This daemon does not support context compaction" => {
+            "이 데몬은 컨텍스트 압축을 지원하지 않습니다"
+        }
+        "compact the context of the shown line" => "표시된 라인의 컨텍스트 압축",
+        "Kept verbatim" => "원문 그대로 유지",
+        "insufficient space: {parts}" => "공간 부족: {parts}",
+        "system prompt" => "시스템 프롬프트",
+        "tools" => "도구",
+        "appended messages" => "추가 메시지",
+        "keyed baseline" => "키가 지정된 기준선",
+        "pinned inputs" => "고정된 입력",
+        "digest" => "다이제스트",
+        "summary" => "요약",
         _ => return None,
     })
 }

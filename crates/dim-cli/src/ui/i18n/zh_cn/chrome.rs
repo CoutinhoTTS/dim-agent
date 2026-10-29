@@ -40,9 +40,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main 就是会话本身；线可以结束，main 不能"
         }
         "Line has ended:" => "该线已结束：",
+        "Esc close" => "Esc 关闭",
+        "/{name} needs {argument}" => "/{name} 需要 {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} 只接受文字；移除 {label} 后再发送"
+        }
         "e edit · b branch · f fork" => "e 编辑 · b 分支 · f 派生",
         "e edit" => "e 编辑",
-        "Fork the session before this message? (y/N)" => "在这条消息之前派生会话？(y/N)",
+        "Fork the session before “{message}”? (y/N)" => "在“{message}”之前派生会话？(y/N)",
+        "Fork the session after the last turn? (y/N)" => "在最近一个回合之后派生会话？(y/N)",
         "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新线 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开线",
         "A line opens from text; images and files were not included" => {
@@ -248,7 +254,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "滚动到顶部",
         "scroll to the bottom" => "滚动到底部",
         "pick an earlier message to edit or quote" => "选择较早的消息进行编辑或引用",
-        "collapse or expand tool details and thoughts" => "折叠或展开工具详情与思考",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "折叠或展开工具详情、思考与压缩摘要"
+        }
         "switch between fullscreen and scrollback" => "在全屏和回滚界面之间切换",
         "switch theme" => "切换主题",
         "switch language" => "切换语言",
@@ -374,6 +382,23 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "终端复制",
         "drag to select" => "拖动选择",
         "drag or {shortcut}" => "拖动或 {shortcut}",
+        "Compacting context…" => "正在压缩上下文…",
+        "Context compacted" => "上下文已压缩",
+        "Context compaction skipped" => "上下文压缩已跳过",
+        "Context compaction failed" => "上下文压缩失败",
+        "Context compaction cancelled" => "上下文压缩已取消",
+        "near the compaction threshold" => "接近压缩阈值",
+        "This daemon does not support context compaction" => "此守护进程不支持上下文压缩",
+        "compact the context of the shown line" => "压缩当前显示线的上下文",
+        "Kept verbatim" => "原文保留",
+        "insufficient space: {parts}" => "空间不足：{parts}",
+        "system prompt" => "系统提示词",
+        "tools" => "工具",
+        "appended messages" => "附加消息",
+        "keyed baseline" => "带 key 的基线",
+        "pinned inputs" => "钉住的输入",
+        "digest" => "清单",
+        "summary" => "摘要",
         _ => return None,
     })
 }

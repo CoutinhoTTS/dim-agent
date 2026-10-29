@@ -66,6 +66,8 @@ pub enum Command {
         target: Option<TaskTarget>,
     },
     FocusLine(String),
+    /// Stop following the side panel's line; the line keeps running.
+    CloseSide,
     /// End a line of the displayed attachment, as the user asked.
     EndLine {
         session_id: String,
@@ -73,7 +75,7 @@ pub enum Command {
         branch_id: String,
     },
     /// Open a line of the displayed attachment at `at` of `parent`, with
-    /// its opening input, and show it (timeline UI §4.2).
+    /// its opening input, and follow it in the side panel (timeline UI §4.7).
     OpenLine {
         session_id: String,
         projection_id: u64,
@@ -129,6 +131,8 @@ pub enum Command {
     },
     /// Produce the `/usage` report.
     Usage,
+    /// `/compact`: ask the shown line to compact its context.
+    Compact,
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// List the providers of the `/connect` panel.
@@ -431,6 +435,28 @@ pub enum SwitchKind {
     Forked,
 }
 
+/// The main branch's context use, in tokens: what the next request is
+/// estimated to send, the window it must fit, and the compaction threshold
+/// the server returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextReading {
+    pub input: u64,
+    pub window: u64,
+    pub threshold: u64,
+}
+
+/// A `session.context.compact` reply as `/compact` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactReply {
+    Completed,
+    Skipped(String),
+    /// `compaction_failed` or another failure of the call, with its message.
+    Failed(String),
+    Cancelled(String),
+    /// The daemon offers no `session.context.compact`.
+    Unsupported,
+}
+
 #[allow(dead_code)]
 pub enum Update {
     /// The session exists; `provider` / `model` label the status line.
@@ -507,9 +533,11 @@ pub enum Update {
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.
     Usage(Result<Usage, String>),
-    /// The main branch's estimated input and context window, in tokens;
-    /// none while the session's usage is unknown.
-    Context(Option<(u64, u64)>),
+    /// The main branch's context use; none while the session's usage is
+    /// unknown.
+    Context(Option<ContextReading>),
+    /// What a `/compact` came to, localized by the interface.
+    Compacted(CompactReply),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,
