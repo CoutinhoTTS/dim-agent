@@ -71,6 +71,19 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
         terminal.raw(&[b'a'; 40]);
         thread::sleep(Duration::from_millis(100));
     }
+    assert!(
+        terminal.child.try_wait().unwrap().is_none(),
+        "the CLI left while the queue filled"
+    );
+    let waiting = terminal.unread();
+    assert!(waiting > 0, "no output was waiting on the terminal");
+    terminal.raw(&[b'a'; 40]);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        terminal.unread(),
+        waiting,
+        "the output queue was not full: the renderer kept writing"
+    );
     terminal.raw(b"\x03");
     thread::sleep(Duration::from_millis(100));
     terminal.raw(b"\x03");

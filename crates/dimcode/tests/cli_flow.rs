@@ -1309,6 +1309,20 @@ impl Terminal {
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
     }
+    /// Bytes the child wrote that the terminal has not consumed yet. A pty
+    /// master reports the queue on its other side through `TIOCOUTQ` on
+    /// macOS, while `FIONREAD` there always answers zero; Linux has no
+    /// `TIOCOUTQ` for terminals and answers through `FIONREAD`.
+    fn unread(&self) -> libc::c_int {
+        #[cfg(target_os = "macos")]
+        const WAITING_BYTES: libc::c_ulong = 0x4004_7473; // TIOCOUTQ
+        #[cfg(not(target_os = "macos"))]
+        const WAITING_BYTES: libc::c_ulong = libc::FIONREAD as libc::c_ulong;
+        let mut waiting: libc::c_int = 0;
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::ioctl(fd, WAITING_BYTES, &mut waiting) }, 0);
+        waiting
+    }
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + PATIENCE;
         loop {
