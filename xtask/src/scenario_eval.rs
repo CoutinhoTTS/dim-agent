@@ -120,7 +120,8 @@ fn delta() -> f64 {
     DELTA.0 as f64 / DELTA.1 as f64
 }
 /// How long the driver waits after the last event before it asks whether
-/// every line is idle.
+/// every line is idle. The quiet period follows the last notice the driver
+/// reads, including the notices it reads while it waited on `session.idle`.
 const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
@@ -858,9 +859,9 @@ fn unparsed(scenario: &Scenario) -> Vec<ProbeRecord> {
 }
 
 /// The run's turns as the exported Timeline records them, and the first failed
-/// turn's error. The export is the account of record: a turn that ends while
-/// the idle probe waits can be missing from the notice stream, because the
-/// probe returns when the line becomes idle, before that notice is read.
+/// turn's error. The export is the account of record: a run that ends on a
+/// budget or an error stops reading the notice stream with notices still
+/// queued, so that stream can hold fewer turn ends than the Timeline does.
 fn turns_in_export(export: &str) -> (u32, Option<String>) {
     let mut turns = 0;
     let mut failed = None;
@@ -1277,8 +1278,12 @@ fn notice(method: &str, params: &Value) -> Notice {
     }
 }
 
-/// Whether every known line is idle. `session.idle` returns when the line is
-/// idle; a short deadline keeps a busy line from holding the driver.
+/// Whether every known line is idle and no notice arrived while it asked.
+/// `session.idle` returns when the line is idle; a short deadline keeps a busy
+/// line from holding the driver. A notice that arrives while a call waits is
+/// left in the client's queue, and the driver reads every queued notice before
+/// its next quiet check, so `false` here means the quiet period follows that
+/// notice's read.
 async fn idle(
     client: &mut Client,
     session: &str,
@@ -1295,7 +1300,10 @@ async fn idle(
             Err(_) => return Ok(false),
         }
     }
-    Ok(true)
+    Ok(!client
+        .notices
+        .iter()
+        .any(|message| matches!(message, WireMessage::Notice { .. })))
 }
 
 /// The judge's answer for one run: a record per probe, the judge's error, and
