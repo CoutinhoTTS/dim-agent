@@ -1610,6 +1610,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
                     metadata: initial_metadata.clone(),
                 }),
                 system: Some(SystemPrompt::Text("adopted system".into())),
+                system_source: None,
             })
             .into(),
         )
@@ -1675,8 +1676,10 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         assert_eq!(data.settings.model_id, "adopted-model");
         assert_eq!(
             data.system,
-            Some(SystemPrompt::Text("adopted system".into()))
+            Some(SystemPrompt::Text("adopted system".into())),
+            "a record written without a source keeps the System it adopted"
         );
+        assert_eq!(data.system_source, None);
     }
     let (tools, tool_sources) = (
         configured[1].settings.tools.clone(),

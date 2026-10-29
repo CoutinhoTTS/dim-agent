@@ -1533,6 +1533,11 @@ impl App {
                     panel.set_models(models);
                 }
             }
+            Update::ModelsRefilled => {
+                if matches!(self.prompt, Some(Prompt::Models(_))) {
+                    self.host.send(Command::ListModels);
+                }
+            }
             Update::Isolation(result) => {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_snapshot(result);

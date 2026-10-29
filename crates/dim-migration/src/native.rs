@@ -59,9 +59,9 @@ impl Native {
         })?;
         let (checked, version) = SqliteStorage::open_read_only(path.clone()).map_err(failure)?;
         checked.close().await.map_err(failure)?;
-        if version != 23 {
+        if version != 24 {
             return Err(Error::Target(
-                "Migration requires native storage format 23; target preserved".into(),
+                "Migration requires native storage format 24; target preserved".into(),
             ));
         }
         let db = Connection::open(path).map_err(failure)?;
