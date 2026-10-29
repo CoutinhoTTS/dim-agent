@@ -1907,6 +1907,7 @@ impl std::fmt::Display for AssemblyFinding {
 /// scope that contains it: a nested scope's subtree is left to that scope's
 /// own pass. A required row or part that has left the tree is reported too:
 /// nothing in the snapshot would otherwise remember it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
     rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>>,

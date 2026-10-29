@@ -337,7 +337,15 @@ impl Agent {
                 .into_iter()
                 .filter_map(|info| session.0.tree.get(&info.id))
                 .collect();
-            let mut scopes: Vec<(&FiberView, &[String], &[FiberView], Option<&str>)> =
+            /// One scope of a Session: its view, the loader row ids its
+            /// profile requires, the required parts it mounted and the branch.
+            type Scope<'a> = (
+                &'a FiberView,
+                &'a [String],
+                &'a [FiberView],
+                Option<&'a str>,
+            );
+            let mut scopes: Vec<Scope> =
                 vec![(&session.0.view, &loaded.required[..], &loaded.parts, None)];
             for branch in &branches {
                 scopes.push((
