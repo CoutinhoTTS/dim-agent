@@ -139,15 +139,17 @@ async fn node_web_settings_permission_cancellation_and_restore() {
     let home = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("dw-{}", uuid::Uuid::new_v4()));
+    let parts = rows();
     let config = ServerConfig {
         product_home: Some(home.clone()),
         target_home: Some(home.join("rust")),
-        session_typescript: Some(rows()),
+        session_typescript: Some(parts.clone()),
         ..Default::default()
     };
     let mut saved = None;
     for restoring in [false, true] {
         let (server, _model_requests, _) = super::session_typescript::start(config.clone()).await;
+        super::session_typescript::plugin_active(&server, &parts.rows[0]).await;
         let mut client = Client::new_version(&server, false, 3).await;
         if !restoring {
             assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
@@ -281,7 +283,11 @@ async fn node_web_settings_permission_cancellation_and_restore() {
         let before = requests.load(Ordering::SeqCst);
         submit(&mut client, &id, "web_fetch", json!({"url":base})).await;
         idle(&mut client, &id).await;
-        assert!(text(&result(&session).await).contains("# Web flow"));
+        let fetched = result(&session).await;
+        assert!(
+            text(&fetched).contains("# Web flow"),
+            "restoring={restoring}: {fetched:?}"
+        );
         assert_eq!(
             requests.load(Ordering::SeqCst),
             before + 1,
