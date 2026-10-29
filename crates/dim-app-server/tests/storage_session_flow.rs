@@ -109,6 +109,7 @@ impl DynPlugin for GenericCleanupFault {
             })?;
             ctx.effect(|| async move {
                 timeline.append(EventDraft {
+                    id: None,
                     tags: Some(vec!["cleanup".into()]),
                     kind: EventKind::PermissionChanged(PermissionChangedData {
                         policy: PermissionPolicy::default(),
@@ -262,6 +263,7 @@ impl DynPlugin for RecordCleanup {
             let timeline = ctx.require_at(&self.timeline)?;
             ctx.effect(|| async move {
                 timeline.append(EventDraft {
+                    id: None,
                     tags: Some(vec!["finalizer".into()]),
                     kind: EventKind::PermissionChanged(PermissionChangedData {
                         policy: PermissionPolicy::default(),

@@ -323,8 +323,9 @@ impl Timeline {
                 }
                 Ok(None) | Err(_) => (original.clone(), original, Vec::new()),
             };
+            let event_id = draft.id.clone().or_else(|| original.id.clone());
             let event = Arc::new(AgentEvent {
-                id: Uuid::new_v4().to_string(),
+                id: event_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
                 sequence: first_sequence + events.len() as u64,
                 create_at: unix_millis(),
                 tags: draft.tags,

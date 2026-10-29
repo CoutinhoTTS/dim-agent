@@ -918,6 +918,14 @@ pub struct CollaborationResultData {
 /// Producer-owned data before the timeline assigns identity and ordering.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventDraft {
+    /// Preassigned event id. Text/thinking producers use it to make the first
+    /// delta id the stable block identity; the timeline generates one otherwise.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub id: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -930,7 +938,16 @@ pub struct EventDraft {
 
 impl EventDraft {
     pub fn new(kind: EventKind) -> Self {
-        Self { tags: None, kind }
+        Self {
+            id: None,
+            tags: None,
+            kind,
+        }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 }
 impl From<EventKind> for EventDraft {

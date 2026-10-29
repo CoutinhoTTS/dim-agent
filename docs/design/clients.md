@@ -58,6 +58,13 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 
 The CLI requires protocol v3 and the `session.create` and `session.history` features; the web client and its assets require an exact protocol match ([web workspace §2.4](web-workspace.md)).
 
+### Timeline block identity
+
+- A text/thinking block is identified by the `id` of its **first raw event**. Every later delta of the same contiguous block is folded into that block; a new block after text/thinking/tool interruption gets the id of its own first event. Replay, history and storage preserve the event ids.
+- Tools use `call_id`; user inputs use the `input/message` event id.
+- `session.model.progress` carries `textPartId` / `thinkingPartId` for the open blocks. They equal the first-event id that will publish that block.
+- Clients must key timeline blocks/groups by that first-event id (or `call_id` for tools), not by local ordinals, request ids or synthetic `:progress` ids. UI-only group/expansion keys may derive from those stable ids.
+
 ## 3. Capability coverage
 
 Rows follow the sections of the [feature list](../feature-list.md), which describes target capabilities of `dimcode`; this table adds the other clients. Legend: **done** implemented; **partial** part implemented; **designed** design exists, not implemented; **none** neither designed nor implemented; **out** out of scope by decision; **—** not applicable or not planned for that client. Desktop is not tracked here (§5).

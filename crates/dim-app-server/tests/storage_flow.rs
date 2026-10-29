@@ -95,6 +95,11 @@ fn text(sequence: u64, delta: &str) -> StoredEvent {
         }),
     )
 }
+fn text_with_id(sequence: u64, delta: &str, id: &str) -> StoredEvent {
+    let mut entry = text(sequence, delta);
+    Arc::make_mut(&mut entry.event).id = id.into();
+    entry
+}
 async fn append(
     store: &SqliteTimelineStore,
     key: TimelineKey,
@@ -539,6 +544,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         steps: vec![TraceStep {
             handler: "before".into(),
             result: Some(EventDraft {
+                id: None,
                 tags: first.event.tags.clone(),
                 kind: prepare,
             }),
@@ -566,6 +572,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         steps: vec![TraceStep {
             handler: "transform".into(),
             result: Some(EventDraft {
+                id: None,
                 tags: fifth.event.tags.clone(),
                 kind: fifth.event.kind.clone(),
             }),
@@ -763,6 +770,45 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
         .await
         .unwrap();
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A text block's identity is the first delta's event id, so the output-row
+/// merge and decode path must preserve that id.
+#[tokio::test]
+async fn output_block_start_id_roundtrips_through_the_merged_row() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let written = [text_with_id(1, "a", "part-1"), text(2, "b")];
+    append(&store, key("session", "main"), written.to_vec())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
+    let session = agent.restore_session("session".into()).await.unwrap();
+    let restored = session.history("main", Some(2)).await.unwrap();
+    let text: Vec<_> = restored
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Text(_)))
+        .collect();
+    assert_eq!(text.len(), 2);
+    assert_eq!(text[0].id, "part-1");
+    assert_eq!(text[1].id, "event-2");
+    agent.close().await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
@@ -1108,6 +1154,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
     let mut traced = record(2, prepare(&first));
     let draft = |request: &Arc<ModelRequest>| {
         Some(EventDraft {
+            id: None,
             tags: traced.event.tags.clone(),
             kind: prepare(request),
         })

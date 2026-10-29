@@ -1306,6 +1306,12 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .wait_for(|progress| progress.thinking == "deep thought")
             .await
             .unwrap();
+        let thinking_part = session
+            .get::<ModelProgress>("main")
+            .unwrap()
+            .unwrap()
+            .thinking_part_id
+            .expect("open thinking part id");
         assert!(outputs(&session.history("main", None).await.unwrap()).is_empty());
         send(vec![
             ModelChunk::ThinkingEnd {
@@ -1320,6 +1326,8 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .unwrap();
         let shown = session.get::<ModelProgress>("main").unwrap().unwrap();
         assert_eq!((shown.text_offset, shown.thinking_offset), (0, 12));
+        let first_text_part = shown.text_part_id.clone().expect("first text part id");
+        assert!(shown.thinking_part_id.is_none());
         assert_eq!(
             outputs(&session.history("main", None).await.unwrap()),
             ["thinking:deep thought"]
@@ -1397,6 +1405,19 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         );
         assert!(events.iter().any(|event| matches!(&event.kind,
             EventKind::ToolResult(data) if data.call_event_id.is_some())));
+        let thinking_event = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::Thinking(_)))
+            .expect("thinking event");
+        assert_eq!(thinking_event.id, thinking_part);
+        let text_events: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Text(_)))
+            .collect();
+        assert!(text_events.len() >= 3);
+        assert_eq!(text_events[0].id, first_text_part);
+        let second_text_part = text_events[1].id.clone();
+        assert_ne!(first_text_part, second_text_part);
         assert_eq!(
             session.get::<ModelProgress>("main").unwrap().unwrap(),
             ModelProgress::default()
