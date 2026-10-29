@@ -175,8 +175,8 @@ a case with no probe of that kind).
 
 [Measured] Six cases are perfect in every arm and run. The pooled differences rest on the other
 two: `instructions` loses one probe in one `off` run, and `cjk` moves by up to two probes between
-runs of the same arm, one of which is the `inherit` `X` miss. The whole of `off`'s `F` lead over
-`inherit` is that single `instructions` probe.
+runs of the same arm, one of which is the `inherit` `X` miss. `off`'s one-probe `F` lead over
+`inherit` is a net result: it gains two probes on `cjk` and loses one on `instructions`.
 
 [Measured] `δ = 0.05` on these denominators is 3.6 `F` probes (of 72) and 1.2 `X` probes (of 24):
 one `F` probe is 0.014 and one `X` probe 0.042. The rule can see a loss of about four `F` probes
