@@ -56,7 +56,8 @@
 //!
 //! The runner copies the scenario's workspace and `--home` into a fresh
 //! directory for every run, so runs share no state, and writes one directory
-//! per run under `--out`: `timeline.jsonl` (the whole Timeline, every line
+//! per run under `--out`, which it creates and resolves where the command
+//! line is read: `timeline.jsonl` (the whole Timeline, every line
 //! included, which the judge reads), `home/` and `workspace/`. The App
 //! Server's local endpoint sits under the system temporary directory, because
 //! a Unix socket's path is short and a run's directory is not; each run
@@ -131,7 +132,6 @@ async fn evaluate(options: &Options) -> Result<String> {
         dim_app_server::cli::model_profile(path)
             .map_err(|error| format!("--model-config {}: {error}", path.display()))?;
     }
-    std::fs::create_dir_all(&options.out)?;
     let cancel = CancellationToken::new();
     let mut records = Vec::new();
     let mut instrument = Instrument {
@@ -189,11 +189,18 @@ struct Options {
 }
 impl Options {
     fn parse() -> Result<Self> {
+        Self::parse_from(std::env::args().skip(2))
+    }
+    /// [`parse`](Self::parse) over the arguments after the command name:
+    /// `--out` is created and resolved here, so every path a run builds from
+    /// it — the workspace, `command-output`, `runs.jsonl` and the report — is
+    /// absolute, as `session.create` requires of the cwd.
+    fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
                      --text ID --candidate FILE --model PROVIDER/MODEL \
                      --judge PROVIDER/MODEL --runs N --home DIR --out DIR \
                      [--model-config FILE]";
-        let mut args = std::env::args().skip(2);
+        let mut args = args.into_iter();
         let (mut scenarios, mut home, mut out) = (None, None, None);
         let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
         let (mut runs, mut model_config) = (None, None);
@@ -219,11 +226,19 @@ impl Options {
             model: model.ok_or(usage)?,
             judge: judge.ok_or(usage)?,
             runs: runs.filter(|runs| *runs > 0).ok_or(usage)?,
-            out: out.ok_or(usage)?,
+            out: output_directory(&out.ok_or(usage)?)?,
             home: home.ok_or(usage)?,
             model_config,
         })
     }
+}
+
+/// Creates `--out` and resolves it: `session.create` takes an absolute cwd,
+/// and every run path is built from this one.
+fn output_directory(path: &Path) -> Result<PathBuf> {
+    let error = |error: std::io::Error| format!("--out {}: {error}", path.display());
+    std::fs::create_dir_all(path).map_err(error)?;
+    Ok(std::fs::canonicalize(path).map_err(error)?)
 }
 
 fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
@@ -2058,6 +2073,18 @@ mod tests {
         format!("first {}", "x".repeat(56_000))
     }
 
+    /// The relative path from the process's working directory to `target`:
+    /// one `..` per component of the working directory, then the target's own
+    /// components after its root.
+    fn relative_to_working_directory(target: &Path) -> PathBuf {
+        let mut path = PathBuf::new();
+        for _ in std::env::current_dir().unwrap().components().skip(1) {
+            path.push("..");
+        }
+        path.extend(target.components().skip(1));
+        path
+    }
+
     /// Both arms run the shipped assembly on the same scenario, and the
     /// candidate text reaches the candidate arm's summarizer request and only
     /// that arm's.
@@ -2174,6 +2201,73 @@ mod tests {
                 "{arm}: the steer's text reaches the next turn"
             );
         }
+    }
+
+    /// A relative `--out` is created and resolved at the command line, so the
+    /// Session's cwd is absolute and both arms run: `session.create` refuses
+    /// a relative cwd. The relative path is the fixture's own output
+    /// directory, spelled from the working directory the test process runs
+    /// in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_relative_out_resolves_before_the_run_uses_it_as_its_cwd() {
+        let fixture = Fixture::start(
+            "relative",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let candidate = fixture.directory.join("candidate.md");
+        std::fs::write(&candidate, CANDIDATE).unwrap();
+        let out = fixture.directory.join("out");
+        let relative = relative_to_working_directory(&out);
+        let options = Options::parse_from(
+            [
+                "--scenarios",
+                fixture.scenarios.to_str().unwrap(),
+                "--text",
+                "context-compaction/summary",
+                "--candidate",
+                candidate.to_str().unwrap(),
+                "--model",
+                "gateway/mock",
+                "--judge",
+                "gateway/mock",
+                "--runs",
+                "1",
+                "--home",
+                fixture.home.to_str().unwrap(),
+                "--model-config",
+                fixture.models.to_str().unwrap(),
+                "--out",
+                relative.to_str().unwrap(),
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(
+            options.out.is_absolute(),
+            "a relative --out is resolved: {}",
+            options.out.display()
+        );
+        assert_eq!(
+            options.out,
+            out.canonicalize().unwrap(),
+            "the resolved --out is the fixture's output directory"
+        );
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+        }
+        assert!(options.out.join("current/case/run-0/workspace").is_dir());
     }
 
     /// A question is declined rather than awaited: the run's next request
