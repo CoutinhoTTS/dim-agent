@@ -635,8 +635,11 @@ impl Decoder {
         match self {
             Self::Identity(cap) => Ok((cap.buf, cap.limited)),
             Self::Gzip(mut gz) => {
-                let _ = gz.try_finish();
+                let finished = gz.try_finish();
                 let limited = gz.get_ref().limited;
+                if finished.is_err() && !limited {
+                    return Err(WebError::new("connect_failed", "The connection failed."));
+                }
                 let buf = std::mem::take(&mut gz.get_mut().buf);
                 Ok((buf, limited))
             }

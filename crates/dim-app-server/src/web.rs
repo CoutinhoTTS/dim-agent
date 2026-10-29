@@ -663,17 +663,16 @@ impl SessionState {
                     "The configured search service is unusable.",
                 ));
             }
-            if effective_query.chars().count() > 500 {
-                return Err(WebError::new(
-                    "invalid_input",
-                    "query and domain filters must contain at most 500 characters.",
-                ));
-            }
+            let relay_query = if effective_query.chars().count() > 500 {
+                query.to_owned()
+            } else {
+                effective_query
+            };
             let reply = self
                 .managed
                 .search(
                     WebSearchRequest {
-                        query: effective_query,
+                        query: relay_query,
                         count: count as u32,
                     },
                     cancel,

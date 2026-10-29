@@ -104,7 +104,11 @@ impl ManagedProvider for Provider {
             _ => Err(ManagedError::TokenMissing),
         })
     }
-    fn web_search(&self, _: WebSearchRequest) -> ManagedFuture<WebSearchResponse> {
+    fn web_search(
+        &self,
+        _: WebSearchRequest,
+        _: CancellationToken,
+    ) -> ManagedFuture<WebSearchResponse> {
         ready(Err(ManagedError::TokenMissing))
     }
     fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {

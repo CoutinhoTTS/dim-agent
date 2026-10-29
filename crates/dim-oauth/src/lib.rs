@@ -735,6 +735,7 @@ impl Inner {
     async fn authorized(
         &self,
         build: impl Fn(&Client, &Tokens) -> reqwest::RequestBuilder,
+        cancel: Option<&CancellationToken>,
     ) -> Result<(Grant, StatusCode, http::Body)> {
         let mut current = self.store.resolve(None).await?;
         let expected = current.account.clone();
@@ -748,7 +749,7 @@ impl Inner {
             for (name, value) in identity_headers() {
                 req = req.header(name, value);
             }
-            let (status, body) = request(req, None).await?;
+            let (status, body) = request(req, cancel).await?;
             if status != StatusCode::UNAUTHORIZED {
                 return Ok((current, status, body));
             }
@@ -765,12 +766,15 @@ impl Inner {
         input(&provider)?;
         let _gate = self.catalog_gate.lock().await;
         let (grant, status, body) = self
-            .authorized(|c, t| {
-                c.get(format!(
-                    "{}/models?type=dim",
-                    trimmed(t.str("relayBaseUrl"))
-                ))
-            })
+            .authorized(
+                |c, t| {
+                    c.get(format!(
+                        "{}/models?type=dim",
+                        trimmed(t.str("relayBaseUrl"))
+                    ))
+                },
+                None,
+            )
             .await?;
         if !status.is_success() {
             return Err(rejected(status, &body));
@@ -788,7 +792,10 @@ impl Inner {
     async fn usage(self: Arc<Self>, provider: String) -> Result<Usage> {
         input(&provider)?;
         let (_, status, body) = self
-            .authorized(|c, t| c.get(format!("{}/api/me/usage", trimmed(t.str("issuer")))))
+            .authorized(
+                |c, t| c.get(format!("{}/api/me/usage", trimmed(t.str("issuer")))),
+                None,
+            )
             .await?;
         if status == StatusCode::FORBIDDEN {
             return Err(ManagedError::RefreshRejected);
@@ -799,7 +806,11 @@ impl Inner {
         usage::project_usage(&body)
     }
 
-    async fn web_search(self: Arc<Self>, req: WebSearchRequest) -> Result<WebSearchResponse> {
+    async fn web_search(
+        self: Arc<Self>,
+        req: WebSearchRequest,
+        cancel: CancellationToken,
+    ) -> Result<WebSearchResponse> {
         let query = req.query.trim();
         if query.is_empty() || query.chars().count() > 500 || !(1..=10).contains(&req.count) {
             return Err(ManagedError::InvalidInput);
@@ -810,10 +821,13 @@ impl Inner {
             "offset": 0,
         });
         let (_, status, body) = self
-            .authorized(|c, t| {
-                c.post(format!("{}/web-search", trimmed(t.str("relayBaseUrl"))))
-                    .json(&payload)
-            })
+            .authorized(
+                |c, t| {
+                    c.post(format!("{}/web-search", trimmed(t.str("relayBaseUrl"))))
+                        .json(&payload)
+                },
+                Some(&cancel),
+            )
             .await?;
         if !status.is_success() {
             return Err(ManagedError::InvalidResponse);
@@ -972,8 +986,12 @@ impl ManagedProvider for DimOAuth {
         let provider = provider.to_owned();
         self.owned(|inner| inner.usage(provider))
     }
-    fn web_search(&self, request: WebSearchRequest) -> ManagedFuture<WebSearchResponse> {
-        self.owned(|inner| inner.web_search(request))
+    fn web_search(
+        &self,
+        request: WebSearchRequest,
+        cancel: CancellationToken,
+    ) -> ManagedFuture<WebSearchResponse> {
+        self.owned(|inner| inner.web_search(request, cancel))
     }
     fn catalog(&self, provider: &str) -> ManagedFuture<ManagedCatalog> {
         let provider = provider.to_owned();

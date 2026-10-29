@@ -219,7 +219,13 @@ pub trait ManagedProvider: Send + Sync + 'static {
     fn cancel_attempt(&self, attempt: ManagedLoginAttempt) -> ManagedFuture<()>;
     fn logout(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
     fn usage(&self, provider: &str) -> ManagedFuture<Usage>;
-    fn web_search(&self, request: WebSearchRequest) -> ManagedFuture<WebSearchResponse>;
+    /// `cancel` releases the relay request; a token refresh it started still
+    /// completes.
+    fn web_search(
+        &self,
+        request: WebSearchRequest,
+        cancel: CancellationToken,
+    ) -> ManagedFuture<WebSearchResponse>;
     fn catalog(&self, provider: &str) -> ManagedFuture<ManagedCatalog>;
     fn credential(&self, provider: &str, model: &str) -> ManagedFuture<CredentialLease>;
     /// One controlled recovery after the relay rejected `lease`.
@@ -453,10 +459,7 @@ impl ManagedProviders {
         let provider = self
             .provider(cancel)
             .map_err(|_| ManagedSearchError::Unavailable)?;
-        let response = tokio::select! {
-            _ = cancel.cancelled() => return Err(ManagedSearchError::SearchFailed),
-            result = provider.web_search(request) => result?,
-        };
+        let response = provider.web_search(request, cancel.clone()).await?;
         checked_search(response).map_err(|_| ManagedSearchError::SearchFailed)
     }
     pub async fn catalog(

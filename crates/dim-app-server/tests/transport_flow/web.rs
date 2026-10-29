@@ -52,7 +52,11 @@ impl ManagedProvider for SearchProvider {
     fn usage(&self, _: &str) -> ManagedFuture<Usage> {
         unused()
     }
-    fn web_search(&self, req: WebSearchRequest) -> ManagedFuture<WebSearchResponse> {
+    fn web_search(
+        &self,
+        req: WebSearchRequest,
+        _: CancellationToken,
+    ) -> ManagedFuture<WebSearchResponse> {
         let signed_in = self.0.load(Ordering::SeqCst);
         Box::pin(async move {
             if !signed_in {
@@ -215,6 +219,13 @@ async fn web_settings_permission_cancellation_and_restore() {
                             closed.send(()).unwrap();
                             return;
                         }
+                        if request.starts_with("GET /truncated-gzip ") {
+                            let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".to_vec();
+                            response.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1, 14, 0, 0xf1, 0xff]);
+                            response.extend_from_slice(b"<p>partial</p>");
+                            socket.write_all(&response).await.unwrap();
+                            return;
+                        }
                         let (media, body) = if request.starts_with("GET /search?") {
                             assert!(request.to_lowercase().contains("x-subscription-token: fixture-web-key\r\n"));
                             ("application/json", r#"{"type":"search","web":{"results":[{"title":"fixture","url":"https://example.com/","description":"fixture-web-key snippet"}]}}"#)
@@ -303,6 +314,20 @@ async fn web_settings_permission_cancellation_and_restore() {
                     "snippet": "Managed snippet",
                     "published_at": "2026-10-28"
                 }])
+            );
+            submit(
+                &mut client,
+                &id,
+                "web_search",
+                json!({"query":"q".repeat(500),"blocked_domains":["blocked.test"]}),
+            )
+            .await;
+            idle(&mut client, &id).await;
+            let full_query = result(&session).await;
+            assert_ne!(full_query.is_error, Some(true), "{full_query:?}");
+            assert!(
+                !text(&full_query).contains("-site:"),
+                "filters that overflow the relay query limit apply locally only"
             );
             let before = requests.load(Ordering::SeqCst);
             submit(
@@ -444,6 +469,20 @@ async fn web_settings_permission_cancellation_and_restore() {
             requests.load(Ordering::SeqCst),
             before + 1,
             "pagination uses the Session cache"
+        );
+        submit(
+            &mut client,
+            &id,
+            "web_fetch",
+            json!({"url":format!("{base}/truncated-gzip")}),
+        )
+        .await;
+        idle(&mut client, &id).await;
+        let truncated = result(&session).await;
+        assert_eq!(truncated.is_error, Some(true), "{truncated:?}");
+        assert!(
+            text(&truncated).contains("connect_failed"),
+            "a gzip stream without its trailer is not a complete page: {truncated:?}"
         );
         let results_before = session
             .local("main", ..)

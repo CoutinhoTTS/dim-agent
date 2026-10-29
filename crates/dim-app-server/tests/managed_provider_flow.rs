@@ -142,7 +142,11 @@ impl ManagedProvider for Provider {
     fn usage(&self, _: &str) -> ManagedFuture<Usage> {
         unused()
     }
-    fn web_search(&self, _: WebSearchRequest) -> ManagedFuture<WebSearchResponse> {
+    fn web_search(
+        &self,
+        _: WebSearchRequest,
+        _: CancellationToken,
+    ) -> ManagedFuture<WebSearchResponse> {
         unused()
     }
     fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
