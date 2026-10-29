@@ -825,6 +825,45 @@ impl AgentIndex {
         Ok(Some(records))
     }
 
+    /// The directory record of one Session whose lease the caller holds, with
+    /// the fields `session_directory` gives it. It reads this Session's title
+    /// row and no other Session or history; the caller fills
+    /// `attached_clients`.
+    ///
+    /// Opening a Session must survive the reloads a catalog read fails on. A
+    /// title that cannot be read now leaves the title fields absent, and a
+    /// branch whose Loop is being replaced reports not running; both reach an
+    /// attached client as notices.
+    pub(crate) async fn session_record(
+        &self,
+        host: &AgentHost,
+        session: &Session,
+        version: u32,
+    ) -> dim_agent_runtime::Result<crate::protocol::SessionInfo> {
+        let title = match (&self.session_store, version >= 3) {
+            (_, false) => None,
+            (Some(store), true) => Some(match store.metadata(session.id()).await {
+                Ok(metadata) => metadata.into(),
+                Err(_) => crate::storage::TitleFields::default(),
+            }),
+            (None, true) => Some(crate::storage::TitleFields::default()),
+        };
+        Ok(crate::protocol::SessionInfo {
+            session_id: session.id().to_owned(),
+            cwd: session.config().cwd.clone(),
+            model: dim_agent_types::ModelId {
+                provider_id: session.config().model.provider_id.clone(),
+                model_id: session.config().model.model_id.clone(),
+            },
+            created_at: session.created_at(),
+            running: session.state("main").is_ok_and(|state| state.running),
+            sequence: session.sequence("main")?,
+            attached_clients: 0,
+            agent_id: (version >= 3).then(|| host.agent_id.clone()),
+            title,
+        })
+    }
+
     pub(crate) async fn session_summary(
         &self,
         id: &str,

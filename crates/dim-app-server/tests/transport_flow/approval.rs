@@ -475,7 +475,7 @@ async fn decisions_are_consumed_in_order_on_both_transports_and_survive_disconne
         let attached = b
             .rpc("session.attach", json!({"sessionId":session.id()}))
             .await;
-        assert_eq!(attached["result"], json!({}), "attach returns no history");
+        assert_eq!(attached["result"]["sessionId"], session.id());
         *probe.decision.lock().unwrap() = Some(ApprovalDecision::Deny);
         let request_id = request(&mut b, &session).await;
         assert_ok(
@@ -641,7 +641,7 @@ async fn stop_before_request_and_after_allow_prevent_tool_start_on_both_transpor
         let attached = client
             .rpc("session.attach", json!({"sessionId":session.id()}))
             .await;
-        assert_eq!(attached["result"], json!({}), "attach returns no history");
+        assert_eq!(attached["result"]["sessionId"], session.id());
         let replayed = client.notice("approval.request").await;
         probe.release.notify_one();
         session.idle("main").await.unwrap();

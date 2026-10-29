@@ -689,7 +689,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         )));
         assert!(v1_events(&idle_events, 0).is_empty());
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
-        assert_eq!(attached["result"], json!({}), "attach returns no history");
+        assert_eq!(attached["result"]["sessionId"], sid);
 
         assert_ok(
             &client
@@ -731,7 +731,7 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
 
         let mut client = Client::new(&server, ws).await;
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
-        assert_eq!(attached["result"], json!({}));
+        assert_eq!(attached["result"]["sessionId"], sid);
         assert_ok(
             &client
                 .rpc("session.submit", json!({"sessionId":sid,"text":"resumed"}))
@@ -863,7 +863,7 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let attach = remote.rpc("session.attach", json!({"sessionId":sid})).await;
-    assert_eq!(attach["result"], json!({}));
+    assert_eq!(attach["result"]["sessionId"], sid);
     let listed = local.rpc("session.list", json!({})).await;
     assert_eq!(listed["result"][0]["attachedClients"], 1);
     let submitted = local
@@ -1446,6 +1446,47 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_replies_the_record_the_catalog_lists_for_that_session() {
+    use dim_agent_types::InputMode;
+    for version in [3, 2] {
+        for ws in [false, true] {
+            let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+            let mut client = Client::new_version(&server, ws, version).await;
+            let created = client.rpc("session.create", create(json!([]))).await;
+            assert_ok(&created);
+            let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+            let session = server.agent().unwrap().get_session(&sid).unwrap();
+            session
+                .submit("a Session with history".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+
+            let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+            assert_ok(&attached);
+            let listed = client.rpc("session.list", json!({})).await;
+            assert_ok(&listed);
+            let entry = listed["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["sessionId"] == sid.as_str())
+                .expect("the Session is listed");
+            assert_eq!(
+                attached["result"], *entry,
+                "protocol v{version}: the attach reply is the list entry"
+            );
+            assert_eq!(attached["result"]["attachedClients"], 1);
+            if version < 3 {
+                assert!(entry.get("agentId").is_none() && entry.get("title").is_none());
+            }
+            server.shutdown();
+            server.join().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attach_replies_first_and_replays_only_current_pending_approvals() {
     use dim_agent_types::InputMode;
     for ws in [false, true] {
@@ -1518,7 +1559,7 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
             .await;
         let reply = client.read(&format!("response {attach}")).await;
         assert_eq!(reply["id"], attach, "the reply precedes every notification");
-        assert_eq!(reply["result"], json!({}));
+        assert_eq!(reply["result"]["sessionId"], session.id());
         assert_eq!(
             client.notice("approval.request").await["params"]["requestId"],
             current_request
@@ -1538,8 +1579,8 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
         assert_eq!(
             client
                 .rpc("session.attach", json!({"sessionId":session.id()}))
-                .await["result"],
-            json!({})
+                .await["result"]["sessionId"],
+            session.id()
         );
         assert_eq!(
             client.notice("approval.request").await["params"]["requestId"],

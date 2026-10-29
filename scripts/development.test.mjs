@@ -54,6 +54,19 @@ if (args.slice(-2).join(' ') === 'daemon stop') {
   const resumed = run(['--model-config', model, '--resume', 'session with spaces'], { TEST_NATIVE_EXIT: '23' });
   assert.equal(resumed.status, 23, resumed.stderr);
   assert.deepEqual(JSON.parse(resumed.stdout).args, ['--home', home, '--model-config', model, '--resume', 'session with spaces']);
+  const migrationHome = path.join(temporary, 'migration target');
+  for (const args of [['migration'], ['migration', 'inspect'], ['migration', 'cancel', 'task'], ['migration', 'retry', 'task']]) {
+    const migration = run(args, { DIMCODE_HOME: migrationHome, DIMCODE_MODEL_CONFIG: model });
+    assert.equal(migration.status, 0, migration.stderr);
+    assert.deepEqual(JSON.parse(migration.stdout).args, args);
+    assert.equal(existsSync(migrationHome), false);
+  }
+  const scopedMigration = run(['migration', '--home', migrationHome]);
+  assert.equal(scopedMigration.status, 0, scopedMigration.stderr);
+  assert.deepEqual(JSON.parse(scopedMigration.stdout).args, ['--home', migrationHome, 'migration', '--home', migrationHome]);
+  const sourceMigration = run(['migration', '--source', '/legacy/v2']);
+  assert.equal(sourceMigration.status, 0, sourceMigration.stderr);
+  assert.deepEqual(JSON.parse(sourceMigration.stdout).args, ['migration', '--source', '/legacy/v2']);
   const stopped = run(['stop']);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.equal(stopped.stdout, '');

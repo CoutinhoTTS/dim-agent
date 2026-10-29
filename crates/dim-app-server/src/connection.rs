@@ -746,15 +746,16 @@ impl Connection {
                 Ok(Reply::Summaries(summaries))
             }
             Call::Attach(params) => {
-                return match self.attach(
-                    rpc,
-                    id.clone(),
-                    params,
-                    usage.expect("attach pins its Session"),
-                ) {
-                    Ok(()) => None,
-                    Err(error) => Some(Err(error)),
-                };
+                return self
+                    .attach(
+                        rpc,
+                        id.clone(),
+                        params,
+                        usage.expect("attach pins its Session"),
+                    )
+                    .await
+                    .err()
+                    .map(Err);
             }
             Call::Detach(params) => {
                 self.attachments

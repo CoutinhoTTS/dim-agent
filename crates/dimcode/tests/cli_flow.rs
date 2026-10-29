@@ -3,6 +3,8 @@
 #[path = "cli_flow/acp.rs"]
 mod acp;
 
+#[path = "cli_flow/migration.rs"]
+mod migration;
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/question.rs"]
@@ -122,7 +124,7 @@ impl Wire {
     }
     fn attached(&mut self) {
         let attach = self.read("session.attach");
-        self.reply(&attach, json!({}));
+        self.reply(&attach, attach_record(&attach));
         let history = self.read("session.history");
         self.reply(
             &history,
@@ -141,6 +143,20 @@ impl Wire {
         let detach = self.read("session.detach");
         self.reply(&detach, json!({}));
     }
+}
+
+/// The record `session.attach` replies for the Session it names: that
+/// Session's `SessionInfo`, as `session.list` gives it.
+fn attach_record(request: &Value) -> Value {
+    json!({
+        "sessionId": request["params"]["sessionId"],
+        "cwd": "/workspace",
+        "model": {"providerId":"test","modelId":"model"},
+        "createdAt": 1,
+        "running": false,
+        "sequence": 8,
+        "attachedClients": 1,
+    })
 }
 
 fn wait(mut child: Child) -> Output {
@@ -2639,7 +2655,7 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let mut line = String::new();
@@ -2672,7 +2688,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -2743,7 +2759,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -2811,7 +2827,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -2865,7 +2881,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -2916,7 +2932,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let catalog = wire.read("provider.catalog");
@@ -3904,6 +3920,254 @@ fn mcp_catalog_and_sign_out_use_public_auth_data_and_the_selected_source() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("Revoked: false"));
 }
 
+/// An empty catalog reads as an empty catalog: one note, and no columns
+/// describing rows that are not there.
+#[test]
+fn mcp_list_says_when_no_server_is_configured() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        mcp_hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request,json!({"userRevision":"user:1","projectRevision":null,"servers":[],"userApplication":{},"projectApplication":null}));
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "No MCP server is configured.\n"
+    );
+}
+
+#[test]
+fn tui_mcp_says_when_no_server_is_configured() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,json!({"userRevision":"user:1","projectRevision":null,"servers":[],"userApplication":{},"projectApplication":null}));
+        let state = wire.read("session.mcp");
+        wire.reply(&state,json!({"sessionId":"session","servers":[],"catalogError":null,"closed":false}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp\r");
+    terminal.until("No MCP server is configured.");
+    assert!(
+        !terminal.transcript.contains("Columns:"),
+        "{}",
+        terminal.transcript
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The Session already knows why a server failed and what it refused;
+/// `/mcp` shows those under the server's row, sanitized, and the catalog
+/// error once. `auth_required` keeps its single sign-in hint.
+#[test]
+fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,json!({"userRevision":"user:1","projectRevision":null,"servers":[
+            {"id":"docs","source":"project","transport":"http","enabled":true,"auth":{"status":"required"}},
+            {"id":"team","source":"user","transport":"http","enabled":true}
+        ],"userApplication":{},"projectApplication":null}));
+        let state = wire.read("session.mcp");
+        wire.reply(&state,json!({"sessionId":"session","servers":[
+            {"id":"docs","state":"auth_required","message":"authorization required"},
+            {"id":"team","state":"failed","message":"connection refused\u{1b}[31m"},
+            {"id":"wiki","state":"ready","version":"v1","rejection":{"version":"v2","reason":"duplicate tool name"}}
+        ],"catalogError":"project MCP configuration is not active","closed":false}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp\r");
+    terminal.until("connection refused");
+    terminal.until("Version v2 rejected: duplicate tool name");
+    terminal.until("MCP catalog: project MCP configuration is not active");
+    assert!(
+        terminal
+            .transcript
+            .contains("Sign in with mcp login \"docs\""),
+        "{}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("authorization required"),
+        "the sign-in hint already says it: {}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("[31m"),
+        "the failure message is sanitized: {}",
+        terminal.transcript
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// `/mcp enable` and `/mcp disable` send what `dimcode mcp enable` /
+/// `disable` sends, report the same text, and the next `/mcp` lists the new
+/// state.
+#[test]
+fn tui_mcp_enables_and_disables_a_project_server() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = |enabled: bool| {
+            json!({"userRevision":"user:1","projectRevision":"project:1","servers":[
+                {"id":"docs","source":"project","transport":"http","enabled":enabled}
+            ],"userApplication":{},"projectApplication":null})
+        };
+        let session = json!({"sessionId":"session","servers":[],"catalogError":null,"closed":false});
+        // `/mcp`: the project entry starts disabled.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(false));
+        let state = wire.read("session.mcp");
+        wire.reply(&state, session.clone());
+        // `/mcp enable docs`
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(false));
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(
+            (
+                &set["params"]["id"],
+                &set["params"]["source"],
+                &set["params"]["expectedVersion"],
+                &set["params"]["enabled"]
+            ),
+            (
+                &json!("docs"),
+                &json!("project"),
+                &json!("project:1"),
+                &json!(true)
+            )
+        );
+        assert!(set["params"]["cwd"].is_string());
+        wire.reply(&set, json!({}));
+        // The next `/mcp` shows it enabled.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true));
+        let state = wire.read("session.mcp");
+        wire.reply(&state, session.clone());
+        // `/mcp disable docs`
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true));
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(
+            (&set["params"]["id"], &set["params"]["enabled"]),
+            (&json!("docs"), &json!(false))
+        );
+        wire.reply(&set, json!({}));
+        // The next `/mcp` shows it disabled again.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(false));
+        let state = wire.read("session.mcp");
+        wire.reply(&state, session);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp\r");
+    terminal.until("disabled");
+    terminal.write(b"/mcp enable docs\r");
+    terminal.until("Enabled \"docs\" (project).");
+    terminal.until(".mcp.json");
+    terminal.write(b"/mcp\r");
+    terminal.until("enabled");
+    terminal.write(b"/mcp disable docs\r");
+    terminal.until("Disabled \"docs\" (project).");
+    terminal.write(b"/mcp\r");
+    terminal.until("disabled");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The standalone `mcp enable` prints the entry and the source; the TUI's
+/// `/mcp enable` shares that function.
+#[test]
+fn mcp_enable_reports_the_entry_and_the_source() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        mcp_hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({"userRevision":"user:1","projectRevision":"project:1","servers":[
+            {"id":"docs","source":"project","transport":"http","enabled":false}
+        ],"userApplication":{},"projectApplication":null}),
+        );
+        let set = wire.read("mcp.set_enabled");
+        assert_eq!(set["params"]["enabled"], json!(true));
+        wire.reply(&set, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "enable", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled \"docs\" (project).\n"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
+}
+
 #[test]
 fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_next_command() {
     let home = Home::new();
@@ -4290,7 +4554,7 @@ fn initial_attach_eof_settles_a_shell_started_before_the_first_prompt() {
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
         wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
-        let attach = wire.read("session.attach"); wire.reply(&attach, json!({}));
+        let attach = wire.read("session.attach"); wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let idle = wire.read("session.idle");
         wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"main","requestId":"restored","textOffset":0,"text":"initial model pending","thinking":"","thinkingOffset":0}));
@@ -4659,7 +4923,7 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -4711,7 +4975,7 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -5214,7 +5478,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         ]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let register = wire.read("ui.attach");
         assert_eq!(
             register["params"],
@@ -5235,7 +5499,7 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         wire.reply(&detach, json!({}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"next"}));
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let register = wire.read("ui.attach");
         assert_eq!(register["params"], json!({"sessionId":"next","kind":"tui"}));
         wire.reply(&register, json!({"uiId":"ui-2"}));
@@ -5284,7 +5548,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -5410,7 +5674,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -5529,7 +5793,7 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
             wire.hello(&[]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
             let providers = wire.read("account.providers");
@@ -5577,7 +5841,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
@@ -5663,7 +5927,7 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         ]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let read = wire.read("session.permission.get");
@@ -5736,7 +6000,7 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"full-access"}));
         wire.reply(&create, json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let read = wire.read("session.permission.get");
@@ -5770,7 +6034,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             wire.hello(&[]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
             let providers = wire.read("account.providers");
@@ -5875,7 +6139,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -5907,7 +6171,7 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -5939,7 +6203,7 @@ fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
             wire.hello(&["session.context.usage"]);
             wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(
                 &history,
@@ -6013,7 +6277,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -6114,7 +6378,7 @@ fn tui_compact_calls_the_context_method_and_reports_its_reply() {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -6174,7 +6438,7 @@ fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_
         wire.hello(&["session.context.usage"]);
         wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -6236,6 +6500,113 @@ fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_
     daemon.join().unwrap();
 }
 
+/// Reads until the CLI closes the connection, failing on any catalog read.
+fn no_catalog(wire: &mut Wire) {
+    let mut line = String::new();
+    while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        assert!(
+            !line.contains("session.summaries") && !line.contains("session.list"),
+            "the open read the Session catalog: {line}"
+        );
+        line.clear();
+    }
+}
+
+/// #556: a cold hosted TUI opens the Session it created without reading the
+/// catalog, and the first message does not wait for it.
+#[test]
+fn cold_hosted_tui_opens_without_reading_the_session_catalog() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"session"}));
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        no_catalog(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// #556: a resume by id takes the model from the attach record, so opening
+/// the Session reads no other Session.
+#[test]
+fn resume_by_id_takes_its_model_from_the_attach_record() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"session"}));
+        wire.reply(&attach, json!({"sessionId":"session","cwd":"/workspace",
+            "model":{"providerId":"resumed","modelId":"record"},"createdAt":1,
+            "running":false,"sequence":8,"attachedClients":1}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        no_catalog(wire);
+    });
+    let mut command = home.command();
+    command.args(["--resume", "session"]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("resumed / record");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A resume by id against a server whose attach reply has no record finds
+/// the model in the catalog and still becomes ready.
+#[test]
+fn resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"session"}));
+        wire.reply(&attach, json!({}));
+        let summaries = wire.read("session.summaries");
+        wire.reply(
+            &summaries,
+            json!([{"sessionId":"other","cwd":"/workspace",
+                    "model":{"providerId":"other","modelId":"other"},"updatedAt":2},
+                   {"sessionId":"session","cwd":"/workspace",
+                    "model":{"providerId":"catalog","modelId":"fallback"},"updatedAt":1}]),
+        );
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.args(["--resume", "session"]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("catalog / fallback");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// A resumed session rebuilds its compaction rows from history.
 #[test]
 fn tui_rebuilds_compaction_rows_from_history_on_resume() {
@@ -6243,10 +6614,8 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
         wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
-        let summaries = wire.read("session.summaries");
-        wire.reply(&summaries, json!([{"sessionId":"session","cwd":"/workspace","model":{"providerId":"test","modelId":"model"},"updatedAt":1}]));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -6381,7 +6750,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let create = wire.read("session.create");
         wire.reply(&create, json!({"sessionId":"session","sequence":0,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         let accounts = wire.read("account.providers");
@@ -6458,6 +6827,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                     "provider.list","provider.catalog","collaboration.model_policy",
                     "collaboration.set_model_policy"]}),
                 "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                "session.attach" => attach_record(&request),
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),

@@ -1267,8 +1267,10 @@ dependencies = [
  "base64 0.22.1",
  "crossterm",
  "dim-acp",
+ "dim-agent-capabilities",
  "dim-agent-types",
  "dim-client",
+ "dim-migration",
  "flate2",
  "ignore",
  "image",
@@ -1287,6 +1289,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-util",
  "unicode-segmentation",
  "unicode-width 0.2.0",
  "url",
@@ -1308,6 +1311,34 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "dim-migration"
+version = "0.1.0-alpha.8"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "crossterm",
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "dim-app-server",
+ "dim-client",
+ "dim-oauth",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rutis",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "unicode-width 0.2.0",
+ "uuid",
 ]
 
 [[package]]
@@ -1345,6 +1376,7 @@ dependencies = [
  "dim-oauth",
  "image",
  "libc",
+ "rusqlite",
  "serde_json",
  "sha2 0.10.9",
  "url",
@@ -5503,6 +5535,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0-alpha.8"
 dependencies = [
+ "axum",
  "dim-agent-aimux",
  "dim-agent-attachments",
  "dim-agent-capabilities",
@@ -5510,6 +5543,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-client",
  "futures-util",
  "rutis",
  "rutis-bridge",

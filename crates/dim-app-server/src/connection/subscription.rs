@@ -398,9 +398,10 @@ fn state_change(id: String, mut receiver: watch::Receiver<()>) -> StateChange {
 }
 
 impl Connection {
-    /// Replies `{}`, then forwards the Session broadcast from this point on.
-    /// Events before the listener are not replayed; pending approvals are.
-    pub(super) fn attach(
+    /// Replies the attached Session's directory record, then forwards the
+    /// Session broadcast from this point on. Events before the listener are
+    /// not replayed; pending approvals are.
+    pub(super) async fn attach(
         self: &Arc<Self>,
         rpc: &Arc<RpcService>,
         id: RequestId,
@@ -413,6 +414,11 @@ impl Connection {
             .ok_or_else(RpcError::closed)?;
         let version = self.protocol_version();
         let session_id = session.id().to_owned();
+        let record = rpc
+            .index
+            .session_record(&host, &session, version)
+            .await
+            .map_err(RpcError::from)?;
         let generation = self.next_attachment.fetch_add(1, Ordering::Relaxed);
         let cancel = self.closed.child_token();
         let watched = Arc::new(Mutex::new(HashSet::new()));
@@ -464,19 +470,13 @@ impl Connection {
         };
         let (availability, active) = availability.unzip();
         let ended = session.is_closing();
+        // The reply carries the count this attach produces. The hub reads every
+        // connection's attachment map, including this one's, and the reply must
+        // be sent under that same map so no notice precedes it.
+        let attached_clients =
+            self.hub.attached_clients(&session_id) + usize::from(!self.is_attached(&session_id));
         {
             let mut attachments = self.attachments.lock().expect("attachments");
-            if self
-                .sender
-                .send(Outbound::result(id, Ok(Reply::empty())), false)
-                .is_err()
-            {
-                drop(attachments);
-                for listener in [Some(listener), availability].into_iter().flatten() {
-                    tokio::spawn(listener.dispose());
-                }
-                return Err(RpcError::wire(-32603, "Connection closed"));
-            }
             attachments.insert(
                 session_id.clone(),
                 Attachment {
@@ -488,6 +488,18 @@ impl Connection {
                     delivery,
                 },
             );
+            let record = SessionInfo {
+                attached_clients,
+                ..record
+            };
+            if self
+                .sender
+                .send(Outbound::result(id, Ok(Reply::Attach(record))), false)
+                .is_err()
+            {
+                attachments.remove(&session_id);
+                return Err(RpcError::wire(-32603, "Connection closed"));
+            }
         }
         crate::approval::replay(&session, |branch_id, request| {
             self.notify(
