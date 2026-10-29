@@ -370,6 +370,9 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 | `toolRegistry.register` | async | `ToolDeclaration`、`execute` | 注册完成时无返回值；被拒绝时返回错误 |
 | `execute`（注册部件自己的函数） | async | `ToolCall`、`cancelled` | `ToolResult` |
 
+`inputSchema` 节点可以省略 `type`，例如由 `oneOf` 表达约束时。保留提供的关键字和
+`type` 是否存在；工具注册和模型请求准备都不为这类节点补造类型。
+
 ```text
 // ToolDeclaration
 { "name": "web_fetch",           // 注册的名称

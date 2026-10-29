@@ -200,7 +200,7 @@ export type SessionBroadcast =
   | { kind: 'fence'; recipient: string; token: number }
   | { kind: 'closed' };
 export type JsonSchema = JsonObject & {
-  type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
+  type?: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
   properties?: Record<string, JsonSchema>;
   items?: JsonSchema;
   required?: string[];

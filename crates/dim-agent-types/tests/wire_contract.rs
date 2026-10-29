@@ -120,6 +120,9 @@ fn malformed_events_are_rejected_at_the_wire_boundary() {
     value["data"]["request"]["providerId"] = Value::Null;
     reject(value);
     let mut value = fixture("model/call", None);
+    value["data"]["request"]["tools"][0]["inputSchema"]["type"] = Value::Null;
+    reject(value);
+    let mut value = fixture("model/call", None);
     value["data"]["request"]["messages"][0]["role"] = json!("system");
     reject(value);
     let mut value = fixture("model/call", None);

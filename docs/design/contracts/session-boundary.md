@@ -371,6 +371,10 @@ ToolBinding reconciles the table through the existing Prompt / BranchOpening flo
 | `toolRegistry.register` | async | `ToolDeclaration`, `execute` | Nothing once registered; an error when refused |
 | `execute` (the registering part's function) | async | `ToolCall`, `cancelled` | `ToolResult` |
 
+An `inputSchema` node may omit `type`, for example when `oneOf` supplies its
+constraints. Preserve the supplied keywords and whether `type` is present;
+neither registration nor model preparation inserts a type for such a node.
+
 ```text
 // ToolDeclaration
 { "name": "web_fetch",           // the registered name

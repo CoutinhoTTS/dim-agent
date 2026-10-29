@@ -86,7 +86,7 @@ async fn rpc(
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
             json!({"tools":[
-                {"name":"lookup/item","description":format!("Subtract two numbers, revision {}", remote.revision.load(Ordering::SeqCst)),"inputSchema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}},
+                {"name":"lookup/item","description":format!("Subtract two numbers, revision {}", remote.revision.load(Ordering::SeqCst)),"inputSchema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"},"rule":{"oneOf":[{"type":"object","properties":{"kind":{"type":"string","const":"manual"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","const":"minutes"},"every":{"type":"integer","minimum":1}},"required":["kind","every"],"additionalProperties":false}]}},"required":["a","b"]}},
                 {"name":"lookup_item","description":"A distinct original name","inputSchema":{"type":"object"}}
             ]})
         }
@@ -540,9 +540,15 @@ async fn temporary_mcp_binds_calls_isolates_and_disposes_without_settings_writes
                     && metadata.mcp_original_tool_name.as_deref() == Some("lookup/item")
             })
         })
-        .expect("the very first request must include the bound MCP tool")
-        .name
-        .clone();
+        .expect("the very first request must include the bound MCP tool");
+    assert_eq!(
+        serde_json::to_value(&tool.input_schema).unwrap()["properties"]["rule"],
+        json!({"oneOf":[
+            {"type":"object","properties":{"kind":{"type":"string","const":"manual"}},"required":["kind"],"additionalProperties":false},
+            {"type":"object","properties":{"kind":{"type":"string","const":"minutes"},"every":{"type":"integer","minimum":1}},"required":["kind","every"],"additionalProperties":false}
+        ]})
+    );
+    let tool = tool.name.clone();
     env.turn(
         &first,
         Action::Call {
