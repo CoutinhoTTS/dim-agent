@@ -2643,7 +2643,8 @@
         "json",
         "println",
         "tokio::pin",
-        "tokio::select"
+        "tokio::select",
+        "vec"
       ]
     },
     {
@@ -20274,8 +20275,7 @@
       "from": "dim_cli",
       "to": "dim_cli::mcp",
       "references": [
-        "mod mcp",
-        "path mcp::Catalog"
+        "mod mcp"
       ]
     },
     {
@@ -20284,6 +20284,8 @@
       "references": [
         "mod mcp_command",
         "path mcp_command::list",
+        "path mcp_command::print_report",
+        "path mcp_command::set_enabled",
         "path mcp_command::sign_in",
         "path mcp_command::sign_out"
       ]
@@ -20433,7 +20435,6 @@
       "to": "dim_client",
       "references": [
         "path client::Client",
-        "path client::RpcError",
         "path client::app_error"
       ]
     },
@@ -21160,12 +21161,14 @@
       "from": "dim_cli::mcp_command",
       "to": "dim_cli::mcp",
       "references": [
+        "path Catalog",
         "path Started",
         "path catalog_report",
         "path error",
         "path self::error",
         "path session_report",
         "path target",
+        "use crate::mcp::Catalog",
         "use crate::mcp::Started",
         "use crate::mcp::catalog_report",
         "use crate::mcp::error",
@@ -22211,6 +22214,13 @@
         "path mcp::session_report",
         "path mcp::target",
         "use crate::mcp"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::mcp_command",
+      "references": [
+        "path crate::mcp_command::set_enabled"
       ]
     },
     {
@@ -29416,6 +29426,10 @@
     {
       "module": "dim_cli::session_host",
       "path": "State::Pending"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_cli::ui::composer",

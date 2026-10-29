@@ -1626,9 +1626,9 @@ impl Worker {
     }
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
-    /// `/mcp logout ID`.
+    /// `/mcp logout ID`, `/mcp enable ID`, `/mcp disable ID`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|enable ID|disable ID]";
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
@@ -1667,6 +1667,27 @@ impl Worker {
                     format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
                     false,
                 );
+            }
+            // The ID is the rest of the line, spaces included.
+            ["enable", ..] | ["disable", ..] => {
+                let (command, id) = args
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((args.trim(), ""));
+                let id = id.trim();
+                if id.is_empty() {
+                    return Err(USAGE.into());
+                }
+                let (rows, notes) = crate::mcp_command::set_enabled(
+                    &mut self.client,
+                    &self.options,
+                    id,
+                    command == "enable",
+                )
+                .await?;
+                let mut lines = rows;
+                lines.extend(notes);
+                self.report(lines.join("\n"), false);
             }
             _ => return Err(USAGE.into()),
         }
