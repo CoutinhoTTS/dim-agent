@@ -6,6 +6,16 @@ Owner: [model_provider.rs](../../../../crates/dim-agent-capabilities/src/model_p
 Runs prepared model calls, validates/commits streamed output and owns terminal
 settlement and bounded retry/recovery.
 
+## Image handling
+
+Every image block in a request is handled when the request is built, from that
+request's model (Attachments A.1; [images.rs](../../../../crates/dim-agent-capabilities/src/model_provider/images.rs)).
+The rule covers images in user content and images inside a tool result alike: a
+model that does not accept image input gets the text placeholder in the block's
+place, an image the request cannot carry gets the other placeholder, and every
+other image is sent as is. The decision changes the request only; the adopted
+input, the Timeline and the stored tool result never change.
+
 ## Dependencies
 
 | Service | Purpose |

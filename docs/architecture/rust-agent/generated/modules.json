@@ -5515,6 +5515,7 @@
         "path ContentMetadata::Gemini",
         "path ContentMetadata::OpenaiResponses",
         "path ContentMetadata::XaiResponses",
+        "path ImageSource",
         "path ImageSourceType::Base64",
         "path ImageSourceType::Url",
         "path MessageContent::Parts",
@@ -5528,10 +5529,12 @@
         "path Role::Assistant",
         "path Role::ToolResult",
         "path Role::User",
+        "path ToolContent",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ContentBlock",
         "use dim_agent_types::ContentMetadata",
+        "use dim_agent_types::ImageSource",
         "use dim_agent_types::ImageSourceType",
         "use dim_agent_types::MessageContent",
         "use dim_agent_types::MessagePart",
@@ -6799,9 +6802,12 @@
       "from": "dim_agent_capabilities::context_model",
       "to": "dim_agent_types::content",
       "references": [
+        "path ContentBlock::Image",
         "path MessageContent::Parts",
         "path MessageContent::Text",
-        "path MessagePart::Image"
+        "path MessagePart::Image",
+        "path MessagePart::ToolResult",
+        "path ToolContent::Blocks"
       ]
     },
     {
@@ -8320,12 +8326,17 @@
       "from": "dim_agent_capabilities::model_provider::images",
       "to": "dim_agent_types::content",
       "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
         "path ImageSource",
         "path ImageSourceType::Base64",
         "path Message",
         "path MessageContent::Parts",
         "path MessagePart::Image",
-        "path MessagePart::Text"
+        "path MessagePart::Text",
+        "path MessagePart::ToolResult",
+        "path ToolContent::Blocks",
+        "path content"
       ]
     },
     {
