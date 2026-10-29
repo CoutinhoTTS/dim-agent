@@ -120,7 +120,7 @@ they carry. Export version 1:
 | `end`, last | `branches` and `events`: the counts written |
 
 ```
-{"kind":"header","export":1,"session_id":"S","store_format":18,"sensitive":true}
+{"kind":"header","export":1,"session_id":"S","store_format":21,"sensitive":true}
 {"kind":"branch","info":{"id":"main"},"head":41}
 {"kind":"branch","info":{"id":"B","parent":"main","branch_point":12,"create_anchor":13},"head":7}
 {"kind":"event","branch_id":"main","event":{"id":"…","sequence":1,"create_at":1761000000000,"type":"input","name":"message","data":{…}},"trace":null,"batch_end":1}

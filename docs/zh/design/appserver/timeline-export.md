@@ -79,7 +79,7 @@ UTF-8 JSONL，每行一个对象，各带一个 `kind`。外层字段用 snake_c
 | `end`，最后一行 | `branches` 与 `events`：写出的数量 |
 
 ```
-{"kind":"header","export":1,"session_id":"S","store_format":18,"sensitive":true}
+{"kind":"header","export":1,"session_id":"S","store_format":21,"sensitive":true}
 {"kind":"branch","info":{"id":"main"},"head":41}
 {"kind":"branch","info":{"id":"B","parent":"main","branch_point":12,"create_anchor":13},"head":7}
 {"kind":"event","branch_id":"main","event":{"id":"…","sequence":1,"create_at":1761000000000,"type":"input","name":"message","data":{…}},"trace":null,"batch_end":1}
