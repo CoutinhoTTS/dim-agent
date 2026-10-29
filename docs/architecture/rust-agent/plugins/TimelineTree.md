@@ -22,6 +22,7 @@ block and the branch markers — with their classes are listed on
 | `S:TimelineFactory` | Build branch capability scopes. |
 | `S:SessionIdentity` | Identify the persisted Session. |
 | `S:dyn TimelineStore` | Persist/load branch directories and timeline facts. |
+| `S:GuideEntries` | Register the `<dim-branch-line>` entry, until this part unloads. |
 
 ### Events and lifetime
 
@@ -59,7 +60,7 @@ Session close, and closing is not deletion of persisted history.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:SessionIdentity`、`S:TimelineFactory`、`S:dyn TimelineStore` |
+| 注入 | `S:GuideEntries`、`S:SessionIdentity`、`S:TimelineFactory`、`S:dyn TimelineStore` |
 | 提供 | `S:TimelineTree`、`S:TreeCommands`、`S:dyn HostDispatch#treeCommands`、`S:dyn TimelineTreeControl` |
 | 被注入于 | `BranchLine`、`BranchTool`、`InputMethods`、`Recall`、`ShellInput`、`TreeTimeline`、`Wait`、`WorkspaceTools` |
 <!-- /generated -->

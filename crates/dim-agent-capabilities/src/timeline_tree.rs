@@ -1588,6 +1588,7 @@ pub struct TimelineTreePlugin {
     factory: Key<TimelineFactory>,
     store: Key<dyn TimelineStore>,
     identity: Key<SessionIdentity>,
+    guide: Key<GuideEntries>,
 }
 impl TimelineTreePlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -1598,6 +1599,7 @@ impl TimelineTreePlugin {
             factory: names.key()?,
             store: names.key()?,
             identity: names.key()?,
+            guide: names.key()?,
         })
     }
 }
@@ -1610,6 +1612,7 @@ impl DynPlugin for TimelineTreePlugin {
             self.factory.erase(),
             self.store.erase(),
             self.identity.erase(),
+            self.guide.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -1617,6 +1620,16 @@ impl DynPlugin for TimelineTreePlugin {
             let factory = ctx.require_at(&self.factory)?;
             let store = ctx.require_at(&self.store)?;
             let identity = ctx.require_at(&self.identity)?;
+            let guide = ctx.require_at(&self.guide)?;
+            guide.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-branch-line".into()],
+                    order: 40,
+                    text: IDENTITY_ENTRY.into(),
+                },
+            )?;
             let tree = TimelineTree::new(factory, store, identity.session_id.clone());
             let owner = tree.clone();
             ctx.effect(move || async move { owner.close().await.map_err(Into::into) })?;
@@ -1703,8 +1716,11 @@ struct LineView {
     /// The line committed its own `branch/end`: it is ending.
     ending: bool,
 }
-/// `<dim-branch-line>` and `<dim-branch-lines>`.
-const BRANCH_LINE_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. On main, dim-branch-lines lists the lines you opened that are still open. A later block of either name replaces the earlier one; both are state about the lines, not requests."#;
+/// `<dim-branch-line>`, written by TimelineTree at the start of every child.
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
+
+/// `<dim-branch-lines>`, the roster BranchLine writes on main.
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
 const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
@@ -1751,11 +1767,7 @@ impl DynPlugin for BranchLinePlugin {
             let guide = ctx.require_at(&self.guide)?;
             let scope = GuideScope::Branch(identity.branch_id.clone());
             for (markers, order, text) in [
-                (
-                    vec!["dim-branch-line", "dim-branch-lines"],
-                    40,
-                    BRANCH_LINE_ENTRY,
-                ),
+                (vec!["dim-branch-lines"], 40, ROSTER_ENTRY),
                 (
                     vec!["dim-branch-message", "dim-branch-idle", "dim-branch-ended"],
                     50,

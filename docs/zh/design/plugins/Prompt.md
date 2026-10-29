@@ -104,7 +104,8 @@ Prompt 自己的两个调用点留在原处：ContextPreparation 放置它发布
 | 10 | `dim-notification` | BackgroundExec | 分支 | exec 通知 |
 | 20 | `dim-agent-report` | Collaboration 的 Session 部件 | Session | 委派工作的结果 |
 | 30 | `dim-agent-message` | Collaboration 的 Session 部件 | Session | 另一个 agent 的消息 |
-| 40 | `dim-branch-line`、`dim-branch-lines` | BranchLine | 分支 | 你是这个 Session 的哪条线，以及 `main` 上的线列表 |
+| 40 | `dim-branch-line` | TimelineTree | Session | 你是这个 Session 的哪条线 |
+| 40 | `dim-branch-lines` | BranchLine | 分支 | `main` 上的线列表；`order` 相同时身份条目在前 |
 | 50 | `dim-branch-message`、`dim-branch-idle`、`dim-branch-ended` | BranchLine | 分支 | 另一条线发来的消息，以及运行时关于某条线的报告 |
 | 60 | `dim-state` | PromptGuide | Session | 状态块是什么 |
 | 70 | `dim-rule` | PromptGuide | Session | 规则块是什么、怎样结束 |
