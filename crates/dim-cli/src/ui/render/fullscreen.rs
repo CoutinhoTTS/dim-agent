@@ -212,10 +212,11 @@ impl Selection {
 
 /// Columns of chrome before the copyable text of a plain row.
 ///
-/// A committed row opens with one margin space, then a gutter glyph
-/// ([`MARGIN_MARKS`]). Any [`GUTTER_MARKS`] glyph in column 0 is chrome too.
-/// Anything else after the margin is text, including a dash, a wide character
-/// or a `$10` that opens an assistant line.
+/// Committed rows have one margin space. This fallback recognizes
+/// [`MARGIN_MARKS`] after it and [`GUTTER_MARKS`] at column 0 in unpadded rows.
+/// Ambiguous marks after the margin are kept, including shell/status chrome;
+/// content starting with a margin mark is stripped. Per-row chrome metadata
+/// is needed to distinguish those cases.
 fn text_inset(plain: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     let mut glyphs = plain.graphemes(true);
@@ -1774,8 +1775,8 @@ mod tests {
     }
 
     #[test]
-    fn selection_on_a_wide_screen_skips_gutter_marks() {
-        let size = (80, 12);
+    fn selection_on_a_wide_screen_keeps_ambiguous_marks() {
+        let size = (80, 13);
         let mut screen = FullScreen::new(size, false);
         let mut emu = Emu::new(size.0 as usize, size.1 as usize);
         let mut doc = Doc::new();
@@ -1783,8 +1784,9 @@ mod tests {
             " \u{25c6} Thought for 3.2s",
             " \u{25a0} something failed",
             " \u{25e6} status note",
-            "$ cargo test",
+            " $ cargo test",
             " $10 kept",
+            " ✓ installed",
             " - kept",
         ]);
         let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
@@ -1792,11 +1794,11 @@ mod tests {
         emu.feed(&screen.render(&frame(&[], &dock), size, &palette, &doc));
         let at = |kind, column, row| MouseEvent { kind, column, row };
         screen.mouse(at(MouseKind::Press, 0, 5), &doc);
-        screen.mouse(at(MouseKind::Drag, 24, 10), &doc);
+        screen.mouse(at(MouseKind::Drag, 24, 11), &doc);
         assert_eq!(
-            screen.mouse(at(MouseKind::Release, 24, 10), &doc),
+            screen.mouse(at(MouseKind::Release, 24, 11), &doc),
             MouseOutcome::Copy(
-                " Thought for 3.2s\n something failed\n status note\n cargo test\n$10 kept\n- kept"
+                " Thought for 3.2s\n something failed\n status note\n$ cargo test\n$10 kept\n✓ installed\n- kept"
                     .to_owned()
             )
         );

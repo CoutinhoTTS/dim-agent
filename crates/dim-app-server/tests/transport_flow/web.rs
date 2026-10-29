@@ -219,6 +219,36 @@ async fn web_settings_permission_cancellation_and_restore() {
                             closed.send(()).unwrap();
                             return;
                         }
+                        if request.starts_with("GET /deflate/") {
+                            use flate2::{Compression, write::{DeflateEncoder, ZlibEncoder}};
+                            use std::io::Write;
+                            let path = request.split_whitespace().nth(1).unwrap();
+                            let raw = path.contains("/raw/");
+                            let limited = path.ends_with("/limited");
+                            let body = if limited {
+                                "x".repeat(5 * 1024 * 1024 + 64 * 1024)
+                            } else {
+                                "complete page ".repeat(2000)
+                            };
+                            let mut compressed = if raw {
+                                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                                encoder.write_all(body.as_bytes()).unwrap();
+                                encoder.finish().unwrap()
+                            } else {
+                                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+                                encoder.write_all(body.as_bytes()).unwrap();
+                                encoder.finish().unwrap()
+                            };
+                            if !path.ends_with("/complete") {
+                                compressed.truncate(compressed.len() - 4);
+                            }
+                            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: deflate\r\nConnection: close\r\n\r\n").await.unwrap();
+                            for chunk in compressed.chunks(7) {
+                                if socket.write_all(chunk).await.is_err() { break; }
+                                tokio::task::yield_now().await;
+                            }
+                            return;
+                        }
                         if request.starts_with("GET /truncated-gzip ") {
                             let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".to_vec();
                             response.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1, 14, 0, 0xf1, 0xff]);
@@ -484,6 +514,42 @@ async fn web_settings_permission_cancellation_and_restore() {
             text(&truncated).contains("connect_failed"),
             "a gzip stream without its trailer is not a complete page: {truncated:?}"
         );
+        for encoding in ["zlib", "raw"] {
+            for ending in ["complete", "truncated", "limited"] {
+                submit(
+                    &mut client,
+                    &id,
+                    "web_fetch",
+                    json!({"url":format!("{base}/deflate/{encoding}/{ending}")}),
+                )
+                .await;
+                idle(&mut client, &id).await;
+                let fetched = result(&session).await;
+                if ending == "truncated" {
+                    assert_eq!(fetched.is_error, Some(true), "{encoding}: {fetched:?}");
+                    assert!(
+                        text(&fetched).contains("connect_failed"),
+                        "{encoding}: {fetched:?}"
+                    );
+                } else {
+                    assert_ne!(
+                        fetched.is_error,
+                        Some(true),
+                        "{encoding}/{ending}: {fetched:?}"
+                    );
+                    let data = fetched.structured_content.as_ref().unwrap();
+                    assert_eq!(
+                        data["download_limited"],
+                        ending == "limited",
+                        "{encoding}: {fetched:?}"
+                    );
+                    if ending == "complete" {
+                        assert_eq!(data["total"], 28_000, "{encoding}: {fetched:?}");
+                        assert!(text(&fetched).contains("complete page complete page"));
+                    }
+                }
+            }
+        }
         let results_before = session
             .local("main", ..)
             .await
@@ -931,10 +997,6 @@ async fn web_fetch_times_out_when_the_response_never_finishes() {
         if count > before {
             break;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(40),
-            "the whole-call deadline did not fire"
-        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(

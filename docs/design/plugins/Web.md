@@ -38,7 +38,7 @@ Web is a built-in process row in the App Server. That row registers the `web` Se
 
 The search API key is `searchService.apiKey`, a user-only field in Web's Settings source ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)). On Unix, the file-backed profile writes the user document with mode 0600. The native profile stores it as `user/web` in SQLite; its boundary is the product home, created with mode 0700 for a new directory on Unix (Windows inherits the parent DACL). Existing home permissions are preserved, and the database has no separate 0600 guarantee. `userOnly` restricts writes, not local reads: the field is written through the client method `settings.update`, never by Web, and local clients can read it through `settings.read`; remote and paired clients cannot. Web reads it with the document at each call, never keeps it, and never places it in definitions, results, `structuredContent`, diagnostics, errors or logs.
 
-**Reload.** Web depends on the process service Settings and on the Session's `toolRegistry`, which it registers with. Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry does not depend on Web (session-boundary A.5), so the Session keeps running: Web's registrations are withdrawn while Web reloads and its tools are offered again from the next request once it registers them again, without a Session reload (#241); an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). Configuration edits never reload.
+**Reload.** Web depends on the process service Settings and on the Session's `toolRegistry`, which it registers with. A Settings reload reloads its dependent Web parts: ToolRegistry does not depend on Web (session-boundary A.5), so the Session keeps running: Web's registrations are withdrawn while Web reloads and its tools are offered again from the next request once it registers them again, without a Session reload (#241); an in-flight call is settled by ToolExecutor as reloaded. This follows the dependency lifecycle ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -208,7 +208,7 @@ Execution follows the tool handler with the call's cancellation token. Every cal
 
 Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
 
-The initial source is the user file `web.json`, read at user scope, with no projectFile or implicit user/project merge (A16). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
+The initial source is the user file `web.json`, read at user scope, with no projectFile or implicit user/project merge (A16). Clients write private-host exceptions; Web has no configuration-writing tool. The App Server registers the built-in Web row whenever a product home exists; Web has no package installation or per-plugin enable switch.
 
 ## 7. Security
 
@@ -236,7 +236,7 @@ The initial source is the user file `web.json`, read at user scope, with no proj
 | ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
 | ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
 | ADR 002 D3 (dependencies follow scope) | Settings is a process service; a missing required service fails the Web part's assembly and the Session continues without it. |
-| ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `web` document is business configuration in Web's own Settings source, read at each call. |
+| ADR 002 D4 (structural vs business configuration) | The built-in row is part of the App Server profile; the `web` document is business configuration in Web's own Settings source, read at each call. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
@@ -336,7 +336,7 @@ Fake-IP DNS answers remain subject to this policy. Synthetic benchmark addresses
 | `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string (URL) | absent |
 
-Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). The API key is `searchService.apiKey` (§1).
+Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Web has no per-plugin enable switch. Built-in adapter ids are an implementation choice (A13). The API key is `searchService.apiKey` (§1).
 
 ### A.6 Timeline and capability mechanics
 
@@ -437,7 +437,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. Web is the built-in process row `web` and its Session part. Product installation of optional packages remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 | HTML to text | A scanner, not a browser. A `<` followed later by `>` starts a tag, including a bare `<` in prose. Script, style and navigation are removed by regular expressions before that scan. |
-| Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. A gzip or zlib-wrapped deflate stream that fails at finalization is `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. A raw deflate stream (the fallback for servers that omit the zlib wrapper) carries no trailer, so a truncated one cannot be told from a complete one. |
+| Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. An incomplete gzip, zlib-wrapped deflate or raw deflate stream fails with `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. Raw deflate is the fallback for servers that omit the zlib wrapper. |
 | User-Agent | `dim-web/` plus the `dim-app-server` package version |
 
 ## Appendix G. Rust binding

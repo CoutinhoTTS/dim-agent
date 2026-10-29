@@ -38,7 +38,7 @@ Web 是 App Server 的内置进程 row。该 row 登记 Settings 来源 `web` �
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
-**重载。** Web 依赖进程服务 Settings，以及它要注册的本 Session 的 `toolRegistry`。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 不依赖 Web（session-boundary A.5），因此 Session 照常运行：Web 重载期间其注册被撤回，Web 重新注册后其工具从下一个请求起再次提供，不需要重载 Session（#241）；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
+**重载。** Web 依赖进程服务 Settings，以及它要注册的本 Session 的 `toolRegistry`。Settings 重载时，其依赖方 Web 部件随之重载：ToolRegistry 不依赖 Web（session-boundary A.5），因此 Session 照常运行：Web 重载期间其注册被撤回，Web 重新注册后其工具从下一个请求起再次提供，不需要重载 Session（#241）；在途调用由 ToolExecutor 以 reloaded 结算。这遵循依赖生命周期（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
 **节点。** 请求从承载该 Session 的 App Server 进程发出，而非从 Session 的资源节点发出（A2）。
 
@@ -208,7 +208,7 @@ home 存在时，App Server 登记进程 row `web`。其 apply 向 `partRegistry
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
-初始来源是用户文件 `web.json`，按 user scope 读取，不声明 projectFile，也没有隐式用户/项目合并（A16）。私有主机例外由客户端写入；Web 没有写配置工具。包的安装与 loader 可编辑意图保持 PluginManager 的职责。
+初始来源是用户文件 `web.json`，按 user scope 读取，不声明 projectFile，也没有隐式用户/项目合并（A16）。私有主机例外由客户端写入；Web 没有写配置工具。App Server 在存在产品 home 时注册内置 Web row；Web 无需安装包，也没有逐插件启用开关。
 
 ## 7. 安全
 
@@ -236,7 +236,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
 | ADR 002 D3（依赖跟随作用域） | Settings 在外层进程作用域；必需服务缺失则 Web 部件装配失败，Session 在没有它的情况下继续运行。 |
-| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web` 文档是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
+| ADR 002 D4（结构配置与业务配置分离） | 内置 row 属于 App Server profile；`web` 文档是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
 ## 9. 向机制所有者提出的需求
@@ -336,7 +336,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址（`198.
 | `allowPrivateHosts` | string[] | `[]` |
 | `proxy` | string（URL） | 缺省 |
 
-每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。API 密钥是 `searchService.apiKey`（§1）。
+每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。Web 没有逐插件启用开关。内置适配器 id 是实现选择（A13）。API 密钥是 `searchService.apiKey`（§1）。
 
 ### A.6 Timeline 与 Capability 机制
 
@@ -437,7 +437,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址（`198.
 | 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。Web 是内置进程 row `web` 及其 Session 部件。可选包的产品安装仍属于 PluginManager。 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 | HTML 转文本 | 扫描器，不是浏览器。后面出现 `>` 的 `<` 即开始一个标签，正文里单独的 `<` 也算。script、style 与导航在这次扫描之前用正则去掉。 |
-| 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。gzip 或带 zlib 封装的 deflate 在收尾时失败是 `connect_failed`；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。原始 deflate 流（服务器省略 zlib 封装时的回退）没有尾部校验，截断的流无法与完整的流区分。 |
+| 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。不完整的 gzip、带 zlib 封装的 deflate 或原始 deflate 流均以 `connect_failed` 失败；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。服务器省略 zlib 封装时回退为原始 deflate。 |
 | User-Agent | `dim-web/` 加上 `dim-app-server` 的包版本 |
 
 ## 附录 G. Rust 绑定
