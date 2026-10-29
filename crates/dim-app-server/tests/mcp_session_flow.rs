@@ -514,6 +514,8 @@ async fn temporary_mcp_binds_calls_isolates_and_disposes_without_settings_writes
     let second = env.session(false, PermissionPreset::FullAccess).await;
     ready(&first).await;
     ready(&second).await;
+    let findings = env.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
     let settings = std::fs::read(env.home.join("mcp.json")).unwrap();
     let binding = uuid::Uuid::new_v4().to_string();
     let input =
