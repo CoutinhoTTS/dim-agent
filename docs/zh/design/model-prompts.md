@@ -89,7 +89,7 @@
 
 输入指南是模型每次请求都会读到的、关于自己输入的那段文字。
 
-今天它是一份固定文字——框架加上内建标记的条目——由请求组装追加到 system 字段：ContextPreparation 在发布随采用配置一起的 System 时追加，Loop 在没有采用配置的宿主准备路径上追加（[提示词生命周期](../architecture/rust-agent/prompt.md)）。凡由采用配置构建的请求都带着它，摘要请求也包括在内。
+今天它是一份固定文字——框架加上内建标记的条目——由请求组装追加到 system 字段：ContextPreparation 在发布随采用配置一起的 System 时追加，Loop 在没有采用配置的宿主准备路径上追加（[提示词生命周期](../../architecture/rust-agent/prompt.md)）。凡由采用配置构建的请求都带着它，摘要请求也包括在内。
 
 ### 6.1 覆盖什么
 
