@@ -38,6 +38,15 @@ export const part = definePlugin({
         alive()
         calls++
         if (call.arguments.text === 'malformed') return { content: { invalid: true } }
+        if (call.arguments.text === 'declares') {
+          return {
+            content: 'declared',
+            effects: [
+              { kind: 'fileWritten', path: '/work/fixture.rs' },
+              { kind: 'commandRun', command: 'npm test', exitCode: 0 },
+            ],
+          }
+        }
         if (call.arguments.text === 'fast') {
           cancelled.then(() => { fastFinished = true; finishFast?.() })
         }

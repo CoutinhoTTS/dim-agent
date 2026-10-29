@@ -1121,3 +1121,46 @@ async fn grep_matches_the_ripgrep_runner() {
         assert_eq!(text(&rejected), message);
     }
 }
+
+#[tokio::test]
+async fn file_tools_declare_the_file_they_published() {
+    use dim_agent_types::ToolEffect;
+    let workspace = Workspace::new();
+    let reads = branch();
+    workspace.put("file.txt", b"before\n");
+    let path = workspace.path("file.txt");
+    let path = path.to_str().unwrap().to_owned();
+
+    // A call that fails before the publish declares nothing.
+    let refused = workspace
+        .call(
+            &reads,
+            "write",
+            json!({ "path": path, "content": "after\n" }),
+        )
+        .await;
+    assert_eq!(code(&refused), "text_binding_required");
+    assert_eq!(refused.effects, None);
+
+    ok(&workspace.read(&reads, &path).await);
+    let written = workspace
+        .call(
+            &reads,
+            "write",
+            json!({ "path": path, "content": "after\n" }),
+        )
+        .await;
+    assert_eq!(
+        written.effects,
+        Some(vec![ToolEffect::FileWritten { path: path.clone() }])
+    );
+    let edited = workspace.edit(&reads, &path, "after", "changed").await;
+    assert_eq!(
+        edited.effects,
+        Some(vec![ToolEffect::FileWritten { path: path.clone() }])
+    );
+    let unmatched = workspace.edit(&reads, &path, "missing", "x").await;
+    assert_eq!(code(&unmatched), "oldtext_not_found");
+    assert_eq!(unmatched.effects, None);
+    assert_eq!(workspace.bytes("file.txt"), b"changed\n");
+}

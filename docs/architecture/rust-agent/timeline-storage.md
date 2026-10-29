@@ -1,6 +1,6 @@
 # Timeline 存储与读取
 
-状态：基础存储、可丢弃恢复快照、分段读取与恢复扫描已实现。本文定义 Timeline 写入、发布、读取、错误与驻留；Session 的创建、装卸载与关闭等业务生命周期由 App Server 负责，SQL/JSON 见[存储格式](../../design/appserver/native-storage-format.md)（当前 v18）。
+状态：基础存储、可丢弃恢复快照、分段读取与恢复扫描已实现。本文定义 Timeline 写入、发布、读取、错误与驻留；Session 的创建、装卸载与关闭等业务生命周期由 App Server 负责，SQL/JSON 见[存储格式](../../design/appserver/native-storage-format.md)。
 
 进程 SQLite 服务在关闭时先停止操作准入，再排空已受理的查询/事务并关闭连接；等待者被丢弃不取消实际 blocking 工作或已启动的关闭。成功关闭立即释放数据库维护锁，保留旧 `Arc` 不占锁且拒绝新操作；关闭失败保留实际连接与锁，错误明确返回。SessionStore 仍拥有业务 writer、批次与发布，沿依赖先停止 Session 并排空 writer，SQLite 不承接第二套事件队列。
 

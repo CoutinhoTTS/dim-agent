@@ -283,6 +283,41 @@ pub struct ToolResult {
         deserialize_with = "crate::optional_non_null"
     )]
     pub context_messages: Option<Vec<Message>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub effects: Option<Vec<ToolEffect>>,
+}
+
+/// What a call did, declared by the tool on its own result
+/// (session boundary A.6). The vocabulary is closed; anything else needs a
+/// requirements change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ToolEffect {
+    /// The call wrote the file at `path`, the absolute resolved path the
+    /// result reports.
+    FileWritten { path: String },
+    /// The call ran `command`. At most one of `exit_code` and `signal` is
+    /// present; both absent mean the tool observed no exit status.
+    CommandRun {
+        command: String,
+        #[serde(
+            rename = "exitCode",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        exit_code: Option<i32>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        signal: Option<String>,
+    },
 }
 
 impl ToolResult {
@@ -294,6 +329,7 @@ impl ToolResult {
             blob_refs: None,
             background_task: None,
             context_messages: None,
+            effects: None,
         }
     }
     pub fn error(content: impl Into<String>) -> Self {

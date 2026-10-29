@@ -555,6 +555,7 @@ impl Projection {
                 self.row(index).compaction = Some(CompactionView {
                     state: CompactionState::Running,
                     text: String::new(),
+                    digest: None,
                     kept: None,
                     insufficient: Vec::new(),
                 });
@@ -1084,18 +1085,19 @@ impl Projection {
 }
 
 /// A compaction result as its row shows it. A completed one carries the
-/// summary that replaced the cut history, the inputs it kept verbatim, and
-/// the parts the record names as keeping it above its bound; the rest carry
-/// the reason they record.
+/// summary that replaced the cut history, the digest it wrote between the
+/// summary and the inputs, the inputs it kept verbatim, and the parts the
+/// record names as keeping it above its bound; the rest carry the reason
+/// they record.
 fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
-    let (state, text, kept, insufficient) = match outcome {
+    let (state, text, digest, kept, insufficient) = match outcome {
         ContextCompactionResult::Completed {
             replacement,
             diagnostics,
             replacement_parts,
             ..
         } => {
-            let (text, kept) = replacement_text(replacement, *replacement_parts);
+            let (text, digest, kept) = replacement_text(replacement, *replacement_parts);
             let insufficient = diagnostics
                 .insufficient_space
                 .as_ref()
@@ -1110,21 +1112,34 @@ fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
                         .collect()
                 })
                 .unwrap_or_default();
-            (CompactionState::Completed, text, kept, insufficient)
+            (CompactionState::Completed, text, digest, kept, insufficient)
         }
-        ContextCompactionResult::Skipped { reason, .. } => {
-            (CompactionState::Skipped, reason.clone(), None, Vec::new())
-        }
-        ContextCompactionResult::Failed { error, .. } => {
-            (CompactionState::Failed, error.clone(), None, Vec::new())
-        }
-        ContextCompactionResult::Cancelled { reason } => {
-            (CompactionState::Cancelled, reason.clone(), None, Vec::new())
-        }
+        ContextCompactionResult::Skipped { reason, .. } => (
+            CompactionState::Skipped,
+            reason.clone(),
+            None,
+            None,
+            Vec::new(),
+        ),
+        ContextCompactionResult::Failed { error, .. } => (
+            CompactionState::Failed,
+            error.clone(),
+            None,
+            None,
+            Vec::new(),
+        ),
+        ContextCompactionResult::Cancelled { reason } => (
+            CompactionState::Cancelled,
+            reason.clone(),
+            None,
+            None,
+            Vec::new(),
+        ),
     };
     CompactionView {
         state,
         text,
+        digest,
         kept,
         insufficient,
     }
@@ -1144,14 +1159,15 @@ fn compaction_part(part: InsufficientSpacePartName) -> CompactionPart {
 }
 
 /// The parts of a completed compaction's replacement, split where the record
-/// says they are: its strategy's messages are the summary, and the pinned
-/// inputs are what follows the strategy and the digest, shown apart. A
-/// record without `replacement_parts` reads as one part (the strategy's), so
-/// the whole replacement is the summary and nothing is pinned.
+/// says they are: its strategy's messages are the summary, the digest the
+/// record wrote follows, and the pinned inputs are what comes after both,
+/// shown apart. A record without `replacement_parts` reads as one part (the
+/// strategy's), so the whole replacement is the summary, with no digest and
+/// nothing pinned.
 fn replacement_text(
     replacement: &[Message],
     parts: Option<ReplacementParts>,
-) -> (String, Option<String>) {
+) -> (String, Option<String>, Option<String>) {
     let length = replacement.len();
     let (strategy, digest) = parts.map_or((length, 0), |parts| {
         (
@@ -1163,8 +1179,13 @@ fn replacement_text(
     });
     let pinned_from = strategy.saturating_add(digest).min(length);
     let summary = messages_text(&replacement[..strategy]);
+    let digest = messages_text(&replacement[strategy..pinned_from]);
     let kept = messages_text(&replacement[pinned_from..]);
-    (summary, (!kept.is_empty()).then_some(kept))
+    (
+        summary,
+        (!digest.is_empty()).then_some(digest),
+        (!kept.is_empty()).then_some(kept),
+    )
 }
 
 /// The text of a run of messages, one per line.
@@ -1742,6 +1763,7 @@ mod tests {
             Some(CompactionView {
                 state: CompactionState::Running,
                 text: String::new(),
+                digest: None,
                 kept: None,
                 insufficient: Vec::new(),
             })
@@ -1768,9 +1790,84 @@ mod tests {
             Some(CompactionView {
                 state: CompactionState::Completed,
                 text: "<dim-summary>\nThe parser is half done.\n</dim-summary>".into(),
+                digest: None,
                 kept: None,
                 insufficient: Vec::new(),
             })
+        );
+    }
+
+    /// A completed record's replacement splits where `replacement_parts`
+    /// says: the strategy's messages are the summary, the digest follows it,
+    /// and the pinned inputs follow both. A record naming no digest part
+    /// shows none.
+    #[test]
+    fn a_completed_record_shows_its_summary_digest_and_kept_inputs_apart() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                compaction(
+                    2,
+                    None,
+                    serde_json::json!({
+                        "status": "completed",
+                        "retain_from": "event-7",
+                        "strategy": "summary",
+                        "replacement": [
+                            {"role": "user", "content": "<dim-summary>\nThe parser is half done.\n</dim-summary>"},
+                            {"role": "user", "content": "<dim-digest>\nwrote src/cache.rs\nran exit 0: cargo test -p cache\n</dim-digest>"},
+                            {"role": "user", "content": "Try the RwLock before touching the parser."},
+                        ],
+                        "replacement_parts": {"strategy": 1, "digest": 1},
+                        "diagnostics": diagnostics(),
+                    }),
+                ),
+                compaction(
+                    3,
+                    None,
+                    serde_json::json!({
+                        "status": "completed",
+                        "retain_from": "event-7",
+                        "strategy": "summary",
+                        "replacement": [
+                            {"role": "user", "content": "<dim-summary>\nThe parser is half done.\n</dim-summary>"},
+                            {"role": "user", "content": "Try the RwLock before touching the parser."},
+                        ],
+                        "replacement_parts": {"strategy": 1, "digest": 0},
+                        "diagnostics": diagnostics(),
+                    }),
+                ),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let summary = "<dim-summary>\nThe parser is half done.\n</dim-summary>";
+        let kept = Some("Try the RwLock before touching the parser.");
+        let split: Vec<(&str, Option<&str>, Option<&str>)> = rows
+            .iter()
+            .map(|row| {
+                let compaction = row.compaction.as_ref().expect("a compaction row");
+                assert_eq!(compaction.state, CompactionState::Completed);
+                // The first record names a digest; the second names none.
+                (
+                    compaction.text.as_str(),
+                    compaction.digest.as_deref(),
+                    compaction.kept.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            split,
+            [
+                (
+                    summary,
+                    Some(
+                        "<dim-digest>\nwrote src/cache.rs\nran exit 0: cargo test -p cache\n</dim-digest>"
+                    ),
+                    kept
+                ),
+                (summary, None, kept),
+            ]
         );
     }
 
@@ -1849,6 +1946,7 @@ mod tests {
             Some(CompactionView {
                 state: CompactionState::Failed,
                 text: "context is not configured".into(),
+                digest: None,
                 kept: None,
                 insufficient: Vec::new(),
             })

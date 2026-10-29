@@ -79,7 +79,7 @@ pub(crate) enum Work {
     },
     Recovered {
         id: String,
-        result: Result<(Prepared, Option<Event>), Error>,
+        result: Box<Result<(Prepared, Option<Event>), Error>>,
     },
     Listed {
         reply: Responder,
@@ -1445,12 +1445,12 @@ impl Gateway {
                 }
             }
             Work::Recovered { id, result } => {
-                if result.as_ref().err().is_some_and(|error| {
-                    error
+                if let Err(error) = &*result
+                    && error
                         .data
                         .as_ref()
                         .is_some_and(|data| data["code"] == "daemon_unavailable")
-                }) {
+                {
                     return self.fail_connection().await;
                 }
                 self.recovering_sessions -= 1;
@@ -1461,7 +1461,7 @@ impl Gateway {
                     return Ok(());
                 };
                 let buffered = session.recovery.take().unwrap_or_default();
-                match result {
+                match *result {
                     Ok((prepared, input)) => {
                         let metadata = prepared.metadata;
                         session.config = prepared.config;
@@ -1903,7 +1903,7 @@ impl Gateway {
                     mcp.ensure(&id).await?;
                     Ok((prepared,input))
                 }).await.unwrap_or_else(|_|Err(rpc::unavailable()));
-                Work::Recovered { id,result }
+                Work::Recovered { id,result: Box::new(result) }
             });
         }
     }

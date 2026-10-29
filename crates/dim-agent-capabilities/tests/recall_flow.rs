@@ -1387,6 +1387,7 @@ fn compaction(through: u64) -> EventKind {
             context_baseline: Vec::new(),
             replacement_parts: None,
             pinned_inputs: None,
+            digest_entries: None,
         },
     })
 }

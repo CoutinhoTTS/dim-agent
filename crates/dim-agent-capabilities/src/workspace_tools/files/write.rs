@@ -6,10 +6,10 @@ use super::super::file_reads::{
 use super::codec;
 use super::{
     Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
-    not_regular, open_options, open_regular, resolve_path, revision, succeeded,
+    not_regular, open_options, open_regular, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
-use dim_agent_types::{JsonObject, ToolResult};
+use dim_agent_types::{JsonObject, ToolEffect, ToolResult};
 use serde_json::{Value, json};
 use std::{
     io::{ErrorKind, Read, Write},
@@ -179,9 +179,10 @@ fn write_locked(
         return done(result);
     }
     let raw_revision = revision(&bytes);
-    let result = succeeded(
+    let result = wrote(
         format!("Wrote {display}"),
         json!({ "path": display, "bytesWritten": bytes.len(), "revision": hex(&raw_revision) }),
+        display,
     );
     let binding = TextFileBinding {
         raw_revision,
@@ -591,7 +592,13 @@ fn write_failure(error: &std::io::Error, display: &str, may_have_modified: bool)
     if may_have_modified {
         structured["mayHaveModified"] = json!(true);
     }
-    failed(message, structured)
+    let mut result = failed(message, structured);
+    if may_have_modified {
+        result.effects = Some(vec![ToolEffect::FileWritten {
+            path: display.to_owned(),
+        }]);
+    }
+    result
 }
 
 /// Windows sharing violation, which Node reports as `EBUSY`.

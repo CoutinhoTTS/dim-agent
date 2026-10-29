@@ -62,6 +62,7 @@ fn completed(retain_from: &str, summary: &str, through: u64) -> ContextCompactio
             context_baseline: vec![],
             replacement_parts: None,
             pinned_inputs: None,
+            digest_entries: None,
         },
     }
 }
@@ -187,8 +188,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_file_owners",
     "session_metadata",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's; v17, v18
-/// and v19 add none.
+/// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
+/// v19 and v20 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -2335,6 +2336,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V18,
         V19,
         V20,
+        V21,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2480,6 +2482,15 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=19",
         ),
         (
+            Base::V20,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=21",
+        ),
+        (Base::V21, "DELETE FROM agent_store_format"),
+        (
+            Base::V21,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=20",
+        ),
+        (
             Base::V13,
             "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
         ),
@@ -2490,6 +2501,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V18, "DROP TABLE session_metadata"),
         (Base::V19, "DROP TABLE session_metadata"),
         (Base::V20, "DROP TABLE session_metadata"),
+        (Base::V21, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2500,7 +2512,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V17 => drop(v16_tables_store(&database.0, 17)),
             Base::V18 => drop(v16_tables_store(&database.0, 18)),
             Base::V19 => drop(v16_tables_store(&database.0, 19)),
-            Base::V20 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V20 => drop(v16_tables_store(&database.0, 20)),
+            Base::V21 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2534,7 +2547,7 @@ fn marker(connection: &Connection) -> Vec<i64> {
 }
 
 /// Upgrades the disposable `connection`'s store, built at `from` and holding
-/// every documented row of the tables it has, to the exact v20 store in place:
+/// every documented row of the tables it has, to the exact v21 store in place:
 /// every business row is unchanged, the added tables are empty, and only that
 /// open reports the upgrade. The documented v16 request row then reads and
 /// continues as mixed rows.
@@ -2565,8 +2578,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(20));
-    assert_eq!(marker(&connection), [20]);
+    assert_eq!(schema(&connection), schema_of(21));
+    assert_eq!(marker(&connection), [21]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2629,8 +2642,9 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     db.close().await.unwrap();
 }
 
-/// An empty store is created at exactly v20; a v13 store takes S5a's,
-/// S5b's, #193's, #2's, #364's and the branch end's one-way steps in one open.
+/// An empty store is created at exactly v21; a v13 store takes S5a's,
+/// S5b's, #193's, #2's, #364's, the branch end's and #527's one-way steps in
+/// one open.
 #[tokio::test]
 async fn a_v13_store_upgrades_in_place_once() {
     let fresh = Database::new();
@@ -2638,8 +2652,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(20));
-    assert_eq!(marker(&connection), [20]);
+    assert_eq!(schema(&connection), schema_of(21));
+    assert_eq!(marker(&connection), [21]);
     drop(connection);
 
     let database = Database::new();
@@ -2647,8 +2661,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 13).await;
 }
 
-/// S5b's one-way upgrade, then #193's, #2's, #364's and the branch end's: an
-/// exact v15 store becomes the exact v20 store.
+/// S5b's one-way upgrade, then #193's, #2's, #364's, the branch end's and
+/// #527's: an exact v15 store becomes the exact v21 store.
 #[tokio::test]
 async fn a_v15_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2657,8 +2671,8 @@ async fn a_v15_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 15).await;
 }
 
-/// #193's, #2's, #364's and the branch end's one-way upgrades replace only
-/// the marker of an exact v16 store.
+/// #193's, #2's, #364's, the branch end's and #527's one-way upgrades replace
+/// only the marker of an exact v16 store.
 #[tokio::test]
 async fn a_v16_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2667,8 +2681,8 @@ async fn a_v16_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 16).await;
 }
 
-/// #2's, #364's and the branch end's one-way upgrades replace only the marker
-/// of an exact v17 store: its rows, v16 and v17 request rows alike, are
+/// #2's, #364's, the branch end's and #527's one-way upgrades replace only the
+/// marker of an exact v17 store: its rows, v16 and v17 request rows alike, are
 /// unchanged.
 #[tokio::test]
 async fn a_v17_store_upgrades_in_place_once() {
@@ -2678,9 +2692,9 @@ async fn a_v17_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 17).await;
 }
 
-/// #364's and the branch end's one-way upgrade replaces only the marker of an
-/// exact v18 store: its Session configurations and Agent profiles, which all
-/// name their tools, read unchanged.
+/// #364's, the branch end's and #527's one-way upgrades replace only the
+/// marker of an exact v18 store: its Session configurations and Agent
+/// profiles, which all name their tools, read unchanged.
 #[tokio::test]
 async fn a_v18_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2689,12 +2703,23 @@ async fn a_v18_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 18).await;
 }
 
+/// The branch end's and #527's one-way upgrades replace only the marker of an
+/// exact v19 store.
 #[tokio::test]
 async fn a_v19_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v16_tables_store(&database.0, 19);
     assert_eq!(schema(&connection), schema_of(19));
     upgrades_in_place_once(&database, connection, 19).await;
+}
+
+/// #527's one-way upgrade replaces only the marker of an exact v20 store.
+#[tokio::test]
+async fn a_v20_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 20);
+    assert_eq!(schema(&connection), schema_of(20));
+    upgrades_in_place_once(&database, connection, 20).await;
 }
 
 /// The daemon names the one-way upgrade on stderr, where its default log
@@ -2740,7 +2765,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v20; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v21; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(

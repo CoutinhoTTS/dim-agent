@@ -386,12 +386,14 @@ pub(crate) fn render_shell(
 }
 
 /// A compaction row: its state, the reason of one that did not complete, a
-/// completed one's insufficient-space mark in its header, and its summary and
-/// kept input behind the `▸`/`▾` disclosure, drawn as the detail of a tool
-/// group is.
+/// completed one's insufficient-space mark in its header, and its summary,
+/// digest and kept input behind the `▸`/`▾` disclosure, drawn as the detail
+/// of a tool group is.
+#[allow(clippy::too_many_arguments)]
 fn render_compaction(
     state: CompactionState,
     text: &str,
+    digest: Option<&str>,
     kept: Option<&str>,
     insufficient: &[CompactionPartSize],
     expanded: bool,
@@ -441,20 +443,26 @@ fn render_compaction(
                 .iter()
                 .map(|row| thinking_row(row, width, p)),
         );
+        if let Some(digest) = digest {
+            rows.extend(labelled_section(t("Tool effects"), digest, width, p));
+        }
         if let Some(kept) = kept {
-            let bar = gutter_mark(THINKING_BAR, gutter_width(width));
-            rows.push(format!(
-                "{}{}",
-                fg(&bar, &p.border),
-                fg(t("Kept verbatim"), &p.faint)
-            ));
-            rows.extend(
-                thinking_body(kept, width)
-                    .iter()
-                    .map(|row| thinking_row(row, width, p)),
-            );
+            rows.extend(labelled_section(t("Kept verbatim"), kept, width, p));
         }
     }
+    rows
+}
+
+/// One labelled section of a completed compaction's detail: the bar and the
+/// faint label on their own row, then the text behind the bar.
+fn labelled_section(label: &str, body: &str, width: usize, p: &Palette) -> Vec<String> {
+    let bar = gutter_mark(THINKING_BAR, gutter_width(width));
+    let mut rows = vec![format!("{}{}", fg(&bar, &p.border), fg(label, &p.faint))];
+    rows.extend(
+        thinking_body(body, width)
+            .iter()
+            .map(|row| thinking_row(row, width, p)),
+    );
     rows
 }
 
@@ -525,14 +533,17 @@ pub(crate) fn render_block(
         Block::Compaction {
             state,
             text,
+            digest,
             kept,
             insufficient,
             expanded,
         } => {
+            let digest = digest.as_deref().map(crate::sanitize::safe);
             let kept = kept.as_deref().map(crate::sanitize::safe);
             render_compaction(
                 *state,
                 &crate::sanitize::safe(text),
+                digest.as_deref(),
                 kept.as_deref(),
                 insufficient,
                 *expanded,

@@ -455,6 +455,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "kompresi konteks baris yang ditampilkan",
         "Kept verbatim" => "Dipertahankan apa adanya",
+        "Tool effects" => "Catatan operasi alat",
         "insufficient space: {parts}" => "ruang tidak cukup: {parts}",
         "system prompt" => "system prompt",
         "tools" => "alat",

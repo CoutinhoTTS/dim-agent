@@ -223,6 +223,7 @@ impl DynPlugin for ToolExecutorPlugin {
                                             );
                                         }
                                         let span = tracing::info_span!("tool.execute", session_id = %session_id, branch_id = %context.branch_id, turn_id = %context.turn_id, request_id = %context.request_id, call_id = %call.id, outcome = tracing::field::Empty);
+                                        let interrupt = cancel.clone();
                                         let (result, outcome) = if cancel.is_cancelled() {
                                             (ToolResult::error("Tool cancelled before execution"), "interrupted")
                                         } else {
@@ -230,7 +231,7 @@ impl DynPlugin for ToolExecutorPlugin {
                                                 execute(&binding, &approval, call.clone(), context.clone(), cancel).await
                                             }).catch_unwind().await {
                                                 Ok(Ok(result)) => {
-                                                    let outcome = if result.is_error == Some(true) { "failure" } else { "returned" };
+                                                    let outcome = if interrupt.is_cancelled() { "interrupted" } else if result.is_error == Some(true) { "failure" } else { "returned" };
                                                     (result, outcome)
                                                 },
                                                 Ok(Err(error)) => {

@@ -405,6 +405,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This daemon does not support context compaction" => "此守護進程不支援上下文壓縮",
         "compact the context of the shown line" => "壓縮目前顯示線的上下文",
         "Kept verbatim" => "原文保留",
+        "Tool effects" => "工具操作紀錄",
         "insufficient space: {parts}" => "空間不足：{parts}",
         "system prompt" => "系統提示詞",
         "tools" => "工具",
