@@ -59,9 +59,9 @@ impl Native {
         })?;
         let (checked, version) = SqliteStorage::open_read_only(path.clone()).map_err(failure)?;
         checked.close().await.map_err(failure)?;
-        if version != 20 {
+        if version != 21 {
             return Err(Error::Target(
-                "Migration requires native storage format 20; target preserved".into(),
+                "Migration requires native storage format 21; target preserved".into(),
             ));
         }
         let db = Connection::open(path).map_err(failure)?;
@@ -760,6 +760,7 @@ pub(crate) fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
                                 blob_refs: None,
                                 background_task: None,
                                 context_messages: None,
+                                effects: None,
                             },
                         });
                     } else {
@@ -824,7 +825,7 @@ pub(crate) fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
             .filter(|record| record.in_context)
             .map(|record| record.message.clone()),
     );
-    push(&mut events, EventKind::ContextCompaction(ContextCompactionData{turn_id:None,request_id:None,command:Some(command),start:Some(command+1),through,outcome:ContextCompactionResult::Completed{retain_from:cut.clone(),replacement,strategy:"migration".into(),context_baseline:Vec::new(),replacement_parts:None,pinned_inputs:None,diagnostics:Box::new(CompactionDiagnosticsRecord{reason:CompactionReason::Manual,trigger:CompactionTrigger::Manual,retain_from:Some(cut.clone()),retain_limit:None,estimated_input_tokens:0.0,estimated_output_tokens:None,entries_replaced:data.records.len() as u64,model_call_count:0,duration_ms:0,model_usage:None,insufficient_space:None,strategy:CompactionStrategyRecord{kind:"migration".into(),details:serde_json::from_value(json!({"source":"legacy-effective-context","tokenEstimateUnavailable":true})).map_err(failure)?}})}}),Some(cut),now);
+    push(&mut events, EventKind::ContextCompaction(ContextCompactionData{turn_id:None,request_id:None,command:Some(command),start:Some(command+1),through,outcome:ContextCompactionResult::Completed{retain_from:cut.clone(),replacement,strategy:"migration".into(),context_baseline:Vec::new(),replacement_parts:None,pinned_inputs:None,digest_entries:None,diagnostics:Box::new(CompactionDiagnosticsRecord{reason:CompactionReason::Manual,trigger:CompactionTrigger::Manual,retain_from:Some(cut.clone()),retain_limit:None,estimated_input_tokens:0.0,estimated_output_tokens:None,entries_replaced:data.records.len() as u64,model_call_count:0,duration_ms:0,model_usage:None,insufficient_space:None,strategy:CompactionStrategyRecord{kind:"migration".into(),details:serde_json::from_value(json!({"source":"legacy-effective-context","tokenEstimateUnavailable":true})).map_err(failure)?}})}}),Some(cut),now);
     Ok(events)
 }
 

@@ -972,7 +972,8 @@
         "json",
         "matches",
         "tokio::select",
-        "unreachable"
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -6657,6 +6658,7 @@
         "path context_compaction",
         "path context_configuration",
         "path context_messages",
+        "path digest_message",
         "path retained_entry",
         "path truncate_middle",
         "path user_message",
@@ -6665,6 +6667,7 @@
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::context_messages",
+        "use crate::history::digest_message",
         "use crate::history::retained_entry",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
@@ -6731,6 +6734,7 @@
         "path ContextCompactionResult::Skipped",
         "path ContextCompactionStartData",
         "path ContextPrepareData",
+        "path DigestEntries",
         "path EventKind::ContextBudget",
         "path EventKind::ContextCompaction",
         "path EventKind::ContextCompactionStart",
@@ -6738,6 +6742,7 @@
         "path EventKind::InputMessage",
         "path EventKind::ModelCall",
         "path EventKind::ModelUsage",
+        "path EventKind::ToolResult",
         "path InputBlock::Raw",
         "path InputMessageData",
         "path ModelUsageData",
@@ -6780,7 +6785,10 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::tool",
       "references": [
-        "path ToolDefinition"
+        "path ToolDefinition",
+        "path ToolEffect",
+        "path ToolEffect::CommandRun",
+        "path ToolEffect::FileWritten"
       ]
     },
     {
@@ -7520,6 +7528,15 @@
       "references": [
         "path ContextBaselineEntry",
         "path ContextConfiguredData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolEffect",
+        "path ToolEffect::CommandRun",
+        "path ToolEffect::FileWritten"
       ]
     },
     {
@@ -9286,6 +9303,7 @@
         "path ToolResult",
         "path ToolResult::error",
         "path ToolResult::text",
+        "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -10867,6 +10885,7 @@
         "path Sandbox::Network",
         "path Sandbox::Workspace",
         "path ShellKind::Posix",
+        "path TemporaryDirectory",
         "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
         "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
         "use crate::host_platform::HostPlatform",
@@ -10875,7 +10894,8 @@
         "use crate::host_platform::Os",
         "use crate::host_platform::ProcessTree",
         "use crate::host_platform::Sandbox",
-        "use crate::host_platform::ShellKind"
+        "use crate::host_platform::ShellKind",
+        "use crate::host_platform::TemporaryDirectory"
       ]
     },
     {
@@ -11076,6 +11096,7 @@
         "path ToolResult::text",
         "use dim_agent_types::ToolCall",
         "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -11167,8 +11188,8 @@
         "path open_regular",
         "path resolve_path",
         "path revision",
-        "path succeeded",
         "path super::CommitHook",
+        "path wrote",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
@@ -11183,7 +11204,7 @@
         "use super::open_regular",
         "use super::resolve_path",
         "use super::revision",
-        "use super::succeeded"
+        "use super::wrote"
       ]
     },
     {
@@ -11478,8 +11499,8 @@
         "path open_regular",
         "path resolve_path",
         "path revision",
-        "path succeeded",
         "path super::CommitHook",
+        "path wrote",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
@@ -11494,7 +11515,7 @@
         "use super::open_regular",
         "use super::resolve_path",
         "use super::revision",
-        "use super::succeeded"
+        "use super::wrote"
       ]
     },
     {
@@ -11520,6 +11541,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolResult",
+        "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -12983,6 +13005,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolEffect",
         "path ToolResult"
       ]
     },
@@ -27412,13 +27435,25 @@
       "from": "dim_cli::ui::transcript::block::tests",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionState::Completed",
+        "path CompactionView",
         "path RowKind",
+        "path RowKind::Compaction",
         "path RowKind::Other",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
         "path RowKind::ToolCall",
         "path RowTone::Warning",
-        "path ViewRow"
+        "path ViewRow",
+        "use crate::model::view::CompactionView"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer::new",
+        "use crate::ui::render::markdown::MarkdownRenderer"
       ]
     },
     {
@@ -27445,6 +27480,14 @@
       "references": [
         "path Block::ToolGroup",
         "path project_row"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_cli::ui::transcript::blocks",
+      "references": [
+        "path render_block",
+        "use crate::ui::transcript::blocks::render_block"
       ]
     },
     {

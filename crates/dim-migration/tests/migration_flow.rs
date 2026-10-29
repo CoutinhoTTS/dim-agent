@@ -475,6 +475,7 @@ async fn migrated_dim_account_states_are_readable_by_the_account_owner() {
         let server = serve(
             builder,
             ServerConfig {
+                startup_timeout: std::time::Duration::from_secs(60),
                 database_path: Some(target.join("rust/dimcode.sqlite")),
                 product_home: Some(target),
                 unix_path: Some(directory.path().join("native.sock")),
@@ -588,6 +589,7 @@ async fn migration_keeps_large_images_as_files_without_rejecting_session_history
         let server = serve(
             builder,
             ServerConfig {
+                startup_timeout: std::time::Duration::from_secs(60),
                 database_path: Some(target.join("rust/dimcode.sqlite")),
                 product_home: Some(target),
                 unix_path: Some(directory.path().join("native.sock")),
@@ -696,7 +698,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        20
+        21
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -717,6 +719,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     let server = serve(
         builder,
         ServerConfig {
+            startup_timeout: std::time::Duration::from_secs(60),
             database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target.clone()),
             unix_path: Some(directory.path().join("native.sock")),
@@ -1099,6 +1102,7 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     let server = serve(
         builder,
         ServerConfig {
+            startup_timeout: std::time::Duration::from_secs(60),
             database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target.clone()),
             unix_path: Some(directory.path().join("native.sock")),
@@ -1382,6 +1386,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
         let server = serve(
             builder,
             ServerConfig {
+                startup_timeout: std::time::Duration::from_secs(60),
                 database_path: Some(target.join("rust/dimcode.sqlite")),
                 product_home: Some(target),
                 unix_path: Some(directory.path().join("native.sock")),
@@ -1549,6 +1554,7 @@ async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler
     let server = serve(
         builder,
         ServerConfig {
+            startup_timeout: std::time::Duration::from_secs(60),
             database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target),
             unix_path: Some(directory.path().join("native.sock")),

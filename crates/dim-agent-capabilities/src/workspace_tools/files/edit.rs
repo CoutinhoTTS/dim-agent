@@ -5,7 +5,7 @@ use super::codec;
 use super::write::write_target;
 use super::{
     Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
-    js_len, not_regular, open_regular, resolve_path, revision, succeeded,
+    js_len, not_regular, open_regular, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
@@ -248,7 +248,7 @@ fn edit_locked(
         return done(result);
     }
     let raw_revision = revision(&written);
-    let result = succeeded(
+    let result = wrote(
         format!("Edited {display}"),
         json!({
             "path": display,
@@ -256,6 +256,7 @@ fn edit_locked(
             "revision": hex(&raw_revision),
             "diff": diff,
         }),
+        display,
     );
     let binding = TextFileBinding {
         raw_revision,
