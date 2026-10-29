@@ -34,7 +34,7 @@ use crate::ui::render::Frame;
 use crate::ui::render::panel::{clip, escape_len, strip_escapes};
 use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
-use crate::ui::text::{display_width, gutter_width};
+use crate::ui::text::display_width;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
@@ -197,16 +197,46 @@ impl Selection {
         }
     }
 
-    /// The columns `[start, end)` selected on `row`, if any; the first
-    /// `gutter` columns (the block's mark) are never selected.
-    fn columns(&self, row: usize, gutter: usize) -> Option<(usize, usize)> {
+    /// The columns `[start, end)` selected on `row`, if any. `inset` is that
+    /// row's chrome ([`text_inset`]); text before it is not selected.
+    fn columns(&self, row: usize, inset: usize) -> Option<(usize, usize)> {
         let ((r0, c0), (r1, c1)) = self.ordered();
         if row < r0 || row > r1 {
             return None;
         }
         let start = if row == r0 { c0 } else { 0 };
         let end = if row == r1 { c1 + 1 } else { usize::MAX };
-        Some((start.max(gutter), end))
+        Some((start.max(inset), end))
+    }
+}
+
+/// Columns of chrome before the copyable text of a plain row.
+///
+/// A committed row opens with one margin space. A user bar (`┃`) or a
+/// thinking bar (`▎`) in the next column is that row's gutter mark.
+/// Selection tests put `◆` in column 0 in place of the margin. Assistant
+/// rows have no mark, so only the margin is skipped: treating every row as
+/// a two-column gutter hid the first column of their text.
+fn text_inset(plain: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    /// `USER_MARK`, `THINKING_BAR`.
+    const BARS: &[&str] = &["\u{2503}", "\u{258e}"];
+    let mut glyphs = plain.graphemes(true);
+    let Some(first) = glyphs.next() else {
+        return 0;
+    };
+    if display_width(first) != 1 {
+        return 0;
+    }
+    if first == "\u{25c6}" {
+        return 1;
+    }
+    if first != " " {
+        return 0;
+    }
+    match glyphs.next() {
+        Some(bar) if BARS.contains(&bar) => 1 + display_width(bar),
+        _ => 1,
     }
 }
 
@@ -605,11 +635,11 @@ impl FullScreen {
                 };
                 self.press = Some((self.spot(index), text.clone()));
                 let width = content_width(self.layout_cols);
-                let gutter = gutter_width(width);
                 let plain = strip_escapes(&text);
+                let inset = text_inset(&plain);
                 let span = match count {
-                    2 if column >= gutter => word_at(&plain, column),
-                    3 => Some((gutter, width)),
+                    2 if column >= inset => word_at(&plain, column),
+                    3 => Some((inset, width)),
                     _ => None,
                 };
                 self.clicks = Some((now, (index, column), text, count));
@@ -740,7 +770,7 @@ impl FullScreen {
                         _ => match self
                             .selection
                             .filter(|s| s.dragged)
-                            .and_then(|s| s.columns(index, gutter_width(width)))
+                            .and_then(|s| s.columns(index, text_inset(&strip_escapes(row))))
                         {
                             Some(range) => highlight(row, range, width),
                             None => clip(row, width).0,
@@ -1059,7 +1089,7 @@ impl FullScreen {
             };
             let plain = strip_escapes(&row);
             let (start, end) = selection
-                .columns(index, gutter_width(width))
+                .columns(index, text_inset(&plain))
                 .unwrap_or((0, 0));
             lines.push(columns_of(&plain, start, end).trim_end().to_owned());
         }
@@ -1706,6 +1736,44 @@ mod tests {
         assert!(!screen.selecting());
         draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
         assert_eq!(emu.rows_text(), before);
+    }
+
+    #[test]
+    fn selection_on_a_wide_screen_keeps_the_first_column_of_text() {
+        let size = (80, 12);
+        let mut screen = FullScreen::new(size, false);
+        let mut emu = Emu::new(size.0 as usize, size.1 as usize);
+        let mut doc = Doc::new();
+        let code = format!("{}code", " ".repeat(5));
+        doc.say(&[
+            " - if only darwin",
+            " n missing-package",
+            &code,
+            " \u{2503} user text",
+            " 关键在",
+        ]);
+        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
+        let dock = ["> x"];
+        emu.feed(&screen.render(&frame(&[], &dock), size, &palette, &doc));
+        let at = |kind, column, row| MouseEvent { kind, column, row };
+        screen.mouse(at(MouseKind::Press, 0, 6), &doc);
+        screen.mouse(at(MouseKind::Drag, 20, 10), &doc);
+        assert_eq!(
+            screen.mouse(at(MouseKind::Release, 20, 10), &doc),
+            MouseOutcome::Copy(
+                "- if only darwin\nn missing-package\n    code\n user text\n关键在".to_owned()
+            )
+        );
+        let mut click = |column, row| {
+            screen.mouse(at(MouseKind::Press, column, row), &doc);
+            screen.mouse(at(MouseKind::Release, column, row), &doc)
+        };
+        click(1, 7);
+        assert_eq!(click(1, 7), MouseOutcome::Copy("n".to_owned()));
+        assert_eq!(
+            click(1, 7),
+            MouseOutcome::Copy("n missing-package".to_owned())
+        );
     }
 
     #[test]
