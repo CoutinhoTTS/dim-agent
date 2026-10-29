@@ -247,6 +247,7 @@ impl DynPlugin for RewriteCompaction {
                                 context_baseline: Vec::new(),
                                 replacement_parts: None,
                                 pinned_inputs: None,
+                                digest_entries: None,
                             };
                         }
                         Edit::Failed => {
@@ -272,6 +273,7 @@ impl DynPlugin for RewriteCompaction {
                                 context_baseline: Vec::new(),
                                 replacement_parts: None,
                                 pinned_inputs: None,
+                                digest_entries: None,
                             };
                         }
                     }

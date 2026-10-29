@@ -370,6 +370,8 @@ WorkspaceTools 不变。
 
   替换为 "on another line of this Session"。本设计不改这些文本，它们归 Goal。
 
+回答这些事项的需求见 [面向模型的提示词](model-prompts.md)。
+
 ### 12.3 评估场景
 
 这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。

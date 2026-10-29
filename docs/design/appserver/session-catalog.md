@@ -35,7 +35,7 @@ and page-boundary semantics, and the place where #557's filters apply.
 It does not own:
 
 - the projection's table, its indexes, write transaction, delete and fork maintenance, and the upgrade's backfill —
-  the [native storage format](native-storage-format.md#556-格式决定) decides those;
+  the [native storage format](native-storage-format.md#556-v22-格式决定) decides those;
 - the classification fields, their defaults and their presentation — [#557](https://github.com/arcships/dim/issues/557);
 - the picker's interaction and the project/all switch — the client that adds them (§6);
 - `session.list`, `session.attach`, and how a client sorts or presents rows.
@@ -56,7 +56,7 @@ It does not own:
 | Order | `updatedAt` descending, then `sessionId` ascending |
 | `query` | Case-insensitive, literal substring match over the five fields the picker searches today — the title, the preview, the Session id, the workspace, and the model's provider id and model id — applied in the catalog query before the page boundary. `%`, `_` and the escape character are escaped, so the value matches only itself (`LIKE … ESCAPE`). The model is read from the stored Session config, the value `session.list` reports, so the query decodes no event |
 | `cwd` | Exact match on the workspace, applied before the page boundary |
-| `withPreview` | Boolean, default `false`. `true` keeps only rows whose preview is not NULL, applied before the page boundary, so a client that hides preview-less rows receives a full page of rows it shows; the projection's partial index over previews keeps that read bounded ([native storage format](native-storage-format.md#556-格式决定)) |
+| `withPreview` | Boolean, default `false`. `true` keeps only rows whose preview is not NULL, applied before the page boundary, so a client that hides preview-less rows receives a full page of rows it shows; the projection's partial index over previews keeps that read bounded ([native storage format](native-storage-format.md#556-v22-格式决定)) |
 | Reply | `SessionSummary` entries, the shape `session.summaries` returns: the fields of a `session.list` record with `preview` and `updatedAt`. `nextCursor` is absent on the last page |
 
 A `cursor` that does not decode, or whose digest does not match the request's `query`, `cwd` and `withPreview`, is
@@ -92,7 +92,7 @@ characters and ending in `…` when the text is longer. The decision is final �
 message among those events keeps NULL. The projection applies the same rule live as in the backfill: a batch may set
 `preview` only while the row's preview is still undecided and the deciding message's `main` sequence is within the
 first 256 events, and once decided it never changes. Backfilled and live rows are therefore column-identical
-([native storage format](native-storage-format.md#556-格式决定)). Dropping the bound would be a separate, visible
+([native storage format](native-storage-format.md#556-v22-格式决定)). Dropping the bound would be a separate, visible
 change to what `session.summaries` lists.
 
 ### 3.4 Lease-free
@@ -113,7 +113,7 @@ cursor and any count stay consistent across refreshes with them in place.
 
 This part writes no event and owns no state. The projection is derived state: every column follows from events the
 Timeline already holds, and the upgrade rebuilds it once for the whole store from them
-([native storage format](native-storage-format.md#556-格式决定)). Nothing here enters the Timeline: the catalog is
+([native storage format](native-storage-format.md#556-v22-格式决定)). Nothing here enters the Timeline: the catalog is
 display data for a picker, which [design rules §4 rule 9](../../architecture/rust-agent/principles.md) keeps out of it.
 
 ## 5. Dependencies
@@ -164,7 +164,7 @@ page boundary, and the picker's first page does not use it. The gap is recorded 
 
 ## 8. Changes to other documents
 
-- [Native storage format](native-storage-format.md#556-格式决定): the catalog table, its two indexes, the
+- [Native storage format](native-storage-format.md#556-v22-格式决定): the catalog table, its two indexes, the
   same-transaction write from creation on, delete and fork maintenance, and the upgrade's backfill and its one-time
   cost.
 - [Session deletion and fork](session-deletion-and-fork.md#32-sequence): its delete and fork row lists name

@@ -2292,3 +2292,49 @@ async fn node_session_rows_flag_installs_session_methods() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+/// A tool a TypeScript row registers declares its call's effects, and the
+/// bridge carries them on the `step/tool-result` the Session records
+/// (session boundary A.6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_tool_result_carries_declared_effects() {
+    let (server, mut requests, _) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    submit(&mut client, &id, r#"tool:ts_echo {"text":"declares"}"#).await;
+    assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let declared = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(batch) => batch
+                .results
+                .iter()
+                .find(|result| result.result.effects.is_some())
+                .map(|result| result.result.clone()),
+            _ => None,
+        })
+        .expect("the bridge carries the declaration on the step record");
+    assert_eq!(
+        declared.effects,
+        Some(vec![
+            dim_agent_types::ToolEffect::FileWritten {
+                path: "/work/fixture.rs".into()
+            },
+            dim_agent_types::ToolEffect::CommandRun {
+                command: "npm test".into(),
+                exit_code: Some(0),
+                signal: None,
+            },
+        ])
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}

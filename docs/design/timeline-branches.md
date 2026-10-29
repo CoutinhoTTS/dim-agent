@@ -370,6 +370,8 @@ The texts above are first versions, owned by TimelineTree's plugin. These items 
 
   The replacement is "on another line of this Session". This design does not change that text; Goal owns it.
 
+The requirements that answer these items are in [Model-facing prompts](model-prompts.md).
+
 ### 12.3 Evaluation scenarios
 
 These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.

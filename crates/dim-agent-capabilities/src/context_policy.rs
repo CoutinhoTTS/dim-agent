@@ -1,7 +1,7 @@
 use crate::{
     history::{
         HistoryEntry, HistoryRenderer, context_compaction, context_configuration, context_messages,
-        retained_entry, truncate_middle, user_message,
+        digest_message, retained_entry, truncate_middle, user_message,
     },
     host::*,
 };
@@ -25,6 +25,13 @@ const PINNED_SHARE: f64 = 0.1;
 /// Share of the input budget the whole context after a compaction is held
 /// to at most (ContextCompaction §5.3); provisional (#428).
 const BOUND_SHARE: f64 = 0.5;
+
+/// Share of the input budget the digest part may take (ContextCompaction
+/// §5.10); provisional (#428).
+const DIGEST_SHARE: f64 = 0.05;
+
+/// Characters of a command the digest keeps before the cut is marked (§5.10).
+const DIGEST_COMMAND_CHARS: usize = 200;
 
 pub(crate) struct ContextPolicy {
     pub timeline: Arc<Timeline>,
@@ -82,6 +89,9 @@ struct Composed {
     retain_from: String,
     replacement: Vec<Message>,
     parts: Option<ReplacementParts>,
+    /// The digest's entries as data, when the replacement carries a digest
+    /// message (§5.10).
+    digest: Option<DigestEntries>,
     /// The `input/message` id of each pinned message, in order (§5.9).
     ids: Option<Vec<String>>,
     baseline: Arc<[ContextBaselineEntry]>,
@@ -156,11 +166,17 @@ impl Pass<'_> {
             return Err("Compaction cut lies inside the retained tail.");
         }
         let pinned = pinned_inputs(self.view, self.turn, &retain_from, self.model);
-        let parts = (!pinned.messages.is_empty()).then_some(ReplacementParts {
-            strategy: strategy_messages.len() as u64,
-            digest: 0,
-        });
+        let digest = digest_entries(self.view, &retain_from, self.model);
+        let message = digest
+            .as_ref()
+            .map(|digest| digest_message(&digest.entries, digest.dropped));
+        let parts =
+            (!pinned.messages.is_empty() || message.is_some()).then_some(ReplacementParts {
+                strategy: strategy_messages.len() as u64,
+                digest: message.is_some() as u64,
+            });
         let mut replacement = strategy_messages;
+        replacement.extend(message);
         replacement.extend(pinned.messages);
         let kept = self.offset + cut.entry;
         let baseline = self.view.history[kept - 1].baseline.clone();
@@ -172,6 +188,7 @@ impl Pass<'_> {
             retain_from,
             replacement,
             parts,
+            digest,
             ids: pinned.ids,
             baseline,
             kept,
@@ -554,6 +571,7 @@ impl ContextPolicy {
                     context_baseline: composed.baseline.to_vec(),
                     replacement_parts: composed.parts,
                     pinned_inputs: composed.ids,
+                    digest_entries: composed.digest,
                 }
             };
         let outcome = match first {
@@ -1010,6 +1028,178 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
     pins
 }
 
+/// The digest for a cut (ContextCompaction §5.10): the entries of the
+/// compaction in effect rolled forward from its record, then the declarations
+/// of the `step/tool-result` events between that record's cut and this one,
+/// one entry per path or command with its latest outcome. Beyond
+/// `DIGEST_SHARE` of the input budget the least recently declared entries are
+/// dropped, and `dropped` stays set once anything was; with every entry
+/// dropped the note alone is the digest, written even when it alone is over
+/// the bound so that later digests keep it. None when the cut has no event in
+/// the view, or when the record's cut is one the view can place neither among
+/// its events nor as the compaction it applies.
+fn digest_entries(
+    view: &View,
+    retain_from: &str,
+    model: &dyn ContextModel,
+) -> Option<DigestEntries> {
+    // The compaction in effect is the latest completed record of the view,
+    // wherever the new cut falls: a record is written after the events it
+    // keeps, so it can sit after the new cut, and a retry reads records from
+    // the reusable events too.
+    let previous = view
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data)
+                if matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
+            {
+                Some(data)
+            }
+            _ => None,
+        });
+    let events = &view.context.events;
+    let end = events.iter().position(|event| event.id == retain_from)?;
+    let (start, mut entries, mut dropped) = match previous {
+        Some(data) => {
+            let ContextCompactionResult::Completed {
+                retain_from: cut,
+                digest_entries,
+                ..
+            } = &data.outcome
+            else {
+                unreachable!("matched a completed compaction")
+            };
+            // The scan of the events since that cut starts at the first event
+            // the fixed context carries at or after it, in timeline order
+            // (§5.10).
+            let order: HashMap<&str, usize> = view
+                .events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| (event.id.as_str(), index))
+                .collect();
+            let start = match order.get(cut.as_str()) {
+                Some(&cut) => events
+                    .iter()
+                    .position(|event| {
+                        order
+                            .get(event.id.as_str())
+                            .is_some_and(|index| *index >= cut)
+                    })
+                    .unwrap_or(end),
+                // The view carries no event at that cut. It still places it
+                // when it is the cut the view's compaction applied: the
+                // replay then begins at or after it, so every event the
+                // context carries is at or after it and the scan starts at
+                // the replay's first event. A cut the view can place neither
+                // way records no digest.
+                None => {
+                    let applied = view
+                        .checkpoint
+                        .as_ref()
+                        .is_some_and(|checkpoint| checkpoint.retain_from == *cut);
+                    if !applied {
+                        return None;
+                    }
+                    0
+                }
+            }
+            .min(end);
+            (
+                start,
+                digest_entries
+                    .as_ref()
+                    .map(|digest| digest.entries.clone())
+                    .unwrap_or_default(),
+                digest_entries.as_ref().is_some_and(|digest| digest.dropped),
+            )
+        }
+        None => (0, Vec::new(), false),
+    };
+    for event in &events[start..end] {
+        let EventKind::ToolResult(data) = &event.kind else {
+            continue;
+        };
+        for result in &data.results {
+            for effect in result.result.effects.iter().flatten() {
+                let entry = shortened(effect);
+                let key = digest_key(&entry);
+                if let Some(index) = entries
+                    .iter()
+                    .position(|existing| digest_key(existing) == key)
+                {
+                    entries.remove(index);
+                }
+                entries.push(entry);
+            }
+        }
+    }
+    let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
+    let count = |entries: &[ToolEffect], dropped: bool| {
+        model.count_tokens(&ModelRequest::new(
+            "",
+            "",
+            vec![digest_message(entries, dropped)],
+        )) - empty
+    };
+    let limit = DIGEST_SHARE * input_budget(model);
+    if (dropped || !entries.is_empty()) && count(&entries, dropped) > limit {
+        dropped = true;
+        // Dropping entries from the front only shrinks the rendered message,
+        // so the largest suffix that fits is one binary search rather than
+        // one render per entry. When even the note alone is over the bound,
+        // every entry goes and the note stays.
+        let fits = |kept: usize| count(&entries[kept..], true) <= limit;
+        let (mut low, mut high) = (0, entries.len());
+        if fits(high) {
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if fits(middle) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+        }
+        entries = entries.split_off(high);
+    }
+    (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped })
+}
+
+/// A command keeps its first `DIGEST_COMMAND_CHARS` characters, counted
+/// before escaping; a longer one is cut there and marked with `…`. A path
+/// stays verbatim, an exact identifier (§5.10).
+fn shortened(effect: &ToolEffect) -> ToolEffect {
+    match effect {
+        ToolEffect::CommandRun {
+            command,
+            exit_code,
+            signal,
+        } => {
+            let command = match command.char_indices().nth(DIGEST_COMMAND_CHARS) {
+                Some((index, _)) => format!("{}…", &command[..index]),
+                None => command.clone(),
+            };
+            ToolEffect::CommandRun {
+                command,
+                exit_code: *exit_code,
+                signal: signal.clone(),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+/// An entry's key: its kind together with its path or shortened command.
+fn digest_key(effect: &ToolEffect) -> (u8, &str) {
+    match effect {
+        ToolEffect::FileWritten { path } => (0, path),
+        ToolEffect::CommandRun { command, .. } => (1, command),
+    }
+}
+
 /// The pins of the latest completed compaction in the view, when it ran in
 /// the turn still running; otherwise the turn's pins start at its own
 /// `turn/start` (ContextCompaction §5.9). A snapshot is only a cache, so
@@ -1318,8 +1508,9 @@ impl<'a> Retention<'a> {
     }
 
     /// The tokens a compaction at `cut` cannot shrink: the frame, the keyed
-    /// baseline at the cut, the pinned inputs at the cut's own size (a digest
-    /// has no content yet, §5.10) and the strategy's replacement.
+    /// baseline at the cut, the pinned inputs at the cut's own size, the
+    /// digest at its bound (its entries depend on the cut being chosen,
+    /// §5.10) and the strategy's replacement.
     fn resident(
         &self,
         history: &[HistoryEntry],
@@ -1340,7 +1531,7 @@ impl<'a> Retention<'a> {
         let pins =
             count(pinned_inputs(self.view, self.turn, &cut.retain_from, self.model).messages)
                 - self.empty;
-        self.frame + baseline + pins + replacement_size
+        self.frame + baseline + pins + DIGEST_SHARE * input_budget(self.model) + replacement_size
     }
 
     /// The tokens `messages` count, beyond the empty list's own bytes.

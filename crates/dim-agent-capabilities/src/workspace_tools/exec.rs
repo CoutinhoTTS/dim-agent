@@ -11,7 +11,7 @@ use crate::{
     host::{HostError, ToolExecutionContext},
     host_platform::{
         EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY,
-        Isolation, Os, ProcessTree, Sandbox, ShellKind,
+        Isolation, Os, ProcessTree, Sandbox, ShellKind, TemporaryDirectory,
     },
     tool_registry::definition,
 };
@@ -109,6 +109,24 @@ fn failed(message: impl Into<String>, code: &str) -> ToolResult {
         structured_content: Some(object(json!({ "code": code }))),
         ..ToolResult::error(message)
     }
+}
+
+/// Declares the command a started call ran (session boundary A.6): the exit
+/// status the result observed, or none.
+fn ran(mut result: ToolResult, command: &str, exit: Option<ExitStatus>) -> ToolResult {
+    result.effects = Some(vec![ToolEffect::CommandRun {
+        command: command.to_owned(),
+        exit_code: exit.and_then(|status| status.code()),
+        signal: exit.and_then(signal_name),
+    }]);
+    result
+}
+
+/// A call cancelled after its command started: the command ran and the tool
+/// stopped it, so the caller declares it with no exit status (session
+/// boundary A.6).
+fn cancelled_result() -> ToolResult {
+    ToolResult::error("Tool execution cancelled.")
 }
 
 fn object(value: Value) -> JsonObject {
@@ -1226,8 +1244,7 @@ pub(super) async fn execute(
         Ok(prepared) => prepared,
         Err(error) => return Ok(failed(error.reason, error.code)),
     };
-    let spawned = platform.spawn(spec);
-    let mut tree = match spawned {
+    let tree = match platform.spawn(spec) {
         Ok(tree) => tree,
         Err(error) => {
             return Ok(failed(
@@ -1236,10 +1253,45 @@ pub(super) async fn execute(
             ));
         }
     };
+    let (result, exit) = run_process(
+        tools,
+        branch,
+        call,
+        context,
+        &request,
+        tree,
+        temporary,
+        isolation,
+        background,
+        effective_timeout,
+        cancel,
+    )
+    .await?;
+    Ok(ran(result, request.command, exit))
+}
+
+/// Runs one started command to its answer: waits for its exit, hands it to
+/// the background, or stops it, and returns the result with the exit it
+/// observed, when it observed one. The caller declares the call's effect
+/// (session boundary A.6).
+#[allow(clippy::too_many_arguments)]
+async fn run_process(
+    tools: &WorkspaceTools,
+    branch: &Branch,
+    call: &ToolCall,
+    context: &ToolExecutionContext,
+    request: &Call<'_>,
+    mut tree: ProcessTree,
+    temporary: Option<TemporaryDirectory>,
+    isolation: Option<Isolation>,
+    background: bool,
+    timeout: Option<u64>,
+    cancel: CancellationToken,
+) -> Result<(ToolResult, Option<ExitStatus>), HostError> {
     tree.hold(temporary);
     let output = Arc::new(Output {
         capture: Mutex::new(Capture {
-            path: tools.output_dir.join(format!("{task_id}.log")),
+            path: tools.output_dir.join(format!("{}.log", request.task_id)),
             inline: String::new(),
             inline_units: 0,
             preview: String::new(),
@@ -1263,17 +1315,17 @@ pub(super) async fn execute(
         pumps,
         stop_pumps,
         started,
-        deadline: effective_timeout.map(|timeout| started + Duration::from_millis(timeout)),
+        deadline: timeout.map(|timeout| started + Duration::from_millis(timeout)),
         isolation,
     };
     if cancel.is_cancelled() {
         if let Err(result) = process.abandon().await {
-            return Ok(*result);
+            return Ok((*result, None));
         }
-        return Err(cancelled());
+        return Ok((cancelled_result(), None));
     }
     if background {
-        return hand_off(branch, call, context, &request, process, true, &cancel).await;
+        return hand_off(branch, call, context, request, process, true, &cancel).await;
     }
 
     let handoff = async {
@@ -1289,13 +1341,16 @@ pub(super) async fn execute(
         _ = cancel.cancelled() => {
             if let Err(error) = process.terminate().await {
                 let settled = process.close().await;
-                return Ok(terminate_failed(&error, &settled));
+                return Ok((terminate_failed(&error, &settled), None));
             }
             let settled = process.close().await;
             if let Some(failure) = &settled.failure {
-                return Ok(offload_failed(failure));
+                return Ok((offload_failed(failure), None));
             }
-            return Err(HostError::Cancelled(settled_content(&settled, Some("Command cancelled."))));
+            return Ok((
+                ToolResult::error(settled_content(&settled, Some("Command cancelled."))),
+                None,
+            ));
         }
         _ = handoff => None,
     };
@@ -1305,28 +1360,29 @@ pub(super) async fn execute(
         None => futures_util::FutureExt::now_or_never(process.next()),
     };
     let Some(observed) = observed else {
-        return hand_off(branch, call, context, &request, process, false, &cancel).await;
+        return hand_off(branch, call, context, request, process, false, &cancel).await;
     };
     let exit = match observed {
         Ok(Observed::Exited(status)) => status,
         Ok(Observed::OutputFailed) => {
             if let Err(error) = process.terminate().await {
                 let settled = process.close().await;
-                return Ok(terminate_failed(&error, &settled));
+                return Ok((terminate_failed(&error, &settled), None));
             }
             let settled = process.close().await;
-            return Ok(offload_failed(
-                settled.failure.as_deref().unwrap_or_default(),
+            return Ok((
+                offload_failed(settled.failure.as_deref().unwrap_or_default()),
+                None,
             ));
         }
         Ok(Observed::TimedOut) => {
             if let Err(error) = process.terminate().await {
                 let settled = process.close().await;
-                return Ok(terminate_failed(&error, &settled));
+                return Ok((terminate_failed(&error, &settled), None));
             }
             let settled = process.close().await;
             if let Some(failure) = &settled.failure {
-                return Ok(offload_failed(failure));
+                return Ok((offload_failed(failure), None));
             }
             let mut fields = json!({
                 "type": "finished",
@@ -1340,26 +1396,32 @@ pub(super) async fn execute(
             if let Some(path) = &settled.output_path {
                 fields["outputPath"] = path.clone().into();
             }
-            return Ok(ToolResult {
-                structured_content: Some(request.structured(fields)),
-                ..ToolResult::error(settled_content(&settled, Some("Command timed out.")))
-            });
+            return Ok((
+                ToolResult {
+                    structured_content: Some(request.structured(fields)),
+                    ..ToolResult::error(settled_content(&settled, Some("Command timed out.")))
+                },
+                None,
+            ));
         }
         Err(error) => {
             if let Err(error) = process.terminate().await {
                 let settled = process.close().await;
-                return Ok(terminate_failed(&error, &settled));
+                return Ok((terminate_failed(&error, &settled), None));
             }
             process.close().await;
-            return Ok(failed(
-                format!("Failed to wait for process: {error}"),
-                "exec_wait_failed",
+            return Ok((
+                failed(
+                    format!("Failed to wait for process: {error}"),
+                    "exec_wait_failed",
+                ),
+                None,
             ));
         }
     };
     let settled = process.close().await;
     if let Some(failure) = &settled.failure {
-        return Ok(offload_failed(failure));
+        return Ok((offload_failed(failure), None));
     }
     let completed = exit.success();
     let note = (!completed).then(|| {
@@ -1381,12 +1443,15 @@ pub(super) async fn execute(
         fields.insert("outputPath".into(), path.clone().into());
     }
     insert_exit(&mut fields, Some(exit));
-    Ok(ToolResult {
-        content: ToolContent::Text(settled_content(&settled, note.as_deref())),
-        is_error: (!completed).then_some(true),
-        structured_content: Some(request.structured(Value::Object(fields))),
-        ..ToolResult::default()
-    })
+    Ok((
+        ToolResult {
+            content: ToolContent::Text(settled_content(&settled, note.as_deref())),
+            is_error: (!completed).then_some(true),
+            structured_content: Some(request.structured(Value::Object(fields))),
+            ..ToolResult::default()
+        },
+        Some(exit),
+    ))
 }
 
 fn settled_content(settled: &Settled, note: Option<&str>) -> String {
@@ -1403,7 +1468,8 @@ fn settled_content(settled: &Settled, note: Option<&str>) -> String {
 }
 
 /// Moves a running command to this branch's BackgroundExec; `immediate`
-/// for `runInBackground`, otherwise after the foreground wait.
+/// for `runInBackground`, otherwise after the foreground wait. Its answer
+/// observed no exit: the call saw that the command started and nothing more.
 async fn hand_off(
     branch: &Branch,
     call: &ToolCall,
@@ -1412,29 +1478,29 @@ async fn hand_off(
     process: ExecProcess,
     immediate: bool,
     cancel: &CancellationToken,
-) -> Result<ToolResult, HostError> {
+) -> Result<(ToolResult, Option<ExitStatus>), HostError> {
     let output_path = match process.ensure_file().await {
         Ok(path) => path,
         Err(error) => {
             if let Err(result) = process.abandon().await {
-                return Ok(*result);
+                return Ok((*result, None));
             }
-            return Ok(offload_failed(&error));
+            return Ok((offload_failed(&error), None));
         }
     };
     if cancel.is_cancelled() {
         if let Err(result) = process.abandon().await {
-            return Ok(*result);
+            return Ok((*result, None));
         }
-        return Err(HostError::Cancelled("Tool execution cancelled.".into()));
+        return Ok((cancelled_result(), None));
     }
     let background = match branch.service::<BackgroundExec>() {
         Ok(background) => background,
         Err(error) => {
             if let Err(result) = process.abandon().await {
-                return Ok(*result);
+                return Ok((*result, None));
             }
-            return Ok(start_failed(&error.to_string()));
+            return Ok((start_failed(&error.to_string()), None));
         }
     };
     let preview = process.output.preview().await;
@@ -1461,9 +1527,15 @@ async fn hand_off(
         .await;
     let task_id = match started {
         Ok(task_id) => task_id,
-        Err(StartError::Closing) => return Ok(start_failed("the branch is closing")),
-        Err(StartError::Timeline(error)) => return Ok(start_failed(&error.to_string())),
-        Err(StartError::Termination(result)) => return Ok(*result),
+        Err(StartError::Closing) => {
+            return Ok((start_failed("the branch is closing"), None));
+        }
+        Err(StartError::Timeline(error)) => {
+            return Ok((start_failed(&error.to_string()), None));
+        }
+        Err(StartError::Termination(result)) => {
+            return Ok((*result, None));
+        }
     };
     let mut structured = request.structured(json!({
         "type": "running",
@@ -1484,10 +1556,13 @@ async fn hand_off(
             DEFAULT_WAIT_TIME.as_millis()
         )
     };
-    Ok(ToolResult {
-        structured_content: Some(structured),
-        ..ToolResult::text(running_content(&reason, &task_id, &output_path, &preview))
-    })
+    Ok((
+        ToolResult {
+            structured_content: Some(structured),
+            ..ToolResult::text(running_content(&reason, &task_id, &output_path, &preview))
+        },
+        None,
+    ))
 }
 
 fn start_failed(reason: &str) -> ToolResult {

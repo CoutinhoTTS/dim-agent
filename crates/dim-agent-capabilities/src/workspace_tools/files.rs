@@ -14,7 +14,7 @@ mod write;
 
 use super::file_reads::FileReads;
 use crate::host::HostError;
-use dim_agent_types::{JsonObject, ToolCall, ToolDefinition, ToolResult};
+use dim_agent_types::{JsonObject, ToolCall, ToolDefinition, ToolEffect, ToolResult};
 use serde_json::{Value, json};
 use sha2::Digest;
 use std::{
@@ -166,6 +166,18 @@ fn invalid_input(message: impl Into<String>) -> ToolResult {
 fn succeeded(content: impl Into<String>, structured: Value) -> ToolResult {
     ToolResult {
         structured_content: Some(object(structured)),
+        ..ToolResult::text(content)
+    }
+}
+
+/// A successful `write` or `edit` result: the published file is the call's
+/// `fileWritten` effect (session boundary A.6).
+fn wrote(content: impl Into<String>, structured: Value, path: &str) -> ToolResult {
+    ToolResult {
+        structured_content: Some(object(structured)),
+        effects: Some(vec![ToolEffect::FileWritten {
+            path: path.to_owned(),
+        }]),
         ..ToolResult::text(content)
     }
 }

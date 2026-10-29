@@ -167,6 +167,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "Hasil: {result}",
         "Controlled by the leader" => "Diatur pemimpin",
         "› Open member conversation" => "› Buka percakapan anggota",
+        "Not started" => "Belum dimulai",
+        "Reason: {reason}" => "Alasan: {reason}",
         "Copied to clipboard" => "Disalin ke clipboard",
         "Opened link" => "Tautan dibuka",
         "Link: {url}" => "Tautan: {url}",
@@ -455,6 +457,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "kompresi konteks baris yang ditampilkan",
         "Kept verbatim" => "Dipertahankan apa adanya",
+        "Tool effects" => "Catatan operasi alat",
         "insufficient space: {parts}" => "ruang tidak cukup: {parts}",
         "system prompt" => "system prompt",
         "tools" => "alat",

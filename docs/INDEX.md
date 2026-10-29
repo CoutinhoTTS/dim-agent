@@ -29,6 +29,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
 - [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）
 - [Compaction requirements](design/compaction-quality.md): what compaction keeps, what users see and control, its cost bounds, how its quality is judged (#428)（[中文](zh/design/compaction-quality.md)）
+- [Model-facing prompts](design/model-prompts.md): the channels that carry model text, protocol versus policy, who may change what, the input guide, one prompt language, and how a prompt change is judged (#429)（[中文](zh/design/model-prompts.md)）
 - [Timeline-first TUI](design/timeline-ui.md): the TUI's Timeline as the primary surface, opening lines and forks from a point of it, line markers and cuts（[中文](zh/design/timeline-ui.md)）
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
