@@ -13,6 +13,7 @@ atomic ConfigurationPublisher used by Prompt.
 | `S:ContextModelHost` | Optional window facts for context policy and recovery. |
 | `S:CompactionStrategyHost` | Optional compaction strategy; the policy exists when both hosts are bound. |
 | `S:PrepareContextHost` | Host preparation hook. |
+| `S:GuideEntries` | Register the digest entry while a strategy is bound. |
 | `B:TimelineIdentity` | Identify configuration publication scope; Session and branch ids of the `context.prepare` span. |
 | `B:Dispatcher` | Replay and receive preparation/steer/interrupt transitions and report faults. |
 | `B:Timeline` | Read fixed context, publish handoff and configuration facts. |
@@ -23,7 +24,12 @@ Consumes `context/prepare`, `stop/interrupt`, `step/model-start`, `input/applied
 turn start/end. Produces `model/call` on success or `step/model-output-end` on
 failure, with `context/compaction-start` and one `context/compaction` around
 each strategy call. `usage` reads the head's budget without writing. Its publisher commits prompt changes, adopted inputs and
-`context/configured` atomically. Preparation is single-flight, tracked,
+`context/configured` atomically; it renders the guide Prompt composes into the
+system it publishes, at each adoption that renders the System — the first
+configuration or a change of sources. A model- or tool-only update keeps the
+previously adopted System and its guide, so a writer that loads with one has its
+entry in force at the next adoption that renders the System
+([Prompt §6.3](../../../design/plugins/Prompt.md#63-contextpreparation-the-entries-and-the-published-system)). Preparation is single-flight, tracked,
 cancelled by stop/steer and joined during cleanup; cleanup aggregates failures.
 Replay settles unmatched handoffs and automatic compaction starts without
 rerunning host work. The mock profile
@@ -37,6 +43,12 @@ summary and falls back to fact replay; it does not repeat model work. Trusted
 builders must independently preserve full-replay semantics; a checksum is not
 proof of semantic correctness or authorization.
 
+The compaction replacement is the policy's, so the part registers the
+`dim-digest` entry of the input guide from its own `apply`, scoped to its
+branch and only while a strategy is bound: without one the policy compacts
+nothing and no digest can be written
+([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)).
+
 ## Tests
 
 [context_flow.rs](../../../../crates/dim-agent-capabilities/tests/context_flow.rs):
@@ -48,7 +60,7 @@ proof of semantic correctness or authorization.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:HistoryRenderer`、`S:PrepareContextHost` |
+| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareContextHost` |
 | 提供 | `B:ConfigurationPublisher`、`B:ContextPreparation` |
 | 被注入于 | `ModelProvider`、`Prompt` |
 <!-- /generated -->

@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, LoopPhase, LoopSnapshot, LoopState,
-    Names, Result, StateCell, Timeline,
+    Names, Result, StateCell, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -121,6 +121,10 @@ pub struct AgentLoop {
     /// turn ends.
     binding: Arc<ToolBinding>,
     history: Arc<HistoryRenderer>,
+    /// The Session's guide entries, for the host-prepared path.
+    guide: Arc<crate::prompt_guide::GuideEntries>,
+    /// This branch's timeline id, which selects the entries in force.
+    branch: String,
     /// Compaction is bound: budget recovery and manual steps run.
     policy: Option<ContextPolicy>,
     tasks: TaskTracker,
@@ -695,7 +699,8 @@ impl AgentLoop {
                                     .prepare(&turn_id, &request_id, &history, tools)
                                     .map_err(|error| AgentError::fault("Loop", error.to_string()))
                             })?;
-                        settings.system = Some(crate::history::with_input_guide(settings.system));
+                        settings.system =
+                            Some(crate::history::with_input_guide(settings.system, &owner.guide.compose(&owner.branch)));
                         settings
                     }
                 };
@@ -1146,6 +1151,8 @@ pub struct LoopPlugin {
     history: Key<HistoryRenderer>,
     context: Key<ContextModelHost>,
     strategy: Key<CompactionStrategyHost>,
+    guide: Key<crate::prompt_guide::GuideEntries>,
+    identity: Key<TimelineIdentity>,
 }
 impl LoopPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -1160,6 +1167,8 @@ impl LoopPlugin {
             history: names.key()?,
             context: names.key()?,
             strategy: names.key()?,
+            guide: names.key()?,
+            identity: names.key()?,
         })
     }
 }
@@ -1176,6 +1185,8 @@ impl DynPlugin for LoopPlugin {
             self.history.erase(),
             self.context.erase(),
             self.strategy.erase(),
+            self.guide.erase(),
+            self.identity.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -1187,6 +1198,8 @@ impl DynPlugin for LoopPlugin {
             let history = ctx.require_at(&self.history)?;
             let context = ctx.require_at(&self.context)?;
             let strategy = ctx.require_at(&self.strategy)?;
+            let guide = ctx.require_at(&self.guide)?;
+            let identity = ctx.require_at(&self.identity)?;
             let policy = ContextPolicy::bind(&timeline, &context, &strategy, &history)
                 .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             let service = Arc::new(AgentLoop {
@@ -1200,6 +1213,8 @@ impl DynPlugin for LoopPlugin {
                 prepare,
                 binding,
                 history,
+                guide,
+                branch: identity.branch_id.clone(),
                 policy,
                 tasks: TaskTracker::new(),
                 lifecycle: ctx.cancellation_token(),

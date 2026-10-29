@@ -59,6 +59,16 @@ sources for PromptRegistry; source loading is separate from branch adoption.
 | `S:SessionConfig` | Working directory and Session context. |
 | `S:PromptRegistry` | Register each of its sources by name, until this part unloads. |
 
+The policy texts — `dim/base`'s identity and rules, the shell guidance and the
+file-encoding guidance — are the plugin's factory configuration: an optional
+member each, the built-in text in force when none is set. The product installs
+the plugin without a configuration, so its texts are the built-in ones; a
+candidate is installed through the shipped assembly with one, never by patching
+text at a request boundary
+([PromptSources design §2](../../../design/plugins/PromptSources.md#2-policy-at-the-factory-configuration)).
+The shell and file-encoding guidance stay inside the environment state block,
+where the model reads them today.
+
 ### Events and lifetime
 
 No Timeline subscriptions/production or background tasks in this Session plugin.

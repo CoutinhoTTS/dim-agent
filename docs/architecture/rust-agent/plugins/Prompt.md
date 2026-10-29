@@ -19,6 +19,7 @@ replaying history; rebuilding restores it from checkpoint configuration and fact
 | `B:Dispatcher` | Order configuration adoption and state projection. |
 | `B:Timeline` | Write controls and rebuild adopted context. |
 | `S:FaultReporter` | Report owned work failures. |
+| `S:GuideEntries` | Compose the guide this branch carries at each adoption it publishes. |
 | `B:BranchOpening` | Register initial prompt completion receipt. |
 
 ## Events and lifetime
@@ -53,7 +54,51 @@ owners, rule check and complete-candidate concurrency limit.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:InitialPromptConfiguration`、`S:PromptHost` |
+| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:GuideEntries`、`S:InitialPromptConfiguration`、`S:PromptHost` |
 | 提供 | `B:Prompt`、`B:StateCell<PromptSnapshot>`、`B:dyn ConfigureControl` |
 | 被注入于 | `PromptSourcesBranch`、`SkillsBranch`、`ToolBinding` |
+<!-- /generated -->
+
+## PromptGuide
+
+Owner: [prompt_guide.rs](../../../../crates/dim-agent-capabilities/src/prompt_guide.rs).
+Holds the Session's input-guide entries, the frame and the composition over
+them, and registers the two entries of the markers Prompt itself writes,
+`dim-state` and `dim-rule`, from its own `apply`
+([Prompt design §2 and §3](../../../design/plugins/Prompt.md#2-the-entry-route)).
+Each other writer registers its own entries; the composition orders what is in
+force for a branch by `order` and first marker, so neither load order nor
+registration order enters.
+
+### Dependencies
+
+None: it provides the table and owns its two entries.
+
+### Events and lifetime
+
+A registration is an effect of the part that made it: it is withdrawn when that
+part unloads, and a reloaded part replaces its entry instead of doubling it. A
+composition already made is unaffected by a later registration or withdrawal:
+the adopted System is fixed until the next adoption that renders it — the first
+configuration or a change of sources — and a tools-only or model-only adoption
+keeps the adopted System and its guide. Entries
+reach the model only through the System a branch adopted or through the request
+Loop assembles, never through a request of their own.
+
+### Tests
+
+[prompt_guide.rs](../../../../tests/integration/tests/prompt_guide.rs):
+`both_paths_carry_one_composition`,
+`an_entry_waits_for_the_next_adoption_that_renders_the_system`,
+`each_branch_keeps_its_own_entries`, `the_frame_states_the_compaction_handle`;
+[reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
+`an_entry_leaves_with_its_contributor`.
+
+<!-- generated:plugin PromptGuide — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | Session |
+| 注入 | — |
+| 提供 | `S:GuideEntries` |
+| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`Prompt` |
 <!-- /generated -->

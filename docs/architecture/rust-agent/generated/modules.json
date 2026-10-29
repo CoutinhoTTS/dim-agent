@@ -467,7 +467,6 @@
       "file": "crates/dim-agent-capabilities/src/history.rs",
       "unexpandedMacros": [
         "format",
-        "include_str",
         "matches",
         "vec"
       ]
@@ -626,6 +625,28 @@
         "tokio::select",
         "tracing::info_span",
         "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::prompt_guide",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/prompt_guide.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::prompt_guide::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::prompt_guide",
+      "file": "crates/dim-agent-capabilities/src/prompt_guide.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "panic",
         "vec"
       ]
     },
@@ -5933,6 +5954,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "mod prompt_guide",
+        "path prompt_guide::GuideEntries"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
         "mod prompt_registry",
@@ -6267,6 +6296,13 @@
     },
     {
       "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path crate::prompt_guide::GuideEntries"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot::from_context",
@@ -6294,6 +6330,14 @@
       "to": "dim_agent_capabilities::tool_executor",
       "references": [
         "path crate::tool_executor::is_reload_settled"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path TimelineIdentity",
+        "use dim_agent_runtime::TimelineIdentity"
       ]
     },
     {
@@ -6873,6 +6917,18 @@
     },
     {
       "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Branch",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",
@@ -7136,6 +7192,13 @@
         "path PromptPlugin::new",
         "use crate::prompt::InitialPromptConfiguration",
         "use crate::prompt::PromptPlugin"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path crate::prompt_guide::PromptGuidePlugin::new"
       ]
     },
     {
@@ -8509,6 +8572,14 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "use crate::prompt_guide::GuideEntries"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",
@@ -8642,6 +8713,41 @@
         "path PromptScope::Task",
         "path PromptScope::Turn",
         "path prompt"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_guide",
+      "to": "dim_agent_capabilities::prompt_guide::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_guide",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_guide",
+      "to": "dim_agent_runtime::registrations",
+      "references": [
+        "path Registrations",
+        "use dim_agent_runtime::Registrations"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_guide::tests",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path ENTRY_LIMIT",
+        "path GuideEntries::default",
+        "path GuideEntry",
+        "path GuideEntryError",
+        "path GuideEntryErrorCode",
+        "path GuideScope::Session"
       ]
     },
     {
@@ -9950,6 +10056,18 @@
     },
     {
       "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
@@ -10034,6 +10152,18 @@
         "use crate::host::HostError",
         "use crate::host::HostFuture",
         "use crate::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Branch",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
       ]
     },
     {
@@ -10873,6 +11003,18 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::background",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Branch",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::background",
       "to": "dim_agent_capabilities::workspace_tools::background::testing",
       "references": [
         "mod testing",
@@ -10896,7 +11038,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionLifecycle",
-        "use dim_agent_runtime::SessionLifecycle"
+        "path TimelineIdentity",
+        "use dim_agent_runtime::SessionLifecycle",
+        "use dim_agent_runtime::TimelineIdentity"
       ]
     },
     {
@@ -14921,6 +15065,18 @@
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostFuture",
         "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use dim_agent_capabilities::prompt_guide::GuideEntries",
+        "use dim_agent_capabilities::prompt_guide::GuideEntry",
+        "use dim_agent_capabilities::prompt_guide::GuideScope"
       ]
     },
     {

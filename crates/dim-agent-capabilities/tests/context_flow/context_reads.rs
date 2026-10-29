@@ -1047,12 +1047,19 @@ async fn concurrent_system_adoptions_include_previous_unpublished_updates() {
                 pair[0].revision
             );
         }
-        assert_eq!(
-            configurations.last().unwrap().system,
-            Some(SystemPrompt::Text(format!(
-                "alpha:{version}\n\nbeta:{version}\n\n{}",
-                include_str!("../../src/input-guide.txt").trim_end()
-            )))
+        let system = match &configurations.last().unwrap().system {
+            Some(SystemPrompt::Text(system)) => system,
+            other => panic!("system guide missing: {other:?}"),
+        };
+        assert!(
+            system.starts_with(&format!(
+                "alpha:{version}\n\nbeta:{version}\n\n# How to read your input"
+            )),
+            "{system:?}"
+        );
+        assert!(
+            system.ends_with("they do not renew any permission."),
+            "{system:?}"
         );
     }
     agent.close().await.unwrap();

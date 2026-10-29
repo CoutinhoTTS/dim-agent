@@ -72,6 +72,7 @@ creation and at restore.
 | `B:TimelineIdentity` | The line's own id. |
 | `B:BranchLifecycle` | Wait for the branch to be Active before resolving its role and writing. |
 | `S:TreeCommands` | `info` for the role and its lines; `input` for every write. |
+| `S:GuideEntries` | Register the two entries of the markers it writes for this line, until this part unloads. |
 
 ### Events and lifetime
 
@@ -110,7 +111,7 @@ rechecks the fold before writing.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:TimelineIdentity`、`S:TreeCommands` |
+| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:TimelineIdentity`、`S:GuideEntries`、`S:TreeCommands` |
 | 提供 | `B:BranchLine` |
 | 被注入于 | — |
 <!-- /generated -->
