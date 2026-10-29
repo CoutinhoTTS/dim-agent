@@ -135,7 +135,7 @@ actions 只说明当前可用性，
 `update` 改动 `baseUrl`、`credential` 或 `headers`（记录所达 endpoint 或账户）时，若记录自身的模型不属于
 bundled catalog（bundled 未定义该 Provider，或 `remoteModels` 已为真），就在写入之外列举
 新 endpoint 的模型，并与连接在同一次 CAS 写入中提交；用户模型冲突规则与 `refresh` 相同。
-列举
+非法 patch 在列举之前就被拒绝，返回带原因的 `provider_invalid_config`。列举
 失败则更新失败、不写入任何内容，重新指向不会把旧 endpoint 的模型留在新 endpoint 上。
 只改 `network`（代理或超时）时单独保存、不列举：它改变到达 endpoint 的方式而非其内容，
 若要求列举成功，列举失败时这些设置就无法保存。driver 不能列举时只保存连接。

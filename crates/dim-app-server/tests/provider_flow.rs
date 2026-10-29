@@ -1920,6 +1920,49 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         "a network-only patch sends no listing request"
     );
 
+    // An invalid patch is reported with its reason, not as a generic failure.
+    let invalid = provider
+        .update(
+            REMOTE.into(),
+            3,
+            serde_json::from_value(json!({"baseUrl":"not a url"})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(invalid, ProviderError::InvalidConfig(_)),
+        "{invalid:?}"
+    );
+    let invalid = provider
+        .update(
+            REMOTE.into(),
+            3,
+            serde_json::from_value(json!({
+                "credential":{"action":"set","value":"third-key"},
+                "network":{"proxy":{"action":"set","value":"socks5://localhost:1080"}}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(invalid, ProviderError::InvalidConfig(_)),
+        "{invalid:?}"
+    );
+    let untouched = provider
+        .management(Some(REMOTE.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    assert_eq!(untouched.version, Some(3));
+    assert_eq!(
+        untouched.connection.as_ref().unwrap().base_url,
+        format!("{base}/new/v1")
+    );
+
     let seeded = provider
         .management(Some("deepseek".into()), &cancel)
         .await

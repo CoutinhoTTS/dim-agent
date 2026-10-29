@@ -416,7 +416,8 @@ impl ProviderService {
                 {
                     return Err(ProviderError::AuthRequired);
                 }
-                validate_static_record(&provider_id, &mut admitted)?;
+                validate_static_record(&provider_id, &mut admitted)
+                    .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
                 let (models, models_listed) = if !admitted.enabled {
                     (None, ModelsListed::Disabled)
                 } else if owner.bundled.provider(&provider_id).is_some() && !admitted.remote_models

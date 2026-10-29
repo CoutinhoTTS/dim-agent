@@ -156,7 +156,8 @@ the account the record reaches — lists the models of the new endpoint when the
 record's models are its own — the bundled catalog does not define the provider,
 or `remoteModels` is already true — and commits the listing with the connection
 in one compare-and-set write. The listing is taken outside the write and keeps
-`refresh`'s user-model conflict rule. A failed
+`refresh`'s user-model conflict rule. An invalid patch is rejected before
+anything is listed, as `provider_invalid_config` with its reason. A failed
 listing fails the update and writes nothing, so re-pointing never leaves the old
 endpoint's models on the new one. A `network`-only change — a proxy or a timeout
 — saves alone and lists nothing: it changes how the endpoint is reached, not
