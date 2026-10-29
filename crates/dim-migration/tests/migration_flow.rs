@@ -295,6 +295,220 @@ async fn migration_validates_dim_account_tokens_before_writing_the_account_file(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrated_dim_account_states_are_readable_by_the_account_owner() {
+    use dim_app_server::managed_provider::ManagedProviders;
+    use sha2::{Digest, Sha256};
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let tokens = json!({"type":"oauth","access":"private-access","refresh":"private-refresh","expires":4102444800000u64,"clientId":"test-client","issuer":"https://auth.example.test","tokenEndpoint":"https://auth.example.test/token","relayBaseUrl":"https://api.example.test"});
+    let digest = format!("{:x}", Sha256::digest(serde_jcs::to_vec(&tokens).unwrap()));
+    for case in [
+        "authenticated",
+        "signed_out",
+        "integer_numbers",
+        "nil_epoch",
+        "missing_generation",
+        "zero_generation",
+        "fractional_generation",
+        "unsafe_generation",
+        "zero_revision",
+        "unsafe_revision",
+        "simple_epoch",
+        "braced_epoch",
+        "urn_epoch",
+        "unknown_state",
+        "missing_state",
+        "signed_out_tokens",
+        "signed_out_identity",
+        "signed_out_digest",
+        "authenticated_without_tokens",
+        "missing_identity",
+        "blank_subject",
+        "invalid_issuer",
+        "different_issuer",
+        "invalid_email",
+        "invalid_name",
+        "wrong_digest",
+    ] {
+        let mut auth = json!({"nextApiOauth":tokens,"dimAccountState":{
+            "schemaVersion":1,"credentialEpoch":"0b6f9a52-7e4b-4a59-9d0c-9a0c1c2f7e11",
+            "generation":1,"credentialRevision":1,"state":"authenticated",
+            "identity":{"issuer":"https://auth.example.test","subject":"legacy-subject"},"tokenDigest":digest
+        }});
+        if matches!(
+            case,
+            "signed_out" | "signed_out_tokens" | "signed_out_identity" | "signed_out_digest"
+        ) {
+            auth.as_object_mut().unwrap().remove("nextApiOauth");
+            let state = auth["dimAccountState"].as_object_mut().unwrap();
+            state.insert("state".into(), json!("signed_out"));
+            state.remove("identity");
+            state.remove("tokenDigest");
+        }
+        match case {
+            "authenticated" | "signed_out" => {}
+            "integer_numbers" => {
+                auth["dimAccountState"]["generation"] = json!(1.0);
+                auth["dimAccountState"]["credentialRevision"] = json!(1.0);
+            }
+            "nil_epoch" => {
+                auth["dimAccountState"]["credentialEpoch"] = json!(uuid::Uuid::nil().to_string())
+            }
+            "missing_generation" => {
+                auth["dimAccountState"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("generation");
+            }
+            "zero_generation" => auth["dimAccountState"]["generation"] = json!(0),
+            "fractional_generation" => auth["dimAccountState"]["generation"] = json!(1.5),
+            "unsafe_generation" => {
+                auth["dimAccountState"]["generation"] =
+                    json!(dim_agent_types::JS_MAX_SAFE_INTEGER + 1)
+            }
+            "zero_revision" => auth["dimAccountState"]["credentialRevision"] = json!(0),
+            "unsafe_revision" => {
+                auth["dimAccountState"]["credentialRevision"] =
+                    json!(dim_agent_types::JS_MAX_SAFE_INTEGER + 1)
+            }
+            "simple_epoch" => {
+                auth["dimAccountState"]["credentialEpoch"] =
+                    json!("0b6f9a527e4b4a599d0c9a0c1c2f7e11")
+            }
+            "braced_epoch" => {
+                auth["dimAccountState"]["credentialEpoch"] =
+                    json!("{0b6f9a52-7e4b-4a59-9d0c-9a0c1c2f7e11}")
+            }
+            "urn_epoch" => {
+                auth["dimAccountState"]["credentialEpoch"] =
+                    json!("urn:uuid:0b6f9a52-7e4b-4a59-9d0c-9a0c1c2f7e11")
+            }
+            "unknown_state" => auth["dimAccountState"]["state"] = json!("other"),
+            "missing_state" => {
+                auth["dimAccountState"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("state");
+            }
+            "signed_out_tokens" => auth["nextApiOauth"] = tokens.clone(),
+            "signed_out_identity" => auth["dimAccountState"]["identity"] = Value::Null,
+            "signed_out_digest" => auth["dimAccountState"]["tokenDigest"] = Value::Null,
+            "authenticated_without_tokens" => {
+                auth.as_object_mut().unwrap().remove("nextApiOauth");
+            }
+            "missing_identity" => {
+                auth["dimAccountState"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("identity");
+            }
+            "blank_subject" => auth["dimAccountState"]["identity"]["subject"] = json!(" "),
+            "invalid_issuer" => {
+                auth["dimAccountState"]["identity"]["issuer"] = json!("file:///invalid")
+            }
+            "different_issuer" => {
+                auth["dimAccountState"]["identity"]["issuer"] =
+                    json!("https://different.example.test")
+            }
+            "invalid_email" => auth["dimAccountState"]["identity"]["email"] = Value::Null,
+            "invalid_name" => auth["dimAccountState"]["identity"]["name"] = json!(1),
+            "wrong_digest" => auth["dimAccountState"]["tokenDigest"] = json!("0".repeat(64)),
+            _ => unreachable!(),
+        }
+        std::fs::write(source.join("auth.json"), auth.to_string()).unwrap();
+        let before = snapshot(&source);
+        let target = directory.path().join(case);
+        std::fs::create_dir_all(&target).unwrap();
+        let original = b"{\"unrelated\":{\"keep\":true}}";
+        std::fs::write(target.join("auth.json"), original).unwrap();
+        let root = rutis::Ctx::root().unwrap();
+        let plugin = root.plugin(MigrationPlugin::new(
+            target.clone(),
+            "rust".into(),
+            vec!["system".into()],
+        ));
+        (&plugin).await.unwrap();
+        let report = root
+            .get::<Migration>()
+            .unwrap()
+            .run(source.clone(), true, None)
+            .await
+            .unwrap();
+        let result = report
+            .objects
+            .iter()
+            .find(|item| item.kind == "account" && item.id == "dimcode-api-oauth")
+            .unwrap();
+        let valid = matches!(
+            case,
+            "authenticated" | "signed_out" | "integer_numbers" | "nil_epoch"
+        );
+        assert_eq!(
+            result.outcome,
+            if valid {
+                Outcome::Imported
+            } else {
+                Outcome::Unsupported
+            },
+            "{case}: {report:?}"
+        );
+        if !valid {
+            assert_eq!(
+                std::fs::read(target.join("auth.json")).unwrap(),
+                original,
+                "{case}"
+            );
+        }
+        assert_eq!(snapshot(&source), before);
+        plugin.dispose().await.unwrap();
+        root.shutdown().await.unwrap();
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_hosts(&mut builder);
+        let server = serve(
+            builder,
+            ServerConfig {
+                database_path: Some(target.join("rust/dimcode.sqlite")),
+                product_home: Some(target),
+                unix_path: Some(directory.path().join("native.sock")),
+                managed_provider: Some(dim_oauth::row(dim_oauth::ClientIds {
+                    global: "test-global".into(),
+                    cn: "test-cn".into(),
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let account = server
+            .service::<ManagedProviders>()
+            .unwrap()
+            .status(
+                "dimcode-api-oauth",
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{case}: native account reader rejected the target: {error}")
+            });
+        assert_eq!(
+            account.account.is_some(),
+            valid && case != "signed_out",
+            "{case}"
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_keeps_large_images_as_files_without_rejecting_session_history() {
     use base64::Engine;
     use dim_agent_types::{ContextCompactionResult, MessageContent, MessagePart};
@@ -932,6 +1146,48 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    native
+        .execute(
+            "UPDATE providers SET record='{}' WHERE provider_id='legacy-provider'",
+            [],
+        )
+        .unwrap();
+    db.execute("INSERT INTO provider_selections (selectionId,scope,cwd,providerId,modelId,version) VALUES ('corrupt-target','workspace',?1,'legacy-provider','legacy-model',1)", [source.join("corrupt-target").to_str().unwrap()]).unwrap();
+    let before = snapshot(&source);
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert_eq!(report.task.status, TaskStatus::Partial, "{report:?}");
+    assert!(
+        report.objects.iter().any(|item| item.kind == "selection"
+            && item.id == "corrupt-target"
+            && item.outcome == Outcome::Unsupported),
+        "{report:?}"
+    );
+    assert_eq!(
+        native
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='legacy-provider'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "{}"
+    );
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1061,7 +1317,7 @@ async fn migration_cancellation_settles_before_unload_and_a_new_load_can_retry()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries() {
-    for case in ["tools", "revert", "retry"] {
+    for case in ["tools", "revert", "revert_before_summary", "retry"] {
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(
             directory.path(),
@@ -1075,10 +1331,10 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
                 db.execute("UPDATE messages SET role='assistant',parts=?1 WHERE messageId='first'",[json!([{"type":"tool_use","id":"old-call","name":"echo","input":{"text":"never replay"}}]).to_string()]).unwrap();
                 db.execute("UPDATE messages SET role='tool_result',parts=?1 WHERE messageId='tail'",[json!([{"type":"tool_result","tool_use_id":"old-call","content":"historical output","structuredContent":{"exitCode":0}}]).to_string()]).unwrap();
             }
-            "revert" => {
+            "revert" | "revert_before_summary" => {
                 db.execute(
                     "UPDATE session_states SET settings=?1 WHERE sessionId='old'",
-                    [json!({"__revertState__":{"anchorOrderKey":"b"}}).to_string()],
+                    [json!({"__revertState__":{"anchorOrderKey":if case == "revert" {"b"} else {"a"}}}).to_string()],
                 )
                 .unwrap();
             }
@@ -1108,6 +1364,14 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             .iter()
             .find(|r| r.kind == "session" && r.id == "old")
             .unwrap();
+        if case == "revert_before_summary" {
+            assert_eq!(imported.outcome, Outcome::Deferred, "{report:?}");
+            assert!(imported.target_id.is_none());
+            assert_eq!(snapshot(&source), before);
+            plugin.dispose().await.unwrap();
+            root.shutdown().await.unwrap();
+            continue;
+        }
         assert_eq!(imported.outcome, Outcome::Imported, "{case}: {report:?}");
         let id = imported.target_id.clone().unwrap();
         plugin.dispose().await.unwrap();
@@ -1197,8 +1461,8 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             }
             "revert" => {
                 assert!(
-                    context.contains("compressed original")
-                        && !context.contains("retained summary")
+                    !context.contains("compressed original")
+                        && context.contains("retained summary")
                         && !context.contains("effective suffix"),
                     "{context}"
                 );

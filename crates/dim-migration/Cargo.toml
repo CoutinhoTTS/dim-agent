@@ -28,6 +28,7 @@ crossterm = "0.28"
 unicode-width = "0.2"
 
 [dev-dependencies]
+dim-oauth = { path = "../dim-oauth" }
 tempfile = "3"
 dim-app-server = { workspace = true, features = ["testing"] }
 dim-client.workspace = true

@@ -61,116 +61,110 @@ pub(crate) async fn import(
     target: &Native,
 ) -> Result<()> {
     if let Some(auth) = crate::engine::document(owner, task, source, "auth.json").await? {
-        for (id, key, state) in [
+        for (id, key, state_key) in [
             ("dimcode-api-oauth", "nextApiOauth", "dimAccountState"),
             ("openai-codex", "openaiCodex", "openaiCodexAccountState"),
             ("xai-grok", "xaiGrokBuild", "xaiGrokBuildAccountState"),
         ] {
-            let Some(tokens) = auth.get(key) else {
+            let tokens = auth.get(key);
+            let state = auth.get(state_key);
+            if tokens.is_none() && (key != "nextApiOauth" || state.is_none()) {
                 continue;
-            };
+            }
             let result = async {
-                if tokens["type"] != "oauth"
-                    || !["access", "refresh"].iter().all(|key| {
-                        tokens[*key].as_str().is_some_and(|s| {
-                            !s.trim().is_empty() && !s.chars().any(char::is_control)
+                let positive_integer = |value: &Value| {
+                    value.as_f64().is_some_and(|number| number >= 1.0
+                        && number <= dim_agent_types::JS_MAX_SAFE_INTEGER as f64
+                        && number.fract() == 0.0)
+                };
+                let http_url = |value: &Value| {
+                    value.as_str().is_some_and(|raw| {
+                        reqwest::Url::parse(raw).is_ok_and(|url| {
+                            matches!(url.scheme(), "http" | "https")
+                                && url.username().is_empty()
+                                && url.password().is_none()
+                                && url.fragment().is_none_or(str::is_empty)
                         })
                     })
-                    || !tokens["expires"]
-                        .as_u64()
-                        .is_some_and(|n| n > 0 && n <= dim_agent_types::JS_MAX_SAFE_INTEGER)
-                {
-                    return Err(Error::Object(
-                        "Legacy OAuth tokens are invalid; source preserved".into(),
-                    ));
-                }
-                if key == "nextApiOauth" {
-                    let http_url = |value: &Value| {
-                        value.as_str().is_some_and(|raw| {
-                            reqwest::Url::parse(raw).is_ok_and(|url| {
-                                matches!(url.scheme(), "http" | "https")
-                                    && url.username().is_empty()
-                                    && url.password().is_none()
-                                    && url.fragment().is_none_or(str::is_empty)
-                            })
+                };
+                let mut fields = Map::new();
+                if let Some(tokens) = tokens {
+                    let valid_expiry = if key == "nextApiOauth" {
+                        positive_integer(&tokens["expires"])
+                    } else {
+                        tokens["expires"].as_u64().is_some_and(|expires| {
+                            expires > 0 && expires <= dim_agent_types::JS_MAX_SAFE_INTEGER
                         })
                     };
-                    if !tokens["clientId"]
-                        .as_str()
-                        .is_some_and(|id| !id.trim().is_empty())
-                        || !["issuer", "tokenEndpoint", "relayBaseUrl"]
-                            .iter()
-                            .all(|key| http_url(&tokens[*key]))
-                        || [
-                            "authorizationEndpoint",
-                            "deviceAuthorizationEndpoint",
-                            "deviceTokenEndpoint",
-                        ]
-                        .iter()
-                        .any(|key| {
-                            tokens
-                                .get(*key)
-                                .is_some_and(|value| !value.is_null() && !http_url(value))
+                    if tokens["type"] != "oauth"
+                        || !["access", "refresh"].iter().all(|key| {
+                            tokens[*key].as_str().is_some_and(|s| {
+                                !s.trim().is_empty() && !s.chars().any(char::is_control)
+                            })
                         })
-                        || tokens
-                            .get("scope")
-                            .is_some_and(|value| !matches!(value, Value::Null | Value::String(_)))
+                        || !valid_expiry
                     {
                         return Err(Error::Object(
-                            "Legacy Dim OAuth tokens are incompatible; source preserved".into(),
+                            "Legacy OAuth tokens are invalid; source preserved".into(),
                         ));
                     }
+                    if key == "nextApiOauth" && (
+                        !tokens["clientId"].as_str().is_some_and(|id| !id.trim().is_empty())
+                        || !["issuer", "tokenEndpoint", "relayBaseUrl"].iter().all(|key| http_url(&tokens[*key]))
+                        || ["authorizationEndpoint", "deviceAuthorizationEndpoint", "deviceTokenEndpoint"].iter().any(|key| {
+                            tokens.get(*key).is_some_and(|value| !value.is_null() && !http_url(value))
+                        })
+                        || tokens.get("scope").is_some_and(|value| !matches!(value, Value::Null | Value::String(_)))
+                    ) {
+                        return Err(Error::Object("Legacy Dim OAuth tokens are incompatible; source preserved".into()));
+                    }
+                    fields.insert(key.into(), tokens.clone());
                 }
-                let mut fields = Map::new();
-                fields.insert(key.into(), tokens.clone());
-                if let Some(state) = auth.get(state) {
+                if let Some(state) = state {
                     if state["schemaVersion"] != 1 {
-                        return Err(Error::Unsupported(
-                            "Legacy account state schema is unsupported".into(),
-                        ));
+                        return Err(Error::Unsupported("Legacy account state schema is unsupported".into()));
                     }
-                    let token_digest =
-                        format!(
-                            "{:x}",
-                            Sha256::digest(serde_jcs::to_vec(tokens).map_err(
-                                |_| Error::Object("Invalid legacy account tokens".into())
-                            )?)
-                        );
-                    if state["tokenDigest"].as_str() != Some(&token_digest) {
-                        return Err(Error::Unsupported(
-                            "Legacy account digest requires recovery; source preserved".into(),
-                        ));
-                    }
-                    let generation = if key == "nextApiOauth" {
-                        state["credentialEpoch"].as_str()
-                    } else {
-                        state["generation"].as_str()
-                    };
-                    if !generation
-                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()))
-                        || !state["credentialRevision"]
-                            .as_u64()
-                            .is_some_and(|revision| {
-                                revision > 0 && revision <= dim_agent_types::JS_MAX_SAFE_INTEGER
-                            })
-                    {
-                        return Err(Error::Unsupported(
-                            "Legacy account state is incompatible; source preserved".into(),
-                        ));
-                    }
-                    fields.insert(
-                        match key {
-                            "nextApiOauth" => "dimAccountState",
-                            "openaiCodex" => "openaiCodexAccountState",
-                            _ => "xaiGrokBuildAccountState",
+                    if key == "nextApiOauth" {
+                        if !state["credentialEpoch"].as_str().is_some_and(|epoch| {
+                            epoch.len() == 36 && uuid::Uuid::parse_str(epoch).is_ok()
+                        }) || !positive_integer(&state["generation"])
+                            || !positive_integer(&state["credentialRevision"])
+                        {
+                            return Err(Error::Unsupported("Legacy Dim account state is incompatible; source preserved".into()));
                         }
-                        .into(),
-                        state.clone(),
-                    );
+                        match state["state"].as_str() {
+                            Some("signed_out") if tokens.is_none()
+                                && state.get("identity").is_none()
+                                && state.get("tokenDigest").is_none() => {},
+                            Some("authenticated") => {
+                                let tokens = tokens.ok_or_else(|| Error::Unsupported("Authenticated legacy Dim account has no tokens; source preserved".into()))?;
+                                let identity = &state["identity"];
+                                if !identity["subject"].as_str().is_some_and(|subject| !subject.trim().is_empty())
+                                    || !http_url(&identity["issuer"])
+                                    || identity["issuer"].as_str() != tokens["issuer"].as_str()
+                                    || ["email", "name"].iter().any(|key| identity.get(*key).is_some_and(|value| !value.is_string()))
+                                {
+                                    return Err(Error::Unsupported("Legacy Dim account identity is incompatible; source preserved".into()));
+                                }
+                            },
+                            _ => return Err(Error::Unsupported("Legacy Dim account state is incompatible; source preserved".into())),
+                        }
+                    } else if !state["generation"].as_str().is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()))
+                        || !state["credentialRevision"].as_u64().is_some_and(|revision| revision > 0 && revision <= dim_agent_types::JS_MAX_SAFE_INTEGER)
+                    {
+                        return Err(Error::Unsupported("Legacy account state is incompatible; source preserved".into()));
+                    }
+                    if let Some(tokens) = tokens {
+                        let token_digest = format!("{:x}", Sha256::digest(serde_jcs::to_vec(tokens)
+                            .map_err(|_| Error::Object("Invalid legacy account tokens".into()))?));
+                        if state["tokenDigest"].as_str() != Some(&token_digest) {
+                            return Err(Error::Unsupported("Legacy account digest requires recovery; source preserved".into()));
+                        }
+                    }
+                    fields.insert(state_key.into(), state.clone());
                 }
                 insert(target, "auth.json", id, fields, &owner.stopping).await
-            }
-            .await;
+            }.await;
             record(owner, task, id, result).await?;
         }
     }

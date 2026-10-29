@@ -1250,7 +1250,11 @@ pub(crate) async fn import(
                         )
                         .map_err(crate::native::failure)?;
                     let record: StaticProviderRecord =
-                        serde_json::from_str(&body).map_err(crate::native::failure)?;
+                        serde_json::from_str(&body).map_err(|_| {
+                            Error::Object(
+                                "Unreadable native provider; selection retained in source".into(),
+                            )
+                        })?;
                     let models: Vec<_> = record
                         .models
                         .iter()

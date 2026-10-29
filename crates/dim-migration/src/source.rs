@@ -587,21 +587,29 @@ impl Source {
                         .into(),
                 ));
             }
-            if revert.is_none() {
-                if let Some(anchor) = anchor {
-                    match rows.iter().find(|row| row.0 == anchor) {
-                        Some(row) => cursor = Some((row.4.clone(), row.0.clone())),
-                        _ => context_error = Some("Legacy compaction cursor is absent".into()),
+            if let Some(anchor) = anchor {
+                match rows.iter().find(|row| row.0 == anchor) {
+                    Some(row) if revert.is_none_or(|cut| row.4.as_str() < cut) => {
+                        cursor = Some((row.4.clone(), row.0.clone()))
+                    }
+                    _ => {
+                        context_error = Some(
+                            "Legacy compaction cursor is absent or beyond the reverted boundary"
+                                .into(),
+                        )
                     }
                 }
-                for segment in segments {
-                    let covered = rows.iter().find(|row| row.0 == segment.end_message_id);
-                    if covered.is_none() {
-                        context_error = Some("Legacy summary coverage cannot be retained".into());
-                    }
-                    if !segment.summary.is_empty() {
-                        summaries.push(segment.summary);
-                    }
+            }
+            for segment in segments {
+                let covered = rows.iter().find(|row| row.0 == segment.end_message_id);
+                if covered.is_none_or(|row| revert.is_some_and(|cut| row.4.as_str() >= cut)) {
+                    context_error = Some(
+                        "Legacy summary coverage cannot be retained at the reverted boundary"
+                            .into(),
+                    );
+                }
+                if !segment.summary.is_empty() {
+                    summaries.push(segment.summary);
                 }
             }
         }

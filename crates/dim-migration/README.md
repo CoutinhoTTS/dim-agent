@@ -65,6 +65,15 @@ settings are reported without sealing them as imported. Existing configured data
 wins. Compatible account records retain ordinary expiry and recovery behavior;
 MCP credentials are bound to the configured server URL, resource and client.
 
+Dim token/state pairs are validated as one account record before publication,
+including explicit signed-out state without tokens. Invalid state retains that
+account at source and leaves unrelated target fields intact. The integration flow
+loads the result through the unmodified DimOAuth provider's public status path.
+
+Local summaries retain their compatible suffix before a revert. A summary or
+cursor that crosses the revert boundary defers the Session instead of restoring
+the compressed original text into its effective context.
+
 Shared settings choose Desktop values before comparing with the target. Settings
 and receipts commit together. Client preference files use atomic replacement and
 an intent record; an ambiguous interrupted replacement is a conflict, preventing

@@ -1325,6 +1325,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
+ "dim-oauth",
  "reqwest 0.12.28",
  "rusqlite",
  "rutis",
