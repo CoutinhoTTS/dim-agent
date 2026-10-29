@@ -16,7 +16,7 @@ Desktop and CLI use one App Server contract for
 | Connection | UUID creation and partial updates preserve secrets the client cannot read |
 | Disconnect/delete | Disconnect clears credentials and disables atomically; custom deletion removes owned selections |
 | Discovery | Probe tests a draft without storing a Provider, catalog, credential or selection |
-| Models | Distinct defaults and user models, persistent descriptor overrides and explicit New API routes |
+| Models | Distinct defaults and user models, persistent descriptor overrides and explicit New API routes; each limit a model declares names its source, and a model that declares none is listed with the reason and cannot be chosen (§3.5) |
 | Preferences | Clients read per-model preferences and pass them with an exact target at explicit adoption |
 | Accounts/usage | Existing login/logout/usage owners and errors; no static-provider usage settings |
 | Multiple clients | Record CAS and rereads on open or after own writes; no pushed notices |
@@ -80,7 +80,7 @@ catalog. Aggregation does not promise an atomic snapshot across account owners.
 | `account` | Optional `{namespace, loginMethods, state}`; namespace is `account`, `account.codex` or `account.grok`, login methods are `browser`/`device`, and state is that namespace's existing public status reply; absent for static authority |
 | `actions` | Available operation names: `update`, `delete`, `refresh`, `models.create`, `models.edit`, `models.reset`, `models.delete`, `models.set_enabled`, `preferences.update`, `login`, `logout`, `usage`; no per-action reason codes |
 | `connection` | Safe static-record connection below; `null` when connection configuration exists only in the optional account package |
-| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority |
+| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, missingLimits: ("contextWindow" \| "maxOutputTokens")[], actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. `missingLimits` names the limits no source declared (§3.5) and is empty otherwise. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority |
 | `preferences` | Map from model ID to the existing `ModelPreferences` shape |
 | `modelsListed` | Absent from the reads and from an update that did not change `baseUrl`, `credential` or `headers`; on the other updates it says what the write did with the record's models: `listed`, `bundled`, `unsupported` or `disabled` |
 
@@ -312,6 +312,67 @@ The native service and RPC share the same create, partial update and model opera
 New custom Providers use canonical UUIDs. Existing bundled and explicitly imported
 non-UUID identities remain editable through their accepted partial-write paths.
 
+### 3.5 Declared model limits
+
+A model's context window and maximum output are facts a source declares. Provider
+never assumes either. Per limit, the declaring source is the one the catalog
+already records:
+
+| Source | Recorded by | Scope |
+| --- | --- | --- |
+| Provider descriptor | `capabilityOverrideFields` on the stored descriptor; a non-positive descriptor value reads as absent | The model that descriptor describes |
+| Bundled catalog | `metadataSource` naming the matched bundled provider, which declares both limits, or that provider's `contextWindowOverride` and `contextWindowFallback` metadata | The models the lookup matches, or every model of the provider |
+| User | The same `capabilityOverrideFields` field on the descriptor override or user model that `models.edit` writes | The model the override names |
+
+Absence is a value of the type, not a number. The catalog carries
+`CatalogCapabilities`, whose two limits are optional and absent when no source
+declares them; the stored descriptor, its overrides, user models, the projected
+entry and the managed catalog's model all use it. The Session-facing
+`ModelCapabilities` keeps both limits required and positive and has no default
+value, so no projection, fixture or fallback can invent a window. One conversion
+turns a catalog entry into `ModelCapabilities`, and it refuses while either limit
+is absent; that conversion is the adoption path, so an undeclared model cannot be
+adopted.
+
+The reads report what is missing: `ProviderModel` and `ManagementModel` carry
+`missingLimits`, and `unavailableReason` is `limits_undeclared` when it is the
+first reason that applies. A model missing either limit is never selectable.
+Every refusal uses the existing unavailable path: `select`, `configuration` (an
+explicit target, default resolution and an Agents profile), `apply_preferences`,
+`preferences.update` and the per-request availability check before credentials.
+The request-path error names the missing limits. Enabling or disabling such a
+model changes nothing about its selectability.
+
+The effective catalog supplies an absent limit from what a source declares: the
+bundled match for a default or a user model, the same bundled fallback for a
+managed catalog model, and the base entry for a descriptor override that does not
+declare the limit itself. Probe, refresh and creation store only declared values,
+and `models.reset` returns a model to its discovery result; when that result
+declares nothing, the model is undeclared again.
+
+A Session keeps its adopted capability snapshot. One whose model becomes
+undeclared resumes and stays readable; its next request fails in the resolver with
+the missing limits named, before credentials or network I/O. After both values are
+declared, selecting the model adopts them. Until that selection `/usage` reports
+the adopted snapshot, as for any descriptor edit (§6).
+
+The managed account catalog follows the same rule. A model that neither the relay
+nor the bundled catalog declares a limit for is projected with that limit absent
+and keeps its `unavailableReason` by the
+[managed catalog projection](../../../crates/dim-oauth/src/models.rs); its own
+family rule still declares a window where it applies. The host admits an absent
+limit only on a model that carries a reason. The
+[model-file profile](../../../crates/dim-cli/README.md#api-key-configuration) is
+unchanged: it already refuses a model entry that lacks either value, naming the
+entry ([#517](https://github.com/arcships/dim/issues/517)).
+
+A stored record carries the absence as an absent key. The
+[#522 storage decision](native-storage-format.md#522-格式决定) is the format
+decision that introduced it, and §6 states what the upgrade does to records
+written before it: a listed model keeps the item it came from in
+`metadata.raw`, so a limit that item declares stays a declaration even when the
+stored entry does not mark it, and only a limit no source declares is deleted.
+
 ## 4. Client integration
 
 ```text
@@ -370,6 +431,20 @@ its models can be listed, and shows what the refresh stored. A failed read or a
 failed refresh keeps the provider's row, and a reply that arrives after the
 picker closed only records the fill: the next open reads it.
 
+An undeclared model is not a picker row. Every provider with at least one such
+model keeps one muted row after its model rows: it counts them and names the
+command that declares them. When the provider offers nothing selectable, that
+row replaces the empty-provider row instead of joining it.
+`dimcode models PROVIDER --set-limits MODEL --context-window N
+--max-output-tokens N` declares both limits of one model through `models.edit`,
+and `--set-missing-limits --context-window N --max-output-tokens N` declares them
+for every model of that provider whose `missingLimits` is not empty. Both named
+values are required with either form. Neither form combines with `--refresh` or
+`--clear-preferences`. Both read the record version first, chain the version each
+`models.edit` reply returns, and then print the catalog as `models PROVIDER`
+does. The list marks a model whose limits are undeclared as `undeclared` and
+names the declaring command below its rows.
+
 ```text
 Select a model
 > Provider / model          ‹ high ›
@@ -400,8 +475,8 @@ separate decision covering Settings too, not a prerequisite here.
 
 ## 6. Persistence, existing Sessions and migration
 
-**Format decision: v19, unchanged SQL schema.** These optional top-level
-fields carry user configuration; missing maps/lists mean no corresponding user data:
+**Format decision: v19, unchanged SQL schema.** These optional top-level fields
+carry user configuration; missing maps/lists mean no corresponding user data:
 
 | Struct / JSON field | Stored value and use |
 | --- | --- |
@@ -410,7 +485,15 @@ fields carry user configuration; missing maps/lists mean no corresponding user d
 | `ProviderRecord.model_preferences` / `modelPreferences` | Same preference map for managed catalogs |
 | `StaticProviderRecord.endpoint_overrides` / `endpointOverrides` | Map of model ID to the existing `NewApiEndpoint`; only `openai`, `openai-response`, `anthropic` and `gemini` are executable overrides here; separate from discovered `endpointTypes` |
 
-The [storage contract](native-storage-format.md#329-格式决定) records this
+The two model limits carry their own, later format decision: the
+[#522 storage decision](native-storage-format.md#522-格式决定) makes an
+undeclared limit an absent key, which no v22 reader can parse either way, and
+upgrades stored records in place instead of reusing a version. The decision
+states the next version after v22, the rewrite the startup transaction performs,
+and the old binary's startup refusal. §3.5 states how the effective catalog then
+supplies what a source declares.
+
+The [storage contract](native-storage-format.md#329-格式决定) records the v19
 decision and its downgrade loss. No fields are added to `ModelMetadata`,
 `ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v19 readers
 reject unknown nested fields there. `ModelPreferences` also denies unknown fields,
@@ -450,6 +533,7 @@ formats retain their existing rejection and byte-preservation rules.
 | Credential, base URL, headers, proxy, timeout | Current connection is resolved on the next request; already-issued I/O uses its admitted connection |
 | Descriptor/capability edits or saved preferences | Adopted snapshot stays unchanged; changes apply on the next explicit adoption, preferences only when passed |
 | Disable/delete Provider or model | Next request/adoption fails unavailable/not found; no forced switch or cross-owner reference rewrite |
+| A limit declared, or its source removed | An adopted Session keeps its snapshot. With a limit undeclared, the next request fails before credentials or network I/O and names the missing limits; after both are declared, selecting the model adopts them (§3.5) |
 | Effective route change from refresh or an endpoint override | A different adopted route stamp fails with a diagnostic to select the model again. An unstamped Session uses the current route on its next request; either edit can break protocol-bound history or lose effort/tier options mapped for the old protocol |
 
 For static New API selection, Provider stamps the chosen `ModelProtocol` string
@@ -507,6 +591,7 @@ unknown descriptor fields also reject it. Source bytes remain unchanged.
 | Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, untargeted F3 and Collaboration inherit preserve absence; inherit copies without creation-time resolution and checks a present stamp at the first request; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
+| Model limits | A probed model the descriptor leaves without a limit is listed with `missingLimits`, refused by selection, adoption and preferences, and becomes selectable with its declared window in the adopted snapshot after the CLI declares both; a bundled match stays declared; a managed model without limits keeps its reason instead of a substitute window; the model-file profile still refuses an entry that lacks either value |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
 | Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
@@ -547,5 +632,9 @@ selection. Create, update and probe respectively handle recoverable identity, se
 preserving writes and unsaved I/O. Disconnect reuses update. Separate user-model
 storage is required to distinguish it from an orphaned default override and make
 it executable. The route stamp preserves the adopted protocol meaning using
-existing metadata. No notification, version-history service, template entity,
-credential abstraction or second client configuration store is needed.
+existing metadata. A declared limit needs no new state: the marker and match the
+catalog already records say whether a value exists, an absent value carries its
+absence in the catalog type, and the reason is derived at the projection, so no
+parallel model list, no second catalog and no `limits` entity is added. No
+notification, version-history service, template entity, credential abstraction or
+second client configuration store is needed.
