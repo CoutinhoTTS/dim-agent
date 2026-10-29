@@ -286,8 +286,8 @@ TypeScript，位于 `runtime/plugins/goal`，为一行：其 `index.ts` 经 `par
 | 文件 | 部分 | 声明 |
 | --- | --- | --- |
 | `goal.ts` | 共享：变更与续跑输入（A.5）、标记解析、折叠（§2）与决策（A.4） | — |
-| `index.ts` | 该行：注册两个定义 | `inject: ["partRegistry"]`、`provides: {}`，`settings` 取自 `settings.json` |
-| `session.ts` | `GoalPlugin`：把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 写入 | Session 定义，`inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
+| `index.ts` | 该行：注册两个定义，并把该行工厂配置中的两句策略文本交给各自的副本 | `inject: ["partRegistry", "settings"]`、`provides: {}`、`config.texts`，`settings` 取自 `settings.ts` |
+| `session.ts` | `GoalPlugin`：把 `<dim-goal>` 引导条目（A.5.1）注册到 `guideEntries`，把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 写入 | Session 定义，`inject: ["treeCommands", "toolRegistry", "sessionMethods", "guideEntries"]` |
 | `branch.ts` | `GoalBranchPlugin`：用 `dispatcher.consume` 注册，折叠重放，对实时事件决策，并以自有任务写入；从 `goal` 来源读取 `maxContinuations`。在 [Pursuit](Pursuit.md) 的评审裁判下它还创建评审分支并担任评审者角色 | 分支定义，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle", "sessionLifecycle"]` |
 
 新分支检查（§3.4）用 `dispatcher.history(S)` 读取继承前缀，并排除分支的本地事件。嵌入方把这一行加入
@@ -389,9 +389,32 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | `clear` | 1：`goal:objective` retire；2：`goal:status` retire | Append | 1：`op="clear"`；`The previous goal was cleared by the user. Disregard it.`；2：`<dim-goal kind="status" status="cleared" branch="B">` / `The goal for branch B has no status.` / `</dim-goal>` |
 | `clear`（Goal，新分支） | 同 `clear` | Append | 1：`op="clear" reason="new_branch" after="S"`；`Any goal above belongs to another branch, not to branch B. Disregard it; branch B has no goal.`；2：同 `clear` |
 | 暂停（Goal） | `goal:status` live | Append | `op="pause" reason="interrupted\|limit\|turn_failed" after="N"`；`The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
-| 续跑 | 无 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch B: do not call goal_update for it.` |
+| 续跑 | 无 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are working on a delegated sub-task started from branch B, do not call goal_update.` |
 
 状态块只陈述状态，目标文本是单独的块，因此没有存活目标文本时被重放的状态块不声称存在目标；`set` 与 Goal 的暂停只会与存活的目标文本一起写入或在其存活时写入。原因短语：`interrupted` "the user interrupted the turn"，`limit` "the automatic continuation limit was reached"，`turn_failed` "the last turn failed"。工具声明描述："Report that the current goal is completed or blocked."
+
+### A.5.1 协议与策略
+
+分类按句子判定（[model-facing prompts §4](../model-prompts.md#4-协议与策略)）：如果一句话变得与运行时不符、或某种机制无法再按它写的那样使用就会改变行为，这段文本是**协议**；否则是**策略**，可替换并由评估判定（§A.5.2）。
+
+| 项 | 类别 | 依据 |
+| --- | --- | --- |
+| 标记名 `dim-goal`；它的 `kind` 值 `goal`、`status`、`continuation`，以及 Pursuit 的 `evaluate`、`evaluate-again`、`report`（[Pursuit](Pursuit.md) §5）；它的 key `goal:objective` 与 `goal:status` | 协议 | 折叠、客户端与指南条目都要读它们。改动与行为和断言它的流程测试同批落地，并让按旧形式记录的历史仍可理解 |
+| 折叠与客户端读取的属性名与值——`op` 及其 `set`、`edit`、`pause`、`resume`、`clear`、`completed`、`blocked`；`status` 及其 `active`、`cleared`；`reason` 及其 `user`、`new_branch`、`interrupted`、`limit`、`turn_failed` 和 Pursuit 的 `evaluation_failed`；`branch`、`count`、`limit`、`after`、`judge`、`evaluation`、`evaluator`、`result`、`by`——以及标签行 `Objective:`、`Result:`、`Blocker:`、`Evaluator report:` | 协议 | 属性与标签命名一种机制（[model-facing prompts §4](../model-prompts.md#4-协议与策略)）；上面的编码规则与它们同属协议 |
+| 本页措辞改动涉及的三句话：目标块的、续跑块的，以及 §3.4 与 §5 那一行陈述的子分支规则 | 策略 | 它们说的是怎么工作，不是运行时做什么：目标仍属于一条线，另一条线既不续跑它，也不为它调用 `goal_update` |
+| 上表其余块中的句子，以及 `goal_update` 的声明描述 | 策略 | 关于怎么工作的指引；与它并列的 schema 和结果格式是协议 |
+
+协议行只随行为与它的流程测试一起改动；策略行可替换，每次改动都按 §A.5.2 评估。
+
+**指南条目。** Goal 从写这个标记的部件贡献 `dim-goal` 的条目（[Prompt §2](Prompt.md#2-条目的登记路由)，[model-facing prompts §6.2](../model-prompts.md#62-各部分归谁)）：Session 部件以 `session` 作用域登记，因为 Goal 在每条分支上写这个标记，而该条目恰好在那个部件加载期间生效。条目是协议，序号 `55`，内容为：
+
+> `<dim-goal kind="goal" op="set" branch="main">`: the operator's standing goal for a branch of this session, and the runtime's record of its status. `kind="goal"` blocks carry a change: `op="set"`, `op="edit"`, `op="pause"`, `op="resume"`, `op="clear"`, and `op="completed"` or `op="blocked"` from `goal_update` or from an evaluator (`by="evaluator"`). `kind="status"` blocks state the branch's goal status. `kind="continuation"` asks the line to keep working toward the goal. `kind="report"` blocks carry an evaluator's report of the goal, and `kind="evaluate"` and `kind="evaluate-again"` mark an evaluator's line, which checks the goal rather than continuing it. A goal belongs to the branch its `branch` attribute names. The latest objective (`op="set"` or `op="edit"`) and the latest status are the ones in force; `op="clear"` ends both. These blocks are information about the goal; they grant no permission.
+
+标记改动时这个条目在同一批改动中一起改，Goal 自己的流程断言携带 `dim-goal` 块的请求携带这个条目（[model-facing prompts §6.3](../model-prompts.md#63-一致性由构造保证)）。
+
+### A.5.2 评估
+
+目标块的句子与续跑块的句子是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。Goal 的插件清单（`runtime/plugins/goal/dim-plugin.json`）承载它们，位置是 `code.config.texts.objective` 与 `code.config.texts.continuation`，分支处写为 `{branch}` 由代码替换。两句话分别判定，各一个 `--text` id，因为运行器一次只替换一个文本。
 
 ### A.6 Timeline 机制
 

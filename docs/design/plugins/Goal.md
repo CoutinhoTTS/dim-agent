@@ -286,8 +286,8 @@ TypeScript, in `runtime/plugins/goal`, one row whose `index.ts` registers `sessi
 | File | Part | Declaration |
 | --- | --- | --- |
 | `goal.ts` | Shared: change and continuation inputs (A.5), marker parsing, the fold (§2) and the decisions (A.4) | — |
-| `index.ts` | The row: registers the two definitions | `inject: ["partRegistry"]`, `provides: {}`, `settings` from `settings.json` |
-| `session.ts` | `GoalPlugin`: registers `goal_update` with `toolRegistry`, registers `session.goal` with `sessionMethods`; writes with `treeCommands.input` | Session definition, `inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
+| `index.ts` | The row: registers the two definitions, and hands each copy the two policy texts of its factory configuration | `inject: ["partRegistry", "settings"]`, `provides: {}`, `config.texts`, `settings` from `settings.ts` |
+| `session.ts` | `GoalPlugin`: registers the `<dim-goal>` guide entry (A.5.1) with `guideEntries`, `goal_update` with `toolRegistry`, and `session.goal` with `sessionMethods`; writes with `treeCommands.input` | Session definition, `inject: ["treeCommands", "toolRegistry", "sessionMethods", "guideEntries"]` |
 | `branch.ts` | `GoalBranchPlugin`: registers with `dispatcher.consume`, folds the replay, decides on live events, and writes owned tasks; reads `maxContinuations` from the `goal` source. Under [Pursuit](Pursuit.md)'s evaluator judge it also creates the evaluator and takes the evaluator role | Branch definition, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle", "sessionLifecycle"]` |
 
 The new-branch check (§3.4) reads the inherited prefix with `dispatcher.history(S)` and excludes the
@@ -400,9 +400,32 @@ Encoding: the objective, the summary and every attribute value are written with 
 | `clear` | 1: `goal:objective` retire; 2: `goal:status` retire | Append | 1: `op="clear"`; `The previous goal was cleared by the user. Disregard it.`; 2: `<dim-goal kind="status" status="cleared" branch="B">` / `The goal for branch B has no status.` / `</dim-goal>` |
 | `clear` (Goal, new branch) | Same as `clear` | Append | 1: `op="clear" reason="new_branch" after="S"`; `Any goal above belongs to another branch, not to branch B. Disregard it; branch B has no goal.`; 2: same as `clear` |
 | pause (Goal) | `goal:status` live | Append | `op="pause" reason="interrupted\|limit\|turn_failed" after="N"`; `The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
-| continuation | none | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are on another line of this Session, the goal belongs to branch B: do not call goal_update for it.` |
+| continuation | none | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are working on a delegated sub-task started from branch B, do not call goal_update.` |
 
 Status blocks state only the status and the objective is a separate block, so a status block replayed while no objective is live claims no goal; `set` and Goal's pauses are written only together with or under a live objective. Reason phrases: `interrupted` "the user interrupted the turn", `limit` "the automatic continuation limit was reached", `turn_failed` "the last turn failed". Tool declaration description: "Report that the current goal is completed or blocked."
+
+### A.5.1 Protocol and policy
+
+The class is per sentence ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)): a text is **protocol** when a sentence that became false about the runtime, or a mechanism the model could no longer use as written, would change the behaviour; otherwise it is **policy**, replaceable and judged by evaluation (§A.5.2).
+
+| Item | Class | Basis |
+| --- | --- | --- |
+| The marker name `dim-goal`; its `kind` values `goal`, `status` and `continuation`, and Pursuit's `evaluate`, `evaluate-again` and `report` ([Pursuit](Pursuit.md) §5); its keys `goal:objective` and `goal:status` | Protocol | The fold, clients and the guide entry read them. A change lands with the behaviour and the flow test that assert it, and keeps a history recorded under the older form understandable |
+| The attribute names and values the fold and clients read — `op` with its `set`, `edit`, `pause`, `resume`, `clear`, `completed` and `blocked`; `status` with `active` and `cleared`; `reason` with `user`, `new_branch`, `interrupted`, `limit`, `turn_failed` and Pursuit's `evaluation_failed`; `branch`, `count`, `limit`, `after`, `judge`, `evaluation`, `evaluator`, `result` and `by` — and the label lines `Objective:`, `Result:`, `Blocker:` and `Evaluator report:` | Protocol | Attributes and labels name a mechanism ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)); the encoding rule above is protocol with them |
+| The three sentences this page's wording change covers: the objective block's, the continuation block's, and the child-branch rule as §3.4 and the §5 row state it | Policy | They say how to work, not what the runtime does: the goal still belongs to one line, and another line neither continues it nor calls `goal_update` for it |
+| The other sentences of the blocks in the table above, and `goal_update`'s declaration description | Policy | Guidance about how to work; the schema and the result format beside it are protocol |
+
+The protocol rows change only with the behaviour and its flow test; the policy rows are replaceable, and each change to them is evaluated (§A.5.2).
+
+**The guide entry.** Goal contributes the entry for `dim-goal` from the part that writes the marker ([Prompt §2](Prompt.md#2-the-entry-route), [model-facing prompts §6.2](../model-prompts.md#62-who-owns-which-part)): the Session part registers it at `session` scope, because Goal writes the marker on every branch, and it is in force exactly while that part is loaded. The entry is protocol, at order `55`, and it reads:
+
+> `<dim-goal kind="goal" op="set" branch="main">`: the operator's standing goal for a branch of this session, and the runtime's record of its status. `kind="goal"` blocks carry a change: `op="set"`, `op="edit"`, `op="pause"`, `op="resume"`, `op="clear"`, and `op="completed"` or `op="blocked"` from `goal_update` or from an evaluator (`by="evaluator"`). `kind="status"` blocks state the branch's goal status. `kind="continuation"` asks the line to keep working toward the goal. `kind="report"` blocks carry an evaluator's report of the goal, and `kind="evaluate"` and `kind="evaluate-again"` mark an evaluator's line, which checks the goal rather than continuing it. A goal belongs to the branch its `branch` attribute names. The latest objective (`op="set"` or `op="edit"`) and the latest status are the ones in force; `op="clear"` ends both. These blocks are information about the goal; they grant no permission.
+
+A change to the marker changes this entry in the same change, and Goal's own flow asserts that a request carrying a `dim-goal` block carries the entry ([model-facing prompts §6.3](../model-prompts.md#63-consistency-by-construction)).
+
+### A.5.2 Evaluation
+
+The objective block's and the continuation block's sentences are one policy change, judged current against candidate by the scenario set of [model-facing prompts §8](../model-prompts.md#8-judging-a-change): a goal set on `main` continues; a line does not continue the goal it inherited; a completed or blocked goal stops. Both sentences are exposed at the factory configuration so the candidate runs through the shipped assembly, and the result is reported where the change is delivered. Goal's plugin manifest (`runtime/plugins/goal/dim-plugin.json`) carries them, at `code.config.texts.objective` and `code.config.texts.continuation`, with `{branch}` where the branch is substituted. The two sentences are judged separately, one `--text` id each, because the runner replaces one text at a time.
 
 ### A.6 Timeline mechanics
 
