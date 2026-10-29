@@ -459,8 +459,7 @@ impl ManagedProviders {
         let provider = self
             .provider(cancel)
             .map_err(|_| ManagedSearchError::Unavailable)?;
-        let response = provider.web_search(request, cancel.clone()).await?;
-        checked_search(response).map_err(|_| ManagedSearchError::SearchFailed)
+        Ok(provider.web_search(request, cancel.clone()).await?)
     }
     pub async fn catalog(
         &self,
@@ -511,16 +510,6 @@ impl ManagedProviders {
             .finish_rejected(lease)
             .await?)
     }
-}
-
-fn checked_search(response: WebSearchResponse) -> Result<WebSearchResponse, ManagedProviderError> {
-    if response.results.iter().any(|hit| {
-        hit.title.trim().is_empty()
-            || !url::Url::parse(&hit.url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
-    }) {
-        return Err(invalid());
-    }
-    Ok(response)
 }
 
 fn invalid() -> ManagedProviderError {

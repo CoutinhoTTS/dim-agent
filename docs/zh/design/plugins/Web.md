@@ -29,11 +29,12 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Web` | Session（仅启用时安装） | 已具名的 `settings`、`toolRegistry` 与 `managedProviders`；缺失保持既有 Pending 语义 | 把 `web_search` 与 `web_fetch` 注册到 `toolRegistry`；不提供任何名称 |
+| `web` | 进程，当 home 存在时 | `settings`、`partRegistry` | 登记 Settings 来源 `web` 与 Session 部件 `Web` |
+| `Web` | Session | `settings`、`toolRegistry`、`managedProviders` | 把 `web_search` 与 `web_fetch` 注册到 `toolRegistry`；持有本 Session 的抓取缓存；不提供任何名称 |
 
 **依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)、[托管 Provider 契约](../../../../crates/dim-app-server/README.md#managed-provider-contract)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
-Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 row 入口；不在 App Server 增加 Web 专属注册表或宿主端口。当 `searchService` 缺省（默认）或为 `{"kind": "dim-oauth"}` 时，`web_search` 通过 `managedProviders` 发起带认证的 relay 查询，使 OAuth 令牌留在 Rust 托管 Provider 内；当 `searchService` 显式配置为 `brave` 等适配器时，Web 直接请求该适配器。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
+Web 是 App Server 的内置进程 row。该 row 登记 Settings 来源 `web` 与 Session 部件，不增加 Web 专属注册表或宿主端口。当 `searchService` 缺省（默认）或为 `{"kind": "dim-oauth"}` 时，`web_search` 通过 `managedProviders` 发起带认证的 relay 查询，使 OAuth 令牌留在 Rust 托管 Provider 内；当 `searchService` 显式配置为 `brave` 等适配器时，Web 直接请求该适配器。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`。
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
@@ -172,69 +173,38 @@ sequenceDiagram
 
 没有 Session 方法、`managementMethods` 或 CLI 子命令：受保护客户端经已实现的 `settings.read`/`settings.update` 修改配置，不假设已有 `/settings` 界面。细节见附录 A。
 
-### 6.1 C4 row 与来源
+### 6.1 注册与来源
 
-Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `inject` 与 `provides`，宿主使用同一份 row。该行在 `apply` 中经 `partRegistry` 把 Session 部分注册为 Session 定义；每个 Session 挂载一份副本，副本注入 `settings`、`toolRegistry` 与 `managedProviders`。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
+home 存在时，App Server 登记进程 row `web`。其 apply 向 `partRegistry` 登记 Settings 来源 `web`（用户文件 `web.json`，无项目文件）和 Session 部件 `Web`。每个 Session 挂载该部件。部件注入 `settings`、`toolRegistry` 与 `managedProviders`。其 apply 只登记资源清理和两个工具，在调用发生前不做 I/O。Rust 形式见附录 G。
+
+该 row 登记的来源 schema，`userOnly` 路径为 `/searchService` 与 `/allowPrivateHosts`：
 
 ```json
 {
-  "id": "web",
-  "name": "@dimcode/web",
-  "config": {},
-  "inject": ["partRegistry"],
-  "provides": {},
-  "settings": [
-    {
-      "source": "web",
-      "userFile": "web.json",
-      "schema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "searchService": {
-            "type": "object",
-            "required": [
-              "kind"
-            ],
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "type": "string",
-                "minLength": 1
-              },
-              "endpoint": {
-                "type": "string",
-                "format": "uri"
-              },
-              "apiKey": {
-                "type": "string",
-                "minLength": 1
-              }
-            }
-          },
-          "allowPrivateHosts": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "default": []
-          },
-          "proxy": {
-            "type": "string",
-            "format": "uri"
-          }
-        }
-      },
-      "userOnly": [
-        "/searchService",
-        "/allowPrivateHosts"
-      ]
-    }
-  ]
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "searchService": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "format": "uri" },
+        "apiKey": { "type": "string", "minLength": 1, "writeOnly": true }
+      }
+    },
+    "allowPrivateHosts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "proxy": { "type": "string", "format": "uri", "writeOnly": true }
+  }
 }
 ```
 
-Session 部分声明 `inject: ["settings", "toolRegistry", "managedProviders"]`，其 apply 只登记资源清理，并以 `toolRegistry.register(declaration, execute)` 注册两个工具，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；配置了 API 密钥适配器时，API 密钥取自该文档的 `searchService.apiKey`。当 `searchService` 缺省或为 `{"kind":"dim-oauth"}` 时，`web_search` 调用 `managedProviders.webSearch({query, count})`，不把 OAuth 令牌读入 Node。不重复校验或填充已交付的文档。
+执行沿工具 handler，并带上该调用的取消令牌。每次调用读取 user scope 的 `web` 来源。读取失败，或已存文档无法反序列化为 web 文档时，调用以 `settings_unavailable` 失败，不建立连接。Web 不用默认值顶替该文档。配置了 API 密钥适配器时，密钥是 `searchService.apiKey`。当 `searchService` 缺省或为 `{"kind":"dim-oauth"}` 时，`web_search` 调用 `managedProviders`，不读取 OAuth 令牌。
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
@@ -262,7 +232,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 | 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolRegistry`、`managedProviders` 和 Settings 业务来源。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4、`managedProviders` 与 Settings 绑定；适配器 API 密钥是 Web 自己的仅用户字段，账号 OAuth 令牌留在 Rust 托管 Provider 内。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
-| 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
+| 原则 §1（Capability 与 App Server 边界） | Web 是内置 Session Capability。代码是 App Server 进程 row `web` 与 Session 部件 `Web`。不增加 Web 专属宿主端口。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
 | ADR 002 D3（依赖跟随作用域） | Settings 在外层进程作用域；必需服务缺失则 Web Pending，重载只沿真实依赖传播，原生 Session 仍可运行。 |
@@ -271,7 +241,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 
 ## 9. 向机制所有者提出的需求
 
-无。工具注册、row 来源声明、Settings 读写/事件都已有合同与实现；API 密钥是 Web 自己的字段。Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。Node row 保留既有必需依赖和 Pending 语义。
+无。工具注册、来源声明、Settings 读写/事件都已有合同与实现；API 密钥是 Web 自己的字段。Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。必需服务缺失则这一 row 的组装失败。
 
 ## 附录 A. 接口细节
 
@@ -418,6 +388,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址（`198.
 | `unsupported_content_type` | 类型不在 A.3 中 |
 | `search_unavailable` | 无可用服务或已登录账号、端点或代理无法解析、适配器不可用或缺少所需的 API 密钥 |
 | `search_failed` | 服务错误或数据无效；消息经缩短并去除秘密 |
+| `settings_unavailable` | `web` 来源无法读取，或已存文档与 web 文档不符 |
 | `cancelled` | 调用被取消 |
 
 恢复：Web 不持有持久工作；重载与重启只丢失缓存。
@@ -463,12 +434,15 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址（`198.
 
 | 问题 | 当前边界 |
 | --- | --- |
-| 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。包使用现有的一行；产品安装仍属于 PluginManager。 |
+| 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。Web 是内置进程 row `web` 及其 Session 部件。可选包的产品安装仍属于 PluginManager。 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
+| HTML 转文本 | 扫描器，不是浏览器。后面出现 `>` 的 `<` 即开始一个标签，正文里单独的 `<` 也算。script、style 与导航在这次扫描之前用正则去掉。 |
+| 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。gzip 或 deflate 在收尾时失败是 `connect_failed`；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。 |
+| User-Agent | `dim-web/` 加上 `dim-app-server` 的包版本 |
 
 ## 附录 G. Rust 绑定
 
-在 Web 迁移到 Rust 时使用；工具名、数据形状与加载器行保持不变。
+当前的 Rust 绑定。工具名与数据形状不变。
 
 | 语言中立 | Rust |
 | --- | --- |

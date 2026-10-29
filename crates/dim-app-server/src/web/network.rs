@@ -1,4 +1,3 @@
-use base64::Engine;
 use bytes::Bytes;
 use flate2::write::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use http_body_util::{BodyExt, Empty};
@@ -319,6 +318,56 @@ impl Policy {
     }
 }
 
+/// Names the library tests resolve without the system resolver. A hostname
+/// absent from the map uses the system resolver.
+#[cfg(test)]
+mod test_dns {
+    use std::net::IpAddr;
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    pub enum Answer {
+        Ips(Vec<IpAddr>),
+        Hang,
+    }
+
+    struct Slot {
+        answer: Answer,
+        hits: usize,
+    }
+
+    static MAP: Mutex<Option<std::collections::HashMap<String, Slot>>> = Mutex::new(None);
+
+    pub fn insert(host: &str, answer: Answer) {
+        let mut guard = MAP.lock().unwrap();
+        guard
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(host.to_owned(), Slot { answer, hits: 0 });
+    }
+
+    pub fn remove(host: &str) {
+        if let Some(map) = MAP.lock().unwrap().as_mut() {
+            map.remove(host);
+        }
+    }
+
+    pub fn hits(host: &str) -> usize {
+        MAP.lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|map| map.get(host))
+            .map(|slot| slot.hits)
+            .unwrap_or(0)
+    }
+
+    pub fn lookup(host: &str) -> Option<Answer> {
+        let mut guard = MAP.lock().unwrap();
+        let slot = guard.as_mut()?.get_mut(host)?;
+        slot.hits += 1;
+        Some(slot.answer.clone())
+    }
+}
+
 async fn resolve_addresses(
     host: &str,
     cancel: &CancellationToken,
@@ -328,6 +377,16 @@ async fn resolve_addresses(
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![ip]);
+    }
+    #[cfg(test)]
+    if let Some(answer) = test_dns::lookup(host) {
+        return match answer {
+            test_dns::Answer::Hang => std::future::pending().await,
+            test_dns::Answer::Ips(ips) if ips.is_empty() => {
+                Err(WebError::new("dns_failed", "The host has no addresses."))
+            }
+            test_dns::Answer::Ips(ips) => Ok(ips),
+        };
     }
     let resolved: Vec<IpAddr> = tokio::select! {
         _ = cancel.cancelled() => return Err(WebError::new("cancelled", "Call cancelled.")),
@@ -448,17 +507,7 @@ async fn open_tunnel(proxy: &Url, ip: IpAddr, port: u16) -> Result<Box<dyn Async
         IpAddr::V4(v4) => format!("{v4}:{port}"),
         IpAddr::V6(v6) => format!("[{v6}]:{port}"),
     };
-    let mut req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
-    if !proxy.username().is_empty() || proxy.password().is_some() {
-        let credentials = format!(
-            "{}:{}",
-            proxy.username(),
-            proxy.password().unwrap_or_default()
-        );
-        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-        req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
-    }
-    req.push_str("\r\n");
+    let req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
     stream
         .write_all(req.as_bytes())
         .await
@@ -747,7 +796,10 @@ pub async fn get(
             .method("GET")
             .uri(path_and_query)
             .header("Host", host_header)
-            .header("User-Agent", "dim-web/0.1.0")
+            .header(
+                "User-Agent",
+                format!("dim-web/{}", env!("CARGO_PKG_VERSION")),
+            )
             .header(
                 "Accept",
                 "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
@@ -819,4 +871,316 @@ pub async fn get(
     .await;
     conn_task.abort();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_util::sync::CancellationToken;
+    use url::Url;
+
+    struct Dns(&'static str);
+
+    impl Drop for Dns {
+        fn drop(&mut self) {
+            test_dns::remove(self.0);
+        }
+    }
+
+    fn dns(host: &'static str, ips: &[&str]) -> Dns {
+        test_dns::insert(
+            host,
+            test_dns::Answer::Ips(ips.iter().map(|ip| ip.parse().unwrap()).collect()),
+        );
+        Dns(host)
+    }
+
+    async fn read_head(socket: &mut TcpStream) -> (String, Vec<u8>) {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let end = loop {
+            let n = socket.read(&mut tmp).await.unwrap();
+            assert!(n > 0, "peer closed before headers");
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|part| part == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            assert!(buf.len() < 16 * 1024);
+        };
+        let head = String::from_utf8(buf[..end].to_vec()).unwrap();
+        let rest = buf[end..].to_vec();
+        (head, rest)
+    }
+
+    fn config(host: &str, proxy: Option<&str>) -> NetworkConfig {
+        NetworkConfig {
+            allow_private_hosts: vec![host.to_owned()],
+            proxy: proxy_url(proxy).unwrap(),
+        }
+    }
+
+    async fn origin() -> (
+        TcpListener,
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<String>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        (listener, address, seen)
+    }
+
+    fn serve_origin(
+        listener: TcpListener,
+        seen: Arc<std::sync::Mutex<String>>,
+        stop: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    accepted = listener.accept() => {
+                        let (mut socket, _) = accepted.unwrap();
+                        let (head, _) = read_head(&mut socket).await;
+                        *seen.lock().unwrap() = head;
+                        let body = "pinned";
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    }
+                }
+            }
+        })
+    }
+
+    fn serve_proxy(
+        listener: TcpListener,
+        origin: std::net::SocketAddr,
+        targets: Arc<std::sync::Mutex<Vec<String>>>,
+        stop: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    accepted = listener.accept() => {
+                        let (mut client, _) = accepted.unwrap();
+                        let targets = targets.clone();
+                        let stop = stop.clone();
+                        tokio::spawn(async move {
+                            let (head, rest) = read_head(&mut client).await;
+                            let target = head
+                                .lines()
+                                .next()
+                                .unwrap()
+                                .split_whitespace()
+                                .nth(1)
+                                .unwrap()
+                                .to_owned();
+                            targets.lock().unwrap().push(target.clone());
+                            if target.starts_with("[::1]:") {
+                                let _ = client
+                                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                                    .await;
+                                return;
+                            }
+                            let mut upstream = TcpStream::connect(origin).await.unwrap();
+                            client
+                                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                                .await
+                                .unwrap();
+                            if !rest.is_empty() {
+                                upstream.write_all(&rest).await.unwrap();
+                            }
+                            tokio::select! {
+                                _ = stop.cancelled() => {}
+                                _ = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {}
+                            }
+                        });
+                    }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_private_dns_answer_is_rejected_before_a_tunnel_opens() {
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_base = format!("http://{}", proxy.local_addr().unwrap());
+        let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = CancellationToken::new();
+        let task = serve_proxy(
+            proxy,
+            "127.0.0.1:9".parse().unwrap(),
+            targets.clone(),
+            stop.clone(),
+        );
+        let blocked = NetworkConfig {
+            allow_private_hosts: Vec::new(),
+            proxy: proxy_url(Some(&proxy_base)).unwrap(),
+        };
+        let _name = dns("private.test", &["8.8.8.8", "10.0.0.1"]);
+        let url = Url::parse("http://private.test/secret").unwrap();
+        let mut diagnostics = Vec::new();
+        let err = match tokio::time::timeout(
+            Duration::from_secs(2),
+            get(
+                &url,
+                &blocked,
+                &CancellationToken::new(),
+                &mut diagnostics,
+                &HashMap::new(),
+            ),
+        )
+        .await
+        {
+            Ok(Err(err)) => err,
+            Ok(Ok(_)) => panic!("expected a blocked address"),
+            Err(_) => panic!("a private answer is rejected before connect"),
+        };
+        assert_eq!(err.code, "blocked_address", "{err}");
+        assert!(targets.lock().unwrap().is_empty(), "{targets:?}");
+        assert_eq!(test_dns::hits("private.test"), 1);
+
+        let _fake = dns("fake.test", &["198.18.0.1"]);
+        let url = Url::parse("https://fake.test/hidden").unwrap();
+        let err = match get(
+            &url,
+            &blocked,
+            &CancellationToken::new(),
+            &mut diagnostics,
+            &HashMap::new(),
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("expected a blocked address"),
+        };
+        assert_eq!(err.code, "blocked_address", "{err}");
+        assert!(err.message.contains("benchmark"), "{err}");
+        assert!(targets.lock().unwrap().is_empty(), "{targets:?}");
+        stop.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_and_proxy_fetches_pin_the_resolved_address() {
+        let (origin_listener, origin_addr, seen) = origin().await;
+        let origin_stop = CancellationToken::new();
+        let origin_task = serve_origin(origin_listener, seen.clone(), origin_stop.clone());
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_base = format!("http://{}", proxy.local_addr().unwrap());
+        let targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let proxy_stop = CancellationToken::new();
+        let proxy_task = serve_proxy(proxy, origin_addr, targets.clone(), proxy_stop.clone());
+        let _name = dns("pinned.test", &["127.0.0.1"]);
+        let url = Url::parse(&format!("http://pinned.test:{}/direct", origin_addr.port())).unwrap();
+        let cancel = CancellationToken::new();
+        let mut diagnostics = Vec::new();
+        let direct = get(
+            &url,
+            &config("pinned.test", None),
+            &cancel,
+            &mut diagnostics,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(direct.status, 200);
+        assert_eq!(direct.body, b"pinned");
+        assert_eq!(test_dns::hits("pinned.test"), 1);
+        let host = seen.lock().unwrap().clone();
+        assert!(
+            host.to_ascii_lowercase()
+                .contains(&format!("host: pinned.test:{}", origin_addr.port())),
+            "{host}"
+        );
+        assert!(targets.lock().unwrap().is_empty());
+
+        let through = get(
+            &Url::parse(&format!("http://pinned.test:{}/proxy", origin_addr.port())).unwrap(),
+            &config("pinned.test", Some(&proxy_base)),
+            &cancel,
+            &mut diagnostics,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(through.body, b"pinned");
+        assert_eq!(test_dns::hits("pinned.test"), 2);
+        assert_eq!(
+            targets.lock().unwrap().as_slice(),
+            [format!("127.0.0.1:{}", origin_addr.port())]
+        );
+
+        let _fallback = dns("pinned.test", &["::1", "127.0.0.1"]);
+        let again = get(
+            &Url::parse(&format!(
+                "http://pinned.test:{}/fallback",
+                origin_addr.port()
+            ))
+            .unwrap(),
+            &config("pinned.test", Some(&proxy_base)),
+            &cancel,
+            &mut diagnostics,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.body, b"pinned");
+        assert_eq!(
+            test_dns::hits("pinned.test"),
+            1,
+            "fallback reuses one lookup"
+        );
+        assert_eq!(
+            targets.lock().unwrap().as_slice(),
+            [
+                format!("127.0.0.1:{}", origin_addr.port()),
+                format!("[::1]:{}", origin_addr.port()),
+                format!("127.0.0.1:{}", origin_addr.port()),
+            ]
+        );
+        origin_stop.cancel();
+        proxy_stop.cancel();
+        origin_task.await.unwrap();
+        proxy_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_resolution_that_does_not_finish_hits_the_connect_deadline() {
+        test_dns::insert("never.test", test_dns::Answer::Hang);
+        let _name = Dns("never.test");
+        let started = std::time::Instant::now();
+        let url = Url::parse("http://never.test/").unwrap();
+        let err = match get(
+            &url,
+            &NetworkConfig {
+                allow_private_hosts: Vec::new(),
+                proxy: None,
+            },
+            &CancellationToken::new(),
+            &mut Vec::new(),
+            &HashMap::new(),
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("expected a connect timeout"),
+        };
+        assert_eq!(err.code, "timeout", "{err}");
+        assert_eq!(err.message, "Connection timed out.");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(15),
+            "{elapsed:?}"
+        );
+    }
 }
