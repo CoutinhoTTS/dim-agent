@@ -382,6 +382,38 @@ ProjectionCheckpoint = {
 
   对应 `storage_flow.rs` 的 `a_v19_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与 `branch_end_events_restore_unchanged_and_the_line_stays_ended`。
 
+### #556 格式决定
+
+[客户端 Session 目录](session-catalog.md#31-sessioncatalog)（#556）的格式决定：升级到 **v21 之后的下一个格式**，从 v21 原地升级。[#527](https://github.com/arcships/dim/issues/527) 的 v21 先合入时它就是 v22；编号在实现时按当时的当前格式确定，本节其余内容不随编号改变。这是本文件第一个读取已有行的升级。
+
+- **新增一张表与一个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)`。`agent_store_format` 的约束改为新版本的编号。
+  - 每个 Session 至多一行，与 `agent_sessions` 一一对应。
+  - `updated_at_ms` 是该 Session `main` 上最后一次提交的最后一个事件的 `create_at`。
+  - `preview` 是该 Session 上第一条用户输入的文字，按现有预览长度截断；没有用户输入时为 NULL。它一旦写入不再改变。
+  - `cwd` 是 `agent_sessions.config` 的工作目录。目录查询按工作区过滤并回复它，所以不必为每个 Session 解码配置 JSON。
+- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。带第一条用户输入的批次写入 `preview` 一次，之后的批次只更新 `updated_at_ms`；`preview` 保持 NULL 的行在出现第一条用户输入时才写入。
+- **删除与分叉**：删除在 S5c 的同一删除事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内按它复制的事件写新行：`updated_at_ms` 是被复制的最后一个事件的 `create_at`，`preview` 是被复制事件里的第一条用户输入，在 `0` 处分叉时为创建时间与 NULL。
+- **不记分类**：本步不记录子 Session 或创建来源。[#557](https://github.com/arcships/dim/issues/557) 的分类字段连同它自己的格式决定一起加入，与上文不记分叉来源相同。
+- **不能留在 v21**：启动要求精确的 SQL 结构，v21 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
+- **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
+  - 空库直接建新格式，`session_catalog` 为空。
+  - 结构恰为 v21 且标记相符的库，在同一事务内建新表和新索引，并从已存事件为每个 Session 回填一行。
+  - 标记相符的 v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为新格式。
+  - 恰为新格式的库直接打开。
+  - 其他库（标记不符的 v21 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **回填的一次性代价**：回填为每个 Session 读一次 `main`：最后一个已提交批次给出 `updated_at_ms`，从起点起的前 256 个事件里找第一条用户输入作为 `preview`。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。
+- **单向**：不做备份，与之前各步相同。旧守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝升级后的库。
+- **升级日志**：沿用 S5a 的那一行，写明实际的两个编号：`Upgraded native store <path> from format v<previous> to v<next>; earlier dimcode versions cannot open it.`
+- **验证**：
+  - 用 v21 结构和完整记录示例构建一次性库，升级后核对结构恰为新格式、标记正确、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致。
+  - v20、v19、v18、v17、v16、v15、v13 库一次升级到位。
+  - 标记不符或升级到一半的结构被拒绝并保留。
+  - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最后一个事件走，`preview` 不被覆盖。
+  - 删除与分叉在各自的事务内维护这一行。
+  - 从不打开用户已有的库。
+
+  对应 `storage_flow.rs` 中本步的 `a_v21_store_upgrades_in_place_once`（编号随实现确定）及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与本期新增的目录流程测试。
+
 
 ## 索引与实际查询
 
