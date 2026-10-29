@@ -27,6 +27,30 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     run_with(args, None)
 }
 
+/// Reads a development model configuration, `--model-config PATH`, as the
+/// profile's model catalog with the profile hash a client checks it by.
+pub fn model_profile(
+    path: &std::path::Path,
+) -> Result<(Arc<AimuxModels>, crate::protocol::DaemonProfile), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let file: ModelConfigFile = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "Invalid model configuration {} at line {}, column {}",
+            path.display(),
+            error.line(),
+            error.column()
+        )
+    })?;
+    let models = Arc::new(AimuxModels::from_config(file)?);
+    let profile = crate::protocol::DaemonProfile::Configured {
+        model_config_sha256: {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))
+        },
+    };
+    Ok((models, profile))
+}
+
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
 pub fn run_with(
@@ -235,20 +259,8 @@ pub fn run_with(
             vec!["echo".into(), "wait".into()];
     }
     let models = if let Some(path) = model_config.as_deref() {
-        let bytes = std::fs::read(path)?;
-        let file: ModelConfigFile = serde_json::from_slice(&bytes).map_err(|error| {
-            format!(
-                "Invalid model configuration {} at line {}, column {}",
-                path.display(),
-                error.line(),
-                error.column()
-            )
-        })?;
-        let models = Arc::new(AimuxModels::from_config(file)?);
-        use sha2::{Digest, Sha256};
-        config.daemon_profile = crate::protocol::DaemonProfile::Configured {
-            model_config_sha256: format!("{:x}", Sha256::digest(&bytes)),
-        };
+        let (models, profile) = model_profile(path)?;
+        config.daemon_profile = profile;
         Some(models)
     } else {
         config.daemon_profile = if config.product_home.is_some() {

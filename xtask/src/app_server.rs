@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
+use dim_agent_types::ModelSelection;
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::Value;
@@ -32,11 +33,27 @@ pub struct Overrides {
     pub summary_prompt: Option<Arc<str>>,
 }
 
-/// What one run adds to the product assembly: the overrides above. The
-/// product path leaves them empty.
+/// What one run adds to the product assembly: the overrides above, the model
+/// configuration file `dim-app-server --model-config` serves, and the local
+/// endpoint a client connects to. The product path leaves every field empty.
 #[derive(Clone, Default)]
 pub struct RunSettings {
     pub overrides: Overrides,
+    pub model_config: Option<PathBuf>,
+    pub unix_path: Option<PathBuf>,
+}
+
+impl RunSettings {
+    /// The native store the served profile keeps under `home`: `home/rust`
+    /// holds it in the product layout, and a model configuration's profile
+    /// (`dim-app-server --model-config`) keeps it in `home` itself.
+    pub fn database(&self, home: &Path) -> PathBuf {
+        if self.model_config.is_some() {
+            home.join("dimcode.sqlite")
+        } else {
+            home.join("rust").join("dimcode.sqlite")
+        }
+    }
 }
 
 /// A scratch directory for one profile, removed by the caller.
@@ -64,8 +81,9 @@ pub async fn serve_product(
 }
 
 /// [`serve_product`] on an existing product home: its native store stays at
-/// `home/rust`, the layout `dimcode` starts the daemon with. `run` carries the
-/// overrides a run adds; the product path passes [`RunSettings::default`].
+/// `home/rust`, the layout `dimcode` starts the daemon with. `run` selects the
+/// model profile and the overrides a run adds; the product path passes
+/// [`RunSettings::default`].
 pub async fn serve_home(
     home: &Path,
     cwd: &Path,
@@ -74,10 +92,16 @@ pub async fn serve_home(
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
     let home = home.to_path_buf();
+    let product = run.model_config.is_none();
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 0).into()),
-        product_home: Some(home.clone()),
-        target_home: Some(home.join("rust")),
+        unix_path: run.unix_path.clone(),
+        product_home: product.then(|| home.clone()),
+        target_home: Some(if product {
+            home.join("rust")
+        } else {
+            home.clone()
+        }),
         ..Default::default()
     };
     config.session_defaults.cwd = cwd.to_string_lossy().into_owned();
@@ -95,12 +119,30 @@ pub async fn serve_home(
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
-    defaults::install_compaction(&mut builder, Arc::new(ProductContextModel), summary);
-    builder.require_feature(
-        Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-            Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
-        }),
-    );
+    match run.model_config {
+        Some(path) => {
+            let (models, profile) = dim_app_server::cli::model_profile(&path)?;
+            config.daemon_profile = profile;
+            config.model_catalog = Some(models.clone());
+            config.session_defaults.model = ModelSelection {
+                provider_id: models.default_model().provider_id.clone(),
+                model_id: models.default_model().model_id.clone(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            };
+            defaults::install_compaction(&mut builder, models.clone(), summary);
+            dim_agent_aimux::install(&mut builder);
+        }
+        None => {
+            defaults::install_compaction(&mut builder, Arc::new(ProductContextModel), summary);
+            builder.require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+                }),
+            );
+        }
+    }
     dim_app_server::collaboration::install(&mut builder);
     dim_agent_questions::install(&mut builder);
     observe(&mut builder);
