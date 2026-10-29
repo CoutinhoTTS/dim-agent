@@ -71,9 +71,14 @@ pub async fn catalog_report(
             rows.push(format!("  Missing scopes: {}", safe(&scopes.join(", "))));
         }
     }
-    let mut notes = vec![
-        "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.".to_owned(),
-    ];
+    // The columns describe rows: with no server, the report says so instead.
+    let mut notes = if rows.is_empty() {
+        vec!["No MCP server is configured.".to_owned()]
+    } else {
+        vec![
+            "Columns: ID, source, transport, enablement, authorization.\nAn enabled entry runs its command or endpoint. Project entries start disabled until you run mcp enable ID.\nSign in with mcp login ID; sign out with mcp logout ID.".to_owned(),
+        ]
+    };
     for (source, application) in [
         ("user", Some(catalog.user_application)),
         ("project", catalog.project_application),

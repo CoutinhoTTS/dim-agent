@@ -3838,6 +3838,67 @@ fn mcp_catalog_and_sign_out_use_public_auth_data_and_the_selected_source() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("Revoked: false"));
 }
 
+/// An empty catalog reads as an empty catalog: one note, and no columns
+/// describing rows that are not there.
+#[test]
+fn mcp_list_says_when_no_server_is_configured() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        mcp_hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request,json!({"userRevision":"user:1","projectRevision":null,"servers":[],"userApplication":{},"projectApplication":null}));
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "No MCP server is configured.\n"
+    );
+}
+
+#[test]
+fn tui_mcp_says_when_no_server_is_configured() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,json!({"userRevision":"user:1","projectRevision":null,"servers":[],"userApplication":{},"projectApplication":null}));
+        let state = wire.read("session.mcp");
+        wire.reply(&state,json!({"sessionId":"session","servers":[],"catalogError":null,"closed":false}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/mcp\r");
+    terminal.until("No MCP server is configured.");
+    assert!(
+        !terminal.transcript.contains("Columns:"),
+        "{}",
+        terminal.transcript
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 #[test]
 fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_next_command() {
     let home = Home::new();

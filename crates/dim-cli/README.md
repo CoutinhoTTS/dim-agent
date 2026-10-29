@@ -239,7 +239,8 @@ The configuration references credentials by environment-variable name. The share
 
 `mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement and
 authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
-Missing scopes appear below the entry.
+Missing scopes appear below the entry. With no entry in the catalog it says so in one line
+instead of printing the column legend, which describes rows.
 It does not print commands, environment values, headers or credentials. `mcp enable ID` and
 `mcp disable ID` change the entry that `mcp list` shows for the workspace.
 
