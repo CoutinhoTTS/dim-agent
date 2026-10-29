@@ -1,33 +1,35 @@
 # Rust 会话存储格式
 
-The current native format is **v22**, with source-owned `settings_documents`,
+The current native format is **v23**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
-branch end events, the tool-effect and digest fields, and the Session catalog projection. Startup requires the
-exact v22 SQL schema and a single format marker of 22 before writable PRAGMAs,
-or the exact v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v22 one step after
+branch end events, the tool-effect and digest fields, and tool schemas that may
+omit `type`, plus the Session catalog projection. Startup requires the
+exact v23 SQL schema and a single format marker of 23 before writable PRAGMAs,
+or the exact v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
+which the same startup transaction upgrades in place to v23 one step after
 another ([S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
-[#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定), [#556 v22 decision](#556-v22-格式决定)).
+[#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定),
+[#580 v22 decision](#580-v22-格式决定), [#556 v23 decision](#556-v23-格式决定)).
 Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as a supported native format.
+migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20, v21 or v22.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v22, and v16 request rows stay readable as written.
+valid in v23, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v22 tables
+## Current v23 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 22)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 23)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -234,7 +236,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件、#527 的工具效果和清单条目与 #556 的目录投影各自为下一版本作出的决定见下文。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件、#527 的工具效果和清单条目、#580 的工具 schema 与 #556 的目录投影各自的格式决定见下文。
 
 ### S5a v15 格式决定
 
@@ -392,7 +394,7 @@ ProjectionCheckpoint = {
 
 [工具效果](../contracts/session-boundary.md#a6-tool-effects)与[压缩清单](../plugins/ContextCompaction.md#510-class-3a-the-digest)（#527）的格式决定：升级到 **v21**，从 v20 原地升级。
 
-- **状态**：当前格式是 v21。
+- **状态**：v21 的字段合同保持；当前格式由 [#580 v22 格式决定](#580-v22-格式决定) 决定。
 - **只增两处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
   - `ToolResult.effects`：`step/tool-result` 的 `result` 上一个可选的效果声明数组；不声明任何效果的工具不写它，此前写下的事件也都没有它。
   - 已完成 `context/compaction` 的 `digest_entries`：清单条目（按顺序）与 `dropped`；没有清单消息的压缩不写它。
@@ -411,11 +413,21 @@ ProjectionCheckpoint = {
 - **单向**：不做备份，与之前各步相同。升级日志沿用同一行：`Upgraded native store <path> from format v20 to v21; earlier dimcode versions cannot open it.`
 - **验证**：用 v20 结构和完整记录示例构建一次性 v20 库，升级后核对结构恰为 v21、标记为 21、业务行逐行不变；v19、v18、v17、v16、v15、v13 库一次升级到 v21；标记不符的 v20、v21 结构和升级到一半的库被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v20_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
 
-### #556 v22 格式决定
+### #580 v22 格式决定
 
-[客户端 Session 目录](session-catalog.md#31-sessioncatalog)（#556）的格式决定：升级到 **v22**，从 v21 原地升级。
+[工具声明](../contracts/session-boundary.md#a5-tool-contribution)（#580）的格式决定：升级到 **v22**，从 v21 原地升级。
 
-- **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为 `CHECK (version = 22)`。
+- **持久化值**：`JsonSchema.type` 可以省略，组合关键字（例如 `oneOf`、`const`）原样保存；显式 `type: null` 仍非法。该类型同时用于 `context/configured.settings.tools` 和模型请求在 `timeline_content` 中的 `tools` 内容行。
+- **不能留在 v21**：旧读取器要求 schema 节点带 `type`，无法恢复包含无类型组合节点的 Session；旧格式门禁必须在启动时拒绝新库，不能等到 Session 恢复时才失败。
+- **升级路径**：沿用 `IMMEDIATE` 启动准入事务，只将 `agent_store_format` 的约束和唯一标记改为 22，不读取或改写任何业务行、内容地址或快照。精确匹配且标记相符的 v21 库原地升级；v20、v19、v18、v17、v16、v15、v13 库先走既有步骤。空库创建 v22，v22 直接打开，未知或标记不符的库拒绝并保留。失败回滚。
+- **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
+- **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
+
+### #556 v23 格式决定
+
+[客户端 Session 目录](session-catalog.md#31-sessioncatalog)（#556）的格式决定：升级到 **v23**，从 v22 原地升级。若在实现之前另有格式变更先合入，实现取当时的下一个编号，本节其余内容不随编号改变。这是本文件第一个读取已有行的升级。
+
+- **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为 `CHECK (version = 23)`。
   - 每个 Session 至多一行，从创建起与 `agent_sessions` 一一对应；写入、回滚与删除见下面的规则。
   - `updated_at_ms` 是该 Session `main` 上最后一次提交的最后一个事件的 `create_at`。
   - `preview` 是窗口里第一条带用户部分的 `input/message` 的文字：各文本块以换行连接，超过 120 个字符时截到 120 个字符并以 `…` 结尾。窗口是 `main` 上起始于前 256 个事件内的各个批次，与今天的读取一样按批次完整——承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。该消息的文字为空（例如只有图片）时为 NULL，之后的消息不再填它；窗口里没有这样的消息时也为 NULL。决定一旦做出，包括决定为 NULL，就不再改变。
@@ -425,19 +437,19 @@ ProjectionCheckpoint = {
 - **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。`updated_at_ms` 跟着批次走；`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息在上面按批次完整的窗口内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件——读取的批次止于第 256 个事件所在的批次；Session 的 `main` 事件不足 256 个时，止于它最后一个已提交批次——且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
 - **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内写新行，与按 F 的事件回填逐列相同：`updated_at_ms` 是该事务写入的最后一个事件的 `create_at`——`0` 以外的分叉就是 `at + 1` 处那条 `session/forked`，其 `create_at` 是分叉当时的时刻；`0` 处分叉不写事件，取创建时间——`preview` 是同一按批次完整的窗口里第一条用户输入的文字或 NULL，`0` 处分叉为 NULL。
 - **不记分类**：本步不记录子 Session 或创建来源。[#557](https://github.com/arcships/dim/issues/557) 的分类字段连同它自己的格式决定一起加入，与上文不记分叉来源相同。
-- **不能留在 v21**：启动要求精确的 SQL 结构，v21 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
+- **不能留在 v22**：启动要求精确的 SQL 结构，v22 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
 - **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
-  - 空库直接建 v22，`session_catalog` 为空。
-  - 结构恰为 v21 且标记相符的库，在同一事务内建新表与两个索引，并从已存事件为每个 Session 回填一行。
-  - 标记相符的 v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为 v22。
-  - 恰为 v22 的库直接打开。
-  - 其他库（标记不符的 v21 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+  - 空库直接建 v23，`session_catalog` 为空。
+  - 结构恰为 v22 且标记相符的库，在同一事务内建新表与两个索引，并从已存事件为每个 Session 回填一行。
+  - 标记相符的 v21、v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为 v23。
+  - 恰为 v23 的库直接打开。
+  - 其他库（标记不符的 v22 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **回填的一次性代价**：回填为每个 Session 读一次 `main`：最后一个已提交批次给出 `updated_at_ms`，起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`；没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL 预览，与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。
 - **单向**：不做备份，与之前各步相同。旧守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝升级后的库。
-- **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
+- **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v22 to v23; earlier dimcode versions cannot open it.`
 - **验证**：
-  - 用 v21 结构和完整记录示例构建一次性 v21 库，升级后核对结构恰为 v22、标记为 22、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致，没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL。
-  - v20、v19、v18、v17、v16、v15、v13 库一次升级到 v22。
+  - 用 v22 结构和完整记录示例构建一次性 v22 库，升级后核对结构恰为 v23、标记为 23、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致，没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL。
+  - v21、v20、v19、v18、v17、v16、v15、v13 库一次升级到 v23。
   - 标记不符或升级到一半的结构被拒绝并保留。
   - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最后一个事件走，`preview` 不被覆盖。
   - 预览的窗口与最终性：承载第 256 个事件的批次里紧接 256 之后的用户输入升级后即为预览；第一条用户消息在起始于 256 之后的批次里的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
@@ -446,7 +458,7 @@ ProjectionCheckpoint = {
   - `withPreview` 的读取按 `EXPLAIN QUERY PLAN` 使用 `session_catalog_with_preview`，前面有多少无预览的行都不改变它的代价。
   - 从不打开用户已有的库。
 
-  对应 `storage_flow.rs` 中本步的 `a_v21_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与本期新增的目录流程测试。
+  对应 `storage_flow.rs` 中本步的 `a_v22_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与本期新增的目录流程测试。
 
 ## 索引与实际查询
 
@@ -462,8 +474,8 @@ ProjectionCheckpoint = {
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
 | v15 `session_file_owners_by_file` | `(file_id)` | 清扫判断文件是否已无 owner |
-| v22 `session_catalog_by_activity` | `(updated_at_ms DESC, session_id)` | 目录键集分页 |
-| v22 `session_catalog_with_preview` | `(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL` | 过滤无预览行的目录分页 |
+| v23 `session_catalog_by_activity` | `(updated_at_ms DESC, session_id)` | 目录键集分页 |
+| v23 `session_catalog_with_preview` | `(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL` | 过滤无预览行的目录分页 |
 | v16 主键 `session_metadata` | `(session_id)` | `read`、`setTitle`、列表联结标题、删除与创建回滚按 Session 删除 |
 
 ## 分页查询
@@ -481,7 +493,7 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v22）
+## 完整记录示例（v23）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -494,7 +506,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 22}],
+  "agent_store_format": [{"version": 23}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],

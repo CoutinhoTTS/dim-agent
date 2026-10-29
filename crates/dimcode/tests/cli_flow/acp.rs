@@ -1351,6 +1351,10 @@ fn acp_stdio_lody_startup_model_is_selected_before_creation_without_shared_write
             create["params"]["model"],
             json!({"provider":"native-provider","modelId":"chosen"})
         );
+        assert_eq!(
+            create["params"]["permissionPolicy"],
+            json!({"preset":"workspace-write"})
+        );
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
@@ -1362,7 +1366,7 @@ fn acp_stdio_lody_startup_model_is_selected_before_creation_without_shared_write
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
-    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"modelId":"chosen","configOptionValues":{"model":"ignored"}}}}}));
+    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"modelId":"chosen","configOptionValues":{"model":"ignored","mode":"workspace-write"}}}}}));
     assert_eq!(peer.response(2)["result"]["sessionId"], "session");
     peer.send(3,"session/resume",json!({"sessionId":"session","cwd":home.0,"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"model":"chosen"}}}}}));
     assert_eq!(
@@ -1371,8 +1375,96 @@ fn acp_stdio_lody_startup_model_is_selected_before_creation_without_shared_write
     );
     peer.send(4,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":2,"configOptionValues":{}}}}}));
     assert!(peer.response(4).get("error").is_some());
+    for (index, mode) in [json!(true), json!("unknown"), Value::Null]
+        .into_iter()
+        .enumerate()
+    {
+        let id = index as i64 + 5;
+        peer.send(id,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"mode":mode}}}}}));
+        assert_eq!(peer.response(id)["error"]["code"], -32602);
+    }
+    for (index, method) in ["session/load", "session/resume", "session/fork"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = index as i64 + 8;
+        peer.send(id,method,json!({"sessionId":"session","cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"mode":"workspace-write"}}}}}));
+        let response = peer.response(id);
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(response["error"]["data"]["code"], "unsupported_control");
+    }
+    peer.send(11,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"reasoning_effort":"high"}}}}}));
+    let response = peer.response(11);
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(
+        response["error"]["data"]["field"],
+        "sessionConfig.configOptionValues.reasoning_effort"
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reasoning_effort")
+    );
+    for (index, field) in ["steer", "goalControl", "worktreeProject"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = index as i64 + 12;
+        peer.send(
+            id,
+            "session/new",
+            json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{field:{"version":1}}}}),
+        );
+        let response = peer.response(id);
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(response["error"]["data"]["field"], field);
+    }
     peer.close();
     daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_lody_startup_mode_is_applied_before_creation_without_shared_writes() {
+    for mode in ["read-only", "workspace-write", "full-access"] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            let mut methods = METHODS.to_vec();
+            methods.extend(["session.permission.get", "session.permission.update"]);
+            wire.hello(&methods);
+            let create = wire.created();
+            assert_eq!(create["params"]["permissionPolicy"], json!({"preset":mode}));
+            assert!(create["params"].get("model").is_none());
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            let policy = wire.read("session.permission.get");
+            wire.reply(
+                &policy,
+                json!({"version":1,"policy":create["params"]["permissionPolicy"]}),
+            );
+            detached_eof(wire);
+        });
+        let mut peer = Peer::start(&home);
+        peer.initialize();
+        peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"mode":mode}}}}}));
+        let response = peer.response(2);
+        assert_eq!(response["result"]["sessionId"], "session", "{response}");
+        assert_eq!(response["result"]["modes"]["currentModeId"], mode);
+        let option = response["result"]["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["id"] == "mode")
+            .unwrap();
+        assert_eq!(option["currentValue"], mode);
+        peer.close();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -1627,6 +1719,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
     let created = peer.response(2);
     assert!(created.get("error").is_none(), "{created}");
+    let default_mode = created["result"]["modes"]["currentModeId"].clone();
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
     peer.send(
         3,
@@ -1658,9 +1751,29 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
             .iter()
             .any(|frame| frame["params"]["update"]["content"]["text"] == "ACP_REAL_FOLLOWUP_OK")
     );
-    peer.send(5, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    let mut options: serde_json::Map<String, Value> = created["result"]["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| {
+            (
+                option["id"].as_str().unwrap().to_owned(),
+                option["currentValue"].clone(),
+            )
+        })
+        .collect();
+    let startup_mode = created["result"]["modes"]["availableModes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mode| mode["id"] != default_mode)
+        .unwrap()["id"]
+        .clone();
+    options.insert("mode".into(), startup_mode.clone());
+    peer.send(5,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":options}}}}));
     let other = peer.response(5);
     assert!(other.get("error").is_none(), "{other}");
+    assert_eq!(other["result"]["modes"]["currentModeId"], startup_mode);
     let other_id = other["result"]["sessionId"].as_str().unwrap();
     assert_ne!(other_id, id);
     peer.send(
@@ -1676,13 +1789,22 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     );
     peer.updates.clear();
     peer.send(7, "session/resume", json!({"sessionId":id,"cwd":home.0}));
-    assert!(peer.response(7).get("error").is_none());
+    assert_eq!(
+        peer.response(7)["result"]["modes"]["currentModeId"],
+        default_mode
+    );
     assert!(
         !peer.updates.iter().any(|frame| matches!(
             frame["params"]["update"]["sessionUpdate"].as_str(),
             Some("agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk")
         )),
         "resume may refresh metadata but cannot replay old messages"
+    );
+    peer.send(8, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert_eq!(
+        peer.response(8)["result"]["modes"]["currentModeId"],
+        default_mode,
+        "Startup mode must not change the shared default"
     );
     peer.close();
     model.join().unwrap();

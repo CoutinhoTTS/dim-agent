@@ -19,7 +19,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 不拥有：
 
-- 投影的表、索引、写入事务、删除与分叉维护、升级回填——这些由[原生存储格式](../../../design/appserver/native-storage-format.md#556-v22-格式决定)决定；
+- 投影的表、索引、写入事务、删除与分叉维护、升级回填——这些由[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)决定；
 - 分类字段、它们的缺省值与呈现——[#557](https://github.com/arcships/dim/issues/557)；
 - 选择面板的交互与 project/all 开关——加入它们的那个客户端（§6）；
 - `session.list`、`session.attach`，以及客户端如何排序或呈现行。
@@ -40,7 +40,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 | 顺序 | `updatedAt` 降序，再 `sessionId` 升序 |
 | `query` | 对今天选择面板搜索的四个字段——Session ID、工作区、model ID 与预览——加上它的搜索文本从不持有的标题与 provider ID，做大小写不敏感的字面子串匹配。查询时由一个存储注册在连接上的 SQL 函数按 `str::to_lowercase` 把查询与每个字段做 Unicode 小写化（与选择面板相同的折叠）；匹配是逐字段的 `instr(fold(field), fold(query)) > 0`，因此是字面的，`%` 与 `_` 只匹配它们本身。它在目录查询里、页边界之前应用。模型取自存储的 Session 配置，即 `session.list` 报告的值，因此查询不解码任何事件 |
 | `cwd` | 工作区精确匹配，在页边界之前应用 |
-| `withPreview` | 布尔，缺省 `false`。`true` 只保留预览不为 NULL 的行，在页边界之前应用，因此隐藏无预览行的客户端拿到的是整页它显示的行；投影按预览建的局部索引让这条读取保持有界（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v22-格式决定)） |
+| `withPreview` | 布尔，缺省 `false`。`true` 只保留预览不为 NULL 的行，在页边界之前应用，因此隐藏无预览行的客户端拿到的是整页它显示的行；投影按预览建的局部索引让这条读取保持有界（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)） |
 | 回复 | `SessionSummary` 条目，即 `session.summaries` 返回的形态：`session.list` 记录的字段加上 `preview` 与 `updatedAt`。最后一页不带 `nextCursor` |
 
 读不出的 `cursor`，或摘要与请求的 `query`、`cwd`、`withPreview` 不符的 `cursor`，被拒绝为 `invalid_params`，而不是当作第一页，客户端因此不会在不知不觉中从头再读一遍目录，也不会用另一组过滤的键接着分页。游标不带库的标记：来自另一个库的目录的游标无法分辨，也不需要分辨，因为它只按同一个顺序定位一个键。
@@ -55,7 +55,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 `session.summaries` 保留参数、回复类型与按连接判定的协议 v3 规则。原生存储打开时，它改为从同一份投影回答而不是读历史，内容不变：投影原样应用下面的预览规则，而且它的行从 Session 创建起就存在（§5）。没有存储的守护进程没有投影，与今天一样从已装载的 Session 回答；它也不列出 `session.catalog`（§3.1）。所以找不到 `session.catalog` 的客户端靠它列目录，比本变更更旧的守护进程上的客户端也靠它；两者继续可用，因为该方法的形态不变。
 
-**预览保持今天的规则，包括按批次完整的窗口。** 窗口是起始于 `main` 前 256 个事件内的批次，且与今天的读取一样按批次完整：承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。窗口事件里第一条带用户部分的 `input/message` 决定预览：该部分的文本块以换行连接，截到 120 个字符，更长时以 `…` 结尾。这个决定是最终的——第一条用户消息的文字为空时（例如只有图片）`preview` 为 NULL，之后的消息不再填它；窗口里没有这样的消息时也保持 NULL。投影对实时写入和回填应用同一条规则：批次只在行的预览仍未决定、且决定它的消息在窗口内时才写 `preview`，一旦决定就不再改变。因此回填行与实时行逐列相同（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v22-格式决定)）。去掉或收窄这个窗口是对 `session.summaries` 所列内容的另一次可见变更。
+**预览保持今天的规则，包括按批次完整的窗口。** 窗口是起始于 `main` 前 256 个事件内的批次，且与今天的读取一样按批次完整：承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。窗口事件里第一条带用户部分的 `input/message` 决定预览：该部分的文本块以换行连接，截到 120 个字符，更长时以 `…` 结尾。这个决定是最终的——第一条用户消息的文字为空时（例如只有图片）`preview` 为 NULL，之后的消息不再填它；窗口里没有这样的消息时也保持 NULL。投影对实时写入和回填应用同一条规则：批次只在行的预览仍未决定、且决定它的消息在窗口内时才写 `preview`，一旦决定就不再改变。因此回填行与实时行逐列相同（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)）。去掉或收窄这个窗口是对 `session.summaries` 所列内容的另一次可见变更。
 
 ### 3.4 无租约
 
@@ -67,7 +67,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 ## 4. 事件与状态
 
-本部分不写事件，也不拥有状态。投影是派生状态：每一列都由 Timeline 已有的事件蕴含，升级时按它们为整个库重建一次（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v22-格式决定)）。这里没有任何东西进入 Timeline：目录是给选择面板显示的数据，[设计规则 §4 第 9 条](../../../architecture/rust-agent/principles.md)把它挡在 Timeline 之外。
+本部分不写事件，也不拥有状态。投影是派生状态：每一列都由 Timeline 已有的事件蕴含，升级时按它们为整个库重建一次（[原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)）。这里没有任何东西进入 Timeline：目录是给选择面板显示的数据，[设计规则 §4 第 9 条](../../../architecture/rust-agent/principles.md)把它挡在 Timeline 之外。
 
 ## 5. 依赖
 
@@ -109,7 +109,7 @@ project/all 开关是另一个客户端决定：`cwd` 为本合同为它而存�
 
 ## 8. 对其他文档的修改
 
-- [原生存储格式](../../../design/appserver/native-storage-format.md#556-v22-格式决定)：目录表、它的两个索引、从创建起的同一事务写入、删除与分叉维护，以及升级回填与它的一次性代价。
+- [原生存储格式](../../../design/appserver/native-storage-format.md#556-v23-格式决定)：目录表、它的两个索引、从创建起的同一事务写入、删除与分叉维护，以及升级回填与它的一次性代价。
 - [Session 删除与分叉](session-deletion-and-fork.md#32-顺序)：它的删除与分叉行清单在各自移除与写入的行旁列出 `session_catalog`。
 - [文档索引](../../../INDEX.md)列出本页。
 - [客户端](../clients.md#32-session-管理) §5 在实时 Session 列表那一行用 `session.catalog` 取代 `session.summaries`；CLI 文档记录 `/resume` 的分页、服务端搜索与取消。两者描述的行为只在客户端实现后才存在，所以由客户端的实现做这两处修改。

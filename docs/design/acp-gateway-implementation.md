@@ -118,7 +118,7 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 | `initialize` | 可接 | 先 `hello {protocolVersion:3, clientKind:"other", clientName:"AcpGateway"}`。按 SDK 协商 ACP 1；记录 client capabilities；读取现有 account discovery/status，按 §4.4 生成真实可执行的 authMethods。initialize 不自动开始登录；无 managed provider 时不强制登录。重复 initialize 拒绝 |
 | `authenticate` | 条件可接 | 仅接受本连接已发布的 agent-type methodId；`account.status` 确认已登录则返回 `{}`，否则走现有 browser begin → 宿主 callback capture → browser complete → status。OAuth 和 token 交换由原插件完成，不由本地 RPC transport 的身份校验代替 |
 | `logout` | 不支持 | 不映射到账户登出，不声明 logout capability |
-| `session/new` | 可接 | 校验绝对 `cwd`，只接受空/缺失 additional directories；按 §8.3 验证 startup model 后，在同一 `session.create {cwd, agentId?, model?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model → 按 §4.6 绑定 mcpServers。初始化及初始工具注册完成才返回 id、可用 modes/configOptions |
+| `session/new` | 可接 | 校验绝对 `cwd`，只接受空/缺失 additional directories；按 §8.3 验证 startup config 后，在同一 `session.create {cwd, agentId?, model?, permissionPolicy?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model → 按 §4.6 绑定 mcpServers。初始化及初始工具注册完成才返回 id、可用 modes/configOptions |
 | `session/load` | 可接 | 从 `session.summaries` 或 `session.list` 获取真实 cwd，检查一致；attach → 固定头 main history 从 0 回放 → 接上 live → 返回。重复 load 复用 runtime，不重复建立订阅；在 prompt 中拒绝重放 |
 | `session/resume` | 可接 | 同 load 的准备和状态恢复，但历史只用于内部关联/去重，不向客户端发送旧消息；先返回，再发送准备期间缓存的真正 live updates |
 | `session/list` | 条件可接 | `session.summaries {agentId?}`；不存在时用 `session.list {agentId?}` 并省略不可得的 updatedAt。按 ACP cwd 在内存过滤；毫秒时间转 ISO 8601。返回完整的一页，不声明原生分页，不制造 nextCursor；非空未知 cursor 报错。原生全量响应超过 frame limit 就报错，不循环扫描凑页 |
@@ -411,7 +411,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 | `_lody/session/activity_update` / sessionActivity | 有 branch running 和各类后台 facts，没有已接入的完整 requires_action/backgroundTaskCount 投影 | 不支持。不能把 main running=false 当作整个 Session idle |
 | sessionTitle / `_meta.lody.titleSource` | 有标准标题通知；当前 auto/manual 不能证明 generated/fallback，初始化也不能保证每 Session 安装标题插件 | 不声明 title ownership；标准标题照常投影，不拦截 Lody 的 title-agent，不加专用环境变量 |
 | worktreeProject | 没有相同的逻辑项目归属合同 | 不支持；不把 cwd 当 originProjectPath |
-| `_meta.lody.sessionConfig` | session.create 可接 model、modelPreferences、permissionPolicy；attach/fork 没有同等 startup override | new 条件可接 model 选择；显式 modelId 优先于 configOptionValues.model，均使用本 Gateway 发布的候选映射，不能自行拆 provider id。缺 metadata 保持默认。首版其他配置项、load/resume/fork 的非空覆盖在变更前拒绝；不能先 attach/fork 后 update 冒充建立前采用，见 §8.3 |
+| `_meta.lody.sessionConfig` | session.create 可接 model、modelPreferences、permissionPolicy；attach/fork 没有同等 startup override | new 可接 model 和 mode 选择；显式 modelId 优先于 configOptionValues.model，模型使用本 Gateway 发布的候选映射，不能自行拆 provider id。mode 选择映射到同一 create 的 permissionPolicy.preset。缺 metadata 保持默认。其他配置项、load/resume/fork 的非空覆盖在变更前拒绝；不能先 attach/fork 后 update 冒充建立前采用，见 §8.3 |
 | Lody elicitation metadata | Questions 可表达部分表单字段 | 仅实际 question/options/multiSelect/allowCustom；不声明 answerNotes，不合成 secret/preview/自动应答 |
 | toolName / notice / messagePhase / plan_mode / proposal plan | 标准工具名和真实错误已有；独立计划模式等来源不完整 | 标准 name/title 保留真实工具名；Lody toolName 仅可写 LODY_TOOL_NAMES 的 ImageGeneration/CronCreate/CronDelete/CronList/ScheduleWakeup，且必须有对应真实 flow，不能写任意 native name。notice 只展示真实诊断。messagePhase、独立 boolean plan_mode、提案计划不支持，plan_mode 不得替代 Permission preset |
 | `_dimcode/rewind-files/preview`、`_dimcode/rewind-files`、`_dimcode/reapply-files`、`_dimcode/file-undo-state` | native 没有历史实现中的文件回滚合同 | 不支持，不以 session.fork 冒充文件回滚 |
@@ -420,7 +420,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 
 ### 8.3 首版具体接线与生命周期
 
-**Startup model**：在任何 native 写入之前解析 `{version:1,modelId?,configOptionValues}`。modelId 若存在即为唯一模型选择，否则取 configOptionValues.model；被覆盖的 model 选项不再参与选择，但整个 DTO 仍须合法。首版仅接受 model 这一选项，其他已知控制项报不支持。通过安全 catalog 和生成 ACP model option 时保留的映射取得 `{provider,modelId}`，放入同一 `session.create` 请求的 `model`；不调用 provider.select/update、不改共享默认值。显式选择要求 catalog 能解析唯一目标，不能退回默认。load/resume/fork 若携带有效非空选择，在 attach/fork 之前拒绝；空配置无副作用。native 建立成功后才从实际响应生成 config options。
+**Startup config**：在任何 native 写入之前解析 `{version:1,modelId?,configOptionValues}`。接受 model 和 mode 两个选项；未知选项以参数错误拒绝，错误信息及 data.field 指明配置路径。modelId 若存在即为唯一模型选择，否则取 configOptionValues.model；被覆盖的 model 选项不再参与选择，但整个 DTO 仍须合法。通过安全 catalog 和生成 ACP model option 时保留的映射取得 `{provider,modelId}`，放入同一 `session.create` 请求的 `model`。mode 只接受 `read-only`、`workspace-write`、`full-access`，放入同一请求的 `permissionPolicy:{preset:mode}`，沿用原生显式创建策略；未提供 mode 时不发送 permissionPolicy，保留原生默认。两项可以单独提供，不调用 provider.select/update 或创建后的 permission.update，不改共享默认值。显式模型选择要求 catalog 能解析唯一目标，不能退回默认。load/resume/fork 若携带有效非空选择，在 attach/fork 之前拒绝；空配置无副作用。native 建立成功后才从实际响应生成 config options。
 
 **Background exec**：直接消费已提交的 `exec/started` / `exec/ended`，来源是现有 [BackgroundExec](../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)，不另造 task 业务服务。开始时生成与发起工具不同的稳定 ACP toolCallId，并以 parentToolCallId 关联；这样原工具因转后台返回 completed 后，不会被重新改成 in_progress。任务状态开始为 in_progress，原生 completed → completed，failed/cancelled → failed 并保留真实原因，不能造 Core 不存在的 task cancelled 状态。结束通知允许发生在 prompt response 之后；不因此延长或重新打开那个 prompt。固定头回放重建投影并去重，live 后续仅处理新的 sequence。EOF/卸载只丢弃显示关联，不停止原生后台任务。
 
@@ -462,7 +462,7 @@ live `session.submit` 仅将[原生保证集合](../../crates/dim-app-server/REA
 | A. 共享 RPC 与宿主 | 已完成：dim-client、现有 CLI client/MCP callback 调用者 | 保留 socket/pipe/profile/frame/security 行为；Gateway 构造接收自有输入且 Deps=()，不迁移既有 CLI 插件。2 个公共传输/callback 边界测试、94 个现有 CLI flows、受影响 crate 全 target Clippy、xtask check 通过；10 个需额外环境的既有 CLI flows 未运行。无 ACP handler，无 daemon diff |
 | B. 插件与标准会话 | 已完成：dim-acp、CLI acp 入口、共享产品事件边界 | initialize/new/list/load/resume/prompt；3 个 ACP stdio flows 覆盖真实 daemon 与 loopback model、消费输入关联、emoji 去重、固定头空页和并发准备。受影响 CLI flows 共 97 通过，10 个额外环境用例未运行 |
 | C. 交互与结算 | 已完成：同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、browser authenticate、terminal helper；输入撤回/stop、审批、form、mode/model、图片/文本资源和 close/delete。101 个 CLI flows 通过、10 个额外环境用例跳过；另有 2 个公共 Gateway 宿主流程验证真实 loopback callback、native exchange 和请求取消。RPC recovery 与输出/卸载结算在 E 验证 |
-| D. 有依据的 Lody 子集 | 已完成接线：history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 公开 stdio flows 覆盖固定头历史、真实终态锚点、task 与父工具独立、压缩取消、同 member 多次委派的 run 身份、startup model 优先级与非 new 覆盖拒绝，以及断线 unknown/恢复新 activation。Lody GUI 基本聊天通过；不能据协议流测试声明所有 GUI 扩展已验收 |
+| D. 有依据的 Lody 子集 | 已完成接线：history/forkAtTurn/compaction、startup model/mode、后台 task、最小 subagent snapshots | 公开 stdio flows 覆盖固定头历史、真实终态锚点、task 与父工具独立、压缩取消、同 member 多次委派的 run 身份、startup model 优先级、三种 permission mode 与非 new 覆盖拒绝，以及断线 unknown/恢复新 activation。Lody GUI 基本聊天通过；不能据协议流测试声明所有 GUI 扩展已验收 |
 | E. 连接恢复、宿主退出与实机 | 已完成：RPC recovery、dimcode 原生入口、文档和验收记录 | 本轮 CLI 回归 123 passed、11 ignored、1 个恢复截止用例 filtered；Node MCP stdio 流程单独通过。覆盖不重发不确定变更、请求取消、输出预算、卸载结算。macOS acpx 基本聊天通过；Lody GUI MCP 工具验收受登录页阻塞，真实 OAuth、Windows/Linux 和发布包待验收。证据见验收记录 |
 
 这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
@@ -486,7 +486,7 @@ D 的消融复核：Lody 只是同一投影的 metadata 和受协商约束的通
 5. 审批 allow/deny、其他客户端先答、native cancel 后迟答；Questions 单选/多选/custom/decline、重复 callId 的不同 request、断线和关闭。
 6. RPC 断线/重连/daemon 重启、丢失 mutation reply、lookup unknown 后原请求迟到；确认没有重复 submit/new/fork/attachment/config/approval。
 7. EOF、signal、插件 unload 只 detach；从另一客户端观察 turn 继续。显式 close 才结算 Session；其他 Session/daemon 不受影响。可靠输出队列溢出结束连接而不无声丢消息。
-8. 标准 model/mode 选项反映真实采用状态；无 catalog/Questions/Attachments 的 profile 只失去对应功能。startup model 的显式 modelId 优先、无 metadata 保留默认、歧义/未知目标/未知 version 报错；new 在同一 create 采用，load/resume/fork 非空覆盖在变更前拒绝；不修改 Provider selection 或配置。
+8. 标准 model/mode 选项反映真实采用状态；无 catalog/Questions/Attachments 的 profile 只失去对应功能。startup config 的显式 modelId 优先，公布的 mode 可回传到新会话建立参数；无 metadata 保留默认，歧义/未知模型、非法 mode/类型、未知选项/version 报错；new 在同一 create 采用，load/resume/fork 非空覆盖在变更前拒绝；不修改 Provider selection 或共享配置。
 9. history、终态 turn fork、compaction skipped/failed/cancelled；后台 exec 开始/终态使用独立 toolCallId，原工具转后台完成不等于 task 完成，取消保留真实原因；终态可发生在 prompt response 之后。普通客户端兼容，Lody capability 和 wire 输出一致。
 10. 通过公开 ManagedProvider 测试装配模拟 browser/device：无插件/API-key profile 不被其他账户阻塞、method 只按实际能力发布、已登录 authenticate 不重复 begin、callback 匹配、端口冲突、过期、取消/EOF、complete reply 丢失不重发。terminal method 不能走 authenticate；helper 保留同一 executable/home/profile，完成后重新检查 native 账户状态。断言 native 通用 -32000 错误不会变成 ACP auth_required。复用 callback capture 时保留既有 MCP/TUI 的安全与公开流程回归。
 11. Provider 管理插件存在时仍不虚报整组 providers capability；三个 ACP 管理方法不修改 Provider 记录。可复用调用与后续启用后的流验证见 §4.5，不能以 list 可读替代 set/disable 的作用域验收。

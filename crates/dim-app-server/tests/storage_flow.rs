@@ -198,7 +198,7 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_catalog",
 ];
 /// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
-/// v19 and v20 add none.
+/// v19 through v22 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -275,9 +275,7 @@ const V15_ADDITIONS: &[&str] = &[
 const V16_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
 ];
-/// The exact schema of `version`, sorted: v13's, plus each later step's
-/// additions, with that version's marker.
-const V22_ADDITIONS: &[&str] = &[
+const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
     "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
     "CREATE INDEX session_catalog_with_preview ON session_catalog(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL",
@@ -287,7 +285,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .iter()
         .chain(V15_ADDITIONS.iter().filter(|_| version >= 15))
         .chain(V16_ADDITIONS.iter().filter(|_| version >= 16))
-        .chain(V22_ADDITIONS.iter().filter(|_| version >= 22))
+        .chain(V23_ADDITIONS.iter().filter(|_| version >= 23))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .collect();
     statements.sort();
@@ -2436,6 +2434,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V19,
         V20,
         V21,
+        V22,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2587,6 +2586,15 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V21, "DELETE FROM agent_store_format"),
         (
             Base::V21,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=22",
+        ),
+        (Base::V22, "DELETE FROM agent_store_format"),
+        (
+            Base::V22,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=21",
+        ),
+        (
+            Base::V21,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=20",
         ),
         (
@@ -2601,6 +2609,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V19, "DROP TABLE session_metadata"),
         (Base::V20, "DROP TABLE session_metadata"),
         (Base::V21, "DROP TABLE session_metadata"),
+        (Base::V22, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2613,6 +2622,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V19 => drop(v16_tables_store(&database.0, 19)),
             Base::V20 => drop(v16_tables_store(&database.0, 20)),
             Base::V21 => drop(v16_tables_store(&database.0, 21)),
+            Base::V22 => drop(v16_tables_store(&database.0, 22)),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2653,7 +2663,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .iter()
         .filter(|_| from < 16)
         .chain(V15_TABLES.iter().filter(|_| from < 15))
-        .chain(["session_catalog"].iter().filter(|_| from < 22))
+        .chain(["session_catalog"].iter().filter(|_| from < 23))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -2673,8 +2683,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(22));
-    assert_eq!(marker(&connection), [22]);
+    assert_eq!(schema(&connection), schema_of(23));
+    assert_eq!(marker(&connection), [23]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2753,8 +2763,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(22));
-    assert_eq!(marker(&connection), [22]);
+    assert_eq!(schema(&connection), schema_of(23));
+    assert_eq!(marker(&connection), [23]);
     drop(connection);
 
     let database = Database::new();
@@ -2810,6 +2820,100 @@ async fn a_v20_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 20).await;
 }
 
+#[tokio::test]
+async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 21);
+    assert_eq!(schema(&connection), schema_of(21));
+    upgrades_in_place_once(&database, connection, 21).await;
+
+    let tools: Vec<ToolDefinition> = serde_json::from_value(serde_json::json!([{
+        "name": "lookup", "description": "Look up an item", "source": "static",
+        "inputSchema": {"type": "object", "properties": {
+            "rule": {"oneOf": [{"const": "allow"}, {"const": "deny"}]}
+        }}
+    }]))
+    .unwrap();
+    let configured = record(
+        1,
+        EventKind::ContextConfigured(ContextConfiguredData {
+            timeline: "main".into(),
+            revision: "configuration".into(),
+            previous: None,
+            prompt: None,
+            settings: Box::new(ModelConfiguration {
+                provider_id: "mock".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                tools: Some(tools.clone()),
+                tool_sources: vec![],
+                config: None,
+                metadata: None,
+            }),
+            system: None,
+        }),
+    );
+    let mut request = ModelRequest::new("mock", "test", vec![Message::text(Role::User, "Hi")]);
+    request.tools = Some(Arc::new(tools.clone()));
+    let called = record(
+        2,
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: Arc::new(request),
+            configuration: None,
+            prompt: None,
+        }),
+    );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("schema", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("schema", "main"),
+        vec![configured.clone(), called.clone()],
+    )
+    .await
+    .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let connection = Connection::open(&database.0).unwrap();
+    assert_ne!(schema(&connection), schema_of(21));
+    assert_eq!(marker(&connection), [23]);
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::to_value(&tools).unwrap()
+    );
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
+    let session = agent.restore_session("schema".into()).await.unwrap();
+    let restored = session.history("main", Some(2)).await.unwrap();
+    assert_eq!(restored[0], configured.event);
+    assert_eq!(restored[1], called.event);
+    agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// The daemon names the one-way upgrade on stderr, where its default log
 /// filter would hide a tracing event, and only on the start that upgrades.
 #[cfg(unix)]
@@ -2853,7 +2957,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v22; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v23; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -4788,4 +4892,11 @@ async fn a_v21_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v16_tables_store(&database.0, 21);
     upgrades_in_place_once(&database, connection, 21).await;
+}
+
+#[tokio::test]
+async fn a_v22_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 22);
+    upgrades_in_place_once(&database, connection, 22).await;
 }

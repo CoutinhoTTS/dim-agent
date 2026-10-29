@@ -91,6 +91,7 @@
       "parent": "dim_acp",
       "file": "crates/dim-acp/src/lody.rs",
       "unexpandedMacros": [
+        "format",
         "json",
         "matches"
       ]
@@ -4992,6 +4993,14 @@
         "path CollaborationOutcome::Failed",
         "use dim_agent_types::CollaborationDelivery",
         "use dim_agent_types::CollaborationOutcome"
+      ]
+    },
+    {
+      "from": "dim_acp::lody",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPreset"
       ]
     },
     {

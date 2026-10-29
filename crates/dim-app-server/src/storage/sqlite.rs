@@ -10,11 +10,11 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 22;
+const FORMAT: u32 = 23;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 22))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23))",
     ),
     (
         "settings_documents",
@@ -112,7 +112,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 8] = [
+const UPGRADES: [(u32, &[&str]); 9] = [
     (
         13,
         &[
@@ -135,8 +135,10 @@ const UPGRADES: [(u32, &[&str]); 8] = [
     // #527: a tool result's `effects` and a completed compaction's
     // `digest_entries`, which a v20 daemon cannot decode; the marker only.
     (20, &[]),
+    // #580: typeless tool schemas, unreadable by v21.
+    (21, &[]),
     (
-        21,
+        22,
         &[
             "session_catalog",
             "session_catalog_by_activity",
