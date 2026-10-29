@@ -1869,6 +1869,9 @@ impl ToolDriver for ImageEcho {
     }
 }
 
+const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
+const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
+
 fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
     events
         .iter()
@@ -1877,6 +1880,99 @@ fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_result_images_take_the_form_its_protocol_defines() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for kind in ["openai-chat", "openai-responses", "anthropic", "gemini"] {
+            let server = NativeServer::start(kind).await;
+            let models = server.models();
+            let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho))));
+            let session = agent.create_session(server.session_config()).await.unwrap();
+            session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
+            session.idle("main").await.unwrap();
+            let events = session.history("main", None).await.unwrap();
+            assert!(
+                matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                "{kind}: {:?}",
+                events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect::<Vec<_>>()
+            );
+            for content in tool_result_events(&events) {
+                assert!(
+                    matches!(content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))),
+                    "{kind}: the stored tool result keeps the image"
+                );
+            }
+            let requests = server.endpoint.requests.lock().unwrap().clone();
+            assert_eq!(requests.len(), 2, "{kind}");
+            let next = &requests[1].2;
+            match kind {
+                "anthropic" => {
+                    let result = next["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                        .find(|part| part["type"] == "tool_result")
+                        .unwrap();
+                    assert_eq!(
+                        result["content"],
+                        json!([
+                            {"type":"text","text":"result text"},
+                            {"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE}},
+                        ]),
+                        "{kind}"
+                    );
+                    assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: no marker when the protocol carries the image inside");
+                }
+                "gemini" => {
+                    let contents = next["contents"].as_array().unwrap();
+                    let response = contents
+                        .iter()
+                        .flat_map(|content| content["parts"].as_array().into_iter().flatten())
+                        .find(|part| part.get("functionResponse").is_some())
+                        .unwrap();
+                    assert!(
+                        response["functionResponse"]["response"]["content"].as_str().unwrap().contains(TOOL_IMAGE_MARKER),
+                        "{kind}: {response}"
+                    );
+                    let user = contents.last().unwrap();
+                    assert_eq!(user["role"], "user", "{kind}");
+                    let parts = user["parts"].as_array().unwrap();
+                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
+                    assert_eq!(parts[1], json!({"inlineData":{"mimeType":"image/png","data":IMAGE}}), "{kind}");
+                }
+                "openai-responses" => {
+                    let input = next["input"].as_array().unwrap();
+                    let output = input.iter().find(|item| item["type"] == "function_call_output").unwrap();
+                    assert!(output["output"].as_str().unwrap().contains(TOOL_IMAGE_MARKER), "{kind}: {output}");
+                    let user = input.iter().rev().find(|item| item["role"] == "user").unwrap();
+                    let parts = user["content"].as_array().unwrap();
+                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
+                    assert_eq!(parts[1], json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")}), "{kind}");
+                }
+                _ => {
+                    let messages = next["messages"].as_array().unwrap();
+                    let tool = messages.iter().find(|message| message["role"] == "tool").unwrap();
+                    assert!(tool["content"].as_str().unwrap().contains(TOOL_IMAGE_MARKER), "{kind}: {tool}");
+                    let user = messages.last().unwrap();
+                    assert_eq!(user["role"], "user", "{kind}");
+                    let parts = user["content"].as_array().unwrap();
+                    assert_eq!(parts[0]["text"], format!("{TOOL_IMAGE_LABEL} call-1: the image after this text is that call's result."), "{kind}");
+                    assert_eq!(parts[1], json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}}), "{kind}");
+                }
+            }
+            session.submit("another".into(), InputMode::Queue, "main").await.unwrap();
+            session.idle("main").await.unwrap();
+            assert!(
+                matches!(session.history("main", None).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                "{kind}: a later turn also completes"
+            );
+            agent.close().await.unwrap();
+            server.close().await;
+        }
+    }).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1918,4 +2014,180 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
         agent.close().await.unwrap();
         server.close().await;
     }).await.unwrap();
+}
+
+/// The request the two inside-form protocols get in the test below: one
+/// assistant tool call and one error tool result that carries an image.
+fn error_tool_result_request() -> ModelRequest {
+    let mut input = serde_json::Map::new();
+    input.insert("text".into(), json!("result text"));
+    ModelRequest::new(
+        "local",
+        "test-model",
+        vec![
+            Message::text(Role::User, "question"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![MessagePart::ToolUse {
+                    provider_metadata: None,
+                    id: "call-1".into(),
+                    name: "echo".into(),
+                    input,
+                    start_time: None,
+                }]),
+            },
+            Message {
+                role: Role::ToolResult,
+                content: MessageContent::Parts(vec![MessagePart::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    content: ToolContent::Blocks(vec![
+                        ContentBlock::Text {
+                            text: "result text".into(),
+                        },
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                source_type: ImageSourceType::Base64,
+                                media_type: "image/png".into(),
+                                data: Some(IMAGE.into()),
+                                url: None,
+                            },
+                        },
+                    ]),
+                    structured_content: None,
+                    is_error: Some(true),
+                }]),
+            },
+        ],
+    )
+}
+
+/// An error tool result that carries an image keeps both the error flag and
+/// the image, for each protocol whose tool message carries the image inside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![
+                    json!({"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}),
+                    json!({"type":"message_stop"}),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(error_tool_result_request()),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::Anthropic,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    let result = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|part| part["type"] == "tool_result")
+        .unwrap();
+    assert_eq!(result["is_error"], json!(true), "{body}");
+    assert_eq!(
+        result["content"],
+        json!([
+            {"type":"text","text":"result text"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE}},
+        ]),
+        "{body}"
+    );
+    assert!(
+        !body.to_string().contains(TOOL_IMAGE_MARKER),
+        "an inside-form result needs no follow-up marker: {body}"
+    );
+
+    let server = MockServer::start().await;
+    let body = [
+        bedrock_frame("messageStart", json!({"role":"assistant"})),
+        bedrock_frame(
+            "contentBlockDelta",
+            json!({"contentBlockIndex":0,"delta":{"text":"ok"}}),
+        ),
+        bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+        bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+        bedrock_frame(
+            "metadata",
+            json!({"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}),
+        ),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/vnd.amazon.eventstream")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(error_tool_result_request()),
+            ModelConnection::Bedrock(BedrockModelConnection {
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                auth: BedrockAuth::Bearer("native-secret".into()),
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+    let sent = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    let result = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|part| part.get("toolResult").is_some())
+        .unwrap();
+    assert_eq!(
+        result["toolResult"]["content"],
+        json!([
+            {"text":"result text"},
+            {"image":{"format":"png","source":{"bytes":IMAGE}}},
+        ]),
+        "{body}"
+    );
+    assert_eq!(result["toolResult"]["status"], "error", "{body}");
+
+    root.shutdown().await.unwrap();
 }
