@@ -672,6 +672,7 @@ def params_from_config(config: dict | None) -> dict:
         "agent_timeout_multiplier": config.get("agent_timeout_multiplier"),
         "n_concurrent_trials": config.get("n_concurrent_trials"),
         "model_name": agent.get("model_name"),
+        "verifier_proxy": bool((config.get("verifier") or {}).get("env")),
         "model_config_sha256": (
             hashlib.sha256(model_config.encode()).hexdigest()
             if (model_config := (agent.get("env") or {}).get("DIM_EVAL_MODEL_CONFIG_JSON"))

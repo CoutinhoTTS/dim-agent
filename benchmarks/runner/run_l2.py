@@ -107,6 +107,24 @@ def _env(name: str, default: str | None = None) -> str:
     return value
 
 
+def verifier_env() -> dict[str, str]:
+    """Proxy settings for the verifier phase only, from ``DIM_EVAL_VERIFIER_PROXY``.
+
+    Most Terminal-Bench verifiers download uv from GitHub at scoring time. When
+    the eval machine cannot reach GitHub directly, they fail before testing
+    anything and score 0 whatever the agent did. The agent phase is untouched:
+    it reaches only the model host, and dimcode would otherwise route the model
+    through the proxy too. Local addresses bypass it, because verifiers also
+    connect to servers the agent started inside the container.
+    """
+    proxy = os.environ.get("DIM_EVAL_VERIFIER_PROXY")
+    if not proxy:
+        return {}
+    bypass = "localhost,127.0.0.1,::1"
+    return {"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "http_proxy": proxy,
+            "https_proxy": proxy, "NO_PROXY": bypass, "no_proxy": bypass}
+
+
 def build_job_config(settings: ProviderSettings) -> dict:
     cli_image = _env("DIM_EVAL_CLI_IMAGE")
     run_id = os.environ.get(
@@ -169,6 +187,7 @@ def build_job_config(settings: ProviderSettings) -> dict:
                 },
             }
         ],
+        "verifier": {"env": verifier_env()},
         "retry": {
             "max_retries": 3,
             "include_exceptions": INFRA_EXCEPTIONS,

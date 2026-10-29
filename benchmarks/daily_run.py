@@ -428,6 +428,9 @@ def run_l2_remote(host: str, remote: str, tag: str, run_id: str, k: int,
         "DIM_EVAL_K": str(k),
         "DIM_EVAL_CONCURRENCY": str(concurrency),
     }
+    if os.environ.get("DIM_EVAL_VERIFIER_PROXY"):
+        # From the eval machine's config.env, which the remote shell does not read.
+        env["DIM_EVAL_VERIFIER_PROXY"] = os.environ["DIM_EVAL_VERIFIER_PROXY"]
     if baseline:
         # run_l2 refuses to run when the endpoint no longer serves the model the
         # baseline recorded. Without this the check runs and reports it has

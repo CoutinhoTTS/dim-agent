@@ -63,7 +63,8 @@ cron ─► nightly.sh ─► git fetch（SSH）─► daily_run.py ─► 推 e
    DIM_EVAL_SCRATCH=/home/user/dim-eval-scratch
    DIM_EVAL_REMOTE_PYTHON=/path/to/harbor-venv/bin/python
    DIM_EVAL_GIT_REMOTE=git@github-dim-eval:arcships/dim.git
-   DIM_EVAL_REDACT="models.example.internal"   # issue 正文里额外抹掉的字符串，如模型端点
+   DIM_EVAL_REDACT="models.example.internal proxy.example.internal"   # issue 正文里额外抹掉的字符串
+   DIM_EVAL_VERIFIER_PROXY=http://proxy.example.internal:port   # 只给判分阶段用的 HTTP 代理，见下
    # 可选：DIM_EVAL_TOOLCHAIN、DIM_EVAL_LEDGER_REMOTE、
    #       DIM_EVAL_LEDGER_BRANCH（默认 eval-ledger）、DIM_EVAL_GITHUB_REPO（默认 arcships/dim）、
    #       CARGO_TARGET_DIR（跨天复用依赖的编译产物）
@@ -123,6 +124,10 @@ ledger 并推送到 `eval-ledger`。
 
 - `ca-certificates.crt` 不属于发布包。dimcode 为每个 HTTPS 客户端读取系统根证书，题目镜像里没有
 证书时 App Server 无法启动；adapter 用 `SSL_CERT_FILE` 指向这份证书。
+- 判分阶段可走 HTTP 代理（`DIM_EVAL_VERIFIER_PROXY`）。30 个 FrontierHarness 任务里有 18 个
+  的判分脚本在打分时从 GitHub 下载 uv；评测机直连不上 GitHub 时它们什么都没测就记 0 分。代理
+  只经 harbor 的 `verifier.env` 进入判分阶段，`localhost` 不走代理；agent 阶段不受影响。是否
+  使用代理记入 baseline 的 `params.verifier_proxy`。
 - 命令沙箱设为 `host`（`host-isolation.json`）。dimcode 的沙箱依赖 bubblewrap，题目镜像里没有，
   默认配置下每个 trial 的第一条命令都以 `isolation_unavailable` 失败，agent 还会自己去改这个
   文件。容器本身就是隔离边界。
