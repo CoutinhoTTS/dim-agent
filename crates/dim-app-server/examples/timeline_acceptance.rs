@@ -664,6 +664,9 @@ impl TimelineStore for BarrierStore {
     fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
         self.inner.rollback_session(id)
     }
+    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.inner.release_session(id)
+    }
     fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
         self.inner.session_config(id)
     }

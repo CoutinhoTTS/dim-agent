@@ -381,6 +381,34 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} モデル利用不可 · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}：モデルなし · dimcode models {id} --refresh"
+        }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}：モデルなし · provider.models.create でモデルを追加"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}：{unavailable} 個利用不可、{disabled} 個無効 · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}：カタログを読み取れません · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "キャッシュされたカタログがありません。サインインして models PROVIDER --refresh を実行してください。"
+        }
+        "Saved model preferences cleared" => "保存したモデル設定を消去しました",
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}：1 モデル無効 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}：{count} モデル無効 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "モデルがありません。dimcode models {id} --refresh で一覧できます。"
+        }
+        "No models. The provider listed none." => {
+            "モデルがありません。このプロバイダーは何も一覧しませんでした。"
+        }
         "Enter select · Esc back" => "Enter 選択 · Esc 戻る",
         "Subagent models" => "サブエージェントモデル",
         "Subagent models: {policy}" => "サブエージェントモデル：{policy}",

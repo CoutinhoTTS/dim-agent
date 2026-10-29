@@ -64,6 +64,12 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
         self.memory.rollback_session(id)
     }
+    fn release_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(id)
+    }
     fn session_config<'a>(
         &'a self,
         id: &'a str,

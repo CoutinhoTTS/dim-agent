@@ -589,26 +589,13 @@ fn checked_lease(lease: CredentialLease) -> Result<CredentialLease, ManagedProvi
     Ok(lease)
 }
 
-pub struct ManagedProvidersPlugin {
-    methods: Key<crate::methods::ManagementMethods>,
-}
-impl ManagedProvidersPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
-        Ok(Self {
-            methods: names.key()?,
-        })
-    }
-}
+pub struct ManagedProvidersPlugin;
 impl DynPlugin for ManagedProvidersPlugin {
     fn name(&self) -> &str {
         "ManagedProviders"
     }
-    fn injects(&self) -> Vec<TypeKey> {
-        vec![self.methods.erase()]
-    }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let methods = ctx.require_at(&self.methods)?;
             let service = Arc::new(ManagedProviders {
                 provider: Mutex::new(None),
                 stop: CancellationToken::new(),
@@ -618,8 +605,36 @@ impl DynPlugin for ManagedProvidersPlugin {
                 owner.stop.cancel();
                 Ok(())
             })?;
-            management::provide(ctx, &methods, service.clone())?;
             ctx.provide_as::<ManagedProviders>(service)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+/// Process owner of the `account` management namespace.
+pub struct ManagedProviderMethodsPlugin {
+    owner: Key<ManagedProviders>,
+    methods: Key<crate::methods::ManagementMethods>,
+}
+impl ManagedProviderMethodsPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            owner: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ManagedProviderMethodsPlugin {
+    fn name(&self) -> &str {
+        "ManagedProviderMethods"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.owner.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let owner = ctx.require_at(&self.owner)?;
+            let methods = ctx.require_at(&self.methods)?;
+            management::provide(ctx, &methods, owner)?;
             Ok(Effect::Done)
         })
     }

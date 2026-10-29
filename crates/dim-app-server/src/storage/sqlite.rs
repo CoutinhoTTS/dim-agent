@@ -1,20 +1,21 @@
-use dim_agent_runtime::{AgentError, Result};
+use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use std::{
     fs::File,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 22;
+const FORMAT: u32 = 24;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 22))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 24))",
     ),
     (
         "settings_documents",
@@ -96,11 +97,23 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "session_metadata",
         "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
     ),
+    (
+        "session_catalog",
+        "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
+    ),
+    (
+        "session_catalog_by_activity",
+        "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
+    ),
+    (
+        "session_catalog_with_preview",
+        "CREATE INDEX session_catalog_with_preview ON session_catalog(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL",
+    ),
 ];
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 8] = [
+const UPGRADES: [(u32, &[&str]); 10] = [
     (
         13,
         &[
@@ -123,9 +136,19 @@ const UPGRADES: [(u32, &[&str]); 8] = [
     // #527: a tool result's `effects` and a completed compaction's
     // `digest_entries`, which a v20 daemon cannot decode; the marker only.
     (20, &[]),
-    // #580: tool schemas may omit `type`, which a v21 daemon cannot
-    // decode; the marker only.
+    // #580: typeless tool schemas, unreadable by v21.
     (21, &[]),
+    (
+        22,
+        &[
+            "session_catalog",
+            "session_catalog_by_activity",
+            "session_catalog_with_preview",
+        ],
+    ),
+    // #555: a configuration's `system_source`, which a v23 daemon cannot
+    // decode; the marker only.
+    (23, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -258,6 +281,19 @@ impl SqliteStorage {
         let admission = DatabaseLease(admission);
         let mut connection = Connection::open(&path).map_err(storage)?;
         connection
+            .create_scalar_function(
+                "catalog_fold",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC
+                    | rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |ctx| {
+                    Ok(ctx
+                        .get::<Option<String>>(0)?
+                        .map(|text| text.to_lowercase()))
+                },
+            )
+            .map_err(storage)?;
+        connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(storage)?;
         let tx = connection
@@ -285,9 +321,12 @@ impl SqliteStorage {
                 tx.execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
-                for (_, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
+                for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
+                    }
+                    if *from == 22 {
+                        super::catalog::backfill(&tx)?;
                     }
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
@@ -390,11 +429,29 @@ impl SqliteStorage {
         }
         let admitted = Operation(self.clone());
         tokio::task::spawn_blocking(move || {
-            let mut guard = admitted.0.connection.lock().unwrap();
+            let mut guard = admitted
+                .0
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
-            operation(connection)
+            match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
+                Ok(result) => result,
+                Err(panic) => {
+                    let failure = storage(format!(
+                        "SQLite operation panicked: {}",
+                        panic_message(panic)
+                    ));
+                    if !connection.is_autocommit()
+                        && let Err(cleanup) = connection.execute_batch("ROLLBACK")
+                    {
+                        return Err(failure.with_cleanup(storage(cleanup)));
+                    }
+                    Err(failure)
+                }
+            }
         })
         .await
         .map_err(storage)?
@@ -413,7 +470,10 @@ impl SqliteStorage {
                 idle.await;
             }
             tokio::task::spawn_blocking(move || {
-                let mut guard = db.connection.lock().unwrap();
+                let mut guard = db
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(connection) = guard.take()
                     && let Err((connection, failure)) = connection.close()
                 {

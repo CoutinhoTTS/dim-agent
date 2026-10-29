@@ -2,7 +2,7 @@
 use dim_agent_capabilities::defaults;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::EventKind;
-use dim_app_server::{ServerConfig, serve};
+use dim_app_server::{ServerConfig, serve, storage::SqliteStorage};
 use dim_client::{Client, ConnectionConfig, Server};
 use dim_migration::{Migration, MigrationPlugin, Outcome, TaskStatus};
 use rusqlite::{Connection, params};
@@ -199,6 +199,8 @@ async fn migration_retains_unsafe_objects_and_cleans_interrupted_snapshots() {
         );
     }
     let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    assert_eq!(native.query_row("SELECT count(*) FROM agent_sessions s LEFT JOIN session_catalog c USING(session_id) WHERE c.session_id IS NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(native.query_row("SELECT count(*) FROM session_catalog c JOIN timeline_events e ON e.session_id=c.session_id AND e.branch_id='main' AND e.last_sequence=(SELECT sequence FROM timeline_branches WHERE session_id=c.session_id AND branch_id='main') WHERE c.updated_at_ms!=json_extract(e.body,'$.record.event.create_at')", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     assert_eq!(
         native
             .query_row(
@@ -668,6 +670,20 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     let db = fixture(&source);
     let target = directory.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
+    let native_path = target.join("rust/dimcode.sqlite");
+    let native = SqliteStorage::open(native_path.clone()).unwrap();
+    native.close().await.unwrap();
+    Connection::open(&native_path)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE agent_store_format;
+             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
+             INSERT INTO agent_store_format VALUES (23);",
+        )
+        .unwrap();
+    let (previous, version) = SqliteStorage::open_read_only(native_path).unwrap();
+    assert_eq!(version, 23);
+    previous.close().await.unwrap();
     std::fs::write(
         target.join("config.json"),
         r#"{"locale":"en","tuiToolDetailsExpanded":false}"#,
@@ -698,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        22
+        24
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -742,6 +758,20 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     let mut client = Client::connect(&connection).await.unwrap();
     let listed: Value = client.typed("session.list", json!({})).await.unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    let page: Value = client
+        .typed("session.catalog", json!({"query":id,"withPreview":true}))
+        .await
+        .unwrap();
+    assert_eq!(page["sessions"][0]["sessionId"], id);
+    assert!(
+        page["sessions"][0]["preview"]
+            .as_str()
+            .is_some_and(|preview| !preview.is_empty())
+    );
+    assert!(
+        agent.sessions().is_empty(),
+        "listing must not restore imported Sessions"
+    );
     let session = agent
         .restore_session(id.clone())
         .await
@@ -1247,7 +1277,7 @@ async fn migration_preserves_removed_client_settings_and_refuses_unsupported_tar
     let preview = directory.path().join("preview");
     std::fs::create_dir_all(preview.join("rust")).unwrap();
     let native = Connection::open(preview.join("rust/dimcode.sqlite")).unwrap();
-    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=23));INSERT INTO agent_store_format VALUES(23);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
+    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=25));INSERT INTO agent_store_format VALUES(25);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
     drop(native);
     let before = std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap();
     let root = rutis::Ctx::root().unwrap();

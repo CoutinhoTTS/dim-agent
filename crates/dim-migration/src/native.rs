@@ -59,9 +59,9 @@ impl Native {
         })?;
         let (checked, version) = SqliteStorage::open_read_only(path.clone()).map_err(failure)?;
         checked.close().await.map_err(failure)?;
-        if version != 22 {
+        if version != 24 {
             return Err(Error::Target(
-                "Migration requires native storage format 22; target preserved".into(),
+                "Migration requires native storage format 24; target preserved".into(),
             ));
         }
         let db = Connection::open(path).map_err(failure)?;
@@ -538,6 +538,7 @@ impl Native {
             )
             .map_err(failure)?;
         }
+        dim_app_server::storage::initialize_session_catalog(&tx, &session).map_err(failure)?;
         if let Some(title) = &data.title {
             tx.execute(
                 "INSERT INTO session_metadata VALUES (?1,1,?2,'manual')",

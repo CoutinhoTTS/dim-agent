@@ -253,8 +253,13 @@ impl Agent {
                     Err(cleanup) => Err(cancelled.with_cleanup(cleanup)),
                 };
             }
-            if created && let Err(failure) = result {
-                result = Err(match owner.0.assembly.store.rollback_session(&id).await {
+            if let Err(failure) = result {
+                let cleanup = if created {
+                    owner.0.assembly.store.rollback_session(&id).await
+                } else {
+                    owner.0.assembly.store.release_session(&id).await
+                };
+                result = Err(match cleanup {
                     Ok(()) => failure,
                     Err(cleanup) => failure.with_cleanup(cleanup),
                 });
@@ -730,6 +735,13 @@ impl Session {
             let children = crate::assembly::with_copies(&children, &this.0.owner.copies);
             if let Err(e) = shutdown_scope(&this.0.view, &children).await {
                 errors.push(e);
+            }
+            if let Err(error) = guarded("storage.release_session", async {
+                this.0.owner.assembly.store.release_session(this.id()).await
+            })
+            .await
+            {
+                errors.push(error);
             }
             this.0.owner.lifecycle.advance(SessionPhase::Closed);
             let supervisor = this.0.supervisor.lock().unwrap().take();

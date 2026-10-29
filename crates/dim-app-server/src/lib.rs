@@ -46,7 +46,9 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
 use rutis_loader::runtime::RowsSource;
 use rutis_loader::runtime::RuntimeRows;
+use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -84,6 +86,16 @@ pub struct ServerConfig {
     pub web_assets: Option<PathBuf>,
     /// The default plugin configuration file (PluginManager §2.3).
     pub plugin_defaults: Option<PathBuf>,
+    /// A default plugin's row configuration (PluginManager §2.1): the
+    /// manifest's `config` with this plugin name's patch deep-merged over
+    /// it. The product sets none, so a shipped plugin reads its manifest's
+    /// value; the evaluation tooling sets the member a candidate text
+    /// replaces, so both arms run the same plugin code.
+    pub plugin_configs: BTreeMap<String, Value>,
+    /// The plugin files root (PluginManager §2.1): `<root>/<plugin id>/` is
+    /// a plugin's data directory. The product sets it through a product
+    /// home; a host without one names it here.
+    pub plugin_files: Option<PathBuf>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -107,6 +119,8 @@ impl Default for ServerConfig {
             idle_unload_after: Duration::from_secs(60),
             web_assets: None,
             plugin_defaults: None,
+            plugin_configs: BTreeMap::new(),
+            plugin_files: None,
         }
     }
 }
@@ -420,6 +434,25 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
+    let plugin_root = match &config.plugin_files {
+        Some(root) => {
+            create_private_directory(root)?;
+            let root = std::fs::canonicalize(root)?;
+            let index = match config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == &root)
+            {
+                Some(index) => index,
+                None => {
+                    config.file_roots.push(root);
+                    config.file_roots.len() - 1
+                }
+            };
+            Some(index)
+        }
+        None => product_root,
+    };
     let execution_root = if config.local_execution() {
         let cwd = std::env::current_dir()?;
         let home = config
@@ -542,12 +575,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(managed_provider::ManagedProvidersPlugin::new(
-            names,
-        )?))
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(managed_provider::ManagedProvidersPlugin))
     })?);
-    if let Some(home_root) = product_root {
+    if let Some(home_root) = plugin_root {
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -557,6 +588,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 )?))
             },
         )?);
+    }
+    if let Some(home_root) = product_root {
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(
+                managed_provider::ManagedProviderMethodsPlugin::new(names)?,
+            ))
+        })?);
         if let Some(provider) = &config.managed_provider {
             rows.push((provider.0)(&mut builtins, home_root));
             rows.push(register_part(&mut builtins, builder.catalog(), |names| {
@@ -668,8 +706,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         Some(home) => Some(
             plugin_manager::State::read(
                 home,
-                product_root.and(config.product_home.as_deref()),
+                plugin_root.and(
+                    config
+                        .plugin_files
+                        .as_deref()
+                        .or(config.product_home.as_deref()),
+                ),
                 config.plugin_defaults.as_deref(),
+                &config.plugin_configs,
                 builder.catalog_mut(),
             )
             .map_err(ServerError::Configuration)?,

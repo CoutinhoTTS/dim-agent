@@ -14,8 +14,41 @@
 //! names. Each arm runs every scenario `--runs` times, one fixed judge reads
 //! each run's exported Timeline, and the report applies the relative rule of
 //! model-prompts §8.1: every probe's pass rate is at least the current arm's
-//! minus 0.05, and the candidate's violations and failed runs are no higher.
-//! There is no absolute pass line.
+//! minus 0.05, the candidate's violations, failed runs and unjudged runs are
+//! no higher, and every probe has at least one judged run in each arm. There
+//! is no absolute pass line.
+//!
+//! A failed run is one that ended on an error or its wall-clock budget, or
+//! one whose judging did not happen: there was nothing the judge could be
+//! asked, or a judge call failed — the first call, its retry without a
+//! temperature, or a re-ask. The judge's verdicts are read from a JSON array
+//! or from one object per line; a reply that gives no verdict, or leaves a
+//! statement without one, is asked again with what was wrong, at most twice.
+//! A run the judge answered but still gave no usable verdicts for after the
+//! re-asks is unjudged: it adds nothing to its arm's probe rates, violations
+//! or failed runs, and the report counts it and lists it. A run that failed
+//! on its own is a failed run, scored as before, whatever its judge did.
+//!
+//! Both arms load the product's default plugins, from the default
+//! configuration file the product ships (`--defaults FILE`, by default the
+//! one in this repository), through the App Server's own default plugin
+//! configuration, so the TypeScript plugins run in every scenario. Their
+//! rows need Node and the `@arcships/rutis-runtime` packages: the runner
+//! reads `DIM_TEST_NODE` and `DIM_TEST_JS_RUNTIME` from the environment, and
+//! each default plugin's packages must be installed (`npm ci --prefix
+//! <plugin directory>`). For example:
+//!
+//! ```text
+//! DIM_TEST_NODE="$(command -v node)" \
+//! DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
+//! cargo run --locked -p xtask -- scenario-eval ...
+//! ```
+//!
+//! A candidate for a TypeScript plugin's text replaces a member of that
+//! plugin's factory configuration, which is its manifest `config`: the
+//! candidate table names the plugin and the member, and the harness patches
+//! the plugin's row, so both arms run the same plugin code and differ only
+//! in the configured text.
 //!
 //! A scenario directory under `--scenarios` holds `scenario.json` and the
 //! starting workspace beside it, in `workspace/`; the directory name is the
@@ -25,6 +58,7 @@
 //! {
 //!   "description": "Two independent fixes, one of them on a line",
 //!   "message": "Make the failing tests pass.",
+//!   "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
 //!   "steers": [
 //!     {"afterSeconds": 30.0, "text": "Also update the README."},
 //!     {"whenToolCall": "config.py", "text": "DEFAULT_TIMEOUT is 45 now."}
@@ -39,6 +73,12 @@
 //! }
 //! ```
 //!
+//! - `calls` is the Session state a scenario needs before its message: a
+//!   list of `{method, params}`, sent in order on the scenario's Session
+//!   after it is created and before the message. The runner resolves the
+//!   Session id into `params.sessionId`; a branch defaults to `main` the
+//!   way the methods treat it. A call that fails fails the run, and the
+//!   error names the method.
 //! - `message` is the operator's first message, submitted to `main`. A steer
 //!   is one more operator message to `main`, sent when the run reaches
 //!   `afterSeconds` of wall clock or, for `whenToolCall`, when a
@@ -69,7 +109,9 @@ use dim_agent_capabilities::{
     context_model::window_facts,
     host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver},
 };
-use dim_agent_types::{Message, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt};
+use dim_agent_types::{
+    Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
+};
 use dim_app_server::RunningServer;
 use dim_client::{Client, ConnectionConfig, Message as WireMessage, Server as WireServer};
 use serde_json::{Value, json};
@@ -92,30 +134,58 @@ fn delta() -> f64 {
     DELTA.0 as f64 / DELTA.1 as f64
 }
 /// How long the driver waits after the last event before it asks whether
-/// every line is idle.
+/// every line is idle. The quiet period follows the last notice the driver
+/// reads, including the notices it reads while it waited on `session.idle`.
 const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
-type TextMember = fn(&mut Overrides, Arc<str>);
+/// The message that asks the judge again, `{what}` saying why its last answer
+/// could not be used.
+const JUDGE_REASK: &str = "Your answer could not be used: {what}. Answer again with the JSON array only, one object per statement.";
+/// How many times one run's judge is asked again for an answer it cannot use.
+const REASKS: u32 = 2;
+
+/// Where one text lives in the assembly [`app_server::serve_home`] builds.
+enum TextMember {
+    /// A Rust part's factory configuration member, put in place by this
+    /// function.
+    Rust(fn(&mut Overrides, Arc<str>)),
+    /// A TypeScript plugin's factory configuration member: the plugin's
+    /// name in the default configuration file, and the dotted path of the
+    /// member inside the manifest's `config`. The harness patches that
+    /// plugin's row, so both arms run the same plugin code (model-prompts
+    /// §8.1).
+    /// A plugin entry is added by its text's owner (#553 for Goal, #551 for
+    /// the capabilities); the runner's own test constructs the variant until
+    /// one lands.
+    #[allow(dead_code)]
+    Plugin {
+        plugin: &'static str,
+        member: &'static str,
+    },
+}
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
 /// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
-/// description (timeline branches §12.4) are the texts exposed at a factory
-/// configuration today; the other owners add their entries with their own
-/// factory members: PromptSources under
-/// [#548](https://github.com/arcships/dim/issues/548), and Goal,
-/// Capabilities and ContextCompaction under their own issues (model-prompts
-/// §9.8).
+/// description (timeline branches §12.4) are the texts exposed at a Rust
+/// factory configuration today; the other owners add their entries with their
+/// own factory members: Goal under
+/// [#553](https://github.com/arcships/dim/issues/553), and Capabilities under
+/// [#551](https://github.com/arcships/dim/issues/551).
+/// A plugin's text is its manifest `config` member, which the plugin's row
+/// carries into its `apply`.
 const TEXTS: &[(&str, TextMember)] = &[
-    ("context-compaction/summary", |overrides, text| {
-        overrides.summary_prompt = Some(text)
-    }),
-    ("timeline-tree/branch-description", |overrides, text| {
-        overrides.branch_description = Some(text)
-    }),
+    (
+        "context-compaction/summary",
+        TextMember::Rust(|overrides, text| overrides.summary_prompt = Some(text)),
+    ),
+    (
+        "timeline-tree/branch-description",
+        TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
+    ),
 ];
 
 pub async fn run() -> Result<()> {
@@ -129,6 +199,14 @@ pub async fn run() -> Result<()> {
 /// Runs the evaluation and writes `runs.jsonl` and `scenario.md`; returns the
 /// report.
 async fn evaluate(options: &Options) -> Result<String> {
+    if options.defaults.is_some() {
+        if options.node.is_none() {
+            return Err("set DIM_TEST_NODE: the default plugins run in Node".into());
+        }
+        if options.js_runtime.is_none() {
+            return Err("set DIM_TEST_JS_RUNTIME: the default plugins import it".into());
+        }
+    }
     let _sockets = Sockets;
     let overrides = overrides(&options.text, options.candidate.clone())?;
     let scenarios = read_scenarios(&options.scenarios)?;
@@ -148,7 +226,8 @@ async fn evaluate(options: &Options) -> Result<String> {
         model_configuration: None,
         judge_configuration: None,
         judge_temperature_dropped: 0,
-        judge_calls: 0,
+        judge_asked_runs: 0,
+        judge_reasks: 0,
     };
     for (arm, overrides) in [("current", Overrides::default()), ("candidate", overrides)] {
         for scenario in &scenarios {
@@ -165,7 +244,9 @@ async fn evaluate(options: &Options) -> Result<String> {
                 )
                 .await?;
                 instrument.judge_temperature_dropped += usize::from(record.temperature_dropped);
-                instrument.judge_calls += usize::from(record.judge_error.is_none());
+                instrument.judge_asked_runs +=
+                    usize::from(record.judge_outcome != JudgeOutcome::NotAsked);
+                instrument.judge_reasks += record.judge_reasks as usize;
                 records.push(record);
             }
         }
@@ -191,6 +272,11 @@ struct Options {
     out: PathBuf,
     home: PathBuf,
     model_config: Option<PathBuf>,
+    /// The default plugin configuration file both arms load; `None` serves
+    /// the assembly without the product's plugins.
+    defaults: Option<PathBuf>,
+    node: Option<PathBuf>,
+    js_runtime: Option<PathBuf>,
 }
 impl Options {
     fn parse() -> Result<Self> {
@@ -204,11 +290,13 @@ impl Options {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
                      --text ID --candidate FILE --model PROVIDER/MODEL \
                      --judge PROVIDER/MODEL --runs N --home DIR --out DIR \
-                     [--model-config FILE]";
+                     [--model-config FILE] [--defaults FILE]";
+        // Both arms serve the product's default plugins; `--defaults`
+        // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut home, mut out) = (None, None, None);
         let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
-        let (mut runs, mut model_config) = (None, None);
+        let (mut runs, mut model_config, mut defaults) = (None, None, None);
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -221,9 +309,13 @@ impl Options {
                 "--home" => home = Some(PathBuf::from(value)),
                 "--out" => out = Some(PathBuf::from(value)),
                 "--model-config" => model_config = Some(PathBuf::from(value)),
+                "--defaults" => defaults = Some(PathBuf::from(value)),
                 _ => return Err(usage.into()),
             }
         }
+        let defaults = Some(defaults.unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/default-plugins.json")
+        }));
         Ok(Self {
             scenarios: scenarios.ok_or(usage)?,
             text: text.ok_or(usage)?,
@@ -234,8 +326,19 @@ impl Options {
             out: output_directory(&out.ok_or(usage)?)?,
             home: home.ok_or(usage)?,
             model_config,
+            defaults,
+            node: env_path("DIM_TEST_NODE"),
+            js_runtime: env_path("DIM_TEST_JS_RUNTIME"),
         })
     }
+}
+
+/// A path from the environment: the TypeScript plugin rows run in Node,
+/// which the runner reads from `DIM_TEST_NODE` and `DIM_TEST_JS_RUNTIME`.
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Creates `--out` and resolves it: `session.create` takes an absolute cwd,
@@ -264,11 +367,21 @@ fn target(value: &str) -> Result<ModelId> {
     })
 }
 
-/// The overrides that put `candidate` in place of the text `text` names; an
-/// unknown id fails before any run and lists the known ids.
+/// The overrides that put `candidate` in place of the text `text` names in
+/// [`TEXTS`]; an unknown id fails before any run and lists the known ids.
 fn overrides(text: &str, candidate: Arc<str>) -> Result<Overrides> {
-    let Some((_, apply)) = TEXTS.iter().find(|(id, _)| *id == text) else {
-        let known: Vec<_> = TEXTS.iter().map(|(id, _)| *id).collect();
+    overrides_in(TEXTS, text, candidate)
+}
+
+/// [`overrides`] over `table`: a test reaches a member no shipped text
+/// exposes yet with its own entry, through the same injection.
+fn overrides_in(
+    table: &[(&str, TextMember)],
+    text: &str,
+    candidate: Arc<str>,
+) -> Result<Overrides> {
+    let Some((_, member)) = table.iter().find(|(id, _)| *id == text) else {
+        let known: Vec<_> = table.iter().map(|(id, _)| *id).collect();
         return Err(format!(
             "--text {text}: unknown text id; known ids: {}",
             known.join(", ")
@@ -276,7 +389,16 @@ fn overrides(text: &str, candidate: Arc<str>) -> Result<Overrides> {
         .into());
     };
     let mut overrides = Overrides::default();
-    apply(&mut overrides, candidate);
+    match member {
+        TextMember::Rust(apply) => apply(&mut overrides, candidate),
+        TextMember::Plugin { plugin, member } => {
+            let mut value = Value::String(candidate.to_string());
+            for key in member.split('.').rev() {
+                value = Value::Object([(key.to_owned(), value)].into_iter().collect());
+            }
+            overrides.plugin_configs.insert((*plugin).to_owned(), value);
+        }
+    }
     Ok(overrides)
 }
 
@@ -317,10 +439,22 @@ struct ScenarioFile {
     #[serde(default)]
     description: String,
     message: String,
+    /// Session method calls made before the message, in order.
+    #[serde(default)]
+    calls: Vec<Call>,
     #[serde(default)]
     steers: Vec<Steer>,
     budget: Budget,
     probes: Vec<Probe>,
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Call {
+    method: String,
+    /// The method's parameters without the Session id, which the runner
+    /// resolves.
+    #[serde(default)]
+    params: Value,
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -368,6 +502,7 @@ struct Scenario {
     description: String,
     directory: PathBuf,
     message: String,
+    calls: Vec<Call>,
     steers: Vec<Steer>,
     budget: Budget,
     probes: Vec<Probe>,
@@ -433,6 +568,14 @@ fn into_scenario(
             }
         }
     }
+    for call in &raw.calls {
+        if call.method.trim().is_empty() {
+            return Err("a call needs a method".into());
+        }
+        if !call.params.is_object() && !call.params.is_null() {
+            return Err(format!("call {}: params must be an object", call.method));
+        }
+    }
     if raw.probes.is_empty() {
         return Err("a scenario needs at least one probe".into());
     }
@@ -456,6 +599,7 @@ fn into_scenario(
         description: raw.description,
         directory,
         message: raw.message,
+        calls: raw.calls,
         steers: raw.steers,
         budget: raw.budget,
         probes: raw.probes,
@@ -475,12 +619,33 @@ struct RunRecord {
     turns: u32,
     window: Option<f64>,
     duration_ms: f64,
+    /// Whether the run is a failed run, set once when the record is built
+    /// (model-prompts §8.1).
     failed: bool,
+    /// How the run's judging ended (model-prompts §8.1).
+    judge_outcome: JudgeOutcome,
     error: Option<String>,
     judge_error: Option<String>,
+    /// How many times the judge was asked again for an answer it could not
+    /// use.
+    judge_reasks: u32,
     #[serde(skip)]
     temperature_dropped: bool,
     probes: Vec<ProbeRecord>,
+}
+impl RunRecord {
+    /// Whether the run is unjudged (model-prompts §8.1): the judge answered
+    /// every call and gave no usable verdicts after the re-asks, and nothing
+    /// else failed the run. Such a run enters none of its arm's metrics.
+    fn unjudged(&self) -> bool {
+        !self.failed && self.judge_outcome == JudgeOutcome::Unreadable
+    }
+    /// Whether the run is judged (model-prompts §8.1): it raised no error and
+    /// the judge answered every call with usable verdicts. Only such a run
+    /// counts toward its arm's and each of its probes' judged runs.
+    fn judged(&self) -> bool {
+        self.error.is_none() && self.judge_outcome == JudgeOutcome::Judged
+    }
 }
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -497,6 +662,24 @@ enum ProbeVerdict {
     Absent,
     Contradicted,
     Unparsed,
+}
+/// How one run's judging ended (model-prompts §8.1). The outcome is a typed
+/// field, so nothing tells a run the judge could not be asked from one it
+/// answered unreadably by reading the error's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JudgeOutcome {
+    /// The judge answered every call, and its verdicts are usable.
+    Judged,
+    /// A judge call failed: a window overflow, a transport or an HTTP error,
+    /// on the first call, on its retry, or on a re-ask.
+    CallFailed,
+    /// The judge was never asked: the run left no export, the profile has no
+    /// model host for the judge, or the run failed before the judge ran.
+    NotAsked,
+    /// The judge answered every call and gave no usable verdicts after the
+    /// re-asks.
+    Unreadable,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,6 +714,9 @@ async fn run_once(
         overrides: overrides.clone(),
         model_config: options.model_config.clone(),
         unix_path: Some(endpoint()?),
+        defaults: options.defaults.clone(),
+        node: options.node.clone(),
+        js_runtime: options.js_runtime.clone(),
     };
     let server = app_server::serve_home(
         &run_home,
@@ -577,22 +763,22 @@ async fn run_once(
         turns: driven.turns,
         window: driven.window,
         duration_ms: started.elapsed().as_secs_f64() * 1000.,
-        failed: failed(driven.stop, error.as_deref(), &finished.probes),
+        failed: failed(driven.stop, error.as_deref(), finished.judging.outcome),
+        judge_outcome: finished.judging.outcome,
         error,
-        judge_error: finished.judge_error,
-        temperature_dropped: finished.temperature_dropped,
-        probes: finished.probes,
+        judge_error: finished.judging.error,
+        judge_reasks: finished.judging.reasks,
+        temperature_dropped: finished.judging.temperature_dropped,
+        probes: finished.judging.probes,
     })
 }
 
 /// What one run left behind: the driven Session, its export and the judge's
-/// answer.
+/// part.
 struct Finished {
     driven: Driven,
     export: Option<String>,
-    probes: Vec<ProbeRecord>,
-    judge_error: Option<String>,
-    temperature_dropped: bool,
+    judging: Judging,
 }
 impl Finished {
     fn failed(scenario: &Scenario, error: String) -> Self {
@@ -605,8 +791,36 @@ impl Finished {
                 error: Some(error),
             },
             export: None,
+            judging: Judging::not_asked(scenario, None),
+        }
+    }
+}
+
+/// The judge's part of one run: how its calls ended, the verdict for every
+/// probe, its error and what its calls cost.
+struct Judging {
+    /// How the judge's calls ended (model-prompts §8.1).
+    outcome: JudgeOutcome,
+    /// One record per probe: the judge's verdicts, or every probe `unparsed`.
+    probes: Vec<ProbeRecord>,
+    /// The judge's error; `None` when its verdicts are usable.
+    error: Option<String>,
+    /// How many times the judge was asked again for an answer it could not
+    /// use.
+    reasks: u32,
+    /// Whether the judge had to drop its temperature.
+    temperature_dropped: bool,
+}
+impl Judging {
+    /// A run the judge was never asked about: it left no export, the profile
+    /// has no model host for the judge, or the run failed before the judge
+    /// ran.
+    fn not_asked(scenario: &Scenario, error: Option<String>) -> Self {
+        Self {
+            outcome: JudgeOutcome::NotAsked,
             probes: unparsed(scenario),
-            judge_error: None,
+            error,
+            reasks: 0,
             temperature_dropped: false,
         }
     }
@@ -639,14 +853,15 @@ async fn drive_once(
     })
     .await
     .map_err(|error| format!("cannot connect to the served App Server: {error}"))?;
+    if settings.defaults.is_some() {
+        wait_for_plugins(&mut client).await?;
+    }
     let mut driven = drive(&mut client, scenario, workspace, model).await;
     if driven.session.is_empty() {
         return Ok(Finished {
             driven,
             export: None,
-            probes: unparsed(scenario),
-            judge_error: None,
-            temperature_dropped: false,
+            judging: Judging::not_asked(scenario, None),
         });
     }
     let _ = client
@@ -678,9 +893,7 @@ async fn drive_once(
             return Ok(Finished {
                 driven,
                 export: None,
-                probes: unparsed(scenario),
-                judge_error: Some(format!("no export to judge: {error}")),
-                temperature_dropped: false,
+                judging: Judging::not_asked(scenario, Some(format!("no export to judge: {error}"))),
             });
         }
     };
@@ -691,30 +904,31 @@ async fn drive_once(
         return Ok(Finished {
             driven,
             export: Some(export),
-            probes: unparsed(scenario),
-            judge_error: Some("the served profile has no model host for the judge".to_owned()),
-            temperature_dropped: false,
+            judging: Judging::not_asked(
+                scenario,
+                Some("the served profile has no model host for the judge".to_owned()),
+            ),
         });
     };
-    let (probes, judge_error, temperature_dropped) =
-        judge_export(&host, &resolver, judge, scenario, &export, cancel).await;
+    let judging = judge_export(&host, &resolver, judge, scenario, &export, cancel).await;
     Ok(Finished {
         driven,
         export: Some(export),
-        probes,
-        judge_error,
-        temperature_dropped,
+        judging,
     })
 }
 
-/// Whether the run counts as a failed run: an error, a wall-clock timeout, or
-/// a verdict the judge did not answer (model-prompts §8.1).
-fn failed(stop: &str, error: Option<&str>, probes: &[ProbeRecord]) -> bool {
+/// Whether the run is a failed run (model-prompts §8.1): it failed on its
+/// own, an error or its wall-clock budget, or its judging did not happen — a
+/// judge call failed, there was no export to judge, or no model host for the
+/// judge.
+fn failed(stop: &str, error: Option<&str>, judge_outcome: JudgeOutcome) -> bool {
     stop == "seconds"
         || error.is_some()
-        || probes
-            .iter()
-            .any(|probe| probe.verdict == ProbeVerdict::Unparsed)
+        || matches!(
+            judge_outcome,
+            JudgeOutcome::CallFailed | JudgeOutcome::NotAsked
+        )
 }
 
 /// Every probe of a run that was not judged.
@@ -732,9 +946,9 @@ fn unparsed(scenario: &Scenario) -> Vec<ProbeRecord> {
 }
 
 /// The run's turns as the exported Timeline records them, and the first failed
-/// turn's error. The export is the account of record: a turn that ends while
-/// the idle probe waits can be missing from the notice stream, because the
-/// probe returns when the line becomes idle, before that notice is read.
+/// turn's error. The export is the account of record: a run that ends on a
+/// budget or an error stops reading the notice stream with notices still
+/// queued, so that stream can hold fewer turn ends than the Timeline does.
 fn turns_in_export(export: &str) -> (u32, Option<String>) {
     let mut turns = 0;
     let mut failed = None;
@@ -778,6 +992,41 @@ async fn selection(
         )
         .await
         .map_err(|error| format!("{}/{}: {error}", target.provider_id, target.model_id).into())
+}
+
+/// Waits until the default plugin rows leave `pending`: they start after
+/// the server is up, and a `calls` step or a plugin's text needs its row
+/// loaded. A failed row fails the run and names itself.
+async fn wait_for_plugins(client: &mut Client) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let items = client
+            .rpc("plugin.list", json!({}))
+            .await
+            .map_err(|error| format!("plugin.list failed: {error}"))?;
+        let items = items
+            .as_array()
+            .ok_or("plugin.list did not answer a list")?;
+        let mut pending = false;
+        for item in items {
+            let name = item["name"].as_str().unwrap_or_default();
+            match item["status"].as_str().unwrap_or_default() {
+                "failed" => {
+                    let error = item["error"].as_str().unwrap_or("no reason given");
+                    return Err(format!("the plugin {name} failed to load: {error}").into());
+                }
+                "pending" => pending = true,
+                _ => {}
+            }
+        }
+        if !pending {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("the default plugins did not start within 60 seconds".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// What one driven run reached.
@@ -858,6 +1107,22 @@ async fn drive(
             driven.stop = "error";
             driven.error = Some(format!(
                 "the Session serves no context window to check the scenario's budget against: {error}"
+            ));
+            return driven;
+        }
+    }
+    for (index, call) in scenario.calls.iter().enumerate() {
+        let mut params = match &call.params {
+            Value::Object(params) => params.clone(),
+            _ => serde_json::Map::new(),
+        };
+        params.insert("sessionId".to_owned(), json!(session));
+        if let Err(error) = client.rpc(&call.method, Value::Object(params)).await {
+            driven.stop = "error";
+            driven.error = Some(format!(
+                "the calls step {} ({}) failed: {error}",
+                index + 1,
+                call.method
             ));
             return driven;
         }
@@ -1100,8 +1365,12 @@ fn notice(method: &str, params: &Value) -> Notice {
     }
 }
 
-/// Whether every known line is idle. `session.idle` returns when the line is
-/// idle; a short deadline keeps a busy line from holding the driver.
+/// Whether every known line is idle and no notice arrived while it asked.
+/// `session.idle` returns when the line is idle; a short deadline keeps a busy
+/// line from holding the driver. A notice that arrives while a call waits is
+/// left in the client's queue, and the driver reads every queued notice before
+/// its next quiet check, so `false` here means the quiet period follows that
+/// notice's read.
 async fn idle(
     client: &mut Client,
     session: &str,
@@ -1118,13 +1387,18 @@ async fn idle(
             Err(_) => return Ok(false),
         }
     }
-    Ok(true)
+    Ok(!client
+        .notices
+        .iter()
+        .any(|message| matches!(message, WireMessage::Notice { .. })))
 }
 
-/// The judge's answer for one run: a record per probe, the judge's error, and
-/// whether the judge had to drop its temperature. A failed or unparseable
-/// answer leaves every probe `unparsed`, so the run is a failed run
-/// (model-prompts §8.1).
+/// The judge's answer for one run: a record per probe, the judge's error,
+/// whether the judge had to drop its temperature, and how many times it was
+/// asked again. A reply that gives no verdict, or leaves a probe without one,
+/// is asked again with what was wrong, at most [`REASKS`] times; a call that
+/// fails during a re-ask ends the asking. An answer that stays unusable
+/// leaves every probe `unparsed` (model-prompts §8.1).
 async fn judge_export(
     host: &Arc<ModelHost>,
     resolver: &Arc<ProviderConnectionResolver>,
@@ -1132,7 +1406,7 @@ async fn judge_export(
     scenario: &Scenario,
     export: &str,
     cancel: &CancellationToken,
-) -> (Vec<ProbeRecord>, Option<String>, bool) {
+) -> Judging {
     let statements = scenario
         .probes
         .iter()
@@ -1141,93 +1415,155 @@ async fn judge_export(
         .join("\n");
     let text =
         format!("<statements>\n{statements}\n</statements>\n\n<timeline>\n{export}\n</timeline>");
-    let mut request = ModelRequest::new(
-        &judge.provider_id,
-        &judge.model_id,
-        vec![Message::text(Role::User, text)],
-    );
-    request.capability_snapshot = judge.capability_snapshot.clone();
+    let mut messages = vec![Message::text(Role::User, text)];
     let mut config = judge.config.clone().unwrap_or_default();
     config.temperature = Some(0.);
-    request.config = Some(config);
-    request.system = Some(Arc::new(SystemPrompt::Text(JUDGE_SYSTEM.into())));
-    let request = Arc::new(request);
     let mut dropped = false;
-    let reply = match complete(host, resolver, &request, cancel).await {
-        Ok(reply) => reply,
-        Err(error) => {
-            let Some(mut retry) = request
-                .config
-                .as_ref()
-                .and_then(|config| config.temperature)
-                .map(|_| (*request).clone())
-            else {
-                return (
+    let mut reasks = 0;
+    let (outcome, probes, error) = loop {
+        let request = Arc::new(judge_request(judge, &messages, &config));
+        let reply = match complete(host, resolver, &request, cancel).await {
+            Ok(reply) => reply,
+            // A call that fails during a re-ask ends the asking, and the
+            // error names the call that failed.
+            Err(error) if dropped || reasks > 0 => {
+                break (
+                    JudgeOutcome::CallFailed,
                     unparsed(scenario),
-                    Some(format!("the judge failed: {error}")),
-                    false,
+                    Some(format!("the judge failed on a re-ask: {error}")),
                 );
-            };
-            retry.config.as_mut().expect("a config").temperature = None;
-            dropped = true;
-            match complete(host, resolver, &Arc::new(retry), cancel).await {
-                Ok(reply) => reply,
-                Err(retry) => {
-                    return (
-                        unparsed(scenario),
-                        Some(format!("the judge failed: {error}, then {retry}")),
-                        dropped,
-                    );
+            }
+            Err(error) => {
+                // The first call is retried once without a temperature.
+                config.temperature = None;
+                dropped = true;
+                let retry = Arc::new(judge_request(judge, &messages, &config));
+                match complete(host, resolver, &retry, cancel).await {
+                    Ok(reply) => reply,
+                    Err(retry) => {
+                        break (
+                            JudgeOutcome::CallFailed,
+                            unparsed(scenario),
+                            Some(format!("the judge failed: {error}, then {retry}")),
+                        );
+                    }
                 }
             }
-        }
+        };
+        let what = match verdicts(scenario, &reply) {
+            Ok(probes) => break (JudgeOutcome::Judged, probes, None),
+            Err(what) if reasks == REASKS => {
+                break (
+                    JudgeOutcome::Unreadable,
+                    unparsed(scenario),
+                    Some(format!(
+                        "the judge answered with no usable verdicts: {what}\n{reply}"
+                    )),
+                );
+            }
+            Err(what) => what,
+        };
+        reasks += 1;
+        messages.push(Message::text(Role::Assistant, reply));
+        messages.push(Message::text(
+            Role::User,
+            JUDGE_REASK.replace("{what}", &what),
+        ));
     };
-    let Some(judged) = parse_judgements(&reply) else {
-        return (
-            unparsed(scenario),
-            Some(format!("the judge answered with no verdict list: {reply}")),
-            dropped,
-        );
-    };
-    let judged: BTreeMap<String, (Verdict, Option<String>)> = judged
+    Judging {
+        outcome,
+        probes,
+        error,
+        reasks,
+        temperature_dropped: dropped,
+    }
+}
+
+/// The request one judge call carries: the conversation so far, the judge's
+/// configuration and the fixed system prompt.
+fn judge_request(
+    judge: &ModelSelection,
+    messages: &[Message],
+    config: &ModelConfig,
+) -> ModelRequest {
+    let mut request = ModelRequest::new(&judge.provider_id, &judge.model_id, messages.to_vec());
+    request.capability_snapshot = judge.capability_snapshot.clone();
+    request.config = Some(config.clone());
+    request.system = Some(Arc::new(SystemPrompt::Text(JUDGE_SYSTEM.into())));
+    request
+}
+
+/// The reply's verdict for every probe, or why it cannot be used: it does not
+/// read, or it answers no verdict for some probe. Ids the scenario does not
+/// have are ignored.
+fn verdicts(scenario: &Scenario, reply: &str) -> std::result::Result<Vec<ProbeRecord>, String> {
+    let judged: BTreeMap<String, (Verdict, Option<String>)> = parse_judgements(reply)
+        .map_err(|error| format!("it is not a JSON array of verdict objects ({error})"))?
         .into_iter()
         .map(|Judgement { id, verdict, quote }| (id, (verdict, quote.filter(|q| !q.is_empty()))))
         .collect();
-    let probes = scenario
+    let missing = scenario
+        .probes
+        .iter()
+        .filter(|probe| !judged.contains_key(&probe.id))
+        .map(|probe| probe.id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!("it has no verdict for {}", missing.join(", ")));
+    }
+    Ok(scenario
         .probes
         .iter()
         .map(|probe| {
-            let (verdict, quote) = match judged.get(&probe.id) {
-                Some((Verdict::Present, quote)) => (ProbeVerdict::Present, quote.clone()),
-                Some((Verdict::Absent, quote)) => (ProbeVerdict::Absent, quote.clone()),
-                Some((Verdict::Contradicted, quote)) => (ProbeVerdict::Contradicted, quote.clone()),
-                None => (ProbeVerdict::Unparsed, None),
+            let (verdict, quote) = judged
+                .get(&probe.id)
+                .expect("every probe has a verdict: a missing one was rejected above");
+            let verdict = match verdict {
+                Verdict::Present => ProbeVerdict::Present,
+                Verdict::Absent => ProbeVerdict::Absent,
+                Verdict::Contradicted => ProbeVerdict::Contradicted,
             };
             ProbeRecord {
                 id: probe.id.clone(),
                 kind: probe.kind.name(),
                 verdict,
-                quote,
+                quote: quote.clone(),
             }
         })
-        .collect();
-    (probes, None, dropped)
+        .collect())
 }
 
-/// The arm's metrics over its scenarios and runs (model-prompts §8.1).
+/// One probe's runs in one arm: every run that counts toward its pass rate,
+/// and how many of them are judged.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ProbeCounts {
+    passed: u32,
+    runs: u32,
+    judged: u32,
+}
+
+/// The arm's metrics over its scenarios and runs (model-prompts §8.1). An
+/// unjudged run adds nothing to them; the arm counts it apart.
 #[derive(Default)]
 struct Metrics {
-    /// `(scenario, probe)` → `(passed runs, runs)`.
-    probes: BTreeMap<(String, String), (u32, u32)>,
+    /// `(scenario, probe)` → its counted and judged runs.
+    probes: BTreeMap<(String, String), ProbeCounts>,
     violations: u32,
     failed: u32,
     /// Runs whose probes a judge answered.
     judged: u32,
+    /// Runs the judge gave no answer to, that did not fail on their own,
+    /// left out of every other count.
+    unjudged: u32,
 }
 impl Metrics {
     fn add(&mut self, scenario: &Scenario, record: &RunRecord) {
+        if record.unjudged() {
+            self.unjudged += 1;
+            return;
+        }
         self.failed += u32::from(record.failed);
-        let judged = record.error.is_none() && record.judge_error.is_none();
+        let judged = record.judged();
         self.judged += u32::from(judged);
         for probe in &scenario.probes {
             let verdict = record
@@ -1251,23 +1587,25 @@ impl Metrics {
                 .probes
                 .entry((scenario.id.clone(), probe.id.clone()))
                 .or_default();
-            counts.1 += 1;
-            counts.0 += u32::from(passed);
+            counts.runs += 1;
+            counts.passed += u32::from(passed);
+            counts.judged += u32::from(judged);
         }
     }
-    /// The probe's `(passed runs, runs)`.
-    fn counts(&self, key: &(String, String)) -> Option<(u32, u32)> {
+    /// The probe's counted and judged runs.
+    fn counts(&self, key: &(String, String)) -> Option<ProbeCounts> {
         self.probes.get(key).copied()
     }
     fn rate(&self, key: &(String, String)) -> Option<f64> {
-        let (passed, total) = self.counts(key)?;
-        (total > 0).then(|| passed as f64 / total as f64)
+        let counts = self.counts(key)?;
+        (counts.runs > 0).then(|| counts.passed as f64 / counts.runs as f64)
     }
 }
 
 /// The §8.1 rule of a candidate arm against the current one: every probe's
-/// pass rate at least `current − δ`, and violations and failed runs no
-/// higher. There is no absolute pass line.
+/// pass rate at least `current − δ`, violations, failed runs and unjudged runs
+/// no higher, and every probe has at least one judged run in each arm. There
+/// is no absolute pass line.
 struct Rule {
     passes: bool,
     failures: Vec<String>,
@@ -1282,11 +1620,23 @@ fn rule(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Rule 
     for scenario in scenarios {
         for probe in &scenario.probes {
             let key = (scenario.id.clone(), probe.id.clone());
-            let (Some((current_passed, current_runs)), Some((candidate_passed, candidate_runs))) =
-                (current.counts(&key), candidate.counts(&key))
+            let current_counts = current.counts(&key);
+            let candidate_counts = candidate.counts(&key);
+            for (arm, counts) in [("current", current_counts), ("candidate", candidate_counts)] {
+                if counts.is_none_or(|counts| counts.judged == 0) {
+                    failures.push(format!(
+                        "{}/{} has no judged run in the {arm} arm",
+                        scenario.id, probe.id
+                    ));
+                }
+            }
+            let (Some(current_counts), Some(candidate_counts)) = (current_counts, candidate_counts)
             else {
                 continue;
             };
+            let (current_passed, current_runs) = (current_counts.passed, current_counts.runs);
+            let (candidate_passed, candidate_runs) =
+                (candidate_counts.passed, candidate_counts.runs);
             // §8.1 in integers (δ = 1/20): kp/kn ≥ cp/cn − 1/20
             // ⇔ 20·kp·cn + cn·kn ≥ 20·cp·kn.
             let (numerator, denominator) = DELTA;
@@ -1317,6 +1667,12 @@ fn rule(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Rule 
             current.failed, candidate.failed
         ));
     }
+    if candidate.unjudged > current.unjudged {
+        failures.push(format!(
+            "unjudged runs rise from {} to {}",
+            current.unjudged, candidate.unjudged
+        ));
+    }
     Rule {
         passes: failures.is_empty(),
         failures,
@@ -1336,7 +1692,10 @@ struct Instrument {
     model_configuration: Option<Configuration>,
     judge_configuration: Option<Configuration>,
     judge_temperature_dropped: usize,
-    judge_calls: usize,
+    /// Runs the judge was asked about: every outcome but `not_asked`.
+    judge_asked_runs: usize,
+    /// How many re-asks the judge was asked for over every run.
+    judge_reasks: usize,
 }
 
 /// The reasoning effort and service tier a request carries (model-prompts
@@ -1380,7 +1739,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         metrics.entry(record.arm).or_default().add(scenario, record);
     }
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations and failed runs are no higher |\n",
+        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher |\n",
         instrument.text,
         instrument.model.provider_id,
         instrument.model.model_id,
@@ -1397,8 +1756,14 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     }
     if instrument.judge_temperature_dropped > 0 {
         text += &format!(
-            "| judge temperature | dropped in {} of {} judge calls |\n",
-            instrument.judge_temperature_dropped, instrument.judge_calls
+            "| judge temperature | dropped in {} of {} runs the judge was asked |\n",
+            instrument.judge_temperature_dropped, instrument.judge_asked_runs
+        );
+    }
+    if instrument.judge_reasks > 0 {
+        text += &format!(
+            "| judge re-asks | {} across all runs |\n",
+            instrument.judge_reasks
         );
     }
     text.push('\n');
@@ -1436,17 +1801,34 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             );
         }
     }
-    text += "\n| arm | violations | failed runs |\n| --- | --- | --- |\n";
+    text += "\n| arm | violations | failed runs | unjudged runs |\n| --- | --- | --- | --- |\n";
     for arm in ["current", "candidate"] {
         let empty = Metrics::default();
         let metrics = metrics.get(arm).unwrap_or(&empty);
-        text += &format!("| {arm} | {} | {} |\n", metrics.violations, metrics.failed);
+        text += &format!(
+            "| {arm} | {} | {} | {} |\n",
+            metrics.violations, metrics.failed, metrics.unjudged
+        );
+    }
+    let unjudged: Vec<&RunRecord> = records.iter().filter(|record| record.unjudged()).collect();
+    if !unjudged.is_empty() {
+        text += "\n| arm | scenario | run | judge error |\n| --- | --- | --- | --- |\n";
+        for record in unjudged {
+            let error = record.judge_error.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                error.lines().next().unwrap_or_default(),
+            );
+        }
     }
     if let (Some(current), Some(candidate)) = (metrics.get("current"), metrics.get("candidate")) {
         let rule = rule(current, candidate, scenarios);
         text += &if rule.passes {
             format!(
-                "\ncandidate passes: every probe is at least the current arm's − {delta:.2}, and violations and failed runs are no higher.\n",
+                "\ncandidate passes: every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher.\n",
                 delta = delta(),
             )
         } else {
@@ -1531,7 +1913,10 @@ mod tests {
         HostFuture, ModelConnection, ModelDriver, ModelStopReason, ResolveModelConnection,
         ResolvedModelConnection,
     };
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     fn probe(id: &str, kind: ProbeKind) -> Probe {
         Probe {
@@ -1546,6 +1931,7 @@ mod tests {
             description: String::new(),
             directory: PathBuf::new(),
             message: "message".into(),
+            calls: Vec::new(),
             steers: Vec::new(),
             budget: Budget {
                 turns: 4,
@@ -1559,7 +1945,7 @@ mod tests {
         arm: &'static str,
         scenario: &Scenario,
         verdicts: &[(&str, ProbeVerdict)],
-        failed: bool,
+        judge_outcome: JudgeOutcome,
     ) -> RunRecord {
         RunRecord {
             arm,
@@ -1570,9 +1956,11 @@ mod tests {
             turns: 1,
             window: None,
             duration_ms: 0.,
-            failed,
+            failed: failed("idle", None, judge_outcome),
+            judge_outcome,
             error: None,
             judge_error: None,
+            judge_reasks: 0,
             temperature_dropped: false,
             probes: verdicts
                 .iter()
@@ -1600,6 +1988,21 @@ mod tests {
         ModelId {
             provider_id: "gateway".into(),
             model_id: "deepseek-v4.1-flash".into(),
+        }
+    }
+    /// One evaluation's instrument, reading `judge`'s verdicts.
+    fn instrument(judge: ModelId) -> Instrument {
+        Instrument {
+            text: "context-compaction/summary".into(),
+            model: model(),
+            judge,
+            runs: 1,
+            tokens: 1.,
+            model_configuration: None,
+            judge_configuration: None,
+            judge_temperature_dropped: 0,
+            judge_asked_runs: 0,
+            judge_reasks: 0,
         }
     }
 
@@ -1635,7 +2038,12 @@ mod tests {
                     } else {
                         ProbeVerdict::Absent
                     };
-                    record(arm, &scenario, &[("reports", verdict)], false)
+                    record(
+                        arm,
+                        &scenario,
+                        &[("reports", verdict)],
+                        JudgeOutcome::Judged,
+                    )
                 })
                 .collect();
             metrics(&scenario, &records)
@@ -1715,7 +2123,7 @@ mod tests {
                             ("reports", ProbeVerdict::Present),
                             ("floods", ProbeVerdict::Absent),
                         ],
-                        false,
+                        JudgeOutcome::Judged,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -1731,7 +2139,7 @@ mod tests {
                     "candidate",
                     &scenario,
                     &[("reports", ProbeVerdict::Present), ("floods", floods)],
-                    false,
+                    JudgeOutcome::Judged,
                 )
             })
             .collect();
@@ -1759,7 +2167,11 @@ mod tests {
                         ("reports", ProbeVerdict::Present),
                         ("floods", ProbeVerdict::Absent),
                     ],
-                    index == 0,
+                    if index == 0 {
+                        JudgeOutcome::CallFailed
+                    } else {
+                        JudgeOutcome::Judged
+                    },
                 )
             })
             .collect();
@@ -1779,6 +2191,319 @@ mod tests {
         );
     }
 
+    /// Unjudged runs are compared between the arms the way failed runs are: a
+    /// candidate with more of them fails the rule, and equal counts do not
+    /// fail it on their own (model-prompts §8.1).
+    #[test]
+    fn more_unjudged_runs_fail_the_candidate() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let arm = |arm: &'static str, judged: usize, unjudged: usize| {
+            let records: Vec<_> = (0..judged)
+                .map(|_| {
+                    record(
+                        arm,
+                        &scenario,
+                        &[("reports", ProbeVerdict::Present)],
+                        JudgeOutcome::Judged,
+                    )
+                })
+                .chain((0..unjudged).map(|_| {
+                    let mut run = record(
+                        arm,
+                        &scenario,
+                        &[("reports", ProbeVerdict::Unparsed)],
+                        JudgeOutcome::Unreadable,
+                    );
+                    run.judge_error = Some("the judge answered with no usable verdicts".into());
+                    run
+                }))
+                .collect();
+            metrics(&scenario, &records)
+        };
+        let verdict = rule(
+            &arm("current", 20, 0),
+            &arm("candidate", 19, 1),
+            std::slice::from_ref(&scenario),
+        );
+        assert!(!verdict.passes);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "unjudged runs rise from 0 to 1"),
+            "{:?}",
+            verdict.failures
+        );
+        let verdict = rule(
+            &arm("current", 19, 1),
+            &arm("candidate", 19, 1),
+            std::slice::from_ref(&scenario),
+        );
+        assert!(verdict.passes, "{:?}", verdict.failures);
+    }
+
+    /// A probe with no judged run in one arm cannot be compared: the rule
+    /// names the arm rather than reading the missing run as a fall (issue
+    /// #642).
+    #[test]
+    fn a_probe_with_no_judged_run_in_an_arm_fails_the_rule() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let current = metrics(
+            &scenario,
+            &[record(
+                "current",
+                &scenario,
+                &[("reports", ProbeVerdict::Present)],
+                JudgeOutcome::Judged,
+            )],
+        );
+        let mut unjudged = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::Unreadable,
+        );
+        unjudged.judge_error = Some("the judge answered with no usable verdicts: no answer".into());
+        let verdict = rule(
+            &current,
+            &metrics(&scenario, std::slice::from_ref(&unjudged)),
+            std::slice::from_ref(&scenario),
+        );
+        assert!(!verdict.passes);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "case/reports has no judged run in the candidate arm"),
+            "{:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| failure.contains("falls from")),
+            "a missing judged run never reads as a fall: {:?}",
+            verdict.failures
+        );
+    }
+
+    /// A probe needs a judged run in each arm, not merely a counted one
+    /// (model-prompts §8.1, issue #642): a run whose judge call failed still
+    /// counts toward the probe's rate, so a probe whose every run in an arm
+    /// ended that way has no judged run there, and the rule names it. One
+    /// judged run in the arm satisfies the floor.
+    #[test]
+    fn a_probe_needs_a_judged_run_in_each_arm() {
+        let case = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut other = scenario(vec![probe("fine", ProbeKind::MustShow)]);
+        other.id = "other".into();
+        let scenarios = [case, other];
+        let (case, other) = (&scenarios[0], &scenarios[1]);
+        // One arm: of the probe's runs, the judge answered `judged` of them
+        // with a verdict that fails it and its calls failed for the rest; one
+        // judged run of `other` keeps the arm itself off the arm-level
+        // message.
+        let arm = |arm: &'static str, judged: usize, call_failed: usize, with_other: bool| {
+            let mut metrics = Metrics::default();
+            for _ in 0..judged {
+                metrics.add(
+                    case,
+                    &record(
+                        arm,
+                        case,
+                        &[("reports", ProbeVerdict::Absent)],
+                        JudgeOutcome::Judged,
+                    ),
+                );
+            }
+            for _ in 0..call_failed {
+                metrics.add(
+                    case,
+                    &record(
+                        arm,
+                        case,
+                        &[("reports", ProbeVerdict::Unparsed)],
+                        JudgeOutcome::CallFailed,
+                    ),
+                );
+            }
+            if with_other {
+                metrics.add(
+                    other,
+                    &record(
+                        arm,
+                        other,
+                        &[("fine", ProbeVerdict::Present)],
+                        JudgeOutcome::Judged,
+                    ),
+                );
+            }
+            metrics
+        };
+        // Every one of the probe's runs in the candidate arm ended in a
+        // failed judge call, while the arm has a judged run elsewhere: the
+        // rule names the probe in the candidate arm alone.
+        let verdict = rule(
+            &arm("current", 1, 2, true),
+            &arm("candidate", 0, 2, true),
+            &scenarios,
+        );
+        assert!(!verdict.passes);
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "case/reports has no judged run in the candidate arm"),
+            "{:?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "case/reports has no judged run in the current arm"),
+            "{:?}",
+            verdict.failures
+        );
+        // An arm with no judged run at all still gets the arm-level message
+        // beside the probe's.
+        let verdict = rule(
+            &arm("current", 1, 2, true),
+            &arm("candidate", 0, 2, false),
+            &scenarios,
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|failure| failure == "the candidate arm has no judged run"),
+            "{:?}",
+            verdict.failures
+        );
+        // One judged run in the arm satisfies the probe's floor.
+        let verdict = rule(
+            &arm("current", 1, 2, true),
+            &arm("candidate", 1, 2, true),
+            &scenarios,
+        );
+        assert!(verdict.passes, "{:?}", verdict.failures);
+    }
+
+    /// A run that stopped on its wall-clock budget is a failed run, scored as
+    /// before, even when its judge gave no answer: only the run's own failure
+    /// would leave it out (issue #642).
+    #[test]
+    fn a_run_that_stopped_on_its_wall_clock_budget_stays_a_failed_run() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut record = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::Unreadable,
+        );
+        // The record a run that stopped on its budget is built as.
+        record.stop = "seconds";
+        record.failed = failed("seconds", None, record.judge_outcome);
+        record.judge_error = Some("the judge answered with no usable verdicts: no answer".into());
+        assert!(!record.unjudged(), "the run failed on its own");
+        let metrics = metrics(&scenario, std::slice::from_ref(&record));
+        assert_eq!(metrics.failed, 1);
+        assert_eq!(metrics.unjudged, 0);
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&record),
+        );
+        assert!(text.contains("| candidate | 0 | 1 | 0 |"), "{text}");
+        assert!(
+            !text.contains("| arm | scenario | run | judge error |"),
+            "{text}"
+        );
+    }
+
+    /// The report counts each arm's unjudged runs, lists them with the first
+    /// line of the judge error, and adds no such row when there are none
+    /// (issue #642).
+    #[test]
+    fn the_report_lists_unjudged_runs_with_the_first_line_of_the_judge_error() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut unjudged = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::Unreadable,
+        );
+        unjudged.judge_error =
+            Some("the judge answered with no usable verdicts: no answer\nand the retry too".into());
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&unjudged),
+        );
+        assert!(text.contains("| candidate | 0 | 0 | 1 |"), "{text}");
+        assert!(
+            text.contains(
+                "| candidate | case | 0 | the judge answered with no usable verdicts: no answer |"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("and the retry too"), "{text}");
+        let judged = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&judged),
+        );
+        assert!(
+            !text.contains("| arm | scenario | run | judge error |"),
+            "{text}"
+        );
+    }
+
+    /// The report names the runs its judge counts are over, and shows the
+    /// re-asks over every run beside the dropped-temperature count
+    /// (model-prompts §8.1).
+    #[test]
+    fn the_report_counts_asked_runs_and_re_asks() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let run = record(
+            "current",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        let quiet = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&run),
+        );
+        assert!(!quiet.contains("| judge temperature |"), "{quiet}");
+        assert!(!quiet.contains("| judge re-asks |"), "{quiet}");
+        let mut instrument = instrument(model());
+        instrument.judge_asked_runs = 3;
+        instrument.judge_temperature_dropped = 2;
+        instrument.judge_reasks = 5;
+        let text = report(
+            &instrument,
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&run),
+        );
+        assert!(
+            text.contains("| judge temperature | dropped in 2 of 3 runs the judge was asked |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| judge re-asks | 5 across all runs |"),
+            "{text}"
+        );
+    }
+
     struct Local;
     impl ResolveModelConnection for Local {
         fn resolve(
@@ -1795,8 +2520,10 @@ mod tests {
             })
         }
     }
-    /// Answers every judge call with prose that holds no verdict list.
-    struct Garbage;
+    /// Answers every judge call with prose that holds no verdict list, and
+    /// counts the calls it was asked.
+    #[derive(Default)]
+    struct Garbage(AtomicUsize);
     impl ModelDriver for Garbage {
         fn invoke(
             &self,
@@ -1804,6 +2531,7 @@ mod tests {
             _: ModelConnection,
             _: CancellationToken,
         ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+            self.0.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move {
                 Ok(Box::pin(futures_util::stream::iter(vec![
                     Ok(dim_agent_capabilities::host::ModelChunk::MessageStart {
@@ -1822,9 +2550,11 @@ mod tests {
         }
     }
 
-    /// A verdict the judge did not answer is a failed run, never a pass.
+    /// A judge that never answers in a readable form is asked three times, and
+    /// the run is unjudged: not a failed run, out of its arm's metrics, and
+    /// listed in the report (issue #642, acceptance 3).
     #[tokio::test]
-    async fn an_unparseable_verdict_is_a_failed_run() {
+    async fn a_judge_that_never_answers_readably_leaves_the_run_unjudged() {
         let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
         let judge = ModelSelection {
             provider_id: "fake".into(),
@@ -1833,8 +2563,9 @@ mod tests {
             config: None,
             metadata: None,
         };
-        let (probes, error, _) = judge_export(
-            &Arc::new(ModelHost(Arc::new(Garbage))),
+        let driver = Arc::new(Garbage::default());
+        let judging = judge_export(
+            &Arc::new(ModelHost(driver.clone())),
             &Arc::new(ProviderConnectionResolver(Arc::new(Local))),
             &judge,
             &scenario,
@@ -1842,37 +2573,338 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(
-            error
-                .as_deref()
-                .is_some_and(|error| error.contains("no verdict list")),
-            "{error:?}"
+        assert_eq!(
+            driver.0.load(Ordering::Relaxed),
+            3,
+            "the call and its two re-asks"
         );
+        assert_eq!(judging.outcome, JudgeOutcome::Unreadable);
+        assert_eq!(judging.reasks, 2);
         assert!(
-            probes
+            judging
+                .probes
                 .iter()
                 .all(|probe| probe.verdict == ProbeVerdict::Unparsed)
         );
-        assert!(failed("idle", None, &probes));
+        let error = judging
+            .error
+            .expect("an unusable answer is the judge's error");
+        assert!(
+            error.starts_with(
+                "the judge answered with no usable verdicts: it is not a JSON array of verdict objects ("
+            ),
+            "{error}"
+        );
+        let record = RunRecord {
+            judge_outcome: judging.outcome,
+            judge_error: Some(error),
+            probes: judging.probes,
+            ..record("current", &scenario, &[], JudgeOutcome::Judged)
+        };
+        assert!(!record.failed, "an unjudged run is not a failed run");
+        let serialized = serde_json::to_value(&record).unwrap();
+        assert_eq!(serialized["failed"], false, "{serialized}");
+        assert_eq!(serialized["judgeOutcome"], "unreadable", "{serialized}");
+        let metrics = metrics(&scenario, std::slice::from_ref(&record));
+        assert_eq!(metrics.unjudged, 1);
+        assert_eq!(metrics.failed, 0);
+        assert_eq!(metrics.judged, 0);
+        assert_eq!(
+            metrics.counts(&("case".to_owned(), "reports".to_owned())),
+            None,
+            "an unjudged run answers no probe"
+        );
+        let text = report(
+            &instrument(ModelId {
+                provider_id: "fake".into(),
+                model_id: "fake".into(),
+            }),
+            std::slice::from_ref(&scenario),
+            std::slice::from_ref(&record),
+        );
+        assert!(
+            text.contains("| current | case | 0 | the judge answered with no usable verdicts: it is not a JSON array of verdict objects ("),
+            "{text}"
+        );
+    }
+
+    /// The judge answers one verdict object per line: one request per run
+    /// reads both probes' verdicts (issue #642, acceptance 1).
+    fn one_object_per_line(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            content(
+                "{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}\n\
+                 {\"id\": \"floods\", \"verdict\": \"absent\", \"quote\": \"nothing\"}",
+            )
+        })
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_judge_answering_one_object_per_line_is_read_in_one_request() {
+        let fixture = Fixture::start(
+            "per-line",
+            one_object_per_line,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [
+                    {"id": "ran", "kind": "must_show", "text": "the run has a transcript"},
+                    {"id": "floods", "kind": "must_not_show", "text": "the run floods the Timeline"}
+                ]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        assert_eq!(fixture.judge().len(), 2, "one judge request per arm");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeReasks"], 0, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+            assert_eq!(record["probes"][1]["verdict"], "absent", "{record}");
+        }
+    }
+
+    /// The judge's first answer loses a level of escaping in a quote, as one
+    /// answer in the evaluation for #553 did, so it is not JSON.
+    const UNESCAPED: &str =
+        r#"[{"id": "ran", "verdict": "present", "quote": "turn/end: the run said "hello""}]"#;
+    /// The judge's first answer is [`UNESCAPED`], and every answer after a
+    /// re-ask is readable.
+    fn unescaped_then_readable(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            content(if text.contains("Your answer could not be used") {
+                "[{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}]"
+            } else {
+                UNESCAPED
+            })
+        })
+    }
+    /// A judge answer that does not read is asked again, and the second answer
+    /// is the one used (issue #642, acceptance 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_that_does_not_read_is_asked_again() {
+        let fixture = Fixture::start(
+            "re-ask",
+            unescaped_then_readable,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeReasks"], 1, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+        }
+        let judge = fixture.judge();
+        assert_eq!(judge.len(), 4, "one call and one re-ask per arm");
+        for pair in judge.chunks(2) {
+            assert!(
+                !pair[0].contains("Your answer could not be used"),
+                "the first call carries no re-ask"
+            );
+            assert!(
+                pair[1].contains("the run said"),
+                "the re-ask carries the first answer: {}",
+                pair[1]
+            );
+            assert!(
+                pair[1].contains(
+                    "Your answer could not be used: it is not a JSON array of verdict objects ("
+                ),
+                "the re-ask says what was wrong: {}",
+                pair[1]
+            );
+            assert!(
+                pair[1].contains("\"role\":\"assistant\""),
+                "the first answer is carried as an assistant message: {}",
+                pair[1]
+            );
+        }
+    }
+
+    /// The judge's first answer leaves a probe without a verdict, and every
+    /// answer after a re-ask is complete.
+    fn missing_then_complete(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            content(if text.contains("Your answer could not be used") {
+                "[{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}, \
+                 {\"id\": \"floods\", \"verdict\": \"absent\", \"quote\": \"nothing\"}]"
+            } else {
+                "[{\"id\": \"ran\", \"verdict\": \"present\", \"quote\": \"turn/end\"}]"
+            })
+        })
+    }
+    /// A reply with no verdict for a probe is asked again, and the request
+    /// names the probe (issue #642, acceptance 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_with_no_verdict_for_a_probe_is_asked_again() {
+        let fixture = Fixture::start(
+            "missing",
+            missing_then_complete,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [
+                    {"id": "ran", "kind": "must_show", "text": "the run has a transcript"},
+                    {"id": "floods", "kind": "must_not_show", "text": "the run floods the Timeline"}
+                ]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeReasks"], 1, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+            assert_eq!(record["probes"][1]["verdict"], "absent", "{record}");
+        }
+        let judge = fixture.judge();
+        assert_eq!(judge.len(), 4, "one call and one re-ask per arm");
+        for pair in judge.chunks(2) {
+            assert!(
+                pair[1].contains("Your answer could not be used: it has no verdict for floods."),
+                "the re-ask names the probe: {}",
+                pair[1]
+            );
+        }
+    }
+
+    /// The judge's call fails, the way a call refused for exceeding the
+    /// judge's window does: the provider answers with an error instead of a
+    /// reply.
+    fn overflowing(text: &str) -> Option<Value> {
+        text.contains("You check statements")
+            .then(|| refusal("This model's maximum context length is 24000 tokens"))
+    }
+    /// The provider's refusal of one call.
+    fn refusal(message: &str) -> Value {
+        json!({"error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded"
+        }})
+    }
+    /// A judge call that fails leaves a failed run, not an unjudged one: it
+    /// counts in failed runs, its probes are `unparsed`, and the report does
+    /// not list it among the unjudged runs (model-prompts §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_judge_call_that_fails_leaves_the_run_failed() {
+        let fixture = Fixture::start(
+            "call-failed",
+            overflowing,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["judgeReasks"], 0, "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "unparsed", "{record}");
+            assert!(
+                record["judgeError"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("the judge failed: "),
+                "{record}"
+            );
+        }
+        assert_eq!(fixture.judge().len(), 4, "two calls per arm");
+        assert!(
+            report.contains("| judge temperature | dropped in 2 of 2 runs the judge was asked |"),
+            "a run whose first call failed is a run the judge was asked: {report}"
+        );
+        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
+        assert!(
+            !report.contains("| arm | scenario | run | judge error |"),
+            "a failed run is not listed as unjudged: {report}"
+        );
+    }
+
+    /// The judge's first answer is unreadable and the call its re-ask makes
+    /// fails: the run is a failed run with one re-ask recorded, and its error
+    /// names the call that failed (model-prompts §8.1).
+    fn prose_then_overflowing(text: &str) -> Option<Value> {
+        text.contains("You check statements").then(|| {
+            if text.contains("Your answer could not be used") {
+                refusal("This model's maximum context length is 24000 tokens")
+            } else {
+                content("the run looks fine to me")
+            }
+        })
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_judge_call_that_fails_during_a_re_ask_leaves_the_run_failed() {
+        let fixture = Fixture::start(
+            "re-ask-failed",
+            prose_then_overflowing,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
+            assert_eq!(record["judgeReasks"], 1, "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "unparsed", "{record}");
+            assert!(
+                record["judgeError"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("the judge failed on a re-ask: "),
+                "the error names the call that failed: {record}"
+            );
+        }
+        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
+        assert!(
+            !report.contains("| arm | scenario | run | judge error |"),
+            "a failed run is not listed as unjudged: {report}"
+        );
     }
 
     /// The judge is named with the result, and one from the model's own
     /// family is reported as a limitation of the measurement.
     #[test]
     fn a_same_family_judge_is_reported_as_a_limitation() {
-        let settings = |judge: ModelId| Instrument {
-            text: "context-compaction/summary".into(),
-            model: model(),
-            judge,
-            runs: 1,
-            tokens: 1.,
-            model_configuration: None,
-            judge_configuration: None,
-            judge_temperature_dropped: 0,
-            judge_calls: 0,
-        };
         let same = report(
-            &settings(ModelId {
+            &instrument(ModelId {
                 provider_id: "gateway".into(),
                 model_id: "auto/deepseek-v4.1".into(),
             }),
@@ -1882,7 +2914,7 @@ mod tests {
         assert!(same.contains("`gateway/auto/deepseek-v4.1`"), "{same}");
         assert!(same.contains("own family"), "{same}");
         let other = report(
-            &settings(ModelId {
+            &instrument(ModelId {
                 provider_id: "gateway".into(),
                 model_id: "claude-opus-5-5".into(),
             }),
@@ -1901,12 +2933,20 @@ mod tests {
     /// The provider's answer to one request: the stream event to send, or
     /// `None` for a plain text reply.
     type Reply = fn(&str) -> Option<Value>;
+    /// How long the provider holds a request's whole answer back before it
+    /// sends the first byte of it; `None` sends the answer at once.
+    type Hold = fn(&str) -> Option<Duration>;
+    /// The hold of a provider that answers every request at once.
+    fn holds_nothing(_: &str) -> Option<Duration> {
+        None
+    }
 
-    /// One loopback OpenAI-compatible provider that answers by `reply` and
-    /// records every request it receives.
+    /// One loopback OpenAI-compatible provider that answers by `reply`, holds
+    /// an answer by `hold`, and records every request it receives.
     struct Provider {
         requests: Mutex<Vec<String>>,
         reply: Reply,
+        hold: Hold,
     }
     async fn completion(
         axum::extract::State(provider): axum::extract::State<Arc<Provider>>,
@@ -1914,6 +2954,9 @@ mod tests {
     ) -> String {
         let text = body.to_string();
         provider.requests.lock().unwrap().push(text.clone());
+        if let Some(hold) = (provider.hold)(&text) {
+            tokio::time::sleep(hold).await;
+        }
         let event = (provider.reply)(&text).unwrap_or_else(|| content("ok"));
         format!("data: {event}\n\ndata: [DONE]\n\n")
     }
@@ -1963,16 +3006,28 @@ mod tests {
     }
     impl Fixture {
         /// `scenario` is the scenario file's content and `workspace` the
-        /// starting files beside it.
+        /// starting files beside it; no answer is held.
         async fn start(
             label: &str,
             reply: Reply,
             scenario: Value,
             workspace: &[(&str, &str)],
         ) -> Self {
+            Self::holding(label, reply, holds_nothing, scenario, workspace).await
+        }
+        /// [`start`](Self::start) with a provider that holds the answers
+        /// [`Hold`] names before it sends them.
+        async fn holding(
+            label: &str,
+            reply: Reply,
+            hold: Hold,
+            scenario: Value,
+            workspace: &[(&str, &str)],
+        ) -> Self {
             let provider = Arc::new(Provider {
                 requests: Mutex::default(),
                 reply,
+                hold,
             });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = listener.local_addr().unwrap();
@@ -2037,6 +3092,9 @@ mod tests {
                 out,
                 home: self.home.clone(),
                 model_config: Some(self.models.clone()),
+                defaults: None,
+                node: None,
+                js_runtime: None,
             }
         }
         fn target(&self) -> ModelId {
@@ -2059,6 +3117,17 @@ mod tests {
                 .cloned()
                 .collect()
         }
+        /// The judge requests the provider received, in arrival order.
+        fn judge(&self) -> Vec<String> {
+            self.provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.contains("You check statements"))
+                .cloned()
+                .collect()
+        }
         /// The records the evaluation wrote under `out`.
         fn records(&self, out: &Path) -> Vec<Value> {
             std::fs::read_to_string(out.join("runs.jsonl"))
@@ -2067,6 +3136,78 @@ mod tests {
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect()
         }
+        /// [`options`](Self::options) with the product's plugins served from
+        /// `defaults`, the way the runner's own command line serves them.
+        fn plugin_options(&self, out: PathBuf, defaults: PathBuf) -> Options {
+            let mut options = self.options(out);
+            options.defaults = Some(defaults);
+            options.node = Some(
+                std::env::var_os("DIM_TEST_NODE")
+                    .expect("DIM_TEST_NODE")
+                    .into(),
+            );
+            options.js_runtime = Some(
+                std::env::var_os("DIM_TEST_JS_RUNTIME")
+                    .expect("DIM_TEST_JS_RUNTIME")
+                    .into(),
+            );
+            options
+        }
+    }
+
+    /// The repository root, whose default plugin configuration and fixtures
+    /// the tests reach.
+    fn repository() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// One arm's run of the fixture's one scenario, as [`evaluate`] runs it.
+    async fn run_arm(
+        fixture: &Fixture,
+        options: &Options,
+        arm: &'static str,
+        overrides: &Overrides,
+        run: usize,
+    ) -> RunRecord {
+        let mut scenarios = read_scenarios(&fixture.scenarios).unwrap();
+        let scenario = scenarios.remove(0);
+        let mut instrument = Instrument {
+            text: options.text.clone(),
+            model: options.model.clone(),
+            judge: options.judge.clone(),
+            runs: options.runs,
+            tokens: 0.,
+            model_configuration: None,
+            judge_configuration: None,
+            judge_temperature_dropped: 0,
+            judge_asked_runs: 0,
+            judge_reasks: 0,
+        };
+        run_once(
+            options,
+            &fixture.home,
+            arm,
+            overrides,
+            &scenario,
+            run,
+            &CancellationToken::new(),
+            &mut instrument,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A scenario that sets a goal through `calls` before its message.
+    fn goal_call_scenario() -> Value {
+        json!({
+            "message": "Continue the work.",
+            "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
+            "budget": {"turns": 6, "seconds": 60, "window": 24000},
+            "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+        })
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -2121,7 +3262,7 @@ mod tests {
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         let current = fixture.arm("current");
         let candidate = fixture.arm("candidate");
@@ -2178,7 +3319,7 @@ mod tests {
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         for arm in ["current", "candidate"] {
             let requests = fixture.arm(arm);
@@ -2236,7 +3377,7 @@ mod tests {
         std::fs::write(&candidate, CANDIDATE).unwrap();
         let out = fixture.directory.join("out");
         let relative = relative_to_working_directory(&out);
-        let options = Options::parse_from(
+        let mut options = Options::parse_from(
             [
                 "--scenarios",
                 fixture.scenarios.to_str().unwrap(),
@@ -2260,6 +3401,11 @@ mod tests {
             .map(str::to_owned),
         )
         .unwrap();
+        // This test is about the command line's paths; the product's
+        // plugins are the command line's other half and need Node.
+        options.defaults = None;
+        options.node = None;
+        options.js_runtime = None;
         assert!(
             options.out.is_absolute(),
             "a relative --out is resolved: {}",
@@ -2276,7 +3422,7 @@ mod tests {
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         assert!(options.out.join("current/case/run-0/workspace").is_dir());
     }
@@ -2316,7 +3462,7 @@ mod tests {
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         for arm in ["current", "candidate"] {
             let requests = fixture.arm(arm);
@@ -2326,5 +3472,281 @@ mod tests {
                 "{arm}: the model reads the refusal"
             );
         }
+    }
+
+    /// The `create_at` of the last `turn/end` on `main` and of the close the
+    /// runner's own `session.close` writes, a `stop/interrupt` with reason
+    /// `timeline closed`.
+    fn last_turn_end_and_close(export: &str) -> (u64, u64) {
+        let mut turn_end = None;
+        let mut closed = None;
+        for line in export.lines() {
+            let Ok(line) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if line["kind"] != "event" || line["branch_id"] != "main" {
+                continue;
+            }
+            let event = &line["event"];
+            let create_at = event["create_at"].as_u64().unwrap_or_default();
+            if event["type"] == "turn" && event["name"] == "end" {
+                turn_end = Some(create_at);
+            }
+            if event["type"] == "stop"
+                && event["name"] == "interrupt"
+                && event["data"]["reason"] == "timeline closed"
+            {
+                closed = Some(create_at);
+            }
+        }
+        (
+            turn_end.expect("a turn ended on main"),
+            closed.expect("the run closed main"),
+        )
+    }
+
+    /// A turn that ends while the driver waits on `session.idle` is read like
+    /// any other notice: the quiet period follows it, and the run closes at
+    /// least `QUIET` after the turn's end instead of at it (issue #643).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_ending_during_the_idle_call_delays_the_close_by_the_quiet_period() {
+        // QUIET plus half of IDLE_WAIT: the turn ends inside the driver's
+        // `session.idle` call, whose deadline it beats.
+        const HELD: Duration = Duration::from_millis(1500);
+        /// The judge's verdict, and plain text for a run request.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        /// Holds a run request's whole answer back for [`HELD`]; the judge
+        /// answers at once.
+        fn holds_the_turn(text: &str) -> Option<Duration> {
+            (!text.contains("You check statements")).then_some(HELD)
+        }
+        let fixture = Fixture::holding(
+            "late-turn",
+            answers,
+            holds_the_turn,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        for arm in ["current", "candidate"] {
+            let export = std::fs::read_to_string(
+                options
+                    .out
+                    .join(arm)
+                    .join("case")
+                    .join("run-0")
+                    .join("timeline.jsonl"),
+            )
+            .unwrap();
+            let (turn_end, closed) = last_turn_end_and_close(&export);
+            assert!(
+                closed >= turn_end + QUIET.as_millis() as u64,
+                "{arm}: the run closed {} ms after its last turn ended, short of QUIET",
+                closed.saturating_sub(turn_end)
+            );
+        }
+    }
+
+    /// Both arms serve the product's default plugins: a Goal method set in
+    /// the scenario's `calls` answers on its Session, so the run reaches its
+    /// turn instead of failing the call (issue #612, acceptance 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_default_plugins_load_and_a_goal_method_answers() {
+        let fixture = Fixture::start(
+            "goal-plugin",
+            summaries_and_judgements,
+            goal_call_scenario(),
+            &[],
+        )
+        .await;
+        let defaults = repository().join("runtime/default-plugins.json");
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        for arm in ["current", "candidate"] {
+            let record = run_arm(&fixture, &options, arm, &Overrides::default(), 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+            assert!(record.turns >= 1, "{arm}: the message's turn ran");
+        }
+    }
+
+    /// A scenario's `calls` run before its message: the goal it sets is in
+    /// the first request of both arms (issue #612, acceptance 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_calls_step_sets_a_goal_before_the_message() {
+        let fixture = Fixture::start(
+            "goal-calls",
+            summaries_and_judgements,
+            goal_call_scenario(),
+            &[],
+        )
+        .await;
+        let defaults = repository().join("runtime/default-plugins.json");
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        for arm in ["current", "candidate"] {
+            let record = run_arm(&fixture, &options, arm, &Overrides::default(), 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            let requests = fixture.arm(arm);
+            assert!(!requests.is_empty(), "{arm}: the turn made a request");
+            assert!(
+                requests[0].contains("dim-goal") && requests[0].contains("Keep the suite green."),
+                "{arm}: the first request carries the goal the call set"
+            );
+        }
+    }
+
+    /// A turn that ends after the quiet period has passed hands its notices to
+    /// the driver: Goal's continuation, written at that turn's end, drives a
+    /// turn of its own in the same run, and the budget counts it (issue #643).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_continuation_after_a_held_turn_runs_in_the_same_run() {
+        // QUIET plus half of IDLE_WAIT: a held turn ends inside the driver's
+        // `session.idle` call, whose deadline it beats.
+        const HELD: Duration = Duration::from_millis(1500);
+        /// The judge's verdict, and plain text for a run request.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        /// Holds a run request's whole answer back for [`HELD`], except one
+        /// that carries Goal's continuation, which is answered at once; the
+        /// judge answers at once.
+        fn holds_the_turn(text: &str) -> Option<Duration> {
+            (!text.contains("You check statements")
+                && !text.contains("Continue working toward the active goal"))
+            .then_some(HELD)
+        }
+        let fixture = Fixture::holding(
+            "goal-continuation",
+            answers,
+            holds_the_turn,
+            json!({
+                "message": "Continue the work.",
+                "calls": [{"method": "session.goal.set", "params": {"objective": "Keep the suite green."}}],
+                // The goal the calls step sets drives a turn of its own before
+                // the message's, so the continuation is the run's third turn
+                // and the budget stops there, not at the turn that wrote it.
+                "budget": {"turns": 3, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let defaults = repository().join("runtime/default-plugins.json");
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        for arm in ["current", "candidate"] {
+            let record = run_arm(&fixture, &options, arm, &Overrides::default(), 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert_eq!(record.stop, "turns", "{arm}");
+            assert_eq!(record.turns, 3, "{arm}: Goal's continuation ran");
+            let export = std::fs::read_to_string(
+                options
+                    .out
+                    .join(arm)
+                    .join("case")
+                    .join("run-0")
+                    .join("timeline.jsonl"),
+            )
+            .unwrap();
+            let continuation = export.lines().any(|line| {
+                let Ok(line) = serde_json::from_str::<Value>(line) else {
+                    return false;
+                };
+                line["kind"] == "event"
+                    && line["branch_id"] == "main"
+                    && line["event"]["type"] == "input"
+                    && line["event"]["name"] == "message"
+                    && line["event"]["data"]["blocks"]
+                        .as_array()
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block["text"]
+                                    .as_str()
+                                    .is_some_and(|text| text.contains(r#"kind="continuation""#))
+                            })
+                        })
+            });
+            assert!(
+                continuation,
+                "{arm}: Goal's continuation input is in the export"
+            );
+        }
+    }
+
+    /// A candidate for a TypeScript plugin's text replaces that member of
+    /// the plugin's factory configuration: the candidate arm's request
+    /// carries it, and the current arm carries the shipped text (issue #612,
+    /// acceptance 3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_plugin_candidate_reaches_the_request() {
+        const SHIPPED: &str = "text-injector fixture: the shipped description";
+        const CANDIDATE: &str = "CANDIDATE PLUGIN TEXT";
+        const FIXTURE_TEXTS: &[(&str, TextMember)] = &[(
+            "fixture/prompt",
+            TextMember::Plugin {
+                plugin: "text-injector",
+                member: "texts.prompt",
+            },
+        )];
+        let fixture = Fixture::start(
+            "plugin-candidate",
+            summaries_and_judgements,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let defaults = fixture.directory.join("plugin-defaults.json");
+        std::fs::write(
+            &defaults,
+            json!({"plugins": {"text-injector": repository().join("runtime/fixtures/text-injector")}})
+                .to_string(),
+        )
+        .unwrap();
+        let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        let candidate =
+            overrides_in(FIXTURE_TEXTS, "fixture/prompt", Arc::from(CANDIDATE)).unwrap();
+        assert_eq!(
+            candidate.plugin_configs["text-injector"]["texts"]["prompt"],
+            json!(CANDIDATE),
+            "the table puts the candidate at the plugin's factory member"
+        );
+        for (arm, overrides) in [("current", Overrides::default()), ("candidate", candidate)] {
+            let record = run_arm(&fixture, &options, arm, &overrides, 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+        }
+        let current = fixture.arm("current");
+        let candidate = fixture.arm("candidate");
+        assert!(
+            current.iter().any(|request| request.contains(SHIPPED)),
+            "the current arm carries the shipped text"
+        );
+        assert!(
+            current.iter().all(|request| !request.contains(CANDIDATE)),
+            "the current arm never carries the candidate text"
+        );
+        assert!(
+            candidate.iter().any(|request| request.contains(CANDIDATE)),
+            "the candidate arm's request carries the candidate text"
+        );
+        assert!(
+            candidate.iter().all(|request| !request.contains(SHIPPED)),
+            "the candidate arm never carries the shipped text"
+        );
     }
 }

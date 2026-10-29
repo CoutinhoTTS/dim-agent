@@ -369,6 +369,34 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: 모델 {count}개 사용 불가 · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}: 모델 없음 · dimcode models {id} --refresh"
+        }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}: 모델 없음 · provider.models.create로 모델 추가"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}: {unavailable}개 사용 불가, {disabled}개 비활성 · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}: 카탈로그를 읽을 수 없음 · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "캐시된 카탈로그가 없습니다. 로그인한 뒤 models PROVIDER --refresh를 실행하세요."
+        }
+        "Saved model preferences cleared" => "저장된 모델 환경설정을 지웠습니다",
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}: 모델 1개 사용 안 함 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}: 모델 {count}개 사용 안 함 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "모델이 없습니다. dimcode models {id} --refresh 로 확인하세요."
+        }
+        "No models. The provider listed none." => {
+            "모델이 없습니다. 이 제공자는 아무것도 나열하지 않았습니다."
+        }
         "Enter select · Esc back" => "Enter 선택 · Esc 뒤로",
         "Subagent models" => "서브에이전트 모델",
         "Subagent models: {policy}" => "서브에이전트 모델: {policy}",
