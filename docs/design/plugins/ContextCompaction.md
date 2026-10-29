@@ -1139,7 +1139,7 @@ Internal Rust changes:
 | Diagnostics | Strategy-neutral: common counts, the summarizer's summed usage and the insufficient-space mark, plus a strategy-owned object (breaking) |
 | Compaction state | Facts: pending = command without start, running = start without result, done = result (§5.7) |
 | Half-finished compaction | Never resumed; settled as `cancelled` (§5.8) |
-| Summarizer reasoning (#170) | `off` (§13.2). The evaluation ([research note](../research/summary-eval.md)) passes `off` on the OpenAI-compatible class, with no other arm's `F` more than `δ` above it, so the value is a strategy constant and `compaction.json` is removed. Decided on the class that ran; provisional for the classes §13.4 requires that did not run (Coverage) |
+| Summarizer reasoning (#170) | `off` (§13.2). The evaluation ([research note](../research/summary-eval.md)) passes `off` on the OpenAI-compatible class, with no other arm's `F` more than `δ` above it, so the value is a strategy constant and `compaction.json` is removed. Decided on the class that ran; provisional for OpenAI Responses and Anthropic budget thinking (§13.4 Coverage), evaluated under [#565](https://github.com/arcships/dim/issues/565) |
 | Target summary length (#170) | No instruction (§13.3). Every phase-2 arm passed; the no-instruction arm's cut-offs and failures were no higher than any target arm's, so none is kept. The planning size uses α = 0.5 and β = 0.10 |
 | Window limits | None of compaction's own: the window facts are the model's catalog values with their overrides, and `B`, the threshold, `0.5 × B`, `0.25 × B` and `S` scale with the declared window. A smaller useful window is declared smaller in the catalog (Provider) or by the `contextWindow` override (§5.1) |
 | The `0.5 × B` bound | The tail budget is `min(0.25 × B, 0.5 × B − resident)` with the replacement planned at `replacement_size` (§13.3's `S` at the provisional α = 0.5, β = 0.10); when no kept tail fits, the limit is the cut that replaces everything; a completed result still above the bound is re-planned once at the replacement's actual size before anything is committed, and only that re-plan's outcome is written; the mark is measured from the written result's total, so a result above the bound always carries it (§5.3). The `0.5` share is provisional (#428) |
@@ -1651,9 +1651,11 @@ and one model without reasoning as a control.
 | Anthropic budget thinking | not run | no model of this class was in the evaluation, which used DeepSeek models only. The evaluation's model reached the Anthropic-compatible endpoint as the control, where the protocol probes show effort ignored: `low` and `max` returned no thinking, and thinking appeared only when a request enabled it explicitly. Its three arms therefore never summon thinking there, and it cannot stand in for this class |
 | non-reasoning control | phase 1 ran and counts; phase 2 is not usable | the same model on its Anthropic-compatible endpoint, where no reply carried thinking at any of the three arms' request shapes in phase 1. In phase 2 the endpoint began returning thinking without a signature for every request, so that phase measures the endpoint's change, not summary quality (research note §4.2) |
 
-**Scope.** The default is `off` for every class: decided on the OpenAI-compatible class, which
-ran, and provisional for the other three. The rule reruns for each class when it can run, and a
-class whose result fails the rule changes the default there.
+**Scope.** The default is `off`: decided on the OpenAI-compatible class, which ran, and
+provisional for OpenAI Responses and Anthropic budget thinking. The non-reasoning control ran
+in phase 1 and has no reasoning default to decide. ContextCompaction reruns the rule for the two
+provisional classes under [#565](https://github.com/arcships/dim/issues/565); a class whose result
+fails the rule changes the default there.
 
 **Decision criteria** (`δ = 0.05`):
 
