@@ -78,6 +78,7 @@ pub enum Call {
     Create(Create),
     List(SessionList),
     Summaries(SessionList),
+    Catalog(Catalog),
     Attach(Attach),
     Detach(SessionId),
     Submit(Submit),
@@ -331,6 +332,27 @@ pub struct SessionList {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub agent_id: Option<String>,
 }
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Catalog {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub limit: Option<usize>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cursor: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub query: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub with_preview: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogResult {
+    pub sessions: Vec<SessionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionId {
@@ -434,7 +456,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 33] = [
+const BUILTIN_METHODS: [&str; 34] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -451,6 +473,7 @@ const BUILTIN_METHODS: [&str; 33] = [
     "session.create",
     "session.list",
     "session.summaries",
+    "session.catalog",
     "session.attach",
     "session.detach",
     "session.submit",
@@ -530,6 +553,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.create" => Call::Create(params(raw_params)?),
             "session.list" => Call::List(params(raw_params)?),
             "session.summaries" => Call::Summaries(params(raw_params)?),
+            "session.catalog" => Call::Catalog(params(raw_params)?),
             "session.attach" => Call::Attach(params(raw_params)?),
             "session.detach" => Call::Detach(params(raw_params)?),
             "session.submit" => Call::Submit(params(raw_params)?),
@@ -834,6 +858,7 @@ pub enum Reply {
     /// The attached Session's directory record, as `session.list` gives it.
     Attach(SessionInfo),
     Summaries(Vec<SessionSummary>),
+    Catalog(CatalogResult),
     Submit(SubmitResult),
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),

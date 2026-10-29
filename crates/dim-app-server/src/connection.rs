@@ -381,6 +381,7 @@ impl Connection {
                     | Call::Shutdown(_)
                     | Call::List(_)
                     | Call::Summaries(_)
+                    | Call::Catalog(_)
                     | Call::AgentList
             )
         {
@@ -392,6 +393,7 @@ impl Connection {
                 Call::InputLookup(_)
                     | Call::History(_)
                     | Call::Summaries(_)
+                    | Call::Catalog(_)
                     | Call::SessionMethods(_)
                     | Call::Delete(_)
                     | Call::Fork(_)
@@ -669,6 +671,30 @@ impl Connection {
                 return None;
             }
             Call::Create(params) => self.create(rpc, params).await,
+            Call::Catalog(mut params) => {
+                let limit = params.limit.unwrap_or(50);
+                if !(1..=200).contains(&limit) {
+                    return Some(Err(RpcError::invalid(
+                        "catalog limit must be between 1 and 200",
+                    )));
+                }
+                params.limit = Some(limit);
+                match rpc
+                    .index
+                    .session_catalog(params, None, self.protocol_version())
+                    .await
+                {
+                    Ok(mut page) => {
+                        for summary in &mut page.sessions {
+                            summary.session.attached_clients =
+                                self.hub.attached_clients(&summary.session.session_id);
+                        }
+                        Ok(Reply::Catalog(page))
+                    }
+                    Err(AgentError::InvalidInput(reason)) => Err(RpcError::invalid(reason)),
+                    Err(error) => Err(RpcError::from(error)),
+                }
+            }
             Call::List(params) | Call::Summaries(params) => {
                 let filter: Option<String> = if self.protocol_version() >= 3 {
                     params.agent_id
@@ -679,6 +705,24 @@ impl Connection {
                     && let Some(reason) = rpc.index.unavailable_agent(agent_id)
                 {
                     return Some(Err(RpcError::from(AgentError::Storage(reason))));
+                }
+                if include_summary && rpc.config.database_path.is_some() {
+                    return Some(
+                        match rpc
+                            .index
+                            .session_catalog(Catalog::default(), filter, self.protocol_version())
+                            .await
+                        {
+                            Ok(mut page) => {
+                                for summary in &mut page.sessions {
+                                    summary.session.attached_clients =
+                                        self.hub.attached_clients(&summary.session.session_id);
+                                }
+                                Ok(Reply::Summaries(page.sessions))
+                            }
+                            Err(error) => Err(RpcError::from(error)),
+                        },
+                    );
                 }
                 let mut records = match rpc
                     .index

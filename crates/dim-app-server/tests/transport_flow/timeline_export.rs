@@ -265,7 +265,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":22,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":23,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -329,9 +329,10 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (17, ""),
             (19, ""),
             (21, ""),
+            (22, ""),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
-            changed(&database, &older, &format!("{dropped} DROP TABLE agent_store_format;
+            changed(&database, &older, &format!("DROP TABLE session_catalog; {dropped} DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
             let bytes = std::fs::read(&older).unwrap();
@@ -344,8 +345,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
-                INSERT INTO agent_store_format VALUES (23);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 24));
+                INSERT INTO agent_store_format VALUES (24);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

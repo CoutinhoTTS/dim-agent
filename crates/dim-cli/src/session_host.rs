@@ -220,6 +220,7 @@ struct Worker {
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
+    catalog_request: Option<(u64, String, bool)>,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
@@ -323,6 +324,7 @@ async fn run(
         members: Members::default(),
         output: None,
         output_request: None,
+        catalog_request: None,
         publish_at: None,
         shell: None,
         ui_id: None,
@@ -1005,27 +1007,28 @@ impl Worker {
             Command::Resume(session_id) => {
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
-            Command::ListSessions => {
-                let sessions = self.list().await.map(|mut sessions| {
-                    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-                    // No preview means no user message yet: nothing to resume.
-                    sessions
-                        .into_iter()
-                        .filter(|session| session.preview.is_some())
-                        .map(|session| SessionItem {
-                            id: session.session_id,
-                            title: None,
-                            preview: session.preview,
-                            cwd: session.cwd,
-                            updated_at: session.updated_at,
-                            model: session.model.model_id,
-                        })
-                        .collect()
-                });
-                self.send(Update::Sessions(
-                    sessions.map_err(|error| error.to_string()),
-                ));
+            Command::ListSessions { id, query, cursor } => {
+                self.catalog_request = None;
+                let paged = self.client.offers("session.catalog");
+                let (method, params) = if paged {
+                    let mut params = json!({"limit":50,"query":query,"withPreview":true});
+                    if let Some(cursor) = cursor {
+                        params["cursor"] = cursor.into();
+                    }
+                    ("session.catalog", params)
+                } else {
+                    ("session.summaries", json!({}))
+                };
+                match self.client.send(method, params).await {
+                    Ok(request) => self.catalog_request = Some((request, id, paged)),
+                    Err(error) => self.send(Update::Sessions {
+                        id,
+                        paged,
+                        result: Err(error.to_string()),
+                    }),
+                }
             }
+            Command::CloseSessions => self.catalog_request = None,
             Command::Usage => match self.context_usage().await {
                 Ok(usage) => self.report(usage.describe(), false),
                 Err(error) => self.report(error.to_string(), true),
@@ -2721,6 +2724,53 @@ impl Worker {
         id: u64,
         result: Result<serde_json::Value, client::RpcError>,
     ) -> crate::Result<()> {
+        if self
+            .catalog_request
+            .as_ref()
+            .is_some_and(|(request, _, _)| *request == id)
+        {
+            let (_, id, paged) = self
+                .catalog_request
+                .take()
+                .expect("matched catalog request");
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Page {
+                sessions: Vec<SessionSummary>,
+                next_cursor: Option<String>,
+            }
+            let result = result.map_err(|error| error.to_string()).and_then(|value| {
+                let (mut sessions, next_cursor) = if paged {
+                    let page: Page = serde_json::from_value(value)
+                        .map_err(|error| format!("Invalid catalog reply: {error}"))?;
+                    (page.sessions, page.next_cursor)
+                } else {
+                    let sessions: Vec<SessionSummary> = serde_json::from_value(value)
+                        .map_err(|error| format!("Invalid summaries reply: {error}"))?;
+                    (sessions, None)
+                };
+                if !paged {
+                    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+                }
+                Ok((
+                    sessions
+                        .into_iter()
+                        .filter(|session| session.preview.is_some())
+                        .map(|session| SessionItem {
+                            id: session.session_id,
+                            title: session.title,
+                            preview: session.preview,
+                            cwd: session.cwd,
+                            updated_at: session.updated_at,
+                            model: session.model.model_id,
+                        })
+                        .collect(),
+                    next_cursor,
+                ))
+            });
+            self.send(Update::Sessions { id, paged, result });
+            return Ok(());
+        }
         if let Some(index) = self
             .question_responses
             .iter()
@@ -3204,6 +3254,7 @@ struct SessionSummary {
     updated_at: u64,
     #[serde(default)]
     preview: Option<String>,
+    title: Option<String>,
 }
 
 #[cfg(test)]

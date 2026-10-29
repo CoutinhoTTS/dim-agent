@@ -51,6 +51,8 @@ mod agents;
 #[path = "transport_flow/collaboration.rs"]
 mod collaboration;
 
+#[path = "transport_flow/catalog.rs"]
+mod catalog;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
