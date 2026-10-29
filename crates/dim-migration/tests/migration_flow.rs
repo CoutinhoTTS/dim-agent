@@ -853,6 +853,25 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
                 && item.outcome == Outcome::Deleted),
         "{retried:?}"
     );
+    native
+        .execute(
+            "DELETE FROM settings_documents WHERE source='user/schedule'",
+            [],
+        )
+        .unwrap();
+    let cleared = migration
+        .run(source.clone(), true, Some(retried.task.id))
+        .await
+        .unwrap();
+    assert!(
+        cleared
+            .objects
+            .iter()
+            .any(|item| item.kind == "scheduled_job"
+                && item.id == "legacy-desktop:paused"
+                && item.outcome == Outcome::Deleted),
+        "{cleared:?}"
+    );
     let config: Value =
         serde_json::from_slice(&std::fs::read(target.join("config.json")).unwrap()).unwrap();
     assert!(config["locale"].is_null());

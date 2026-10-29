@@ -78,6 +78,7 @@ pub(crate) async fn import(
                 if let Some(previous)=target.document(&key)? {
                     if previous["digest"]!=digest {return Ok(Outcome::Conflict);}
                     let document=target.settings("schedule",&owner.stopping).await?;
+                    if document.as_object().is_some_and(|document|document.is_empty()) {return Ok(Outcome::Deleted);}
                     let jobs=document["jobs"].as_array().ok_or_else(||Error::Object("Invalid native schedule document is preserved".into()))?;
                     return Ok(if jobs.iter().any(|job|job["id"]==source_id) {Outcome::AlreadyImported}else{Outcome::Deleted});
                 }
