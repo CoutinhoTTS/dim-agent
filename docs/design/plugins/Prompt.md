@@ -214,6 +214,11 @@ impl GuideEntries {
     /// The guide for `branch`: the frame, the entries in force, and the
     /// frame's tail, paragraphs joined by one blank line.
     pub fn compose(&self, branch: &str) -> String;
+
+    /// The System for `branch`: `base` text followed by the guide. A missing
+    /// or empty base is the guide alone, and a `Parts` base gains the guide
+    /// as one more text part.
+    pub fn compose_system(&self, branch: &str, base: Option<SystemPrompt>) -> SystemPrompt;
 }
 ```
 
@@ -244,6 +249,6 @@ pub struct GuideEntryError {
 
 `invalid_entry`, `duplicate_marker` and `too_large` are the codes this binding produces. `no_caller_row` is produced only by the bridge: a Rust caller always has its `ctx`, and the registration is that caller's own effect. `closed` comes from the framework: when the caller's context is closing or unloading, the effect cannot be registered and the framework returns its own closed error, which a bridge maps to `closed`; the Rust binding returns it unchanged rather than dressing it as a `GuideEntryError`.
 
-Prompt composes through `GuideEntries::compose`, at the adoption it publishes and, for a host-prepared request, where Loop assembles its System. `with_input_guide(system, guide)` places an already composed guide in a `SystemPrompt`; it no longer knows where the guide came from, and no caller appends text of its own.
+Prompt composes through `GuideEntries::compose_system`, at the adoption it publishes and, for a host-prepared request, where Loop assembles its System: the composition is the `SystemPrompt` the request carries, placed over the source text the branch adopted. No caller appends text of its own.
 
 The foreign form of `register` is §2's data: the scope, the entry, and the error codes; `compose` is Rust-only, since no other language reads a composition — every language reaches the model through the same request.

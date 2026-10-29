@@ -212,6 +212,10 @@ impl GuideEntries {
 
     /// `branch` 的指南：框架、生效的条目、框架的尾，段落之间隔一个空行。
     pub fn compose(&self, branch: &str) -> String;
+
+    /// `branch` 的 System：`base` 文字在前，其后是指南。`base` 缺失或为空
+    /// 时只有指南；`Parts` 形式的 `base` 追加一个文本 part 承载指南。
+    pub fn compose_system(&self, branch: &str, base: Option<SystemPrompt>) -> SystemPrompt;
 }
 ```
 
@@ -242,6 +246,6 @@ pub struct GuideEntryError {
 
 `invalid_entry`、`duplicate_marker` 和 `too_large` 是这个绑定产生的代码。`no_caller_row` 只由桥接产生：Rust 的调用方总有自己的 `ctx`，登记就是调用方自己的 effect。`closed` 来自框架：调用方的上下文正在关闭或卸载时，effect 无法登记，框架返回它自己的 closed 错误，桥接把它映射为 `closed`；Rust 绑定原样返回它，而不把它包装成 `GuideEntryError`。
 
-Prompt 经 `GuideEntries::compose` 组合：在它发布的采用处，以及宿主准备的请求由 Loop 组装 System 处。`with_input_guide(system, guide)` 把已经组合好的指南放进 `SystemPrompt`；它不再知道指南从哪来，也没有调用方追加自己的文字。
+Prompt 经 `GuideEntries::compose_system` 组合：在它发布的采用处，以及宿主准备的请求由 Loop 组装 System 处。组合的结果就是请求承载的 `SystemPrompt`，放在分支已采用的来源文字之后。没有调用方追加自己的文字。
 
 `register` 的对外形式就是 §2 的数据：作用域、条目与错误码；`compose` 只存在于 Rust，因为没有别的语言读取组合——每种语言都经同一个请求到达模型。
