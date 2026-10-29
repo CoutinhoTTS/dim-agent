@@ -6354,7 +6354,6 @@
         "path HistoryRenderer",
         "path context_configuration",
         "path context_messages",
-        "path crate::history::with_input_guide",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_configuration",
         "use crate::history::context_messages"
@@ -6973,11 +6972,9 @@
         "path context_configuration",
         "path context_messages",
         "path crate::history::read_context",
-        "path with_input_guide",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_configuration",
-        "use crate::history::context_messages",
-        "use crate::history::with_input_guide"
+        "use crate::history::context_messages"
       ]
     },
     {
@@ -7124,6 +7121,7 @@
       "references": [
         "path BaselineSource",
         "path ModelRequest",
+        "path SystemPrompt",
         "path SystemPrompt::Text",
         "path model"
       ]
@@ -7694,16 +7692,6 @@
         "path InputMessageData",
         "path UserInput",
         "path events"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::history",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path SystemPrompt",
-        "path SystemPrompt::Parts",
-        "path SystemPrompt::Text",
-        "path SystemPromptPart::Text"
       ]
     },
     {
@@ -8656,14 +8644,6 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
-      "to": "dim_agent_capabilities::prompt_guide",
-      "references": [
-        "path GuideEntries",
-        "use crate::prompt_guide::GuideEntries"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",
@@ -8830,6 +8810,18 @@
       "references": [
         "path Registrations",
         "use dim_agent_runtime::Registrations"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_guide",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path SystemPrompt",
+        "path SystemPrompt::Parts",
+        "path SystemPrompt::Text",
+        "path SystemPromptPart::Text",
+        "use dim_agent_types::SystemPrompt",
+        "use dim_agent_types::SystemPromptPart"
       ]
     },
     {

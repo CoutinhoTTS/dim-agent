@@ -5,23 +5,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 
-/// Places the guide Prompt composed beside the renderer's system
-/// configuration.
-pub(crate) fn with_input_guide(system: Option<SystemPrompt>, guide: &str) -> SystemPrompt {
-    match system {
-        None => SystemPrompt::Text(guide.to_owned()),
-        Some(SystemPrompt::Text(text)) if text.is_empty() => SystemPrompt::Text(guide.to_owned()),
-        Some(SystemPrompt::Text(text)) => SystemPrompt::Text(format!("{text}\n\n{guide}")),
-        Some(SystemPrompt::Parts(mut parts)) => {
-            parts.push(SystemPromptPart::Text {
-                text: guide.to_owned(),
-                cache_control: None,
-            });
-            SystemPrompt::Parts(parts)
-        }
-    }
-}
-
 /// An ephemeral view of a fixed timeline prefix, never a second history store.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {

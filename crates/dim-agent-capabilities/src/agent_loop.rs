@@ -700,7 +700,7 @@ impl AgentLoop {
                                     .map_err(|error| AgentError::fault("Loop", error.to_string()))
                             })?;
                         settings.system =
-                            Some(crate::history::with_input_guide(settings.system, &owner.guide.compose(&owner.branch)));
+                            Some(owner.guide.compose_system(&owner.branch, settings.system));
                         settings
                     }
                 };
