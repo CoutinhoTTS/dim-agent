@@ -1891,12 +1891,12 @@ async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
     };
     assert_eq!(key.as_deref(), Some("branch:line"));
     assert!(!retire);
-    assert!(text.starts_with(&format!(
-        "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"host\">\n"
-    )));
-    assert!(
-        text.ends_with(
-            "The message after this one says what this line is for.\n</dim-branch-line>"
+    assert_eq!(
+        text,
+        &format!(
+            "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"host\">\n\
+             You are line {child} of this session, opened from line main at this point of its history. You are the same agent as main: everything above is your own history, and you continue from here on your own line, in parallel with main. You do not see main's work after this point. Messages above that were addressed to main are main's, not yours. The message after this one says what this line is for.\n\
+             </dim-branch-line>"
         )
     );
     assert_eq!(input.effective_mode(), InputMode::Queue);
@@ -2919,10 +2919,185 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
     let history = session.history(&first, None).await.unwrap();
     let (identity, retired) = line_block(&history).unwrap();
     assert!(!retired);
-    assert!(identity.starts_with(&format!(
-        "<dim-branch-line branch=\"{first}\" parent=\"main\" source=\"tool\">"
-    )));
     assert!(identity.ends_with("</dim-branch-line>"));
+    let facts = identity
+        .split("\n\nHow you work with main:")
+        .next()
+        .expect("the factual sentences come before the rules");
+    assert_eq!(
+        facts,
+        format!(
+            "<dim-branch-line branch=\"{first}\" parent=\"main\" source=\"tool\">\n\
+             You are line {first} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.\n\n\
+             Your purpose, as main wrote it:\nfirst purpose"
+        )
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// #552: `<dim-branch-line>` is written by the Session part TimelineTree, so
+/// its guide entry is registered there, at the Session, and a line carries it
+/// even where no branch part is loaded. `<dim-branch-lines>` stays with
+/// BranchLine, which writes the roster.
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+
+fn system_text(prompt: &SystemPrompt) -> String {
+    match prompt {
+        SystemPrompt::Text(text) => text.clone(),
+        SystemPrompt::Parts(parts) => parts
+            .iter()
+            .map(|part| {
+                let SystemPromptPart::Text { text, .. } = part;
+                text.as_str()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// The system of a branch's last model call.
+async fn last_system(session: &Session, branch: &str) -> String {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.system.as_deref().map(system_text),
+            _ => None,
+        })
+        .expect("a model call carries the system")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+
+    // main writes the roster and sees it: its marker and its entry.
+    let main = last_system(&session, "main").await;
+    assert_eq!(main.matches(IDENTITY_ENTRY).count(), 1, "{main:?}");
+    assert_eq!(main.matches(ROSTER_ENTRY).count(), 1, "{main:?}");
+    let roster = line_block(&session.history("main", None).await.unwrap());
+    assert!(roster.is_some_and(|(text, _)| text.starts_with("<dim-branch-lines")));
+
+    // The line carries its identity marker, and the Session's writer
+    // explains it there.
+    let opening = line_block(&session.history(&child, None).await.unwrap())
+        .expect("the line's opening input carries its identity");
+    assert!(opening.0.starts_with(&format!(
+        "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"tool\">"
+    )));
+    let line = last_system(&session, &child).await;
+    assert_eq!(line.matches(IDENTITY_ENTRY).count(), 1, "{line:?}");
+    soon(agent.close()).await.unwrap();
+}
+
+/// #552: the branch tool's actions, modes and schema are protocol, so they
+/// are asserted here; the description's policy sentences are judged by the
+/// §12.3 evaluation instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_branch_tool_declares_its_actions_and_modes() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("hello".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let tools = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.clone(),
+            _ => None,
+        })
+        .expect("the request carries the declarations");
+    let branch = tools
+        .iter()
+        .find(|tool| tool.name == "branch")
+        .expect("the branch tool is declared");
+    assert_eq!(branch.risk.as_deref(), Some("session"));
+    let schema = serde_json::to_value(&branch.input_schema).unwrap();
+    assert_eq!(schema["required"], serde_json::json!(["action"]));
+    assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+    assert_eq!(
+        schema["properties"]["action"]["enum"],
+        serde_json::json!(["create", "message", "read", "end"])
+    );
+    assert_eq!(
+        schema["properties"]["mode"]["enum"],
+        serde_json::json!(["append", "steer"])
+    );
+    assert_eq!(schema["properties"]["at"]["minimum"], serde_json::json!(0));
+    assert_eq!(
+        schema["properties"]["after"]["minimum"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        schema["properties"]["limit"]["minimum"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        schema["properties"]["limit"]["maximum"],
+        serde_json::json!(200)
+    );
+    for sentence in [
+        "- create (main only): open a line to work on prompt in parallel.",
+        "- message: send content to a line you opened, or to the line that opened you.",
+        "Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line.",
+        "- read: show the recent activity of a line you opened, also after it ended.",
+        "Pass nextCursor as after to continue.",
+        "- end: on a line opened with create, end your own line.",
+        "Returns the line's id.",
+        "It is your last action.",
+        "Lines talk only with the line that opened them and the lines they opened.",
+    ] {
+        assert!(
+            branch.description.contains(sentence),
+            "{sentence:?} is missing from: {}",
+            branch.description
+        );
+    }
+    soon(agent.close()).await.unwrap();
+}
+
+/// #552: a malformed call is a refusal of the tool's own argument rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_branch_tool_reports_invalid_arguments() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    for (arguments, text) in [
+        (
+            r#"{"action":"message","content":"x"}"#,
+            "Invalid branch arguments: message requires to",
+        ),
+        (
+            r#"{"action":"frobnicate"}"#,
+            "Invalid branch arguments: unknown action frobnicate",
+        ),
+    ] {
+        let result = tool_call(&session, "main", arguments).await;
+        assert_eq!(result.is_error, Some(true), "{:?}", result.content);
+        assert!(
+            matches!(&result.content, ToolContent::Text(shown) if shown == text),
+            "{:?}",
+            result.content
+        );
+    }
     soon(agent.close()).await.unwrap();
 }
 
@@ -3328,11 +3503,29 @@ async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
     assert_eq!(page.is_error, None, "{:?}", page.content);
     let page = page.structured_content.unwrap();
     assert_eq!(page["done"], serde_json::json!(true));
-    assert!(page["items"].as_array().is_some_and(|items| {
+    let items = page["items"].as_array().expect("the page lists items");
+    assert!(
         items
             .iter()
             .any(|item| item["type"] == serde_json::json!("turn_end"))
-    }));
+    );
+    let cursor = page["nextCursor"].as_u64().expect("a cursor");
+    assert!(
+        items
+            .iter()
+            .all(|item| item["sequence"].as_u64().unwrap() <= cursor),
+        "nextCursor follows every item returned"
+    );
+    let after = tool_call(
+        &session,
+        "main",
+        &format!(r#"{{"action":"read","branch":"{child}","after":{cursor}}}"#),
+    )
+    .await;
+    assert_eq!(after.is_error, None, "{:?}", after.content);
+    let after = after.structured_content.unwrap();
+    assert_eq!(after["items"], serde_json::json!([]));
+    assert_eq!(after["done"], serde_json::json!(true));
     soon(agent.close()).await.unwrap();
 }
 

@@ -18,6 +18,7 @@ async fn isolation_settings_are_local_revisioned_and_preserve_policy_on_errors()
         dim_agent_capabilities::workspace_tools::WorkspaceToolsConfig {
             output_root: home.join("outputs"),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     defaults::mock_model_hosts(&mut builder);
     let server = serve(

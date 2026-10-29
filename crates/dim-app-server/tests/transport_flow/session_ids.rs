@@ -28,6 +28,7 @@ async fn an_empty_session_id_is_invalid_params_and_an_unknown_one_stays_closed()
         WorkspaceToolsConfig {
             output_root: native.join("outputs"),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
