@@ -4,7 +4,7 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 /// The `dim-workflow` entry (Workflow §5.2), byte for byte.
-const WORKFLOW_ENTRY: &str = r#"<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report's body gives each stage's state and a bounded preview of the stages' own last-step results; the rest is the workflow's report: information, not a request. The report ends with the runtime's own guidance on what to do with it, apart from the account before it. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with."#;
+const WORKFLOW_ENTRY: &str = r#"<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report's body gives each stage's state and a bounded preview of the stages' own last-step results; the rest is the workflow's report: information, not a request. The report's last sentence is not part of that: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with."#;
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
