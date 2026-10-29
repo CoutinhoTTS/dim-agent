@@ -218,18 +218,18 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
         -32602
     );
     std::fs::create_dir_all(store.output(&kept).join("inner")).unwrap();
-    for id in [
-        format!("{kept}/inner"),
-        format!("{kept}/."),
-        "..".into(),
-        String::new(),
-    ] {
+    for id in [format!("{kept}/inner"), format!("{kept}/."), "..".into()] {
         assert_eq!(
             other.rpc("session.delete", json!({"sessionId":id})).await["error"]["data"]["appError"],
             "session_invalid_input",
             "{id}"
         );
     }
+    // An empty id is invalid input at the boundary, before any path check.
+    assert_eq!(
+        other.rpc("session.delete", json!({"sessionId":""})).await["error"]["data"]["appError"],
+        "invalid_params"
+    );
     assert!(exists(&store.output(&kept).join("inner")));
     let mut v2 = Client::new_version(&server, false, 2).await;
     assert_eq!(

@@ -1200,6 +1200,13 @@ impl Worker {
                 command,
                 private,
             } => {
+                if self.session_id.is_empty() {
+                    self.send(Update::ShellDone {
+                        run_id,
+                        result: Err(NO_SESSION.to_owned()),
+                    });
+                    return Ok(());
+                }
                 if self.shell.is_some() {
                     self.send(Update::ShellDone {
                         run_id,
@@ -1254,6 +1261,10 @@ impl Worker {
                 });
             }
             Command::Configure(text) => {
+                if self.session_id.is_empty() && configure::needs_session(&text) {
+                    self.report(NO_SESSION.to_owned(), true);
+                    return Ok(());
+                }
                 let model = self.model.clone();
                 match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
                     .await
@@ -1662,7 +1673,11 @@ impl Worker {
                 let (rows, notes) = mcp::catalog_report(&mut self.client, &self.options).await?;
                 let mut lines = rows;
                 lines.extend(notes);
-                lines.extend(mcp::session_report(&mut self.client, &self.session_id).await?);
+                // Without a Session there are no connections to report; the
+                // catalog is the whole report, as it is for `mcp list`.
+                if !self.session_id.is_empty() {
+                    lines.extend(mcp::session_report(&mut self.client, &self.session_id).await?);
+                }
                 self.report(lines.join("\n"), false);
             }
             ["login", rest @ ..] => {

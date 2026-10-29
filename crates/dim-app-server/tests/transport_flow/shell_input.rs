@@ -92,7 +92,11 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
             json!({"sessionId":"","branchId":"main","taskId":task}),
         )
         .await;
-    assert_eq!(empty_session["error"]["data"]["appError"], "session_closed");
+    assert_eq!(empty_session["error"]["data"]["appError"], "invalid_params");
+    assert_eq!(
+        empty_session["error"]["message"], "sessionId must not be empty",
+        "{empty_session}"
+    );
     for wrong in [
         json!({"sessionId":shell.sid,"branchId":child,"taskId":task}),
         json!({"sessionId":other["result"]["sessionId"],"branchId":"main","taskId":task}),
