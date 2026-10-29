@@ -676,13 +676,13 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     Connection::open(&native_path)
         .unwrap()
         .execute_batch(
-            "DROP TABLE session_catalog; DROP TABLE agent_store_format;
-             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 22));
-             INSERT INTO agent_store_format VALUES (22);",
+            "DROP TABLE agent_store_format;
+             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
+             INSERT INTO agent_store_format VALUES (23);",
         )
         .unwrap();
     let (previous, version) = SqliteStorage::open_read_only(native_path).unwrap();
-    assert_eq!(version, 22);
+    assert_eq!(version, 23);
     previous.close().await.unwrap();
     std::fs::write(
         target.join("config.json"),
@@ -714,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        23
+        24
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -1277,7 +1277,7 @@ async fn migration_preserves_removed_client_settings_and_refuses_unsupported_tar
     let preview = directory.path().join("preview");
     std::fs::create_dir_all(preview.join("rust")).unwrap();
     let native = Connection::open(preview.join("rust/dimcode.sqlite")).unwrap();
-    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=24));INSERT INTO agent_store_format VALUES(24);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
+    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=25));INSERT INTO agent_store_format VALUES(25);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
     drop(native);
     let before = std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap();
     let root = rutis::Ctx::root().unwrap();
