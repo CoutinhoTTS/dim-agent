@@ -1874,7 +1874,8 @@ impl std::fmt::Display for AssemblyFinding {
 }
 
 /// Checks one live scope of `snapshot`: its `required` rows, their descendants
-/// and everything else in the scope, as creation used to. `view` is the scope
+/// and everything else in the scope, as creation used to. `rows` is the
+/// loader's [index](scope_rows) of rows by instance, `view` the scope
 /// instance, `required` the loader row ids its profile requires and `nested`
 /// the scopes nested inside it. `scope` names the Session the scope belongs
 /// to and, for a branch scope, the branch. Each plugin is checked once, by the
@@ -1882,7 +1883,7 @@ impl std::fmt::Display for AssemblyFinding {
 /// scope's own pass.
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
-    loader: &Loader,
+    rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<(String, PluginId)>>,
     view: &FiberView,
     required: &[String],
     nested: &[FiberView],
@@ -1899,7 +1900,7 @@ pub(crate) fn check_scope(
             detail,
         });
     };
-    let rows = required_rows(loader, view, required);
+    let rows = required_rows(rows, view, required);
     let excluded: HashSet<_> = nested
         .iter()
         .flat_map(|nested| subtree(snapshot, nested.id))
@@ -1961,23 +1962,42 @@ pub(crate) fn check_scope(
     }
 }
 
+/// The loader's rows by the instance each runs in: one pass over
+/// [`Loader::entries`], so a check of every live scope reads the rows once and
+/// the reads no longer grow with the number of Sessions. A row belongs to an
+/// instance when its chain of enclosing instances contains it, the predicate
+/// [`required_rows`] applies.
+pub(crate) fn scope_rows(
+    loader: &Loader,
+) -> std::collections::HashMap<rutis::host::InstanceId, Vec<(String, PluginId)>> {
+    let mut rows: std::collections::HashMap<_, Vec<(String, PluginId)>> = Default::default();
+    for entry in loader.entries() {
+        let (Some(plugin), Some(instance)) = (entry.plugin, &entry.instance) else {
+            continue;
+        };
+        for (_, id) in &instance.chain {
+            rows.entry(*id)
+                .or_default()
+                .push((entry.id.clone(), plugin));
+        }
+    }
+    rows
+}
+
 /// The plugin ids of one scope instance's required rows: the loader rows
 /// `required` names, copied in `view`'s instance. Every row of a scope is
 /// either a required row or below one, so a mounted part is covered by its
 /// mounter's row without being listed here.
-fn required_rows(loader: &Loader, view: &FiberView, required: &[String]) -> HashSet<PluginId> {
-    loader
-        .entries()
+fn required_rows(
+    rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<(String, PluginId)>>,
+    view: &FiberView,
+    required: &[String],
+) -> HashSet<PluginId> {
+    rows.get(&view.instance())
         .into_iter()
-        .filter(|entry| entry.plugin.is_some_and(|plugin| plugin != view.id))
-        .filter(|entry| required.iter().any(|id| id == &entry.id))
-        .filter(|entry| {
-            entry
-                .instance
-                .as_ref()
-                .is_some_and(|info| info.chain.iter().any(|(_, id)| *id == view.instance()))
-        })
-        .filter_map(|entry| entry.plugin)
+        .flatten()
+        .filter(|(id, plugin)| *plugin != view.id && required.iter().any(|name| name == id))
+        .map(|(_, plugin)| *plugin)
         .collect()
 }
 

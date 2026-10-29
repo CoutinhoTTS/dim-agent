@@ -293,7 +293,9 @@ impl Agent {
     /// is provided without an instance key. Each plugin is checked once, by the
     /// innermost scope that contains it, and names the Session it belongs to
     /// and, for a branch plugin, the branch. It reports every finding rather
-    /// than the first, and nothing for a sound assembly.
+    /// than the first, and nothing for a sound assembly. The loader's rows are
+    /// read once per call; each scope still walks one whole snapshot, so the
+    /// cost grows with the square of the live Sessions.
     ///
     /// Creation does not run this. A test that wants the check creates the
     /// Session, branch or scope it wants covered, then calls this once; a
@@ -304,9 +306,16 @@ impl Agent {
     /// already gone. `Ok` with no findings means every live scope was
     /// inspected and is sound.
     pub fn check_assembly(&self) -> Result<Vec<AssemblyFinding>> {
-        let Some(snapshot) = self.diagnostics() else {
-            return Err(AgentError::fault("assembly check", "no diagnostics snapshot"));
+        let Some(placed) = self.0.placed.get() else {
+            return Err(AgentError::fault(
+                "assembly check",
+                "no diagnostics snapshot",
+            ));
         };
+        let snapshot = placed.placement.anchor.diagnostics();
+        // Every Session of an Agent is placed by the same loader, so one pass
+        // over its rows covers all of them.
+        let rows = scope_rows(&placed.placement.loader);
         let parents: std::collections::HashMap<_, _> = snapshot
             .plugins
             .iter()
@@ -340,12 +349,14 @@ impl Agent {
             for (view, required, branch) in scopes.iter().copied() {
                 let nested: Vec<FiberView> = scopes
                     .iter()
-                    .filter(|(other, _, _)| other.id != view.id && below(&parents, other.id, view.id))
+                    .filter(|(other, _, _)| {
+                        other.id != view.id && below(&parents, other.id, view.id)
+                    })
                     .map(|(other, _, _)| (*other).clone())
                     .collect();
                 check_scope(
                     &snapshot,
-                    &owner.loader,
+                    &rows,
                     view,
                     required,
                     &nested,
