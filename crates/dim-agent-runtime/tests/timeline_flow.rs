@@ -247,6 +247,43 @@ async fn failed_registration_commits_nothing() {
 }
 
 #[tokio::test]
+async fn panicking_before_keeps_the_original_fact_and_the_branch_usable() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let timeline = Timeline::new(
+        ctx.clone(),
+        TimelineKey {
+            session_id: "session".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store,
+    );
+    let hook = timeline
+        .before(&ctx, "panicking-before", &["input/message"], |_| {
+            panic!("injected before panic")
+        })
+        .unwrap();
+    let original = input("original");
+    let first = timeline.append(original.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&first.kind).unwrap(),
+        serde_json::to_value(original.kind).unwrap()
+    );
+    assert_eq!(first.sequence, 1);
+    drop(hook);
+    assert_eq!(timeline.append(input("after panic")).unwrap().sequence, 2);
+    assert_eq!(timeline.local(..).await.unwrap().len(), 2);
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn unknown_storage_keys_cannot_create_sessions_or_branches() {
     let store = Arc::new(MemoryTimelineStore::default());
     store

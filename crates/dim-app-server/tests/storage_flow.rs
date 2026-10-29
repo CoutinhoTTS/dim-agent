@@ -1919,14 +1919,21 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
     assert_eq!(store.writer_memo_requests("bad"), 0);
     assert_eq!(store.head(&key("bad", "main")).await.unwrap(), 1);
     assert_eq!(store.branches("bad").await.unwrap().len(), 1);
+    let (unexpected, rejected_callback) = tokio::sync::oneshot::channel();
     assert!(
         store
             .append(
                 key("bad", "main"),
                 vec![text(2, "late")],
-                Box::new(|_| panic!("rejected append callback must not run"))
+                Box::new(move |_| {
+                    let _ = unexpected.send(());
+                })
             )
             .is_err()
+    );
+    assert!(
+        rejected_callback.await.is_err(),
+        "rejected append callback must not run"
     );
     assert_eq!(store.head(&key("good", "main")).await.unwrap(), 1);
     assert_eq!(store.head(&key("other", "main")).await.unwrap(), 1);

@@ -312,16 +312,17 @@ impl Timeline {
                 draft: original.clone(),
                 steps: Mutex::default(),
             });
-            let result = self
-                .0
-                .ctx
-                .waterfall_sync(offered.clone(), |offered| Ok(Some(offered.draft.clone())));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                self.0
+                    .ctx
+                    .waterfall_sync(offered.clone(), |offered| Ok(Some(offered.draft.clone())))
+            }));
             let (original, draft, steps) = match result {
-                Ok(Some(draft)) => {
+                Ok(Ok(Some(draft))) => {
                     let steps = std::mem::take(&mut *offered.steps.lock().unwrap());
                     (original, draft, steps)
                 }
-                Ok(None) | Err(_) => (original.clone(), original, Vec::new()),
+                Ok(Ok(None) | Err(_)) | Err(_) => (original.clone(), original, Vec::new()),
             };
             let event_id = draft.id.clone().or_else(|| original.id.clone());
             let event = Arc::new(AgentEvent {

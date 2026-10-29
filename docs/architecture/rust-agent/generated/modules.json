@@ -2331,8 +2331,11 @@
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/timeline.rs",
       "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "format",
         "matches",
+        "panic",
         "params",
         "tracing::error",
         "vec"
@@ -20314,6 +20317,7 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
+        "path SessionConfig::default",
         "use dim_agent_runtime::SessionConfig"
       ]
     },
@@ -20387,6 +20391,7 @@
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
         "path EventKind::ContextCompaction",
+        "path EventKind::InputMessage",
         "path EventKind::SessionForked",
         "path EventKind::Text",
         "path EventKind::Thinking",
@@ -20479,6 +20484,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path SqliteStorage",
+        "path SqliteStorage::open",
         "path error",
         "use super::SqliteStorage",
         "use super::sqlite::error"
@@ -31544,6 +31550,18 @@
     {
       "module": "dim_app_server::storage::metadata",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "EventDraft::new"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "InputMessageData::text"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Timeline::new"
     },
     {
       "module": "dim_app_server::transport",

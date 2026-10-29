@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::RangeInclusive,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, Weak, mpsc},
     thread,
     time::{Duration, Instant},
@@ -36,7 +37,25 @@ const ROUND_WINDOW: Duration = Duration::from_millis(20);
 struct Pending {
     key: TimelineKey,
     events: Vec<StoredEvent>,
-    publish: PublishCallback,
+    publish: Option<PublishCallback>,
+}
+impl Pending {
+    fn publish(&mut self, result: Result<()>) {
+        if let Some(publish) = self.publish.take()
+            && catch_unwind(AssertUnwindSafe(|| publish(result))).is_err()
+        {
+            tracing::error!("Timeline publication callback panicked");
+        }
+    }
+}
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self.publish.is_some() {
+            self.publish(Err(error(
+                "Timeline writer stopped before publishing the batch",
+            )));
+        }
+    }
 }
 enum Command {
     Append(Pending),
@@ -45,6 +64,8 @@ enum Command {
         done: tokio::sync::oneshot::Sender<Result<()>>,
     },
     Close,
+    #[cfg(test)]
+    Panic,
 }
 
 /// One process writer batches every Session; only pending events reside here.
@@ -193,6 +214,8 @@ impl SqliteTimelineStore {
                         continue;
                     }
                     Command::Close => break,
+                    #[cfg(test)]
+                    Command::Panic => panic!("injected Timeline writer panic"),
                 };
                 let outputs = |batch: &Pending| {
                     batch
@@ -258,7 +281,7 @@ impl SqliteTimelineStore {
     }
     fn commit_round(&self, pending: Vec<Pending>) {
         let mut sessions: BTreeMap<String, Vec<Pending>> = BTreeMap::new();
-        for batch in pending {
+        for mut batch in pending {
             let failure = self
                 .admission
                 .lock()
@@ -267,7 +290,7 @@ impl SqliteTimelineStore {
                 .get(&batch.key.session_id)
                 .cloned();
             if let Some(failure) = failure {
-                (batch.publish)(Err(failure));
+                batch.publish(Err(failure));
             } else {
                 sessions
                     .entry(batch.key.session_id.clone())
@@ -298,7 +321,11 @@ impl SqliteTimelineStore {
         }
     }
     fn commit_prepared(&self, prepared: BTreeMap<String, (Vec<Pending>, Prepared)>) {
-        let mut guard = self.db.connection.lock().unwrap();
+        let mut guard = self
+            .db
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = guard
             .as_mut()
             .ok_or_else(|| error("SQLite storage is closed"))
@@ -315,8 +342,8 @@ impl SqliteTimelineStore {
             drop(guard);
             for (session, (batches, encoding)) in prepared {
                 self.remember(&session, encoding);
-                for batch in batches {
-                    (batch.publish)(Ok(()));
+                for mut batch in batches {
+                    batch.publish(Ok(()));
                 }
             }
             return;
@@ -354,10 +381,14 @@ impl SqliteTimelineStore {
                         .insert(session, failure.clone());
                 }
             }
-            for batch in batches {
-                (batch.publish)(result.clone());
+            for mut batch in batches {
+                batch.publish(result.clone());
             }
-            guard = self.db.connection.lock().unwrap();
+            guard = self
+                .db
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
     /// Fails `batches` of `session` without writing them.
@@ -368,8 +399,8 @@ impl SqliteTimelineStore {
             .unwrap()
             .failures
             .insert(session, failure.clone());
-        for batch in batches {
-            (batch.publish)(Err(failure.clone()));
+        for mut batch in batches {
+            batch.publish(Err(failure.clone()));
         }
     }
     /// Records the last request of each branch a commit wrote.
@@ -402,7 +433,11 @@ impl SqliteTimelineStore {
         mut step: impl FnMut(&Connection, &mut Reader) -> Result<Option<T>>,
     ) -> Result<T> {
         loop {
-            let guard = self.db.connection.lock().unwrap();
+            let guard = self
+                .db
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let connection = guard
                 .as_ref()
                 .ok_or_else(|| error("SQLite storage is closed"))?;
@@ -646,7 +681,11 @@ impl SqliteTimelineStore {
     }
     fn rollback_creation(&self, session_id: &str) -> Result<()> {
         self.forget(session_id);
-        let mut guard = self.db.connection.lock().unwrap();
+        let mut guard = self
+            .db
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let connection = guard
             .as_mut()
             .ok_or_else(|| error("SQLite storage is closed"))?;
@@ -1747,14 +1786,18 @@ impl TimelineStore for SqliteTimelineStore {
         if let Some(failure) = admission.failures.get(&key.session_id) {
             return Err(failure.clone());
         }
-        admission
-            .sender
-            .send(Command::Append(Pending {
-                key,
-                events,
-                publish,
-            }))
-            .map_err(error)
+        let requested = admission.sender.send(Command::Append(Pending {
+            key,
+            events,
+            publish: Some(publish),
+        }));
+        drop(admission);
+        requested.map_err(|failure| {
+            if let Command::Append(mut pending) = failure.0 {
+                pending.publish.take();
+            }
+            error("Timeline writer stopped")
+        })
     }
     fn read_page<'a>(
         &'a self,
@@ -2114,4 +2157,66 @@ pub(super) async fn validate_session(
         }
     }
     Ok(branches.into_values().collect())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() {
+    use dim_agent_runtime::{Timeline, core::close_timeline};
+    use dim_agent_types::{EventDraft, InputMessageData};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let directory = std::env::temp_dir().join(format!("dim-storage-panic-{}", uuid::Uuid::new_v4()));
+        let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+        let failed = db.run::<()>(|connection| {
+            connection.execute_batch("BEGIN IMMEDIATE; INSERT INTO settings_documents VALUES ('panic',1,'{}','test')").unwrap();
+            panic!("injected SQLite operation panic");
+        }).await;
+        assert!(matches!(failed, Err(AgentError::Storage(message)) if message.contains("SQLite operation panicked")));
+        assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM settings_documents", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 0);
+        let store = SqliteTimelineStore::new(db.clone());
+        for session in ["healthy", "first", "failed", "queued"] {
+            store.create_session(session, &SessionConfig::default()).await.unwrap();
+        }
+        let key = |session: &str| TimelineKey { session_id: session.into(), branch_id: "main".into() };
+        let record = |sequence| StoredEvent {
+            event: Arc::new(AgentEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                sequence,
+                create_at: dim_agent_runtime::core::unix_millis(),
+                tags: None,
+                kind: EventKind::InputMessage(InputMessageData::text("saved", None)),
+            }),
+            trace: None,
+            batch_end: sequence,
+        };
+        store.append(key("healthy"), vec![record(1)], Box::new(|result| {
+            result.unwrap();
+            panic!("injected publication callback panic");
+        })).unwrap();
+        let (published, publication) = tokio::sync::oneshot::channel();
+        store.append(key("healthy"), vec![record(2)], Box::new(move |result| { let _ = published.send(result); })).unwrap();
+        publication.await.unwrap().unwrap();
+        assert_eq!(store.head(&key("healthy")).await.unwrap(), 2);
+
+        let timeline = Timeline::new(Ctx::root().unwrap(), key("failed"), vec![], store.clone());
+        let (first, committed) = tokio::sync::oneshot::channel();
+        let (queued, rejected) = tokio::sync::oneshot::channel();
+        {
+            let _connection = db.connection.lock().unwrap();
+            store.append(key("first"), vec![record(1)], Box::new(move |result| { let _ = first.send(result); })).unwrap();
+            assert!(store.admission.lock().unwrap().sender.send(Command::Panic).is_ok());
+            timeline.append(EventDraft::new(EventKind::InputMessage(InputMessageData::text("pending", None)))).unwrap();
+            store.append(key("queued"), vec![record(1)], Box::new(move |result| { let _ = queued.send(result); })).unwrap();
+        }
+        committed.await.unwrap().unwrap();
+        assert!(rejected.await.unwrap().is_err(), "an accepted callback must receive an error, not disappear");
+        assert!(close_timeline(&timeline).await.is_err());
+        let (unexpected, unaccepted) = tokio::sync::oneshot::channel();
+        assert!(store.append(key("queued"), vec![record(1)], Box::new(move |_| { let _ = unexpected.send(()); })).is_err());
+        assert!(unaccepted.await.is_err(), "a rejected append must not invoke its callback");
+        assert!(store.close().await.is_err());
+        assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM timeline_events", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 3);
+        db.close().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }).await.expect("panic recovery and close must not hang");
 }
