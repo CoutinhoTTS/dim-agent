@@ -321,10 +321,10 @@ impl Harness {
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(compacting.then(|| {
-                Arc::new(compaction_support::Window) as Arc<dyn ResolveContextModel>
+                Arc::new(compaction_support::Window::default()) as Arc<dyn ResolveContextModel>
             }))))
             .session_value(Arc::new(CompactionStrategyHost(compacting.then(|| {
-                Arc::new(compaction_support::Window) as Arc<dyn CompactionStrategy>
+                Arc::new(compaction_support::Window::default()) as Arc<dyn CompactionStrategy>
             }))))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {

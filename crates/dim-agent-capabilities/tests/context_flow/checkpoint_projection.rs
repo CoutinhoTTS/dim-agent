@@ -590,6 +590,7 @@ fn checkpoint_replay_preserves_prompt_configuration_pending_input_and_internal_t
             metadata: None,
         }),
         system: Some(SystemPrompt::Text("system".into())),
+        system_source: None,
     };
     let input = |text: &str| InputMessageData {
         user: InputMessageData::text(text, None).user,

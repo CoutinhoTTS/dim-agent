@@ -198,7 +198,7 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_catalog",
 ];
 /// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
-/// v19 through v22 add none.
+/// v19 through v22 and v24 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -314,6 +314,14 @@ fn v16_tables_store(path: &std::path::Path, marker: u32) -> Connection {
     connection
         .execute("INSERT INTO agent_store_format VALUES (?1)", [marker])
         .unwrap();
+    connection
+}
+/// Builds a disposable v23 store, as a v23 daemon created it.
+fn v23_store(path: &std::path::Path) -> Connection {
+    let connection = v16_tables_store(path, 23);
+    for sql in V23_ADDITIONS {
+        connection.execute_batch(sql).unwrap();
+    }
     connection
 }
 /// Builds a disposable v15 store, as a v15 daemon created it.
@@ -2446,6 +2454,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V20,
         V21,
         V22,
+        V23,
+        V24,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2605,6 +2615,15 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=21",
         ),
         (
+            Base::V23,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=24",
+        ),
+        (Base::V24, "DELETE FROM agent_store_format"),
+        (
+            Base::V24,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=23",
+        ),
+        (
             Base::V21,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=20",
         ),
@@ -2621,6 +2640,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V20, "DROP TABLE session_metadata"),
         (Base::V21, "DROP TABLE session_metadata"),
         (Base::V22, "DROP TABLE session_metadata"),
+        (Base::V23, "DROP TABLE session_metadata"),
+        (Base::V24, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2634,6 +2655,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V20 => drop(v16_tables_store(&database.0, 20)),
             Base::V21 => drop(v16_tables_store(&database.0, 21)),
             Base::V22 => drop(v16_tables_store(&database.0, 22)),
+            Base::V23 => drop(v23_store(&database.0)),
+            Base::V24 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2694,8 +2717,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(23));
-    assert_eq!(marker(&connection), [23]);
+    assert_eq!(schema(&connection), schema_of(24));
+    assert_eq!(marker(&connection), [24]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2774,8 +2797,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(23));
-    assert_eq!(marker(&connection), [23]);
+    assert_eq!(schema(&connection), schema_of(24));
+    assert_eq!(marker(&connection), [24]);
     drop(connection);
 
     let database = Database::new();
@@ -2862,6 +2885,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
                 metadata: None,
             }),
             system: None,
+            system_source: None,
         }),
     );
     let mut request = ModelRequest::new("mock", "test", vec![Message::text(Role::User, "Hi")]);
@@ -2894,7 +2918,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [23]);
+    assert_eq!(marker(&connection), [24]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -2968,7 +2992,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v23; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v24; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -4933,4 +4957,13 @@ async fn a_v22_store_upgrades_in_place_once() {
     let database = Database::new();
     let connection = v16_tables_store(&database.0, 22);
     upgrades_in_place_once(&database, connection, 22).await;
+}
+
+/// An exact v23 store upgrades by replacing only its marker.
+#[tokio::test]
+async fn a_v23_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v23_store(&database.0);
+    assert_eq!(schema(&connection), schema_of(23));
+    upgrades_in_place_once(&database, connection, 23).await;
 }

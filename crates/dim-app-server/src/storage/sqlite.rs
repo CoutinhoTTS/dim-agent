@@ -10,11 +10,11 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 23;
+const FORMAT: u32 = 24;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 24))",
     ),
     (
         "settings_documents",
@@ -112,7 +112,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 9] = [
+const UPGRADES: [(u32, &[&str]); 10] = [
     (
         13,
         &[
@@ -145,6 +145,9 @@ const UPGRADES: [(u32, &[&str]); 9] = [
             "session_catalog_with_preview",
         ],
     ),
+    // #555: a configuration's `system_source`, which a v23 daemon cannot
+    // decode; the marker only.
+    (23, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -317,12 +320,14 @@ impl SqliteStorage {
                 tx.execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
-                for (_, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
+                for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
                     }
+                    if *from == 22 {
+                        super::catalog::backfill(&tx)?;
+                    }
                 }
-                super::catalog::backfill(&tx)?;
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
                 upgraded_from = Some(version);
