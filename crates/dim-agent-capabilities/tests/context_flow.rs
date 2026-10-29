@@ -750,6 +750,37 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
     forged_agent.close().await.unwrap();
 }
 
+/// The definition of `name`, a tool whose call carries the effects its input
+/// names (ContextCompaction §5.10).
+fn declare_definition(name: &str) -> ToolDefinition {
+    ToolDefinition {
+        risk: Some("session".into()),
+        ..dim_agent_capabilities::tool_registry::definition(
+            name,
+            "Declare the effects its input names.",
+            serde_json::json!({"type":"object","properties":{"effects":{"type":"array"}}}),
+        )
+    }
+}
+
+/// A `declare` call's result: `text` carrying the effects its input names.
+fn declared(
+    input: &JsonObject,
+    text: impl Into<String>,
+) -> std::result::Result<ToolResult, HostError> {
+    let effects: Vec<ToolEffect> = serde_json::from_value(
+        input
+            .get("effects")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|_| HostError::failed("Invalid effects"))?;
+    Ok(ToolResult {
+        effects: Some(effects),
+        ..ToolResult::text(text)
+    })
+}
+
 #[path = "context_flow/checkpoint_projection.rs"]
 mod checkpoint_projection;
 #[path = "context_flow/compacted_bindings.rs"]

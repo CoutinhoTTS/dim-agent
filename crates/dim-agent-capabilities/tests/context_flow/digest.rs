@@ -1,9 +1,7 @@
 //! Class 3a: the digest composed from the effects tools declare
 //! (ContextCompaction §5.10, acceptance 18).
 use super::*;
-use dim_agent_capabilities::{
-    agent_loop::AgentLoop, history::digest_message, tool_registry::definition,
-};
+use dim_agent_capabilities::{agent_loop::AgentLoop, history::digest_message};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -18,13 +16,10 @@ use std::{
 struct Effects;
 impl Effects {
     fn result(name: &str, input: &JsonObject) -> std::result::Result<ToolResult, HostError> {
-        let effects: Vec<ToolEffect> =
-            serde_json::from_value(input.get("effects").cloned().unwrap_or_else(|| json!([])))
-                .map_err(|_| HostError::failed("Invalid effects"))?;
-        let result = ToolResult {
-            effects: Some(effects),
-            ..ToolResult::text(format!("{name} done"))
-        };
+        if name == "plain" {
+            return Ok(ToolResult::text("plain done"));
+        }
+        let result = declared(input, format!("{name} done"))?;
         Ok(if name == "declare_error" {
             ToolResult {
                 is_error: Some(true),
@@ -38,14 +33,7 @@ impl Effects {
 impl ToolDriver for Effects {
     fn definitions(&self) -> Vec<ToolDefinition> {
         ["declare", "declare_error", "plain"]
-            .map(|name| ToolDefinition {
-                risk: Some("session".into()),
-                ..definition(
-                    name,
-                    "Declare the effects its input names.",
-                    json!({"type":"object","properties":{"effects":{"type":"array"}}}),
-                )
-            })
+            .map(declare_definition)
             .to_vec()
     }
     fn execute(
@@ -54,12 +42,7 @@ impl ToolDriver for Effects {
         _: ToolExecutionContext,
         _: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
-        Box::pin(async move {
-            if call.name == "plain" {
-                return Ok(ToolResult::text("plain done"));
-            }
-            Self::result(&call.name, &call.input)
-        })
+        Box::pin(async move { Self::result(&call.name, &call.input) })
     }
 }
 

@@ -8,7 +8,6 @@ use dim_agent_capabilities::{
     context_model::ProductContextModel,
     history::{context_messages, project_context_history},
     summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
-    tool_registry::definition,
 };
 use serde_json::Value;
 use std::{
@@ -145,14 +144,7 @@ struct Declares;
 impl ToolDriver for Declares {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = MockTools.definitions();
-        definitions.push(ToolDefinition {
-            risk: Some("session".into()),
-            ..definition(
-                "declare",
-                "Declare the effects its input names.",
-                serde_json::json!({"type":"object","properties":{"effects":{"type":"array"}}}),
-            )
-        });
+        definitions.push(declare_definition("declare"));
         definitions
     }
     fn execute(
@@ -164,19 +156,7 @@ impl ToolDriver for Declares {
         if call.name != "declare" {
             return MockTools.execute(call, context, cancel);
         }
-        Box::pin(async move {
-            let effects: Vec<ToolEffect> = serde_json::from_value(
-                call.input
-                    .get("effects")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!([])),
-            )
-            .map_err(|_| HostError::failed("Invalid effects"))?;
-            Ok(ToolResult {
-                effects: Some(effects),
-                ..ToolResult::text("declared")
-            })
-        })
+        Box::pin(async move { declared(&call.input, "declared") })
     }
 }
 
