@@ -1873,6 +1873,7 @@ impl TimelineStore for SqliteTimelineStore {
             #[cfg(test)]
             fault: None,
         }));
+        drop(admission);
         requested.map_err(|failure| {
             if let Command::Append(mut pending) = failure.0 {
                 pending.publish.take();
@@ -2245,6 +2246,18 @@ pub(super) async fn validate_session(
 async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() {
     use dim_agent_runtime::{Timeline, core::close_timeline};
     use dim_agent_types::{EventDraft, InputMessageData};
+    struct CallbackResource {
+        store: Arc<SqliteTimelineStore>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for CallbackResource {
+        fn drop(&mut self) {
+            self.released.store(
+                self.store.admission.try_lock().is_ok(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
     tokio::time::timeout(Duration::from_secs(10), async {
         let directory = std::env::temp_dir().join(format!("dim-storage-panic-{}", uuid::Uuid::new_v4()));
         let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
@@ -2345,8 +2358,11 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
         assert!(rejected.await.unwrap().is_err(), "an accepted callback must receive an error, not disappear");
         assert!(close_timeline(&timeline).await.is_err());
         let (unexpected, unaccepted) = tokio::sync::oneshot::channel();
-        assert!(store.append(key("queued"), vec![record(1)], Box::new(move |_| { let _ = unexpected.send(()); })).is_err());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resource = CallbackResource { store: store.clone(), released: released.clone() };
+        assert!(store.append(key("queued"), vec![record(1)], Box::new(move |_| { drop(resource); let _ = unexpected.send(()); })).is_err());
         assert!(unaccepted.await.is_err(), "a rejected append must not invoke its callback");
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst), "rejected callback resources must be released outside admission");
         assert!(store.close().await.is_err());
         assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM timeline_events", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 6);
         db.close().await.unwrap();
