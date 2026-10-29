@@ -22685,7 +22685,6 @@
         "path ExecStatus::Completed",
         "path ExecStatus::Failed",
         "path InputMode",
-        "path InputMode::Append",
         "path InputMode::Steer",
         "path ModelOutputOutcome::Failed",
         "path ReplacementParts",
@@ -29690,6 +29689,7 @@
         "path LineState::Waiting",
         "path LineState::Working",
         "path RowKind::AssistantMessage",
+        "path RowKind::Status",
         "path RowKind::UserMessage",
         "path SideLine",
         "path ViewRow",
@@ -29702,6 +29702,14 @@
       "to": "dim_cli::ui::prompts",
       "references": [
         "path AskUserPrompt::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::fullscreen",
+      "references": [
+        "path FullScreen",
+        "path FullScreen::new"
       ]
     },
     {
@@ -31948,7 +31956,7 @@
     },
     {
       "module": "dim_cli::ui::tui",
-      "path": "LiveItem::Compaction"
+      "path": "LiveItem::Row"
     },
     {
       "module": "dim_cli::ui::tui",
