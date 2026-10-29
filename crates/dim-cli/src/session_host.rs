@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DraftPart, ModelItem, ModelList,
+    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, ModelItem, ModelList,
     ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction,
     ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind, Update,
 };
@@ -2000,7 +2000,9 @@ impl Worker {
     /// The selectable models: every enabled static provider with
     /// credentials and every signed-in managed provider (`provider.list`
     /// lists static ones only), less unavailable and disabled models. A
-    /// provider whose catalog cannot be read is left out.
+    /// provider whose catalog cannot be read is left out; one that lists
+    /// unavailable models but has none selectable is reported for its picker
+    /// row. Models the user disabled make no row.
     async fn models(&mut self) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         struct Providers {
@@ -2066,6 +2068,7 @@ impl Worker {
             }
         }
         let mut models = Vec::new();
+        let mut empty = Vec::new();
         for (provider_id, provider_name) in usable {
             let snapshot = self
                 .client
@@ -2074,6 +2077,12 @@ impl Worker {
             let Some(catalog) = snapshot.ok().and_then(|snapshot| snapshot.catalog) else {
                 continue;
             };
+            let unavailable = catalog
+                .models
+                .iter()
+                .filter(|model| model.unavailable_reason.is_some())
+                .count();
+            let before = models.len();
             models.extend(
                 catalog
                     .models
@@ -2090,12 +2099,23 @@ impl Worker {
                         display_name: model.name,
                     }),
             );
+            if models.len() == before && unavailable > 0 {
+                empty.push(EmptyProvider {
+                    provider_id,
+                    provider_name,
+                    unavailable,
+                });
+            }
         }
         let current = self
             .model
             .as_ref()
             .map(|model| (model.provider_id.clone(), model.model_id.clone()));
-        Ok(ModelList { models, current })
+        Ok(ModelList {
+            models,
+            current,
+            empty,
+        })
     }
 
     /// Reports the subagent model policy, only to a daemon that manages it.
