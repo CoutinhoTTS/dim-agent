@@ -405,10 +405,20 @@ async fn measure() -> std::result::Result<(), Box<dyn std::error::Error>> {
         session.close().await?;
     }
     agent.close().await?;
+    drop(agent);
     if let Some(process) = process {
         process.shutdown().await?;
     }
-    let report = json!({"modelHost": if native { "aimux" } else { "mock" }, "debugAssertions":cfg!(debug_assertions),"runtimeWorkers":2,"taskBaseline":before,"peakRustAllocationBytes":allocation::peak(),"runs":runs,"concurrentMockTurns":concurrent,"agentEventBytes":std::mem::size_of::<dim_agent_types::AgentEvent>(),"modelRequestBytes":std::mem::size_of::<dim_agent_types::ModelRequest>()});
+    let settling = Instant::now();
+    while tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks()
+        > before
+        && settling.elapsed() < std::time::Duration::from_secs(30)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let report = json!({"modelHost": if native { "aimux" } else { "mock" }, "debugAssertions":cfg!(debug_assertions),"runtimeWorkers":2,"taskBaseline":before,"cleanupSettleMs":settling.elapsed().as_secs_f64()*1000.,"tasksAfterAgentClose":tokio::runtime::Handle::current().metrics().num_alive_tasks(),"allocationBytesAfterAgentClose":allocation::live(),"peakRustAllocationBytes":allocation::peak(),"runs":runs,"concurrentMockTurns":concurrent,"agentEventBytes":std::mem::size_of::<dim_agent_types::AgentEvent>(),"modelRequestBytes":std::mem::size_of::<dim_agent_types::ModelRequest>()});
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }

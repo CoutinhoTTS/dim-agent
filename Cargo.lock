@@ -3835,8 +3835,7 @@ dependencies = [
 [[package]]
 name = "rutis-loader"
 version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b615d960b04759786cb48feee35825de746b7ce4d6835df9cebeb2bb099d5fe"
+source = "git+https://github.com/arcships/rutis?rev=61a80bf60ee3afc141a252eeb143e90ee9d9afbe#61a80bf60ee3afc141a252eeb143e90ee9d9afbe"
 dependencies = [
  "libc",
  "rutis",

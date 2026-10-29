@@ -1536,17 +1536,10 @@ async fn create_instance(
 /// not exist until Session publication and have their own assembly snapshots.
 fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
     loader
-        .entries()
+        .instance_rows(instance.instance())
         .into_iter()
-        .filter(|entry| required.is_none_or(|rows| rows.contains(&entry.id)))
-        .filter(|entry| {
-            entry
-                .instance
-                .as_ref()
-                .is_some_and(|i| i.chain.iter().any(|(_, id)| *id == instance.instance()))
-        })
-        .filter_map(|entry| entry.view)
-        .filter(|view| view.id != instance.id)
+        .filter(|(id, _)| required.is_none_or(|rows| rows.contains(id)))
+        .map(|(_, view)| view)
         .collect()
 }
 /// The instance `instance` of a creation that did not end; it walks the
