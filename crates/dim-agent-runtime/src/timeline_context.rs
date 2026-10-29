@@ -30,6 +30,8 @@ pub struct TimelineContext {
     children: Vec<FiberView>,
     /// Loader row ids the branch profile requires.
     required: Arc<[String]>,
+    /// The required parts its mounters mounted before it published.
+    parts: Vec<FiberView>,
     copies: crate::parts::Copies,
     scope: BranchScope,
     timeline: Timeline,
@@ -125,6 +127,7 @@ impl TimelineContext {
         view: FiberView,
         children: Vec<FiberView>,
         required: Arc<[String]>,
+        parts: Vec<FiberView>,
         copies: crate::parts::Copies,
         scope: BranchScope,
         timeline: Timeline,
@@ -141,6 +144,7 @@ impl TimelineContext {
             view,
             children,
             required,
+            parts,
             copies,
             scope,
             timeline,
@@ -309,6 +313,10 @@ impl TimelineContext {
     /// The loader row ids this branch's profile requires.
     pub(crate) fn required_rows(&self) -> &[String] {
         &self.required
+    }
+    /// The required parts its mounters mounted when it opened.
+    pub(crate) fn required_parts(&self) -> &[FiberView] {
+        &self.parts
     }
     pub(crate) fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Option<Arc<StateCell<S>>> {
         self.ctx

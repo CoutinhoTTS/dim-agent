@@ -7,6 +7,7 @@ use rutis::host::{
 };
 use rutis::{Ctx, Error};
 use rutis_loader::edit::{CreateInstance, InstanceResult};
+use rutis_loader::report::EntryInfo;
 use rutis_loader::resolve::Build;
 use rutis_loader::resolve::{Resolved, ScopedFactory};
 use rutis_loader::{Builtins, Loader, LoaderError, Resolver};
@@ -990,6 +991,9 @@ pub(crate) struct Loaded<S> {
     pub scope: S,
     pub children: Vec<FiberView>,
     pub(crate) required: Arc<[String]>,
+    /// The parts the required mounter mounted when the scope opened, which
+    /// creation waited for; the assembly check reports one that has left.
+    pub(crate) parts: Vec<FiberView>,
 }
 
 pub(crate) struct SessionAssembly {
@@ -1073,6 +1077,7 @@ impl DynPlugin for SessionScopePlugin {
                 scope,
                 children: vec![],
                 required: self.2.clone(),
+                parts: vec![],
             }));
             Ok(Effect::Done)
         })
@@ -1224,6 +1229,7 @@ impl DynPlugin for BranchScopePlugin {
                     scope,
                     children: vec![],
                     required: self.2.clone(),
+                    parts: vec![],
                 },
                 timeline,
                 dispatcher,
@@ -1318,7 +1324,7 @@ impl TimelineFactory {
                 )
                 .await
             };
-            std::mem::take(&mut *owner.mounted.lock().unwrap());
+            let mounted = std::mem::take(&mut *owner.mounted.lock().unwrap());
             let result = AssertUnwindSafe(async {
                 let created = started.as_ref().map_err(|(error, _)| error.clone())?;
                 let branch = {
@@ -1332,6 +1338,7 @@ impl TimelineFactory {
                             scope: current.scope.scope,
                             children: created.children.clone(),
                             required: current.scope.required.clone(),
+                            parts: mounted.required.clone(),
                         },
                         timeline: current.timeline.clone(),
                         dispatcher: current.dispatcher.clone(),
@@ -1354,6 +1361,7 @@ impl TimelineFactory {
                     created.view.clone(),
                     branch.scope.children.clone(),
                     branch.scope.required.clone(),
+                    branch.scope.parts.clone(),
                     owner.copies.clone(),
                     scope,
                     branch.timeline.clone(),
@@ -1481,7 +1489,7 @@ async fn create_instance(
         })
         .collect();
     let mut created = Created {
-        children: rows(loader, &created.view, None),
+        children: rows(&loader.entries(), &created.view, None),
         view: created.view,
     };
     if let Err(error) = AgentError::aggregate(failures) {
@@ -1493,11 +1501,11 @@ async fn create_instance(
             Some(created),
         ));
     };
-    let mut waiting = rows(loader, &created.view, Some(&required));
+    let mut waiting = rows(&loader.entries(), &created.view, Some(&required));
     waiting.extend(instance().2.required);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let ready = wait_active(ctx, &waiting, remaining, cancel).await;
-    created.children = rows(loader, &created.view, None);
+    created.children = rows(&loader.entries(), &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
     }
@@ -1525,19 +1533,41 @@ async fn create_instance(
 }
 /// Candidate rows, including nested extensions. Main and child branches do
 /// not exist until Session publication and have their own assembly snapshots.
-fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
-    loader
-        .entries()
+fn rows(
+    entries: &[EntryInfo],
+    instance: &FiberView,
+    required: Option<&[String]>,
+) -> Vec<FiberView> {
+    scope_entries(entries, instance, required)
         .into_iter()
-        .filter(|entry| required.is_none_or(|rows| rows.contains(&entry.id)))
+        .filter_map(|entry| entry.view.clone())
+        .collect()
+}
+
+/// The rows `instance` holds, the ones `required` names when given, and never
+/// its own row. A row belongs to an instance when its chain of enclosing
+/// instances contains it. Creation and the assembly check both read their
+/// rows here, so the two cannot select differently.
+fn scope_entries<'a>(
+    entries: &'a [EntryInfo],
+    instance: &FiberView,
+    required: Option<&[String]>,
+) -> Vec<&'a EntryInfo> {
+    entries
+        .iter()
+        .filter(|entry| required.is_none_or(|rows| rows.iter().any(|id| id == &entry.id)))
         .filter(|entry| {
             entry
                 .instance
                 .as_ref()
                 .is_some_and(|i| i.chain.iter().any(|(_, id)| *id == instance.instance()))
         })
-        .filter_map(|entry| entry.view)
-        .filter(|view| view.id != instance.id)
+        .filter(|entry| {
+            entry
+                .view
+                .as_ref()
+                .is_none_or(|view| view.id != instance.id)
+        })
         .collect()
 }
 /// The instance `instance` of a creation that did not end; it walks the
@@ -1551,7 +1581,7 @@ fn locate(loader: &Loader, ctx: &Ctx, instance: rutis::host::InstanceId) -> Opti
         .id;
     let view = ctx.view(plugin)?;
     Some(Created {
-        children: rows(loader, &view, None),
+        children: rows(&loader.entries(), &view, None),
         view,
     })
 }
@@ -1646,7 +1676,7 @@ pub(crate) async fn build_session(
         )
         .await
     };
-    std::mem::take(&mut *owner.mounted.lock().unwrap());
+    let mounted = std::mem::take(&mut *owner.mounted.lock().unwrap());
     let result = AssertUnwindSafe(async {
         let created = started.as_ref().map_err(|(error, _)| error.clone())?;
         let current = owner.loaded()?;
@@ -1655,6 +1685,7 @@ pub(crate) async fn build_session(
             scope: current.scope,
             children: created.children.clone(),
             required: current.required.clone(),
+            parts: mounted.required.clone(),
         });
         *owner.loaded.lock().unwrap() = Some(session.clone());
         let tree = required::<dyn TimelineTreeControl>(
@@ -1866,19 +1897,22 @@ impl std::fmt::Display for AssemblyFinding {
     }
 }
 
-/// Checks one live scope of `snapshot`: its `required` rows, their descendants
-/// and everything else in the scope, as creation used to. `rows` is the
-/// loader's [index](scope_rows) of rows by instance, `view` the scope
-/// instance, `required` the loader row ids its profile requires and `nested`
-/// the scopes nested inside it. `scope` names the Session the scope belongs
-/// to and, for a branch scope, the branch. Each plugin is checked once, by the
-/// innermost scope that contains it: a nested scope's subtree is left to that
-/// scope's own pass.
+/// Checks one live scope of `snapshot`: its `required` rows, the parts its
+/// mounters mounted and everything else in the scope, as creation waited for
+/// them. `rows` is the loader's [index](scope_rows) of rows by instance,
+/// `view` the scope instance, `required` the loader row ids its profile
+/// requires, `parts` the required parts it mounted and `nested` the scopes
+/// nested inside it. `scope` names the Session the scope belongs to and, for
+/// a branch scope, the branch. Each plugin is checked once, by the innermost
+/// scope that contains it: a nested scope's subtree is left to that scope's
+/// own pass. A required row or part that has left the tree is reported too:
+/// nothing in the snapshot would otherwise remember it.
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
-    rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<(String, PluginId)>>,
+    rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>>,
     view: &FiberView,
     required: &[String],
+    parts: &[FiberView],
     nested: &[FiberView],
     scope: (&str, Option<&str>),
     findings: &mut Vec<AssemblyFinding>,
@@ -1893,7 +1927,24 @@ pub(crate) fn check_scope(
             detail,
         });
     };
-    let rows = required_rows(rows, view, required);
+    let mut absent =
+        |id: String| report(id, AssemblyRule::Ready, "absent from the snapshot".into());
+    let entries = rows.get(&view.instance()).map(Vec::as_slice);
+    let required_rows = scope_entries(entries.unwrap_or_default(), view, Some(required));
+    for entry in &required_rows {
+        if !entry
+            .view
+            .as_ref()
+            .is_some_and(|row| snapshot.plugins.iter().any(|plugin| plugin.id == row.id))
+        {
+            absent(entry.id.clone());
+        }
+    }
+    for part in parts {
+        if !snapshot.plugins.iter().any(|plugin| plugin.id == part.id) {
+            absent(part.name().to_owned());
+        }
+    }
     let excluded: HashSet<_> = nested
         .iter()
         .flat_map(|nested| subtree(snapshot, nested.id))
@@ -1902,7 +1953,11 @@ pub(crate) fn check_scope(
         .into_iter()
         .filter(|id| !excluded.contains(id))
         .collect();
-    let required: HashSet<_> = rows.iter().flat_map(|id| subtree(snapshot, *id)).collect();
+    let required: HashSet<_> = required_rows
+        .iter()
+        .filter_map(|entry| entry.view.as_ref().map(|row| row.id))
+        .flat_map(|id| subtree(snapshot, id))
+        .collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
         if required.contains(&plugin.id) && plugin.state != FiberState::Active {
             report(
@@ -1957,41 +2012,21 @@ pub(crate) fn check_scope(
 
 /// The loader's rows by the instance each runs in: one pass over
 /// [`Loader::entries`], so a check of every live scope reads the rows once and
-/// the reads no longer grow with the number of Sessions. A row belongs to an
-/// instance when its chain of enclosing instances contains it, the predicate
-/// [`required_rows`] applies.
+/// the reads no longer grow with the number of Sessions. A row is filed under
+/// every enclosing instance, the chain [`scope_entries`] selects on.
 pub(crate) fn scope_rows(
     loader: &Loader,
-) -> std::collections::HashMap<rutis::host::InstanceId, Vec<(String, PluginId)>> {
-    let mut rows: std::collections::HashMap<_, Vec<(String, PluginId)>> = Default::default();
+) -> std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>> {
+    let mut rows: std::collections::HashMap<_, Vec<EntryInfo>> = Default::default();
     for entry in loader.entries() {
-        let (Some(plugin), Some(instance)) = (entry.plugin, &entry.instance) else {
+        let Some(instance) = &entry.instance else {
             continue;
         };
         for (_, id) in &instance.chain {
-            rows.entry(*id)
-                .or_default()
-                .push((entry.id.clone(), plugin));
+            rows.entry(*id).or_default().push(entry.clone());
         }
     }
     rows
-}
-
-/// The plugin ids of one scope instance's required rows: the loader rows
-/// `required` names, copied in `view`'s instance. Every row of a scope is
-/// either a required row or below one, so a mounted part is covered by its
-/// mounter's row without being listed here.
-fn required_rows(
-    rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<(String, PluginId)>>,
-    view: &FiberView,
-    required: &[String],
-) -> HashSet<PluginId> {
-    rows.get(&view.instance())
-        .into_iter()
-        .flatten()
-        .filter(|(id, plugin)| *plugin != view.id && required.iter().any(|name| name == id))
-        .map(|(_, plugin)| *plugin)
-        .collect()
 }
 
 /// Plugin IDs of `root` and its descendants in one diagnostics snapshot.

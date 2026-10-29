@@ -337,28 +337,30 @@ impl Agent {
                 .into_iter()
                 .filter_map(|info| session.0.tree.get(&info.id))
                 .collect();
-            let mut scopes: Vec<(&FiberView, &[String], Option<&str>)> =
-                vec![(&session.0.view, &loaded.required[..], None)];
+            let mut scopes: Vec<(&FiberView, &[String], &[FiberView], Option<&str>)> =
+                vec![(&session.0.view, &loaded.required[..], &loaded.parts, None)];
             for branch in &branches {
                 scopes.push((
                     branch.0.scope_view(),
                     branch.0.required_rows(),
+                    branch.0.required_parts(),
                     Some(branch.id()),
                 ));
             }
-            for (view, required, branch) in scopes.iter().copied() {
+            for (view, required, parts, branch) in scopes.iter().copied() {
                 let nested: Vec<FiberView> = scopes
                     .iter()
-                    .filter(|(other, _, _)| {
+                    .filter(|(other, _, _, _)| {
                         other.id != view.id && below(&parents, other.id, view.id)
                     })
-                    .map(|(other, _, _)| (*other).clone())
+                    .map(|(other, _, _, _)| (*other).clone())
                     .collect();
                 check_scope(
                     &snapshot,
                     &rows,
                     view,
                     required,
+                    parts,
                     &nested,
                     (session.id(), branch),
                     &mut findings,

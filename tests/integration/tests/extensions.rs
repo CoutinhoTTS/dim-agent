@@ -371,7 +371,7 @@ async fn undeclared_reads_are_reported() {
 /// A reader whose provider withdraws after the read keeps the access but loses
 /// the resolved dependency. Each plugin is checked once, by its innermost
 /// scope: the reader's branch reports its `Pending` state and the lost
-/// generation, and the withdrawn provider has left the tree.
+/// generation, and the required provider that left the tree is reported too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reads_of_a_withdrawn_generation_are_reported() {
     let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -432,6 +432,12 @@ async fn reads_of_a_withdrawn_generation_are_reported() {
                 Some("main".to_string()),
                 "test.declared-reader".to_string(),
                 AssemblyRule::Generation
+            ),
+            (
+                session.id().to_string(),
+                Some("main".to_string()),
+                "test.withdrawn-provider".to_string(),
+                AssemblyRule::Ready
             ),
         ],
         "{findings:?}"
