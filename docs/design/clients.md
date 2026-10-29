@@ -76,7 +76,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Sign in, sign out (OAuth, Dim account) | done | — | `/login`, `dimcode login` |
 | API-key Providers, add/edit/test/enable/disable/switch | done; remove and model-list edits: none in the CLI (server supports them) | read-only `provider.*` | [Provider management](appserver/provider-management.md) |
 | Switch model | done | done | `session.model.update` |
-| Reasoning effort, fast mode | done (`/effort`, `/fast`); effort inside `/models`: none | — | [Model configuration](model-configuration.md) |
+| Reasoning effort, fast mode | done (`/effort`, `/fast`, and ←/→ in `/models`) | — | [Model configuration](model-configuration.md) |
 | Subagent model policy | done (`/models` → Subagent models) | — | [Subagent model policy](subagent-model-policy.md), [#263](https://github.com/arcships/dim/issues/263) |
 | Auxiliary models | designed server-side per owner (e.g. SessionTitle); no client UI | — | [AuxiliaryModel](appserver/auxiliary-model.md) |
 
@@ -98,6 +98,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
 | Send, queue, automatic sending, steer (`Ctrl+S`), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
+| Lines: tree, switch, create, send, stop, approvals, end | done | done (right-side Lines panel) | [Timeline branches](timeline-branches.md) §14, [Web workspace](web-workspace.md#41-lines-and-branch) |
 | `/queue` panel and queue deletion | none (only Up-withdraw) | — | server contract done (S1) |
 | Retrieve a queued message for editing | done; a message with attachments loses them (§4 item 4) | — | |
 | Multiline, paste, large paste, images, mixed attachments, `@` files, `!` / `!!` | done | attachments: later phase | [CLI attachment input](cli-attachment-input.md), [ShellInput](plugins/ShellInput.md) |
@@ -107,7 +108,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Open links, tool groups, `/tools` | done | done (rendering) | |
 | Streaming output, run status, terminal status and progress | done | done | |
 | File change feedback | done | done | |
-| Tool approvals | done | done | [ADR 003](../adr/003-approval-scope.md) |
+| Tool approvals | done (`/approval` chooses ask or full access; `/approvals` also edits command rules) | done | [ADR 003](../adr/003-approval-scope.md) |
 | User questions (`ask_user`) | done (line client and terminal UIs) | none | [Questions](plugins/Questions.md) (implemented in #269, #336, #351) |
 | Todo status | out | out | [overview](overview.md) §1 |
 | Background tasks: commands and members (detail, stop one, stop all) | done | — | [Background-task list](background-task-list.md), [output](background-task-output.md), [member conversation](member-conversation.md) |

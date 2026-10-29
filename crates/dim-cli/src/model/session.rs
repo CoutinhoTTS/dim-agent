@@ -179,9 +179,11 @@ pub enum Command {
     /// A configuration command line (`/effort high`, `/agent`, ...).
     Configure(String),
     /// Make `(provider, model)` the default and the active session's model.
+    /// `reasoning_effort` is set when the picker cycled that model's effort.
     SelectModel {
         provider_id: String,
         model_id: String,
+        reasoning_effort: Option<String>,
     },
     /// Read the subagent model policy and its revision.
     ReadModelPolicy,
@@ -389,6 +391,13 @@ pub struct ModelItem {
     pub provider_version: u32,
     pub model_id: String,
     pub display_name: String,
+    /// Advertised reasoning efforts, in cycle order. Empty when the model
+    /// offers no choice.
+    pub efforts: Vec<String>,
+    /// Catalog default, when it is one of `efforts`.
+    pub default_effort: Option<String>,
+    /// Saved `reasoningEffort`, when it is one of `efforts`.
+    pub saved_effort: Option<String>,
 }
 
 /// A usable provider with unavailable models and none selectable.

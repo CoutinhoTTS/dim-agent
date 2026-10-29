@@ -324,6 +324,13 @@ pub async fn chat(
                     draft.clear();
                     continue;
                 }
+                Some("/approval") => {
+                    display.record(
+                        "/approval chooses ask or full access in the terminal UI. At this prompt use /approvals.",
+                    )?;
+                    draft.clear();
+                    continue;
+                }
                 Some("/approvals" | "/permissions") => {
                     let text = text.as_deref().expect("plain approvals command");
                     if let Err(error) = permission_command::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {

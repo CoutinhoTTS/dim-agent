@@ -267,12 +267,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "sign in to DimAgent" => "登录 DimAgent",
         "DimAgent account · usage · sign out" => "DimAgent 账号 · 用量 · 退出登录",
         "configure tool approvals" => "配置工具审批",
+        "choose ask or full access" => "选择询问或完全访问",
         "open settings" => "打开设置",
         "suspend to the shell" => "挂起到 Shell",
         "exit" => "退出应用",
 
-        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 选择 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
+        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 选择 · ←/→ 推理强度 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
         }
         "Enter select · Esc clear/close" => "Enter 选择 · Esc 清除/关闭",
         "esc close" => "Esc 关闭",
@@ -301,6 +302,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "鼠标（全屏）",
         "Permissions" => "权限",
         "Tool approvals" => "工具审批",
+        "Command isolation" => "命令隔离",
         "Models" => "模型",
         "Model" => "模型",
         "not set" => "未设置",

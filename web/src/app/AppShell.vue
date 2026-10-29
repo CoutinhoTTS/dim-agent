@@ -5,6 +5,9 @@ import { useI18n } from "vue-i18n"
 import { Menu, PanelLeftOpen, X } from "lucide-vue-next"
 import AppSidebar from "../components/AppSidebar.vue"
 import ToastRegion from "../components/ToastRegion.vue"
+import EndLineDialog from "../features/lines/EndLineDialog.vue"
+import LinesPanel from "../features/lines/LinesPanel.vue"
+import NewLineDialog from "../features/lines/NewLineDialog.vue"
 import { useConnectionStore } from "../stores/connection"
 import { useSessionsStore, workspaceName } from "../stores/sessions"
 import { useUiStore } from "../stores/ui"
@@ -19,6 +22,8 @@ const drawer = ref<HTMLDialogElement>()
 let observer: ResizeObserver | undefined
 
 const chatRoute = computed(() => route.name === "chat-new" || route.name === "chat-session")
+const sessionId = computed(() => typeof route.params.sessionId === "string" ? route.params.sessionId : undefined)
+const detailOpen = computed(() => ui.detailOpen && route.name === "chat-session" && sessionId.value !== undefined)
 const pageTitle = computed(() => {
   if (route.name === "chat-session" && typeof route.params.sessionId === "string") {
     const session = sessions.byId.get(route.params.sessionId)
@@ -91,6 +96,25 @@ onBeforeUnmount(() => {
 function closeDrawerFromBackdrop(event: MouseEvent): void {
   if (event.target === drawer.value) ui.drawerOpen = false
 }
+
+function startResize(event: PointerEvent): void {
+  if (ui.shellMode === "compact") return
+  const startX = event.clientX
+  const startWidth = ui.detailWidth
+  const move = (next: PointerEvent): void => {
+    ui.setDetailWidth(startWidth + startX - next.clientX)
+  }
+  const stop = (): void => {
+    window.removeEventListener("pointermove", move)
+    window.removeEventListener("pointerup", stop)
+  }
+  window.addEventListener("pointermove", move)
+  window.addEventListener("pointerup", stop, { once: true })
+}
+
+function resizeBy(delta: number): void {
+  ui.setDetailWidth(ui.detailWidth + delta)
+}
 </script>
 
 <template>
@@ -121,8 +145,13 @@ function closeDrawerFromBackdrop(event: MouseEvent): void {
 
     <AppSidebar v-if="ui.shellMode !== 'compact' && !ui.sidebarCollapsed" class="inline-sidebar" />
 
-    <div class="content-region">
-      <main id="main" class="main-region" :aria-label="t('a11y.mainContent')">
+    <div
+      class="content-region"
+      :data-has-detail="detailOpen"
+      :data-detail-expanded="ui.detailExpanded"
+      :style="{ '--detail-width': `${ui.detailWidth}px` }"
+    >
+      <main id="main" class="main-region" :aria-label="t('a11y.mainContent')" @pointerdown="ui.detailFocused = false" @focusin="ui.detailFocused = false">
         <button v-if="ui.sidebarCollapsed && ui.shellMode !== 'compact'" class="ui-icon-button sidebar-reopen" data-variant="ghost" data-size="md" type="button" :aria-label="t('sidebar.openMenu')" v-tooltip="t('sidebar.openMenu')" @click="ui.sidebarCollapsed = false">
           <PanelLeftOpen aria-hidden="true" />
         </button>
@@ -132,6 +161,27 @@ function closeDrawerFromBackdrop(event: MouseEvent): void {
         <p v-if="connection.phase === 'reconnecting'" class="reconnect-banner" role="status">{{ t("page.reconnecting") }}</p>
         <RouterView :key="route.fullPath" />
       </main>
+
+      <div
+        v-if="detailOpen"
+        class="detail-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-label="t('lines.resize')"
+        :aria-valuenow="ui.detailWidth"
+        :aria-valuemin="320"
+        :aria-valuemax="720"
+        tabindex="0"
+        @pointerdown.prevent="startResize"
+        @keydown.left.prevent="resizeBy(-16)"
+        @keydown.right.prevent="resizeBy(16)"
+      />
+      <aside v-if="detailOpen && sessionId" class="detail-region" data-active="true" :aria-label="t('lines.panelAria')" @pointerdown="ui.detailFocused = true" @focusin="ui.detailFocused = true">
+        <LinesPanel :session-id="sessionId" />
+      </aside>
     </div>
+
+    <NewLineDialog v-if="ui.newLine" />
+    <EndLineDialog v-if="ui.endingLine" />
   </div>
 </template>

@@ -326,13 +326,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "sign in to DimAgent" => "iniciar sesión en DimAgent",
         "DimAgent account · usage · sign out" => "cuenta DimAgent · uso · cerrar sesión",
         "configure tool approvals" => "configurar aprobaciones",
+        "choose ask or full access" => "elegir preguntar o acceso total",
         "open settings" => "abrir ajustes",
         "suspend to the shell" => "suspender al shell",
         "exit" => "salir",
 
         // composer/palette.rs
-        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter elegir · Ctrl+X borrar guardado · Esc borrar/cerrar"
+        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter elegir · ←/→ esfuerzo · Ctrl+X borrar guardado · Esc borrar/cerrar"
         }
         "Enter select · Esc clear/close" => "Enter elegir · Esc borrar/cerrar",
         "esc close" => "esc cerrar",
@@ -365,6 +366,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Ratón (pantalla completa)",
         "Permissions" => "Permisos",
         "Tool approvals" => "Aprobaciones",
+        "Command isolation" => "Aislamiento de comandos",
         "Models" => "Modelos",
         "Model" => "Modelo",
         "not set" => "sin definir",

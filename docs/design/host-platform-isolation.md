@@ -456,15 +456,18 @@ approval or rule. Successful commands, timeouts, disabled policy and Windows get
 persistent shell's `execute` results carry none: that tool is not in the App Server's product
 assembly, and ShellSession can keep the same value if it joins.
 
-**CLI status.** The CLI shows no isolation indicator beside the permission preset. Isolation is
-the execution node's local policy, read at each process start. No client-visible read reports it;
-an indicator would need a new protocol method or hello feature, and a value read when a client
-attaches can be stale by the next command. The CLI guide documents the policy and states that
-presets and approvals do not change it, and the failure note names the file. A client indicator
-needs its own protocol decision.
+**CLI status.** `/settings > Command isolation` shows the effective tier, wider-request policy,
+source and actual path through the local management methods
+([Trusted local policy management](#trusted-local-policy-management)); it remains usable when
+model commands are denied. There is no indicator beside the permission preset: isolation is the
+execution node's local policy, read at each process start, so a value shown in the panel can be
+stale by the next command if the file changes elsewhere, and another node's policy is not
+reported. The CLI guide documents the policy and states that presets and approvals do not change
+it, and the failure note names both the file and the settings entry.
 
 **User documentation.** The [CLI guide](../../crates/dim-cli/README.md#command-isolation) has the user page: the
-file location for each profile, the fields, how to disable isolation, opt-in toolchain roots and
+file location for each profile, the fields, how to disable isolation from `/settings` or by
+editing the file, opt-in toolchain roots and
 what isolation does not cover. For macOS it also describes the temporary directory, developer
 tools and git configuration in user terms, what an explicit list drops, and how a list grants
 git's configuration files as file roots. Per-platform defaults stay in this design's

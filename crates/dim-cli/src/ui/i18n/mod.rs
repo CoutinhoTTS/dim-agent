@@ -190,6 +190,17 @@ mod tests {
         }
     }
 
+    /// `/settings` names command isolation.
+    #[test]
+    fn every_locale_translates_command_isolation() {
+        for (code, lookup) in tables() {
+            assert!(
+                lookup("Command isolation").is_some(),
+                "{code} lacks Command isolation"
+            );
+        }
+    }
+
     /// The approval prompt and the transcript command row name the requested
     /// boundary; a table that drops the placeholder would print the tier name
     /// nowhere.

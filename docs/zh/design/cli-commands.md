@@ -21,6 +21,7 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
+| `/approval` | 在终端界面里为当前 Session 和之后的 Session 选择询问（`workspace-write`）或完全访问（[权限控制](#权限控制)）。 |
 | `/approvals`（别名 `/permissions`） | 交互客户端空闲时查看、切换和管理预设与命令规则。 |
 
 全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。现有的
@@ -245,7 +246,7 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
         v                                         v  创建成员时复制
  main: permission/changed（按版本 CAS）     agent 成员 Session（Collaboration）
    ^  由恢复时的 --permission
-   |  和 /approvals 写入
+   |  和 /approval 或 /approvals 写入
    +-- 分支点 --> 子分支（branch 工具）：分支点处 main 的策略，
                    之后是它自己的修改
 ```
@@ -256,6 +257,30 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
   `main` 的修改不会。切换的确认信息会说明这一点，下文的需求 R2 请 Collaboration 改为复制领导者分支的
   当前策略。
 - 分叉复制源 Session 的事实，所以分叉从源 Session 当前的 `main` 策略开始（#26）。
+
+### `/approval`
+
+终端界面里的 `/approval` 为 `main` 的预设打开两个选项。它写入与 `/approvals` 相同的
+`session.permission.update`，并以同样的方式把预设记入产品 home 的 `config.json`
+（`permissionPreset`）：没有 `--permission` 时，之后创建的 Session 在 `session.create` 里带上它，
+恢复的 Session 在 attach 之前把 `main` 切过去。它不列出也不编辑命令规则。行模式提示符拒绝这条
+命令，仍使用 `/approvals`。
+
+```text
+Approval
+> Ask            current
+  Full access
+↑↓/Tab move · Enter apply · Esc back
+```
+
+| 选项 | 预设 | 哪些会运行 |
+| --- | --- | --- |
+| 询问（Ask） | `workspace-write` | 读取和工作区写入直接运行；命令、网络、工作区外写入和未分类工具先询问 |
+| 完全访问（Full access） | `full-access` | 每次工具调用都不询问 |
+
+询问是产品默认。已经生效的选项上按 Enter 关闭菜单。完全访问仍要和 `/approvals` 一样先确认。
+当前是 `read-only` 时两个选项都不是当前项；选询问会切到 `workspace-write`。`read-only` 仍从
+`/approvals` 和 `--permission` 进入。提示里把 `workspace-write` 称为询问。
 
 ### `/approvals`
 
@@ -370,7 +395,6 @@ CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写
 | --- | --- |
 | 由审阅模型代替用户回答审批 | 一个通过 Approval 公开的回答操作作答的审批回答者，带自己的模型调用和设计，类似 Collaboration 的领导者路径；不是 CLI 改动 |
 | 只在一个 Session 内记住的允许 | 一条记录下来的事实，或 Session 作用域的规则来源（F2 §10.2 暂缓了按工作区的用户规则）；CLI 进程内的记忆会在没有记录决定的情况下代为回答 |
-| 在 CLI 中设置沙箱 | F5 只提供 `host-isolation.json`，没有读写方法；需要 HostPlatform 的管理方法，带修订号、仅限本地，类似 `permission.rules` |
 | Shift+Tab 循环切换 | 只涉及 CLI：编辑器动作结果和确认路径（决定 4） |
 | `--allowed-tools`/`--disallowed-tools` | 一个工具目录读取接口，用于在参数边界校验名字（决定 2） |
 | 回合运行中使用 `/approvals` | 只涉及 CLI：运行中的回合读取普通行并回答审批；面板调用需要加入它的多路复用循环 |

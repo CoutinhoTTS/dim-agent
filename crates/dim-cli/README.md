@@ -467,7 +467,7 @@ when unset); and every file that `include.path` or `includeIf` pulls in. Listing
 not exist makes the policy invalid. Prefer the files to their directory: listing `~/.config/git`
 also exposes every other file in it, including a `credentials` file if git keeps one there.
 
-To turn isolation off:
+To turn isolation off, select the `host` tier in `/settings > Command isolation`, or write the file yourself:
 
 ```json
 {"version": 2, "sandbox": "host"}

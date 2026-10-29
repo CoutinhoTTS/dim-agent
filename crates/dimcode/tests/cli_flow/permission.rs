@@ -468,6 +468,9 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.write(b"/approvals remove 9\n");
     terminal.until("Error: No such rule in the last /approvals listing");
     terminal.until("\n> ");
+    terminal.write(b"/approval\n");
+    terminal.until("/approval chooses ask or full access in the terminal UI");
+    terminal.until("\n> ");
     terminal.write(b"after\n");
     terminal.until("[permission] main branch preset: full-access");
     terminal.until("\n> ");

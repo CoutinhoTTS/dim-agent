@@ -310,13 +310,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "sign in to DimAgent" => "masuk ke DimAgent",
         "DimAgent account · usage · sign out" => "akun DimAgent · pemakaian · keluar",
         "configure tool approvals" => "atur persetujuan tool",
+        "choose ask or full access" => "pilih tanya atau akses penuh",
         "open settings" => "buka pengaturan",
         "suspend to the shell" => "tangguhkan ke shell",
         "exit" => "keluar",
 
         // composer/palette.rs
-        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter pilih · Ctrl+X hapus simpanan · Esc hapus/tutup"
+        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter pilih · ←/→ upaya · Ctrl+X hapus simpanan · Esc hapus/tutup"
         }
         "Enter select · Esc clear/close" => "Enter pilih · Esc hapus/tutup",
         "esc close" => "esc tutup",
@@ -349,6 +350,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Mouse (layar penuh)",
         "Permissions" => "Izin",
         "Tool approvals" => "Persetujuan tool",
+        "Command isolation" => "Isolasi perintah",
         "Models" => "Model",
         "Model" => "Model",
         "not set" => "belum diatur",

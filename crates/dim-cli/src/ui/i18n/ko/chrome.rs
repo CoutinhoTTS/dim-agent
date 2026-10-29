@@ -284,13 +284,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "sign in to DimAgent" => "DimAgent에 로그인",
         "DimAgent account · usage · sign out" => "DimAgent 계정 · 사용량 · 로그아웃",
         "configure tool approvals" => "도구 승인 설정",
+        "choose ask or full access" => "확인 또는 전체 액세스 선택",
         "open settings" => "설정 열기",
         "suspend to the shell" => "shell로 일시 중단",
         "exit" => "종료",
 
         // composer/palette.rs
-        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 선택 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
+        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 선택 · ←/→ 추론 강도 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
         }
         "Enter select · Esc clear/close" => "Enter 선택 · Esc 지우기/닫기",
         "esc close" => "esc 닫기",
@@ -323,6 +324,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "마우스 (전체 화면)",
         "Permissions" => "권한",
         "Tool approvals" => "도구 승인",
+        "Command isolation" => "명령 격리",
         "Models" => "모델",
         "Model" => "모델",
         "not set" => "미설정",

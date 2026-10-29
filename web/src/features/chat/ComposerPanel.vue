@@ -21,6 +21,9 @@ const props = defineProps<{
   send: (text: string) => Promise<void>
   stop?: () => Promise<void>
   selectModel: (model: ModelId) => Promise<void> | void
+  /** The narrower line panel: no model menu, less vertical chrome. */
+  variant?: "main" | "panel"
+  placeholder?: string
 }>()
 const { t } = useI18n()
 const field = ref<HTMLTextAreaElement>()
@@ -99,7 +102,7 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 </script>
 
 <template>
-  <section class="composer-panel" :aria-label="t('chat.composer')">
+  <section class="composer-panel" :data-variant="variant ?? 'main'" :aria-label="t('chat.composer')">
     <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
     <div class="composer-surface" @click="field?.focus()">
       <textarea
@@ -107,15 +110,15 @@ defineExpose({ focus: () => field.value?.focus(), quote })
         v-model="text"
         class="composer-input"
         rows="2"
-        :placeholder="t('composer.sendMessage')"
-        :aria-label="t('composer.sendMessage')"
+        :placeholder="placeholder ?? t('composer.sendMessage')"
+        :aria-label="placeholder ?? t('composer.sendMessage')"
         @input="resize"
         @keydown="onKeydown"
       />
       <footer class="composer-toolbar">
         <div class="composer-tool-group" />
         <div class="composer-run-group">
-          <ComposerModelMenu :model="model" :selectable="modelSelectable" :disabled="changingModel" @select="onModel" />
+          <ComposerModelMenu v-if="variant !== 'panel'" :model="model" :selectable="modelSelectable" :disabled="changingModel" @select="onModel" />
           <button
             class="ui-icon-button"
             :data-variant="showStop ? 'contrast' : 'primary'"
@@ -141,4 +144,7 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 <style scoped>
 .composer-input { display: block; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; }
 .composer-input::placeholder { color: var(--muted-foreground); }
+.composer-panel[data-variant="panel"] { padding: var(--space-2) var(--space-3) var(--space-3); }
+.composer-panel[data-variant="panel"] .composer-input { min-height: 48px; }
+
 </style>

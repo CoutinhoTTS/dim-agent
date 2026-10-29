@@ -433,7 +433,7 @@ WorkspaceTools 不变。
 └────────── Enter show the line · x end it · Esc close ───────────┘
 ```
 
-**Web** 目前只显示 `main`，线以后再做。Desktop 得到的是协议：`session.branch_end`，以及 v3 历史里的两种事件。
+**Web** 让 `main` 留在中央，在右侧详情面板里跟随线：Lines 树、每个打开的线一个标签，以及按 line 的发送、停止、审批和结束（[Web 工作区 §4.1](../../design/web-workspace.md#41-lines-and-branch)）。Desktop 得到的是协议：`session.branch_end`，以及 v3 历史里的两种事件。
 
 ## 15. 改动
 

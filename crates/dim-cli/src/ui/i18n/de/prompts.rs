@@ -88,6 +88,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Not answered" => "Nicht beantwortet",
         // approvals_panel.rs
         "Tool Approvals" => "Tool-Freigaben",
+        "Approval" => "Freigabe",
+        "Ask" => "Fragen",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "Vor Befehlen, Netzwerk, Schreiben außerhalb und nicht eingeordneten Tools fragen"
+        }
         "full access" => "Vollzugriff",
         "All tools run automatically, bypass permissions" => {
             "Alle Tools laufen automatisch, ohne Freigabe"

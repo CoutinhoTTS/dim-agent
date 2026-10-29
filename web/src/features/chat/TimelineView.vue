@@ -2,16 +2,27 @@
 import { computed, nextTick, onMounted, ref, watch, type ComponentPublicInstance } from "vue"
 import { useI18n } from "vue-i18n"
 import { useVirtualizer } from "@tanstack/vue-virtual"
-import { ChevronDown, LoaderCircle } from "lucide-vue-next"
+import { ChevronDown, GitBranch, LoaderCircle } from "lucide-vue-next"
 import type { TimelineRow } from "../../projection"
 import ChatMarkdown from "./ChatMarkdown.vue"
 import TimelineUserMessage from "./TimelineUserMessage.vue"
 import TimelineWorkRow from "./TimelineWorkRow.vue"
 import { groupRows } from "./work"
 
-/** `quotable`: the composer is shown, so a message can be quoted into it. */
-const props = defineProps<{ rows: readonly TimelineRow[]; running: boolean; quotable: boolean }>()
-const emit = defineEmits<{ quote: [text: string] }>()
+/**
+ * `quotable`: the composer is shown, so a message can be quoted into it.
+ * `branchable`: the shown line is open, so a user message can open a child line.
+ * `variant`: the main column or the narrower line panel.
+ */
+const props = defineProps<{
+  rows: readonly TimelineRow[]
+  running: boolean
+  quotable: boolean
+  branchable?: boolean
+  empty?: string
+  variant?: "main" | "panel"
+}>()
+const emit = defineEmits<{ quote: [text: string]; branch: [text: string, cut: number]; openLine: [branchId: string] }>()
 const { t } = useI18n()
 const viewport = ref<HTMLElement>()
 const list = ref<HTMLElement>()
@@ -22,6 +33,14 @@ const expandedGroups = ref<Record<string, boolean>>({})
 const expandedItems = ref<Record<string, boolean>>({})
 
 const display = computed(() => groupRows(props.rows))
+
+function shortId(id: string): string {
+  return id.slice(0, 8)
+}
+
+function onBranch(row: TimelineRow, text: string): void {
+  if (row.kind === "user") emit("branch", text, row.cut)
+}
 
 const virtualizer = useVirtualizer(computed(() => ({
   count: display.value.length,
@@ -77,9 +96,9 @@ onMounted(() => void toEnd())
 </script>
 
 <template>
-  <div class="timeline-shell">
+  <div class="timeline-shell" :data-variant="variant ?? 'main'">
     <div ref="viewport" class="timeline app-scroll-viewport" @scroll.passive="onScroll">
-      <p v-if="display.length === 0 && !running" class="timeline-empty">{{ t("chat.emptyTimeline") }}</p>
+      <p v-if="display.length === 0 && !running" class="timeline-empty">{{ empty ?? t("chat.emptyTimeline") }}</p>
       <div ref="list" class="virtual-timeline" :style="{ height: `${totalSize}px`, position: 'relative' }">
         <div
           v-for="item in virtualRows"
@@ -98,11 +117,34 @@ onMounted(() => void toEnd())
               @toggle="expandedGroups[entry.key] = !expandedGroups[entry.key]"
               @toggle-item="expandedItems[$event] = !expandedItems[$event]"
             />
-            <TimelineUserMessage v-else-if="entry.row.kind === 'user'" :text="entry.row.text" :at="entry.row.at" :quotable="quotable" @quote="emit('quote', $event)" />
+            <TimelineUserMessage v-else-if="entry.row.kind === 'user'" :text="entry.row.text" :at="entry.row.at" :quotable="quotable" :branchable="branchable === true" @branch="onBranch(entry.row, $event)" @quote="emit('quote', $event)" />
             <article v-else-if="entry.row.kind === 'assistant'" class="timeline-row" data-role="assistant">
               <strong class="sr-only">{{ t("chat.assistant") }}</strong>
               <ChatMarkdown :content="entry.row.text" :final="!entry.row.streaming" :message-id="entry.row.key" />
             </article>
+            <button
+              v-else-if="entry.row.kind === 'line'"
+              type="button"
+              class="timeline-line-marker"
+              :disabled="entry.row.failed === true"
+              :aria-label="t('lines.openLine', { name: entry.row.purpose || shortId(entry.row.branchId) })"
+              @click="entry.row.failed !== true && emit('openLine', entry.row.branchId)"
+            >
+              <GitBranch :size="14" aria-hidden="true" />
+              <span class="timeline-line-name">{{ entry.row.purpose || shortId(entry.row.branchId) }}</span>
+              <code>{{ shortId(entry.row.branchId) }}</code>
+              <span v-if="entry.row.failed" class="timeline-line-failed">{{ t("lines.state.creationFailed") }}</span>
+              <span v-else-if="entry.row.before" class="timeline-line-cut">{{ t("timeline.beforeMessage", { message: entry.row.before }) }}</span>
+            </button>
+            <p v-else-if="entry.row.kind === 'line-ended'" class="timeline-notice">
+              {{ entry.row.issuer === "itself" ? t("timeline.lineEndedItself") : entry.row.issuer === "operation" ? t("timeline.lineEndedByOperation") : t("timeline.lineEndedWith", { id: entry.row.ancestor ?? "" }) }}
+            </p>
+            <p v-else-if="entry.row.kind === 'source-message'" class="timeline-line-notice">
+              <span class="timeline-line-from">{{ t("timeline.fromLine", { id: entry.row.from }) }}<template v-if="entry.row.steer"> {{ t("timeline.steer") }}</template><template v-if="entry.row.final">, {{ t("timeline.final") }}</template></span>
+              <span>{{ entry.row.body }}</span>
+            </p>
+            <p v-else-if="entry.row.kind === 'source-idle'" class="timeline-line-notice">{{ t("timeline.lineWaiting", { id: entry.row.branch, status: entry.row.status }) }}</p>
+            <p v-else-if="entry.row.kind === 'source-ended'" class="timeline-line-notice">{{ t("timeline.lineEnded", { id: entry.row.branch }) }}</p>
             <div v-else-if="entry.row.kind === 'error'" class="notice-row error-row" role="alert"><span>{{ entry.row.text }}</span></div>
             <p v-else class="timeline-notice">{{ t("timeline.noticeStopped") }}</p>
           </template>

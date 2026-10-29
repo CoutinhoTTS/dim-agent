@@ -77,6 +77,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Review your answers and press Enter to submit." => "确认答案后按 Enter 提交。",
         "Not answered" => "未回答",
         "Tool Approvals" => "工具审批",
+        "Approval" => "审批",
+        "Ask" => "询问",
+        "Ask before commands, network, outside writes and unclassified tools" => {
+            "执行命令、访问网络、工作区外写入和未分类工具前先询问"
+        }
         "full access" => "完全授权",
         "All tools run automatically, bypass permissions" => "所有工具自动执行，跳过权限确认",
         "approve for me" => "智能权限",

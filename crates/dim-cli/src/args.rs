@@ -70,6 +70,8 @@ Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /approvals (alias /permissions) shows the preset and command rules; it also takes\n\
   PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
+/approval in the terminal UI chooses ask (workspace-write) or full access for\n\
+  this session and later ones. The line prompt keeps /approvals.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
 The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\

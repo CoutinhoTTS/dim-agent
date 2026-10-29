@@ -16,7 +16,8 @@
 //! │   Notify when agent ...  on                  │
 //! │   Permissions                                │
 //! │   Tool approvals         default ›           │
-//! │ 1 / 7 · ↑↓ move · enter select · ←→/space change · esc close │
+//! │   Command isolation      ›                  │
+//! │ 1 / 8 · ↑↓ move · enter select · ←→/space change · esc close │
 //! ╰──────────────────────────────────────────────╯
 //! ```
 
