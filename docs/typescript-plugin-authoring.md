@@ -556,8 +556,9 @@ The description's guidance is policy; its schema, its result format and its
 refusal codes are protocol ([model-facing prompts §4](design/model-prompts.md#4-protocol-and-policy)).
 A protocol change lands with the behaviour and the flow that asserts it; a policy
 change is judged against the current text ([model-facing prompts §8](design/model-prompts.md#8-judging-a-change)).
-Where your plugin ships a policy text, keep it in the row's `code.config` with a
-default in the schema, so a candidate can replace it through the shipped assembly
+Where your plugin ships a policy text, make it an optional field of the row's
+`code.config`; when the field is absent the plugin uses its built-in text from
+code, byte for byte, so a candidate replaces it through the shipped assembly
 without an evaluation-only path.
 
 ### Markers and the input guide

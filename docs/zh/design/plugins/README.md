@@ -25,6 +25,7 @@
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
+| [Collaboration](Collaboration.md) | 成员关系与临时 agent | `agent` 工具、报告与消息；两个标记的指南条目 | 委派的事实、唤醒输入与结算 | #551 |
 | [ExternalAgent](ExternalAgent.md) | 外部会话、Collaboration 成员类型 `external-agent`；每节点一个桥接行 | —（委派与决定归 Collaboration） | — | P3 |
 | [AcpGateway](AcpGateway.md) | 接入方宿主插件：ACP/RPC 连接、请求与清理；位于 daemon 外 | — | — | 支持子集已实现，未发布（#436，PR #441；[验收](../../../design/acp-gateway-acceptance.md)） |
 | [TemporaryMcp](../../../design/plugins/TemporaryMcp.md) | 由既有 MCP 功能注册 | 临时绑定、MCP server 子插件和工具；不写持久配置 | — | 已实现；#436 的客户端 MCP 接入 |
