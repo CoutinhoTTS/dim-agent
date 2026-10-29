@@ -228,9 +228,11 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert_eq!(usage["result"]["outputTokens"], 200.0);
         assert_eq!(usage["result"]["thresholdTokens"], 3800.0 - 0.2 * 3800.0);
         assert_eq!(usage["result"]["baselineSource"], "full_estimate");
+        let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(overhead > 0.);
-        let size = 600.;
+        // One turn stays below the threshold; two cross it.
+        let size = (threshold - overhead) / 2.;
         let missing = client
             .rpc("session.context.compact", json!({"sessionId":sid}))
             .await;
@@ -240,6 +242,18 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         let events = loop {
             turn(&mut client, &sid, &big(index, size)).await;
             index += 1;
+            if index == 1 {
+                let after = client
+                    .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
+                    .await;
+                assert_ok(&after);
+                assert!(
+                    after["result"]["estimatedInputTokens"].as_f64().unwrap()
+                        < after["result"]["thresholdTokens"].as_f64().unwrap(),
+                    "one turn already crosses the threshold: {}",
+                    after["result"]
+                );
+            }
             let events = history(&mut client, &sid).await;
             if events.iter().any(|event| is(event, "context/compaction")
                 && event["data"]["status"] == "completed")
