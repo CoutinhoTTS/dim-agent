@@ -1910,7 +1910,8 @@ async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
         branch_id: "main".into(),
     };
     {
-        let native = SqliteTimelineStore::new(SqliteStorage::open(store.database()).unwrap());
+        let database = SqliteStorage::open(store.database()).unwrap();
+        let native = SqliteTimelineStore::new(database.clone());
         let legacy = Timeline::restore(
             rutis::Ctx::root().unwrap(),
             key.clone(),
@@ -1946,6 +1947,8 @@ async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
         .await
         .unwrap()
         .unwrap();
+        native.close().await.unwrap();
+        database.close().await.unwrap();
     }
 
     let Served {
