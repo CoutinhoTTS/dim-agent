@@ -148,6 +148,39 @@ async fn catalog_pages_and_searches_a_large_dormant_store_without_reading_histor
             "{page}"
         );
     }
+    connection
+        .execute(
+            "UPDATE session_catalog SET updated_at_ms=500000 WHERE preview IS NOT NULL",
+            [],
+        )
+        .unwrap();
+    let mut cursor = None;
+    let mut tied = Vec::new();
+    loop {
+        let mut params = json!({"withPreview":true,"limit":37});
+        if let Some(cursor) = cursor {
+            params["cursor"] = cursor;
+        }
+        let page = client.rpc("session.catalog", params).await;
+        assert_ok(&page);
+        tied.extend(
+            page["result"]["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["sessionId"].as_str().unwrap().to_owned()),
+        );
+        cursor = page["result"].get("nextCursor").cloned();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        tied,
+        (0..300)
+            .map(|index| format!("catalog-{index:04}"))
+            .collect::<Vec<_>>()
+    );
     let no_match = client
         .rpc("session.catalog", json!({"cwd":"/absent-workspace"}))
         .await;

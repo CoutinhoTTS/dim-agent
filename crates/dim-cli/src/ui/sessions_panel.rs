@@ -13,10 +13,9 @@ const HINT: &str = "Enter open · Ctrl+R refresh · Esc close";
 
 pub struct SessionsPanel {
     list: ListPanel,
-    request_id: String,
+    request_id: Option<String>,
     paged: Option<bool>,
     due: Option<Instant>,
-    pending: bool,
     append: bool,
     next_cursor: Option<String>,
 }
@@ -24,10 +23,9 @@ pub struct SessionsPanel {
 impl SessionsPanel {
     pub fn new() -> Self {
         Self {
-            request_id: String::new(),
+            request_id: None,
             paged: None,
             due: Some(Instant::now()),
-            pending: false,
             append: false,
             next_cursor: None,
             list: ListPanel::new(
@@ -54,10 +52,10 @@ impl SessionsPanel {
         paged: bool,
         result: Result<(Vec<SessionItem>, Option<String>), String>,
     ) {
-        if self.request_id != id {
+        if self.request_id.as_deref() != Some(id) {
             return;
         }
-        self.pending = false;
+        self.request_id = None;
         self.paged = Some(paged);
         self.list.remote_filter(paged);
         match result {
@@ -78,22 +76,24 @@ impl SessionsPanel {
         if self.due.is_some() && !reset {
             return None;
         }
-        if !reset && (self.pending || !self.list.near_end() || self.next_cursor.is_none()) {
+        if !reset
+            && (self.request_id.is_some() || !self.list.near_end() || self.next_cursor.is_none())
+        {
             return None;
         }
         self.due = None;
-        self.pending = true;
         self.append = !reset;
-        self.request_id = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        self.request_id = Some(id.clone());
         Some(Command::ListSessions {
-            id: self.request_id.clone(),
+            id,
             query: self.list.query().trim().to_owned(),
             cursor: if reset { None } else { self.next_cursor.take() },
         })
     }
 
     pub fn refresh(&mut self) {
-        self.request_id.clear();
+        self.request_id = None;
         self.next_cursor = None;
         self.due = Some(Instant::now());
         self.list.loading();

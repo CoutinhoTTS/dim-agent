@@ -164,8 +164,8 @@ impl SessionStore {
         self.timeline.db.run(move |connection| {
             let index = if request.with_preview { "session_catalog_with_preview" } else { "session_catalog_by_activity" };
             let mut sql = format!(
-                "SELECT c.session_id, c.cwd, s.created_at_ms, b.sequence, o.agent_id, \
-                 m.revision, m.title, m.title_source, c.preview, c.updated_at_ms, \
+                "SELECT c.session_id AS session_id, c.cwd, s.created_at_ms, b.sequence, o.agent_id, \
+                 m.revision, m.title, m.title_source, c.preview, c.updated_at_ms AS updated_at_ms, \
                  json_extract(s.config, '$.model.providerId'), json_extract(s.config, '$.model.modelId') \
                  FROM session_catalog c INDEXED BY {index} CROSS JOIN agent_sessions s ON s.session_id=c.session_id \
                  CROSS JOIN session_owners o ON o.session_id=c.session_id \
@@ -177,17 +177,19 @@ impl SessionStore {
             let mut values: Vec<rusqlite::types::Value> = vec![i64::from(version).into(), serde_json::to_string(&hosts).map_err(error)?.into(), serde_json::to_string(&closed).map_err(error)?.into()];
             if request.with_preview { sql.push_str(" AND c.preview IS NOT NULL"); }
             if let Some(agent) = agent { values.push(agent.into()); sql.push_str(&format!(" AND o.agent_id=?{}", values.len())); }
-            if let Some((time, id)) = cursor {
-                values.push((time as i64).into()); let time = values.len();
-                values.push(id.into()); let id = values.len();
-                sql.push_str(&format!(" AND c.updated_at_ms<=?{time} AND (c.updated_at_ms<?{time} OR c.session_id>?{id})"));
-            }
             if let Some(cwd) = request.cwd { values.push(cwd.into()); sql.push_str(&format!(" AND c.cwd=?{}", values.len())); }
             if let Some(query) = request.query {
                 values.push(query.to_lowercase().into()); let p = values.len();
                 sql.push_str(&format!(" AND (instr(catalog_fold(c.session_id),?{p})>0 OR instr(catalog_fold(c.cwd),?{p})>0 OR instr(catalog_fold(c.preview),?{p})>0 OR instr(catalog_fold(m.title),?{p})>0 OR instr(catalog_fold(json_extract(s.config,'$.model.providerId')),?{p})>0 OR instr(catalog_fold(json_extract(s.config,'$.model.modelId')),?{p})>0)"));
             }
-            sql.push_str(" ORDER BY c.updated_at_ms DESC, c.session_id");
+            if let Some((time, id)) = cursor {
+                values.push((time as i64).into());
+                let time = values.len();
+                values.push(id.into());
+                let id = values.len();
+                sql = format!("{sql} AND c.updated_at_ms=?{time} AND c.session_id>?{id} UNION ALL {sql} AND c.updated_at_ms<?{time}");
+            }
+            sql.push_str(" ORDER BY updated_at_ms DESC, session_id");
             if let Some(limit) = request.limit { values.push(((limit+1) as i64).into()); sql.push_str(&format!(" LIMIT ?{}", values.len())); }
             let mut statement = connection.prepare_cached(&sql).map_err(error)?;
             let mut rows = statement.query(rusqlite::params_from_iter(values)).map_err(error)?;

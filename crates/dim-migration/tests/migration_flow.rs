@@ -700,7 +700,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        21
+        22
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -744,6 +744,20 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     let mut client = Client::connect(&connection).await.unwrap();
     let listed: Value = client.typed("session.list", json!({})).await.unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    let page: Value = client
+        .typed("session.catalog", json!({"query":id,"withPreview":true}))
+        .await
+        .unwrap();
+    assert_eq!(page["sessions"][0]["sessionId"], id);
+    assert!(
+        page["sessions"][0]["preview"]
+            .as_str()
+            .is_some_and(|preview| !preview.is_empty())
+    );
+    assert!(
+        agent.sessions().is_empty(),
+        "listing must not restore imported Sessions"
+    );
     let session = agent
         .restore_session(id.clone())
         .await

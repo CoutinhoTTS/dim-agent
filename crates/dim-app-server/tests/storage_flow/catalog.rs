@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+fn catalog_backfill_failure_preserves_the_legacy_store() {
+    let database = Database::new();
+    let connection = v16_tables_store(&database.0, 21);
+    insert_documented_records(
+        &connection,
+        &BUSINESS_TABLES
+            .iter()
+            .copied()
+            .filter(|table| *table != "session_catalog")
+            .collect::<Vec<_>>(),
+    );
+    connection.execute("UPDATE timeline_events SET body='damaged' WHERE session_id='s1' AND branch_id='main' AND sequence=8", []).unwrap();
+    drop(connection);
+    let before = std::fs::read(&database.0).unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    assert_eq!(std::fs::read(&database.0).unwrap(), before);
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), [21]);
+    assert_eq!(schema(&connection), schema_of(21));
+}
+
 fn input(sequence: u64, content: Vec<ContentBlock>) -> StoredEvent {
     record(
         sequence,
