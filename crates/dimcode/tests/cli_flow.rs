@@ -7305,10 +7305,228 @@ fn tui_models_picker_cycles_reasoning_effort() {
     );
 }
 
+/// `/models` sends `provider.refresh` for a usable provider whose catalog is
+/// empty when the daemon says its models can be listed, draws its rows without
+/// waiting for that listing, shows the models a late listing returns in the
+/// same open picker, keeps the row of a refresh that fails, and asks no
+/// provider twice in one connection.
+#[test]
+fn tui_models_picker_refills_an_empty_provider_catalog() {
+    let home = Home::new();
+    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = refreshed.clone();
+    let listed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counted = listed.clone();
+    let stored = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        Value,
+    >::new()));
+    let kept = stored.clone();
+    let (release, wait_release) = std::sync::mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        // One writer at a time: the listing a provider is slow to give is
+        // answered from another thread once the test releases it, so the
+        // daemon keeps serving the requests the picker makes meanwhile.
+        let writes = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let held_writes = writes.clone();
+        // One listing is held in this test; the loop serves the rest.
+        let mut wait_release = Some(wait_release);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            let answer = match request["method"].as_str().unwrap() {
+                "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","provider.refresh"]})),
+                "session.create" => Some(json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}})),
+                "session.history" => Some(json!({"events":[],"through":8,"nextAfter":8,"done":true})),
+                "session.idle" => Some(json!({"sequence":8})),
+                "provider.list" => {
+                    *counted.lock().unwrap() += 1;
+                    Some(json!({"providers":[
+                        {"providerId":"fresh","displayName":"Fresh","enabled":true,"remoteModelList":true},
+                        {"providerId":"broken","displayName":"Broken","enabled":true,"remoteModelList":true},
+                        {"providerId":"unlisted","displayName":"Unlisted","enabled":true,"remoteModelList":false}]}))
+                }
+                "provider.catalog" => {
+                    let provider = request["params"]["providerId"].as_str().unwrap();
+                    let catalog = stored.lock().unwrap().get(provider).cloned().unwrap_or_else(|| {
+                        json!({"version":1,"disabledModelIds":[],"models":[]})
+                    });
+                    Some(json!({"catalog":catalog}))
+                }
+                "provider.refresh" => {
+                    let provider = request["params"]["providerId"].as_str().unwrap().to_owned();
+                    seen.lock().unwrap().push(provider.clone());
+                    if provider == "broken" {
+                        let _guard = writes.lock().unwrap();
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"listing failed"}}));
+                        None
+                    } else {
+                        // Hold the listing: the picker may not wait for it.
+                        let mut socket = wire.0.get_ref().try_clone().unwrap();
+                        let stored = kept.clone();
+                        let writes = held_writes.clone();
+                        let id = request["id"].clone();
+                        let wait = wait_release.take().expect("one held listing");
+                        thread::spawn(move || {
+                            wait.recv_timeout(PATIENCE).unwrap();
+                            let catalog = json!({"version":2,"disabledModelIds":[],"models":[
+                                {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
+                                    "capabilities":dim_agent_types::ModelCapabilities::default()},
+                                {"id":"vendor/model-b","name":"Model B","unavailableReason":null,
+                                    "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                            stored.lock().unwrap().insert(provider, catalog.clone());
+                            let _guard = writes.lock().unwrap();
+                            writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
+                                .unwrap();
+                            socket.flush().unwrap();
+                        });
+                        None
+                    }
+                }
+                "account.providers" => Some(json!([])),
+                _ => Some(json!({})),
+            };
+            if let Some(result) = answer {
+                let _guard = writes.lock().unwrap();
+                wire.reply(&request, result);
+            }
+        }
+    });
+    let mut command = home.command();
+    command.env("LC_ALL", "C");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    // The listing is still held: the picker draws every row it has.
+    terminal.until("Fresh: no models · dimcode models fresh --refresh");
+    terminal.until("Broken: no models · dimcode models broken --refresh");
+    terminal.until("Unlisted: no models · add a model with provider.models.create");
+    release.send(()).unwrap();
+    // The listing that arrives late fills the picker that is already open.
+    terminal.until("Fresh / vendor/model-a");
+    terminal.until("Fresh / vendor/model-b");
+    // Closing and reopening in the same connection asks no provider again,
+    // though the failed refresh kept its row.
+    terminal.write(b"\x1b");
+    thread::sleep(Duration::from_millis(500));
+    terminal.write(b"/models\r");
+    let deadline = Instant::now() + PATIENCE;
+    while *listed.lock().unwrap() < 3 {
+        assert!(Instant::now() < deadline, "the picker did not open again");
+        thread::sleep(Duration::from_millis(10));
+    }
+    terminal.until("Broken: no models · dimcode models broken --refresh");
+    terminal.until("Fresh / vendor/model-a");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(
+        *refreshed.lock().unwrap(),
+        ["fresh".to_owned(), "broken".to_owned()],
+        "one refresh per provider that can be listed in the connection, none on the reopen"
+    );
+}
+
+/// A refill that lands after the picker closed is recorded, so the provider
+/// is not asked again, but it starts no re-read: the next open is what reads
+/// the catalog the listing stored.
+#[test]
+fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
+    let home = Home::new();
+    let listed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counted = listed.clone();
+    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = refreshed.clone();
+    let stored = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+    let kept = stored.clone();
+    let (release, wait_release) = std::sync::mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        let mut wait_release = Some(wait_release);
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            let answer = match request["method"].as_str().unwrap() {
+                "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","provider.refresh"]})),
+                "session.create" => Some(json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}})),
+                "session.history" => Some(json!({"events":[],"through":8,"nextAfter":8,"done":true})),
+                "session.idle" => Some(json!({"sequence":8})),
+                "provider.list" => {
+                    *counted.lock().unwrap() += 1;
+                    Some(json!({"providers":[
+                        {"providerId":"fresh","displayName":"Fresh","enabled":true,"remoteModelList":true}]}))
+                }
+                "provider.catalog" => {
+                    let catalog = kept.lock().unwrap().clone();
+                    Some(json!({"catalog":catalog}))
+                }
+                "provider.refresh" => {
+                    seen.lock()
+                        .unwrap()
+                        .push(request["params"]["providerId"].as_str().unwrap().to_owned());
+                    let mut socket = wire.0.get_ref().try_clone().unwrap();
+                    let stored = stored.clone();
+                    let id = request["id"].clone();
+                    let wait = wait_release.take().expect("one held listing");
+                    thread::spawn(move || {
+                        wait.recv_timeout(PATIENCE).unwrap();
+                        let catalog = json!({"version":2,"disabledModelIds":[],"models":[
+                            {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
+                                "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                        *stored.lock().unwrap() = catalog.clone();
+                        writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
+                            .unwrap();
+                        socket.flush().unwrap();
+                    });
+                    None
+                }
+                "account.providers" => Some(json!([])),
+                _ => Some(json!({})),
+            };
+            if let Some(result) = answer {
+                wire.reply(&request, result);
+            }
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Fresh: no models · dimcode models fresh --refresh");
+    terminal.write(b"\x1b");
+    terminal.until("Ask anything...");
+    let opens = *listed.lock().unwrap();
+    release.send(()).unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        *listed.lock().unwrap(),
+        opens,
+        "a refill that lands with the picker closed starts no re-read"
+    );
+    // The next open reads the catalog the refresh stored, and asks nothing.
+    terminal.write(b"/models\r");
+    terminal.until("Fresh / vendor/model-a");
+    assert_eq!(
+        refreshed.lock().unwrap().as_slice(),
+        ["fresh".to_owned()],
+        "the provider recorded its refill; the reopen asks again"
+    );
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// A provider that offers nothing selectable keeps a row naming it and the
 /// reason: no models with the refresh command when the daemon can list them,
 /// no models with the add method when it cannot, an unreadable catalog, or
-/// the unavailable and disabled counts together. The picker lists nothing.
+/// the unavailable and disabled counts together. The picker refills only the
+/// provider whose catalog is empty and can be listed: a provider whose models
+/// are its bundled catalog's, one the daemon cannot list and one whose
+/// catalog cannot be read are never refreshed.
 #[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
@@ -7336,7 +7554,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[
-                    {"providerId":"ready","displayName":"Ready","enabled":true},
+                    {"providerId":"ready","displayName":"Ready","enabled":true,"remoteModelList":true},
                     {"providerId":"empty","displayName":"Empty","enabled":true},
                     {"providerId":"mixed","displayName":"Mixed","enabled":true},
                     {"providerId":"hidden","displayName":"All disabled","enabled":true},
@@ -7398,9 +7616,10 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
-    assert!(
-        refreshed.lock().unwrap().is_empty(),
-        "the picker never lists a provider's models: {:?}",
-        refreshed.lock().unwrap()
+    let refreshed = refreshed.lock().unwrap();
+    assert_eq!(
+        refreshed.as_slice(),
+        ["blank".to_owned()],
+        "only the empty catalog the daemon can list is refreshed"
     );
 }

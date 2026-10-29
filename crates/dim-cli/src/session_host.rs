@@ -262,6 +262,12 @@ struct Worker {
     context_stale: bool,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
+    /// Providers whose catalog this connection already asked to refill, so an
+    /// endpoint that lists nothing costs one request, not one per open.
+    refilled_catalogs: std::collections::HashSet<String>,
+    /// The outstanding `provider.refresh` requests `models()` sent for those
+    /// catalogs.
+    refill_requests: Vec<u64>,
 }
 
 struct OutputWatch {
@@ -351,6 +357,8 @@ async fn run(
         login_callbacks: unbounded_channel(),
         context_stale: false,
         compact_requests: Vec::new(),
+        refilled_catalogs: Default::default(),
+        refill_requests: Vec::new(),
     };
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
@@ -2120,11 +2128,14 @@ impl Worker {
     /// credentials and every signed-in managed provider (`provider.list`
     /// lists static ones only), less unavailable and disabled models.
     ///
-    /// The picker reads; it never lists a provider's models. The Provider
-    /// owner decides what a catalog holds, so every client sees the same
-    /// catalogs. Every usable provider that offers no selectable model is
-    /// reported for its picker row, with the reason and whether
-    /// `provider.refresh` can list it.
+    /// A static provider whose stored catalog holds no models is asked to
+    /// refill it through `provider.refresh` when `provider.list` says its
+    /// models can be listed, once per connection. The request is sent, not
+    /// awaited: the picker opens with what the catalogs hold, a provider
+    /// still listing none shows its `no models` row meanwhile, and the reply
+    /// asks the open picker to read the list again. Every usable provider
+    /// that offers no selectable model is reported for its picker row, with
+    /// the reason and whether `provider.refresh` can list it.
     async fn models(&mut self) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         struct Providers {
@@ -2180,11 +2191,17 @@ impl Worker {
         }
         let listed: Providers = self.client.typed("provider.list", json!({})).await?;
         let mut usable: Vec<(String, String, bool)> = Vec::new();
+        // `provider.refresh` lists a static provider only; an account
+        // catalog is filled by its account owner.
+        let mut refillable = std::collections::HashSet::new();
         for provider in listed
             .providers
             .into_iter()
             .filter(|provider| provider.enabled)
         {
+            if provider.remote_model_list {
+                refillable.insert(provider.provider_id.clone());
+            }
             usable.push((
                 provider.provider_id,
                 provider.display_name,
@@ -2227,6 +2244,18 @@ impl Worker {
                     continue;
                 }
             };
+            if catalog
+                .as_ref()
+                .is_none_or(|catalog| catalog.models.is_empty())
+                && refillable.contains(&provider_id)
+                && self.refilled_catalogs.insert(provider_id.clone())
+                && let Ok(request) = self
+                    .client
+                    .send("provider.refresh", json!({"providerId": provider_id}))
+                    .await
+            {
+                self.refill_requests.push(request);
+            }
             let Some(catalog) = catalog else {
                 empty.push(EmptyProvider {
                     provider_id,
@@ -2943,6 +2972,22 @@ impl Worker {
         {
             self.compact_requests.remove(index);
             self.send(Update::Compacted(compact_reply(result)));
+            return Ok(());
+        }
+        if let Some(index) = self
+            .refill_requests
+            .iter()
+            .position(|request| *request == id)
+        {
+            self.refill_requests.remove(index);
+            if result.is_ok() {
+                // The refresh stored the catalog; a picker that is still
+                // open reads the list again to show it, and
+                // `refilled_catalogs` keeps that read from asking twice.
+                // With the picker closed this only records the fill: the
+                // next open reads anyway.
+                self.send(Update::ModelsRefilled);
+            }
             return Ok(());
         }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {

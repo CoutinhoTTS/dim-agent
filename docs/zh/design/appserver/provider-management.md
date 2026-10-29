@@ -262,7 +262,7 @@ Desktop / CLI             Local App Server            Provider / account
 CLI 同步迁移 crates/dim-cli/src/session_host.rs 的 PROVIDER_METHODS、全部 save 调用者及
 真实 daemon 流程：Add 先 probe 未保存连接再 create，保留 UUID 供丢回复后恢复，不能先保存
 再 refresh 测试；编辑按需 probe 草稿，然后只 update 改动字段，记录自身的模型由该 update
-用新连接列举并保存，客户端不代用户刷新 catalog；Disconnect 原子提交
+用新连接列举并保存；Disconnect 原子提交
 credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭据被拒绝的问题。
 启停用 update，账号登录/登出仍走原 owner。
 重复创建时若 UUID 已存在，转为该记录的编辑表单并保留 URL/密钥草稿，由用户再次 Apply 确认，
@@ -275,6 +275,11 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 两者都不改当前 Session 已采用的模型；发现和采用失败不会自动删除历史偏好。
 `←` 与 `→` 在选中模型上循环其声明的推理强度。Enter 采用该模型；若强度被切换过，
 先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。
+
+列表还会通过 `provider.refresh` 填充 catalog 无模型的静态 provider：`provider.list`
+说其模型可列举时，每个连接对每个 provider 只问一次，并显示刷新写入的 catalog。
+读取或刷新失败时该 provider 的提示行保留；面板关闭后才到达的回复只记录这次填充，
+下次打开再读。
 
 ```text
 Select a model

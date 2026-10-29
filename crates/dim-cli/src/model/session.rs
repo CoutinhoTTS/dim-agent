@@ -561,6 +561,9 @@ pub enum Update {
         result: Result<(), String>,
     },
     Models(Result<ModelList, String>),
+    /// A catalog `models()` asked `provider.refresh` to fill holds models
+    /// now: a picker that is still open reads the list again.
+    ModelsRefilled,
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
     Isolation(Result<dim_agent_types::isolation::IsolationPolicySnapshot, String>),

@@ -340,8 +340,7 @@ Add probes the unsaved connection **before** create, retains its generated UUID
 for recovery, and never saves then refreshes as a test. Connection edits probe a
 draft when requested, then update the changed fields; the update lists and
 stores the new endpoint's models when the record's models are its own, and a
-proxy or timeout edit saves alone, so no
-client refreshes a catalog on the user's behalf. Disconnect sends credential
+proxy or timeout edit saves alone. Disconnect sends credential
 clear **and** `enabled:false` atomically, fixing the enabled-key-required rejection
 of clear alone. Enable/disable use update; account login/logout retain their owners.
 When listing is unsupported, connection edits still save and explicitly report
@@ -364,6 +363,12 @@ keep historical preferences until this explicit user action.
 `←` and `→` cycle the selected model's advertised reasoning efforts. Enter
 adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
 with the model's other saved preferences.
+
+The picker also fills a static provider whose catalog holds no models through
+`provider.refresh`, once per provider per connection, when `provider.list` says
+its models can be listed, and shows what the refresh stored. A failed read or a
+failed refresh keeps the provider's row, and a reply that arrives after the
+picker closed only records the fill: the next open reads it.
 
 ```text
 Select a model
