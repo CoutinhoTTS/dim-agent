@@ -198,7 +198,7 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_catalog",
 ];
 /// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
-/// v19 through v22 and v24 add none.
+/// v19 through v22, v24 and v25 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
@@ -319,6 +319,14 @@ fn v16_tables_store(path: &std::path::Path, marker: u32) -> Connection {
 /// Builds a disposable v23 store, as a v23 daemon created it.
 fn v23_store(path: &std::path::Path) -> Connection {
     let connection = v16_tables_store(path, 23);
+    for sql in V23_ADDITIONS {
+        connection.execute_batch(sql).unwrap();
+    }
+    connection
+}
+/// Builds a disposable v24 store, as a v24 daemon created it.
+fn v24_store(path: &std::path::Path) -> Connection {
+    let connection = v16_tables_store(path, 24);
     for sql in V23_ADDITIONS {
         connection.execute_batch(sql).unwrap();
     }
@@ -461,7 +469,11 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
     connection
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
-    insert_documented_records(&connection, &["agent_store_format"]);
+    // The documented example states the format of its decision; the marker
+    // row is the daemon's own current format.
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (25)", [])
+        .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
 
@@ -2463,6 +2475,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V22,
         V23,
         V24,
+        V25,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2630,6 +2643,11 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V24,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=23",
         ),
+        (Base::V25, "DELETE FROM agent_store_format"),
+        (
+            Base::V25,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=24",
+        ),
         (
             Base::V21,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=20",
@@ -2649,6 +2667,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V22, "DROP TABLE session_metadata"),
         (Base::V23, "DROP TABLE session_metadata"),
         (Base::V24, "DROP TABLE session_metadata"),
+        (Base::V25, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2663,7 +2682,8 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V21 => drop(v16_tables_store(&database.0, 21)),
             Base::V22 => drop(v16_tables_store(&database.0, 22)),
             Base::V23 => drop(v23_store(&database.0)),
-            Base::V24 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V24 => drop(v24_store(&database.0)),
+            Base::V25 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2724,8 +2744,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(24));
-    assert_eq!(marker(&connection), [24]);
+    assert_eq!(schema(&connection), schema_of(25));
+    assert_eq!(marker(&connection), [25]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2804,8 +2824,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(24));
-    assert_eq!(marker(&connection), [24]);
+    assert_eq!(schema(&connection), schema_of(25));
+    assert_eq!(marker(&connection), [25]);
     drop(connection);
 
     let database = Database::new();
@@ -2925,7 +2945,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [24]);
+    assert_eq!(marker(&connection), [25]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -2999,7 +3019,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v24; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v25; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -4973,4 +4993,197 @@ async fn a_v23_store_upgrades_in_place_once() {
     let connection = v23_store(&database.0);
     assert_eq!(schema(&connection), schema_of(23));
     upgrades_in_place_once(&database, connection, 23).await;
+}
+
+/// #522: a v24 record's model limit that neither `capabilityOverrideFields`
+/// marks nor the record's `metadata.raw` declares was the old assumed default,
+/// not a declaration, so the upgrade deletes it. A listed model keeps a limit
+/// the item it came from declares even when the store does not mark it; a
+/// marked limit stays, a managed model that loses a limit gains the reason its
+/// record shape requires, and every other value is unchanged.
+#[tokio::test]
+async fn a_v24_provider_record_loses_only_undeclared_model_limits() {
+    use serde_json::json;
+    let database = Database::new();
+    let connection = v24_store(&database.0);
+    let caps = |context: u64, output: u64| {
+        json!({"modalities":["text"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
+            "contextWindow":context,"maxOutputTokens":output})
+    };
+    let static_record = json!({
+        "kind":"custom","displayName":"Legacy","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"gpt-5-nano","displayName":"GPT-5 Nano","status":"active","capabilities":caps(400_000,128_000)},
+            {"modelId":"private-model","displayName":"Private","status":"active","capabilities":caps(128_000,16_384)},
+            {"modelId":"listed-both","displayName":"Listed Both","status":"active","capabilities":caps(1_000_000,65_536),
+             "metadata":{"raw":{"id":"listed-both","inputTokenLimit":1_000_000,"outputTokenLimit":65_536}}},
+            {"modelId":"listed-window","displayName":"Listed Window","status":"active","capabilities":caps(32_000,4_000),
+             "metadata":{"raw":{"id":"listed-window","inputTokenLimit":32_000}}},
+            {"modelId":"listed-none","displayName":"Listed None","status":"active","capabilities":caps(8_000,1_000),
+             "metadata":{"raw":{"id":"listed-none","type":"chat"}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[
+            {"modelId":"private-model","displayName":"Private","status":"active","capabilities":caps(64_000,8_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],"raw":{}}},
+            {"modelId":"gpt-5-nano","displayName":"Renamed","status":"active","capabilities":caps(400_000,128_000),"metadata":{"raw":{}}}
+        ],
+        "userModels":[
+            {"modelId":"user-model","displayName":"User","status":"active","capabilities":caps(32_000,4_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow"],"raw":{}}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let managed_record = json!({
+        "kind":"managed",
+        "account":{"credentialEpoch":"epoch","generation":1,
+            "account":{"issuer":"issuer","subject":"subject","grantedScopes":[]}},
+        "models":[{"entry":{"modelId":"relay-model","displayName":"Relay","status":"active",
+            "capabilities":caps(128_000,16_384),"metadata":{"raw":{}}},
+            "protocol":"openai-compatible","zdr":false}],
+        "modelConfigOverrides":[],"disabledModelIds":[],"modelPreferences":{},"version":1
+    });
+    for (id, record) in [
+        ("static-provider", &static_record),
+        ("managed-provider", &managed_record),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO providers(provider_id,version,record) VALUES (?1,1,?2)",
+                params![id, record.to_string()],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), Some(24));
+    db.close().await.unwrap();
+
+    let read = |id: &str| -> String {
+        Connection::open(&database.0)
+            .unwrap()
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), schema_of(25));
+    assert_eq!(marker(&connection), [25]);
+    drop(connection);
+
+    // The documented rule: a limit stays when the mark names it or the item
+    // the entry came from declares it under the projection's keys.
+    fn rewrite(model: &mut serde_json::Value) {
+        let marked = model["metadata"]
+            .get("capabilityOverrideFields")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let raw = model["metadata"]
+            .get("raw")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let declared = |keys: [&str; 3], limit: &str, capability: &str| {
+            let positive = |value: Option<&serde_json::Value>| {
+                value
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|n| n > 0)
+            };
+            keys.iter().any(|key| positive(raw.get(*key)))
+                || positive(raw.get("limit").and_then(|value| value.get(limit)))
+                || positive(
+                    raw.get("capabilities")
+                        .and_then(|value| value.get(capability)),
+                )
+        };
+        let capabilities = model["capabilities"].as_object_mut().unwrap();
+        for (field, declared) in [
+            (
+                "contextWindow",
+                declared(
+                    ["contextWindow", "context_window", "inputTokenLimit"],
+                    "context",
+                    "contextWindow",
+                ),
+            ),
+            (
+                "maxOutputTokens",
+                declared(
+                    ["maxOutputTokens", "max_output_tokens", "outputTokenLimit"],
+                    "output",
+                    "maxOutputTokens",
+                ),
+            ),
+        ] {
+            if !declared && !marked.iter().any(|name| name == field) {
+                capabilities.remove(field);
+            }
+        }
+        // An empty `metadata.raw` is not serialized.
+        if let Some(metadata) = model.get_mut("metadata").and_then(|m| m.as_object_mut())
+            && metadata
+                .get("raw")
+                .is_some_and(|raw| raw.as_object().is_some_and(|raw| raw.is_empty()))
+        {
+            metadata.remove("raw");
+        }
+    }
+    let mut expected = static_record.clone();
+    for key in ["models", "modelConfigOverrides", "userModels"] {
+        for model in expected[key].as_array_mut().unwrap() {
+            rewrite(model);
+        }
+    }
+    let stored: serde_json::Value = serde_json::from_str(&read("static-provider")).unwrap();
+    assert_eq!(stored, expected);
+    let override_declared = &stored["modelConfigOverrides"][0]["capabilities"];
+    assert_eq!(override_declared["contextWindow"], 64_000);
+    assert_eq!(override_declared["maxOutputTokens"], 8_000);
+    let user_declared = &stored["userModels"][0]["capabilities"];
+    assert_eq!(user_declared["contextWindow"], 32_000);
+    assert!(user_declared.get("maxOutputTokens").is_none());
+    let listed = |id: &str| {
+        stored["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["modelId"] == id)
+            .unwrap()
+            .clone()
+    };
+    // A listed model keeps what the listing declared, and only that.
+    let both = listed("listed-both")["capabilities"].clone();
+    assert_eq!(both["contextWindow"], 1_000_000);
+    assert_eq!(both["maxOutputTokens"], 65_536);
+    let window = listed("listed-window")["capabilities"].clone();
+    assert_eq!(window["contextWindow"], 32_000);
+    assert!(window.get("maxOutputTokens").is_none());
+    let none = listed("listed-none")["capabilities"].clone();
+    assert!(none.get("contextWindow").is_none());
+    assert!(none.get("maxOutputTokens").is_none());
+
+    let mut expected = managed_record.clone();
+    rewrite(&mut expected["models"][0]["entry"]);
+    expected["models"][0]["unavailableReason"] = json!("limits_undeclared");
+    expected.as_object_mut().unwrap().remove("modelPreferences");
+    let stored: serde_json::Value = serde_json::from_str(&read("managed-provider")).unwrap();
+    assert_eq!(stored, expected);
+    assert_eq!(
+        stored["models"][0]["unavailableReason"],
+        "limits_undeclared"
+    );
+
+    // A second open neither upgrades nor rewrites the records again.
+    let before = (read("static-provider"), read("managed-provider"));
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    assert_eq!((read("static-provider"), read("managed-provider")), before);
 }

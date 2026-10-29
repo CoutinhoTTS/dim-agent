@@ -714,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        24
+        i64::from(dim_app_server::storage::STORE_FORMAT)
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))

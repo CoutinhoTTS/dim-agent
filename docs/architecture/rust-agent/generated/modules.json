@@ -18536,6 +18536,7 @@
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
         "path declarations_hold",
+        "path declared_limits",
         "path inherit_limits",
         "path limits_valid",
         "use crate::model_catalog::BundledCatalog",
@@ -18548,6 +18549,8 @@
         "use crate::model_catalog::ProviderProjection",
         "use crate::model_catalog::declarations_hold",
         "use crate::model_catalog::declare",
+        "use crate::model_catalog::declared_limit_values",
+        "use crate::model_catalog::declared_limits",
         "use crate::model_catalog::inherit_limits",
         "use crate::model_catalog::limits_valid"
       ]
@@ -19189,7 +19192,8 @@
         "path ModelEntry",
         "path ModelSource::Builtin",
         "path ModelSource::Custom",
-        "path ProviderProjection"
+        "path ProviderProjection",
+        "path declared_limit_values"
       ]
     },
     {
@@ -20060,6 +20064,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
+        "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin"
       ]
@@ -20483,6 +20488,13 @@
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
         "use dim_agent_runtime::panic_message"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path crate::provider::rewrite_stored_limits"
       ]
     },
     {
@@ -30815,6 +30827,7 @@
       "references": [
         "path SqliteStorage::open",
         "path SqliteStorage::open_read_only",
+        "path dim_app_server::storage::STORE_FORMAT",
         "use dim_app_server::storage::SqliteStorage"
       ]
     },

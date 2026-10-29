@@ -1,37 +1,39 @@
 # Rust 会话存储格式
 
-The current native format is **v24**, with source-owned `settings_documents`,
+The current native format is **v25**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
-branch end events, the tool-effect and digest fields, and tool schemas that may
-omit `type`, the Session catalog projection and a configuration's System source. Startup requires the
-exact v24 SQL schema and a single format marker of 24 before writable PRAGMAs,
-or the exact v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v24 one step after
+branch end events, the tool-effect and digest fields, tool schemas that may
+omit `type`, the Session catalog projection, a configuration's System source,
+and Provider model limits that only a declaration writes. Startup requires the
+exact v25 SQL schema and a single format marker of 25 before writable PRAGMAs,
+or the exact v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
+which the same startup transaction upgrades in place to v25 one step after
 another ([S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
 [#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定),
 [#580 v22 decision](#580-v22-格式决定), [#556 v23 decision](#556-v23-格式决定),
-[#555 v24 decision](#555-v24-格式决定)).
+[#555 v24 decision](#555-v24-格式决定),
+[#522 v25 decision](#522-格式决定)).
 Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20, v21, v22
-or v23.
+migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20, v21, v22,
+v23 or v24.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v24, and v16 request rows stay readable as written.
+valid in v25, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v24 tables
+## Current v25 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 24)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 25)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -486,25 +488,25 @@ ProjectionCheckpoint = {
 
 ### #522 格式决定
 
-[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)（#522）的格式决定：升级到 **v23 之后的下一版**，从 v23 原地升级。本节不写死编号：[#556 v23 格式决定](#556-v23-格式决定) 先占用 v23，本步在其基础上顺延，其余内容不随编号改变。
+[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)（#522）的格式决定：升级到 **v25**，从 v24 原地升级（[#555 v24 格式决定](#555-v24-格式决定) 先占用 v24，本步在其基础上顺延）。
 
 - **改变的已存值**：`providers.record` 内每个模型描述的两项上限 `contextWindow`、`maxOutputTokens` 变成可选。没有来源声明时该键缺省，不再存假定值。这是 [Provider 管理 §3.5](provider-management.md#35-declared-model-limits) 的缺失语义在存储上的表示。
-- **为什么不能沿用 v23**：v23 读取器要求两项上限都是正整数，遇到缺键的 Provider 记录会解析失败；那是升级后到读取某个 Provider 才失败，违反本文件的启动拒绝规则。启动门禁比较精确的 SQL 结构，所以格式号必须改变。
+- **为什么不能沿用 v24**：v24 读取器要求两项上限都是正整数，遇到缺键的 Provider 记录会解析失败；那是升级后到读取某个 Provider 才失败，违反本文件的启动拒绝规则。启动门禁比较精确的 SQL 结构，所以格式号必须改变。
 - **升级路径**：沿用 `IMMEDIATE` 启动准入事务，在改写标记的同一事务内改写 Provider 记录：
   - 空库直接建新版本。
-  - 结构恰为 v23 且标记相符的库，在同一事务内处理；标记相符的更旧库先走既有各步，再走本步。
+  - 结构恰为 v24 且标记相符的库，在同一事务内处理；标记相符的更旧库先走既有各步，再走本步。
   - 对每条 `providers.record`，删除两项上限中既未在 `metadata.capabilityOverrideFields` 中列出、也未被该条目的 `metadata.raw` 声明的值：静态记录（`kind` 为 `builtin` 或 `custom`）处理 `models`、`modelConfigOverrides` 与 `userModels` 的每个条目，托管记录（`kind` 为 `managed`）处理 `models[].entry`。`metadata.raw` 保留清单项目的原文，升级与投影用同一组键和同一函数读取它（`context_window`/`contextWindow`/`inputTokenLimit`、`max_output_tokens`/`maxOutputTokens`/`outputTokenLimit`，以及 `limit.context`/`limit.output` 与 `capabilities.contextWindow`/`capabilities.maxOutputTokens`），不另列清单。来源声明某个值就保留，只删除没有任何来源声明的上限；不比较数值，也不补齐替代值。
   - 其余字节不变：`capabilityOverrideFields`、其他能力位、metadata、凭据、偏好、路由与选择都不改写；任何一步失败则回滚，原库保持不变。
   - 恰为新版本的库直接打开；其他库（标记不符、升级到一半、更旧格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **改写的位置**：`providers.record` 的 JSON 由 Provider 拥有的记录转换函数改写，存储层只负责在准入事务内对每条记录调用它，不解析 Provider 的字段。
 - **升级后从哪里取得值**：缺省键的上限由有效目录按来源补齐，不写回记录——默认项与用户模型走既有捆绑匹配，托管目录模型走同一 `BundledCatalog::fallback`，描述覆盖未自行声明的上限取自其基础项（[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)）。因此命中捆绑目录的模型升级前后取到同一个声明值；扫描不到的私有模型变为未声明，由管理面报告原因。
 - **单向**：旧二进制按既有精确 SQL 结构检查拒绝整个新库，报现有的 "unsupported SQLite schema … preserved" 错误；不会到读取某个 Provider 时才失败。不做降级或备份。
-- **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v23 to v<N>; earlier dimcode versions cannot open it.`
+- **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v24 to v25; earlier dimcode versions cannot open it.`
 - **验证**：
-  - 在一次性 v23 库中写入 Provider 记录，覆盖命中捆绑目录的默认项、扫描不到的私有默认项、清单声明了上限的条目（两项、仅窗口、两项皆无）、命中与未命中捆绑目录的两类描述覆盖、用户模型和一条托管记录；升级后核对只删除没有任何来源声明的上限（未列入标记且 `metadata.raw` 未声明）、其余字节逐字节不变、标记与结构为新版本，再次打开不再升级。
+  - 在一次性 v24 库中写入 Provider 记录，覆盖命中捆绑目录的默认项、扫描不到的私有默认项、清单声明了上限的条目（两项、仅窗口、两项皆无）、命中与未命中捆绑目录的两类描述覆盖、用户模型和一条托管记录；升级后核对只删除没有任何来源声明的上限（未列入标记且 `metadata.raw` 未声明）、其余字节逐字节不变、标记与结构为新版本，再次打开不再升级。
   - 有效目录中命中捆绑目录的模型取值与升级前相同；扫描不到的模型带 `missingLimits` 且不可选；两者都由 Provider 流程测试保护。
   - 用本决定之前的基线构建的旧二进制打开升级后的库，在启动时以 "unsupported SQLite schema … preserved" 拒绝并保留，不读取任何 Provider。
-  - 对应 `storage_flow.rs` 的 `a_v23_provider_record_loses_only_undeclared_model_limits` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`，以及 `provider_flow.rs` 的目录流程。
+  - 对应 `storage_flow.rs` 的 `a_v24_provider_record_loses_only_undeclared_model_limits` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`，以及 `provider_flow.rs` 的目录流程。
 
 ## 索引与实际查询
 
@@ -539,7 +541,7 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v24）
+## 完整记录示例（v25）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -552,7 +554,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 24}],
+  "agent_store_format": [{"version": 25}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],

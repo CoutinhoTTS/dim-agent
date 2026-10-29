@@ -27,7 +27,7 @@ use crate::{
     model_catalog::{
         BundledCatalog, CatalogCapabilities, MAX_MODEL_TOKENS, ModelEdit, ModelEntry,
         ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
-        inherit_limits, limits_valid,
+        declared_limit_values, declared_limits, inherit_limits, limits_valid,
     },
     storage::SqliteStorage,
 };
@@ -1045,6 +1045,107 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
     }
     Ok(())
 }
+/// The #522 format step: a stored limit that neither
+/// `capabilityOverrideFields` marks nor the record's `metadata.raw` declares
+/// was the old assumed default, not a declaration, so the upgrade deletes it.
+/// The storage layer calls this inside its startup transaction; this module
+/// owns the record's field names.
+pub(crate) fn rewrite_stored_limits(
+    connection: &rusqlite::Connection,
+) -> dim_agent_runtime::Result<()> {
+    let mut query = connection
+        .prepare("SELECT provider_id, record FROM providers")
+        .map_err(storage)?;
+    let rows = query
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage)?;
+    for (id, body) in rows {
+        // A record that does not parse is reported by `list`; the upgrade
+        // leaves its bytes untouched.
+        let Ok(record) = serde_json::from_str::<PersistedProviderRecord>(&body) else {
+            continue;
+        };
+        let (changed, body) = match record {
+            PersistedProviderRecord::Static(mut record) => {
+                let mut changed = false;
+                for model in record
+                    .models
+                    .iter_mut()
+                    .chain(&mut record.model_config_overrides)
+                    .chain(&mut record.user_models)
+                {
+                    changed |= drop_undeclared_limits(model);
+                }
+                (changed, serde_json::to_string(&*record).map_err(storage)?)
+            }
+            PersistedProviderRecord::Managed(mut record) => {
+                let mut changed = false;
+                for model in &mut record.models {
+                    changed |= drop_undeclared_limits(&mut model.entry);
+                    // The managed record shape keeps a reason on a model with
+                    // an absent limit; the catalog recomputes the reason from
+                    // the effective limits.
+                    if !model.entry.capabilities.missing_limits().is_empty()
+                        && model.unavailable_reason.is_none()
+                    {
+                        model.unavailable_reason = Some("limits_undeclared".into());
+                        changed = true;
+                    }
+                }
+                for model in &mut record.model_config_overrides {
+                    changed |= drop_undeclared_limits(model);
+                }
+                (changed, serde_json::to_string(&*record).map_err(storage)?)
+            }
+        };
+        if changed {
+            connection
+                .execute(
+                    "UPDATE providers SET record=?2 WHERE provider_id=?1",
+                    params![id, body],
+                )
+                .map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes the limits neither the mark nor `metadata.raw` declares.
+fn drop_undeclared_limits(model: &mut ModelEntry) -> bool {
+    let marked = model
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.capability_override_fields.as_slice())
+        .unwrap_or_default();
+    // A listed model keeps the item it came from in `raw`; a limit that item
+    // declares was a declaration even when the store does not mark it.
+    let (declared_context, declared_output) = model
+        .metadata
+        .as_ref()
+        .map(|metadata| declared_limits(&metadata.raw))
+        .unwrap_or((None, None));
+    let mut changed = false;
+    if model.capabilities.context_window.is_some()
+        && !marked.iter().any(|field| field == "contextWindow")
+        && declared_context.is_none()
+    {
+        model.capabilities.context_window = None;
+        changed = true;
+    }
+    if model.capabilities.max_output_tokens.is_some()
+        && !marked.iter().any(|field| field == "maxOutputTokens")
+        && declared_output.is_none()
+    {
+        model.capabilities.max_output_tokens = None;
+        changed = true;
+    }
+    changed
+}
+
 fn save_catalog(
     connection: &rusqlite::Connection,
     provider_id: &str,

@@ -11,11 +11,11 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 24;
+pub const FORMAT: u32 = 25;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 24))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25))",
     ),
     (
         "settings_documents",
@@ -113,7 +113,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 10] = [
+const UPGRADES: [(u32, &[&str]); 11] = [
     (
         13,
         &[
@@ -149,6 +149,9 @@ const UPGRADES: [(u32, &[&str]); 10] = [
     // #555: a configuration's `system_source`, which a v23 daemon cannot
     // decode; the marker only.
     (23, &[]),
+    // #522: a Provider record's model limits may be absent, which a v24
+    // daemon cannot decode; the marker and the Provider-owned rewrite.
+    (24, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -327,6 +330,9 @@ impl SqliteStorage {
                     }
                     if *from == 22 {
                         super::catalog::backfill(&tx)?;
+                    }
+                    if *from == 24 {
+                        crate::provider::rewrite_stored_limits(&tx)?;
                     }
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])

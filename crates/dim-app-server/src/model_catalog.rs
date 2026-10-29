@@ -617,14 +617,8 @@ fn descriptor_entry(
     id: &str,
     input: &Map<String, Value>,
 ) -> Result<ModelEntry, ProjectionError> {
-    let limit = input.get("limit").and_then(Value::as_object);
     let capabilities = input.get("capabilities").and_then(Value::as_object);
-    let context = positive(input.get("contextWindow"))
-        .or_else(|| limit.and_then(|x| positive(x.get("context"))))
-        .or_else(|| capabilities.and_then(|x| positive(x.get("contextWindow"))));
-    let output = positive(input.get("maxOutputTokens"))
-        .or_else(|| limit.and_then(|x| positive(x.get("output"))))
-        .or_else(|| capabilities.and_then(|x| positive(x.get("maxOutputTokens"))));
+    let (context, output) = declared_limits(input);
     let reasoning_value = input.get("reasoning");
     let reasoning_options = input.get("reasoning_options").or_else(|| {
         input
@@ -812,6 +806,53 @@ pub fn limits_valid(capabilities: &CatalogCapabilities) -> bool {
         .into_iter()
         .flatten()
         .all(|limit| (1..=MAX_MODEL_TOKENS).contains(&limit))
+}
+
+/// The values that declare a model's two limits, in the order the projection
+/// reads them: the flat descriptor keys, the nested `limit`, and
+/// `capabilities`. The remote listing and the stored record's `raw` are read
+/// with this one function, so the projection and the upgrade agree on what a
+/// declaration is.
+pub(crate) fn declared_limit_values(input: &Map<String, Value>) -> (Vec<&Value>, Vec<&Value>) {
+    fn values<'a>(
+        input: &'a Map<String, Value>,
+        keys: [&str; 3],
+        limit: &str,
+        capability: &str,
+    ) -> Vec<&'a Value> {
+        keys.iter()
+            .filter_map(|key| input.get(*key))
+            .chain(input.get("limit").and_then(|value| value.get(limit)))
+            .chain(
+                input
+                    .get("capabilities")
+                    .and_then(|value| value.get(capability)),
+            )
+            .collect()
+    }
+    (
+        values(
+            input,
+            ["contextWindow", "context_window", "inputTokenLimit"],
+            "context",
+            "contextWindow",
+        ),
+        values(
+            input,
+            ["maxOutputTokens", "max_output_tokens", "outputTokenLimit"],
+            "output",
+            "maxOutputTokens",
+        ),
+    )
+}
+
+/// The first valid value among each limit's declaration sources.
+pub(crate) fn declared_limits(input: &Map<String, Value>) -> (Option<u64>, Option<u64>) {
+    let (context, output) = declared_limit_values(input);
+    (
+        context.into_iter().find_map(|value| positive(Some(value))),
+        output.into_iter().find_map(|value| positive(Some(value))),
+    )
 }
 
 /// A limit the entry does not declare is inherited from the entry it replaces.
