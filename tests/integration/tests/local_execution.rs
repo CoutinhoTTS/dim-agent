@@ -1163,20 +1163,24 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
-    let noted = |result: &ToolResult| {
-        let text = text(result);
-        let structured = serde_json::to_string(&result.structured_content).unwrap();
-        assert!(!structured.contains("host isolation"), "{structured}");
-        let Some((_, note)) = text.split_once("This command ran under host isolation") else {
-            return false;
+    let noted =
+        |result: &ToolResult| {
+            let text = text(result);
+            let structured = serde_json::to_string(&result.structured_content).unwrap();
+            assert!(!structured.contains("host isolation"), "{structured}");
+            let Some((_, note)) = text.split_once("This command ran under host isolation") else {
+                return false;
+            };
+            assert!(note.contains(
+                "Approving or retrying without a wider sandbox request does not lift it."
+            ));
+            assert!(note.contains("/settings > Command isolation"));
+            assert!(
+                note.contains(&format!("policy: {}", policy.display())),
+                "{text}"
+            );
+            true
         };
-        assert!(note.contains("Approving or retrying the command does not lift it."));
-        assert!(
-            note.contains(&format!("change the policy in {}.", policy.display())),
-            "{text}"
-        );
-        true
-    };
     let last = async || results(&local_events(&session).await).pop().unwrap();
 
     for (command, cwd, failed, note) in [
@@ -1805,7 +1809,7 @@ async fn an_unavailable_shell_or_backend_refuses_the_payload() {
         assert_eq!(code(&result), Some("isolation_unavailable"));
         assert!(
             text(&result).contains(
-                "Install bubblewrap, or set \"sandbox\": \"host\" in host-isolation.json to run commands without isolation."
+                "Install bubblewrap, or use /settings > Command isolation to select host access (policy: host-isolation.json)."
             ),
             "{}",
             text(&result)
@@ -2840,41 +2844,164 @@ async fn exec_sandbox_requests_follow_the_nodes_escalation_policy() {
         escaped.display()
     );
 
-    harness
-        .run(
-            &session,
-            &[(
-                "exec",
-                json!({"command": command.clone(), "cwd": home.clone(), "sandbox": "host"}),
-            )],
-        )
-        .await;
-    session.idle("main").await.unwrap();
-    let events = local_events(&session).await;
-    let result = results(&events).pop().unwrap();
-    assert_eq!(result.is_error, Some(true), "{}", text(&result));
-    assert_eq!(code(&result), Some("isolation_denied"));
-    assert!(!escaped.exists(), "{}", text(&result));
-
-    std::fs::write(
-        &policy,
-        r#"{"version":2,"sandbox":"workspace","escalation":"ask"}"#,
-    )
-    .unwrap();
-    harness
-        .run(
-            &session,
-            &[(
-                "exec",
-                json!({"command": command, "cwd": home.clone(), "sandbox": "host"}),
-            )],
-        )
-        .await;
-    session.idle("main").await.unwrap();
-    let events = local_events(&session).await;
-    let result = results(&events).pop().unwrap();
-    assert!(result.is_error != Some(true), "{}", text(&result));
-    assert_eq!(std::fs::read_to_string(&escaped).unwrap(), "escaped");
+    for explicit in [
+        None,
+        Some(r#"{"version":2,"sandbox":"workspace"}"#),
+        Some(r#"{"version":2,"sandbox":"workspace","escalation":"ask"}"#),
+    ] {
+        if let Some(bytes) = explicit {
+            std::fs::write(&policy, bytes).unwrap();
+        }
+        for boundary in ["host", "network"] {
+            for decision in [ApprovalDecision::Deny, ApprovalDecision::Allow] {
+                let mut config = harness.config();
+                config.permission_policy.preset = PermissionPreset::WorkspaceWrite;
+                let interactive = harness.agent.create_session(config).await.unwrap();
+                let marker = if boundary == "host" {
+                    escaped.clone()
+                } else {
+                    harness.cwd.join("network-payload")
+                };
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let payload = if boundary == "host" {
+                    command.clone()
+                } else {
+                    format!(
+                        "printf network > '{}'; /usr/bin/curl --fail --silent --max-time 3 http://{address}",
+                        marker.display()
+                    )
+                };
+                harness
+                    .run(
+                        &interactive,
+                        &[("exec", json!({"command":payload,"sandbox":boundary}))],
+                    )
+                    .await;
+                let events = until(&interactive, "boundary approval", |events| {
+                    events
+                        .iter()
+                        .any(|event| matches!(event.kind, EventKind::ApprovalRequest(_)))
+                })
+                .await;
+                let request = events
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        EventKind::ApprovalRequest(data) => Some(data.clone()),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(request.call.input["sandbox"], boundary);
+                assert!(!marker.exists(), "payload must wait for command approval");
+                let responder = if boundary == "network" && decision == ApprovalDecision::Allow {
+                    Some(tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let (mut socket, _) =
+                            tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                                .await
+                                .unwrap()
+                                .unwrap();
+                        let mut request = [0; 4096];
+                        assert!(socket.read(&mut request).await.unwrap() > 0);
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nnetwork-proof").await.unwrap();
+                    }))
+                } else {
+                    None
+                };
+                interactive
+                    .service::<dim_agent_capabilities::approval::Approval>("main")
+                    .unwrap()
+                    .respond(&request.approval_id, decision)
+                    .await
+                    .unwrap();
+                interactive.idle("main").await.unwrap();
+                let result = results(&local_events(&interactive).await).pop().unwrap();
+                if decision == ApprovalDecision::Allow {
+                    assert_ne!(result.is_error, Some(true), "{}", text(&result));
+                    assert!(marker.exists());
+                    if let Some(responder) = responder {
+                        responder.await.unwrap();
+                        assert!(text(&result).contains("network-proof"), "{}", text(&result));
+                    }
+                    std::fs::remove_file(marker).unwrap();
+                } else {
+                    assert_eq!(result.is_error, Some(true));
+                    assert!(!marker.exists(), "denied payload must not execute");
+                }
+                interactive.close().await.unwrap();
+            }
+        }
+        if explicit.is_none() {
+            assert!(
+                !policy.exists(),
+                "default escalation must not create a policy file"
+            );
+        }
+        for allowed_tool in [false, true] {
+            let mut config = harness.config();
+            if allowed_tool {
+                config.permission_policy.preset = PermissionPreset::WorkspaceWrite;
+                config.permission_policy.allowed_tools = vec!["exec".into()];
+            }
+            let admitted = harness.agent.create_session(config).await.unwrap();
+            harness
+                .run(
+                    &admitted,
+                    &[("exec", json!({"command":command,"sandbox":"host"}))],
+                )
+                .await;
+            admitted.idle("main").await.unwrap();
+            let events = local_events(&admitted).await;
+            assert_eq!(count(&events, "approval/request"), 0);
+            let result = results(&events).pop().unwrap();
+            assert_ne!(result.is_error, Some(true), "{}", text(&result));
+            assert_eq!(std::fs::read_to_string(&escaped).unwrap(), "escaped");
+            std::fs::remove_file(&escaped).unwrap();
+            admitted.close().await.unwrap();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if Path::new("/opt/homebrew/bin/gh").is_file() {
+        for boundary in ["network", "host"] {
+            harness
+                .run(
+                    &session,
+                    &[(
+                        "exec",
+                        json!({"command":"/opt/homebrew/bin/gh --version","sandbox":boundary}),
+                    )],
+                )
+                .await;
+            session.idle("main").await.unwrap();
+            let result = results(&local_events(&session).await).pop().unwrap();
+            assert_eq!(
+                result.is_error == Some(true),
+                boundary == "network",
+                "{}",
+                text(&result)
+            );
+            if boundary == "host" {
+                assert!(text(&result).contains("gh version"), "{}", text(&result));
+            }
+        }
+    }
+    for explicit in [
+        r#"{"version":1}"#,
+        r#"{"version":2,"sandbox":"workspace","escalation":"deny"}"#,
+    ] {
+        std::fs::write(&policy, explicit).unwrap();
+        harness
+            .run(
+                &session,
+                &[("exec", json!({"command":command,"sandbox":"host"}))],
+            )
+            .await;
+        session.idle("main").await.unwrap();
+        let result = results(&local_events(&session).await).pop().unwrap();
+        assert_eq!(code(&result), Some("isolation_denied"));
+        assert!(!escaped.exists());
+    }
     session.close().await.unwrap();
     harness.shutdown().await;
+    std::fs::remove_dir_all(home).unwrap();
 }

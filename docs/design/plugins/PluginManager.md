@@ -141,7 +141,6 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 {
   "plugins": {
     "goal": "plugins/goal",
-    "web": "plugins/web",
     "session-title": "plugins/session-title",
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler",

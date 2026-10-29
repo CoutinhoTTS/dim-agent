@@ -79,7 +79,7 @@ and receipts commit together. Client preference files use atomic replacement and
 an intent record; an ambiguous interrupted replacement is a conflict, preventing
 replay over a later clear. Explicit shell auto-detection is a configured choice.
 Skills IDs and command permission groups require exact compatible semantics. Web
-imports explicit Brave settings and its enabled choice; unsupported adapters stay
+imports `dim-oauth` and explicit Brave settings and its enabled choice; unsupported adapters stay
 at source. Calendar-compatible schedules retain their enabled state and map bound
 Sessions through successful receipts.
 

@@ -249,7 +249,6 @@ fn run_terminal(
         surroundings.home.clone(),
         cwd_key,
     );
-    app.isolation = surroundings.isolation.clone();
     app.fullscreen = full.is_some();
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
@@ -690,8 +689,6 @@ struct App {
     composer: Composer,
     cwd_key: String,
     home: PathBuf,
-    /// This profile's `host-isolation.json`, when this OS isolates commands.
-    isolation: Option<PathBuf>,
     /// How tool groups are drawn by default (`/tools`, which redraws every
     /// committed group too).
     tool_detail: Detail,
@@ -901,6 +898,7 @@ enum Prompt {
     Theme(ThemePanel),
     Language(LanguagePanel),
     Settings(SettingsPanel),
+    Isolation(Box<crate::ui::isolation_panel::IsolationPanel>),
     Exit(ExitConfirm),
     Upgrade(UpgradeDialog),
     Permission(PermissionPrompt),
@@ -929,7 +927,6 @@ impl App {
             group_details: HashMap::new(),
             tail_groups: Vec::new(),
             home,
-            isolation: None,
             notices: Vec::new(),
             reports: Vec::new(),
             banner_committed: false,
@@ -1177,6 +1174,7 @@ impl App {
             | Some(Prompt::Theme(_))
             | Some(Prompt::Language(_))
             | Some(Prompt::Settings(_))
+            | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
             | Some(Prompt::Timeline(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
@@ -1523,6 +1521,11 @@ impl App {
                     panel.set_models(models);
                 }
             }
+            Update::Isolation(result) => {
+                if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
+                    panel.set_snapshot(result);
+                }
+            }
             Update::ModelPolicy(update) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt
                     && let Some(notice) = panel.set_policy(update)
@@ -1605,6 +1608,7 @@ impl App {
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
+                    Some(Prompt::Isolation(panel)) => panel.paste(&text),
                     Some(Prompt::Ask(prompt)) => prompt.paste(&text),
                     Some(_) => {}
                 }
@@ -1697,6 +1701,7 @@ impl App {
                 Prompt::Theme(p) => p.handle_key(key),
                 Prompt::Language(p) => p.handle_key(key),
                 Prompt::Settings(p) => p.handle_key(key),
+                Prompt::Isolation(p) => p.handle_key(key),
                 Prompt::Exit(p) => p.handle_key(key),
                 Prompt::Upgrade(p) => p.handle_key(key),
                 Prompt::Permission(p) => p.handle_key(key),
@@ -2367,6 +2372,15 @@ impl App {
                     reasoning_effort,
                 });
             }
+            Effect::ReadIsolation => self.host.send(Command::ReadIsolation),
+            Effect::SaveIsolation {
+                expected_revision,
+                policy,
+            } => self.host.send(Command::SaveIsolation {
+                expected_revision,
+                policy,
+            }),
+            Effect::ResetIsolation(revision) => self.host.send(Command::ResetIsolation(revision)),
             Effect::ReadModelPolicy => self.host.send(Command::ReadModelPolicy),
             Effect::SetModelPolicy {
                 expected_revision,
@@ -2486,19 +2500,6 @@ impl App {
                 &[("locale", i18n::system_locale().label())],
             ),
         };
-        let isolation =
-            self.isolation
-                .clone()
-                .and_then(|path| match crate::ui::isolation::enabled(&path) {
-                    Ok(on) => Some(on),
-                    Err(error) => {
-                        self.set_notice(tf(
-                            "Command isolation not read: {error}",
-                            &[("error", &error)],
-                        ));
-                        None
-                    }
-                });
         let values = SettingValues {
             theme: theme.to_owned(),
             language,
@@ -2508,7 +2509,6 @@ impl App {
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
             model: self.label.clone(),
-            isolation,
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -2530,6 +2530,11 @@ impl App {
             Setting::Approvals => {
                 let panel = ApprovalsPanel::new(&self.approvals);
                 self.open_prompt(Prompt::Approvals(panel));
+            }
+            Setting::Isolation => {
+                let panel = crate::ui::isolation_panel::IsolationPanel::new(&self.approvals);
+                self.open_prompt(Prompt::Isolation(Box::new(panel)));
+                self.host.send(Command::ReadIsolation);
             }
             Setting::Model => {
                 self.open_prompt(Prompt::Models(ModelsPanel::new()));
@@ -2562,19 +2567,6 @@ impl App {
                 let value = if self.mouse { "on" } else { "off" };
                 if let Some(error) = crate::ui::config::write(&self.home, MOUSE_KEY, value.into()) {
                     self.set_notice(error);
-                }
-                self.settings_return = None;
-                self.open_settings(setting);
-            }
-            Setting::Isolation => {
-                if let Some(path) = self.isolation.clone()
-                    && let Ok(on) = crate::ui::isolation::enabled(&path)
-                    && let Err(error) = crate::ui::isolation::set_enabled(&path, !on)
-                {
-                    self.set_notice(tf(
-                        "Command isolation not saved: {error}",
-                        &[("error", &error)],
-                    ));
                 }
                 self.settings_return = None;
                 self.open_settings(setting);
@@ -3281,6 +3273,7 @@ impl App {
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Settings(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Isolation(prompt)) => list(prompt.render(list_width, budget, p)),
                 _ => None,
             };
         }
@@ -3303,6 +3296,7 @@ impl App {
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
@@ -4835,6 +4829,92 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn isolation_settings_edit_save_conflict_and_reset_without_model_execution() {
+        use dim_agent_types::isolation::{
+            IsolationEscalation, IsolationPolicy, IsolationPolicyEffective,
+            IsolationPolicySnapshot, IsolationPolicySource, Sandbox,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.run_command("settings", "");
+        for _ in 0..7 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
+        let policy = IsolationPolicy {
+            sandbox: Some(Sandbox::Host),
+            escalation: Some(IsolationEscalation::Deny),
+            environment: Some(Vec::new()),
+            read_only_paths: Some(vec!["/usr".into()]),
+            ..IsolationPolicy::default()
+        };
+        let snapshot = IsolationPolicySnapshot {
+            revision: "r1".into(),
+            path: home.path().join("host-isolation.json"),
+            source: IsolationPolicySource::File,
+            effective: IsolationPolicyEffective {
+                sandbox: Sandbox::Host,
+                escalation: IsolationEscalation::Deny,
+            },
+            policy,
+        };
+        app.apply(Update::Isolation(Ok(snapshot)));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Up));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Enter));
+        for _ in 0..3 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        match sent.borrow().last() {
+            Some(Command::SaveIsolation {
+                expected_revision,
+                policy,
+            }) => {
+                assert_eq!(expected_revision, "r1");
+                assert_eq!(policy.sandbox, Some(Sandbox::Network));
+                assert_eq!(policy.escalation, Some(IsolationEscalation::Deny));
+                assert_eq!(policy.environment, Some(Vec::new()));
+                assert_eq!(policy.read_only_paths, Some(vec!["/usr".into()]));
+                assert_eq!(policy.writable_paths, None);
+            }
+            _ => panic!("settings save must use local management, not model exec"),
+        }
+        app.apply(Update::Isolation(Err("isolation_policy_conflict".into())));
+        for _ in 0..3 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::SaveIsolation { expected_revision, policy }) if expected_revision == "r1" && policy.sandbox == Some(Sandbox::Network))
+        );
+        app.apply(Update::Isolation(Err("isolation_policy_conflict".into())));
+        for _ in 0..4 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        app.handle_input(key(KeyCode::Enter));
+        app.handle_input(key(KeyCode::Char('y')));
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::ResetIsolation(revision)) if revision == "r1")
+        );
     }
 
     /// A picked message opens a line of the shown line with the submitted

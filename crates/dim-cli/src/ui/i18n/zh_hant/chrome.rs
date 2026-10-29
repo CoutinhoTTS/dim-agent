@@ -311,8 +311,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permissions" => "權限",
         "Tool approvals" => "工具核准",
         "Command isolation" => "命令隔離",
-        "Command isolation not saved: {error}" => "命令隔離未能儲存：{error}",
-        "Command isolation not read: {error}" => "未能讀取命令隔離：{error}",
         "Models" => "模型",
         "Model" => "模型",
         "not set" => "未設定",

@@ -190,8 +190,7 @@ mod tests {
         }
     }
 
-    /// `/settings` names command isolation, and a save or read failure keeps
-    /// the `{error}` placeholder.
+    /// `/settings` names command isolation.
     #[test]
     fn every_locale_translates_command_isolation() {
         for (code, lookup) in tables() {
@@ -199,16 +198,6 @@ mod tests {
                 lookup("Command isolation").is_some(),
                 "{code} lacks Command isolation"
             );
-            for key in [
-                "Command isolation not saved: {error}",
-                "Command isolation not read: {error}",
-            ] {
-                let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
-                assert!(
-                    text.contains("{error}"),
-                    "{code} drops the placeholder in {key:?}: {text:?}"
-                );
-            }
         }
     }
 
