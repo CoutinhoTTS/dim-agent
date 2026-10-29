@@ -2699,7 +2699,9 @@ const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session
 /// The product sets none of it, so the built-in text is in force.
 #[derive(Clone, Default)]
 pub struct BranchToolConfig {
-    /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`].
+    /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`]. A
+    /// candidate keeps the description's protocol sentences byte-identical
+    /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
     pub description: Option<Arc<str>>,
 }
 

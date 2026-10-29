@@ -405,9 +405,11 @@ WorkspaceTools 不变。
 
 **策略。**
 
-- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则、`message` 关于选模式与不重复接收方已知内容的规则，以及名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them."。它覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配区域、回应 steer、结束自己的等待，以及不重做线上的工作。
-- **线的工作规则。** "How you work with P:" 的五条要点——目的、消息、工作区、用户和结束——除了点明机制的从句："You cannot open lines"、动作名与模式名、`file_modified_since_read` 码是协议，见上。
-- **通知的指引。** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." 与 "read it if you need what it did."。
+- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则，以及 `message` 关于选模式的规则。它是分支唯一有工厂配置成员的策略文本：[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它部分覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域。回应 steer、结束 `main` 自己的等待、不重做线上的工作仍未覆盖（[#636](https://github.com/arcships/dim/issues/636)）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them." 也是 `main` 的协调文字；它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+- **线的工作规则。** "How you work with P:" 的五条要点——目的、消息（含 "Do not repeat what P already knows"）、工作区、用户和结束——除了点明机制的从句："You cannot open lines"、动作名与模式名、`file_modified_since_read` 码是协议，见上。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+- **通知的指引。** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." 与 "read it if you need what it did."。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+
+策略文本的候选放在该文本的工厂配置成员上（[面向模型的提示词 §8.1](model-prompts.md#81-规则)），并让它替换的文本里的协议句逐字节不变。
 
 `main` 的协调文字用 [§12.3](#123-评估场景) 的场景判定——重复劳动、过度拆分、刷屏、不结束、兄弟中转、来回空转、压缩后的身份和问用户——当前对照候选（[面向模型的提示词 §8](model-prompts.md#8-一次改动怎样判定)）。
 
