@@ -246,7 +246,7 @@ An owner validates what it is given. Content it refuses (an MCP document that fa
 
 ## 5. Context mapping
 
-PluginManager adds nothing to model context. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). Results of the `plugin` tool say what changed, the status, and `restart_required` when it applies.
+PluginManager adds no text of its own to model context beyond the `plugin` tool. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). The tool's texts are marked by [model-facing prompts §4](../model-prompts.md#4-protocol-and-policy): the command names and each command's argument grammar, the one-line command list the declaration carries, and the `Usage:` line of a usage text are protocol, because the tool parses them exactly; the sentences after the usage line, and in `help`, that say what a command does or does not touch are policy. A malformed command's error result carries the command list or that command's usage, and a refused call's error carries its code (A.2) — both protocol. A completed call's result says what changed, the status, and `restart_required` when it applies; that is protocol too, because the model decides its next step by it.
 
 ## 6. Interfaces (summary)
 

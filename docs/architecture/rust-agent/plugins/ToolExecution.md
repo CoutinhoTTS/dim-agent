@@ -126,6 +126,17 @@ aggregates failures. Reload settles unmatched committed batches as errors rather
 than rerunning effects; reload-settled results make Loop fail the turn.
 Cancellation is not rollback of a tool's completed side effect.
 
+### Model-facing texts
+
+The results of a call that never became one are protocol
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+`Tool was not executed: <reason>`, whose reasons include
+`progress admission failed` and `capability_reloading`;
+`Tool cancelled before execution`; and
+`Tool execution cancelled: capability_reloading`. Each states whether the work
+ran at all, so the model neither retries work that may have run nor reports work
+that never did.
+
 ### Tests
 
 [interrupt_flow.rs](../../../../crates/dim-agent-capabilities/tests/interrupt_flow.rs):

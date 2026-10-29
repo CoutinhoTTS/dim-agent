@@ -25,6 +25,19 @@ can make per-call branch lookup fail as reloading; this contribution itself has
 no tracker or disposer. It is not a process join primitive: cancelled background
 tasks emit no wake and old arrivals are not replayed after WaitBranch reload.
 
+### Model-facing texts
+
+The `wait` tool's result texts are protocol
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)).
+`wait ended: notification (<task ids>)` names the tasks that finished, and those
+ids are the handles the model passes to `read`; `wait ended: steer`,
+`wait ended: interrupted` and `wait ended: timeout` state the other ways a wait
+ends. The refusals — `wait taskId must be a string.`,
+`wait timeoutMs must be less than or equal to <limit>.`,
+`wait timeoutMs must be a positive integer.` and
+`wait is already running in this session.` — are protocol too: each names the
+input it refused and how the input is wrong.
+
 ### Tests
 
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs):
