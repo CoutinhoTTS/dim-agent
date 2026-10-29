@@ -605,13 +605,17 @@ never changes the labels sent to the owner. The composer's draft is preserved.
 
 A pending question does not block commands. While its free-text answer is not being
 edited, `/`, Ctrl+O and Ctrl+P open the command palette over it, drawn where that mode
-draws the palette, and the question keeps its tabs, selections and typed answers. Enter
-runs the chosen command as it runs during a reply, and Esc in the palette closes it and
-gives the keys back to the question. A command that opens its own panel puts the
-question aside and brings it back, with its state, when that panel closes; a question
-the Session stopped asking meanwhile is not brought back. `/` is the palette until the
-free-text row is edited, so an answer may itself start with a path: Enter, Space, the
-row's number or any other typed character edits the row, and `/` typed there is text.
+draws the palette, and the question keeps its tabs, selections and typed answers. The
+palette opens command entry, which keeps the keys through the command's argument, shown
+on the composer line; Enter runs the command as it runs during a reply, and command
+entry lasts until that Enter, Esc, or a draft that stops being a command. Esc in the
+palette and while an argument is typed closes command entry and gives the keys back to
+the question, declining nothing and interrupting no run. A command that opens its own
+panel puts the question aside and brings it back, with its state, when that panel
+closes; a question the Session stopped asking meanwhile is not brought back. `/` is the
+palette until the free-text row is edited, so an answer may itself start with a path:
+Enter, Space, the row's number or any other typed character edits the row, and `/`
+typed there is text.
 Esc keeps its meaning on every other surface: it declines an open question and
 interrupts a busy run with no prompt open, with no timing window.
 

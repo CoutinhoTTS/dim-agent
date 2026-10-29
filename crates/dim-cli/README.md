@@ -559,12 +559,15 @@ Member questions never open a response control in the leader UI.
 A pending question does not block commands. While its free-text answer is not being
 edited, `/`, `Ctrl+O` and `Ctrl+P` open the command palette over it, drawn as the
 palette is drawn anywhere else; the question stays pending with its tabs, its
-selections and its typed answers, and `Esc` in the palette closes it and gives the
-keys back to the question. Enter runs the chosen command as it does during a reply,
-and a command that opens its own panel gives the question back, with its answers, when
-that panel closes — unless the Session stopped asking it meanwhile, for example
-because another client answered or the turn was interrupted. `/` is the palette
-before the free-text row is edited, so an answer may itself start with a path:
+selections and its typed answers. The palette opens command entry, which keeps the
+keys through a command's argument, shown on the composer line, until `Enter` runs the
+command, `Esc`, or a draft that stops being a command. `Enter` runs the chosen command
+as it does during a reply, and `Esc` in the palette or while an argument is typed
+closes command entry and gives the keys back to the question, without declining it or
+interrupting a run. A command that opens its own panel gives the question back, with
+its answers, when that panel closes — unless the Session stopped asking it meanwhile,
+for example because another client answered or the turn was interrupted. `/` is the
+palette before the free-text row is edited, so an answer may itself start with a path:
 Enter, Space, the row's number or any other character enters the row, and `/` typed
 inside it is text.
 
@@ -667,7 +670,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
 | Click a tool group's header or a thought's title | Opens (`▾`) or closes (`▸`) that group, or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every group and thought, settled ones included, and lays the transcript out again from the bottom |
 | `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
-| `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the palette closes. With a question pending whose free-text answer is not being edited, the palette opens over it instead, and the question keeps its answers |
+| `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the command entry it opened ends (`Enter`, `Esc` or an emptied draft). With a question pending whose free-text answer is not being edited, the palette opens over it instead, and the question keeps its answers while the command's argument is typed |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
