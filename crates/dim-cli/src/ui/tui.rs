@@ -1073,10 +1073,21 @@ impl App {
     /// Shows `prompt` in the prompt slot, keeping a pending question aside
     /// so the panel gives the question back with its answers when it closes.
     fn open_prompt(&mut self, prompt: Prompt) {
+        if matches!(self.prompt, Some(Prompt::Sessions(_))) {
+            self.host.send(Command::CloseSessions);
+        }
         if let Some(Prompt::Ask(question)) = self.prompt.take() {
             self.question_stash = Some(question);
         }
         self.prompt = Some(prompt);
+    }
+
+    fn sync_sessions(&mut self) {
+        if let Some(Prompt::Sessions(panel)) = &mut self.prompt
+            && let Some(command) = panel.request()
+        {
+            self.host.send(command);
+        }
     }
 
     /// Puts the question a panel took the screen from back, once the slot
@@ -1219,6 +1230,7 @@ impl App {
     /// Time-driven changes: the pulse of a running turn, notice and arm
     /// expiry. True when the screen needs a frame.
     fn tick(&mut self) -> bool {
+        self.sync_sessions();
         self.sync_task_details();
         let now = Instant::now();
         let mut changed = false;
@@ -1404,9 +1416,9 @@ impl App {
                 ));
             }
             Update::Switched { session_id, kind } => self.switch_session(session_id, kind),
-            Update::Sessions(items) => {
+            Update::Sessions { id, paged, result } => {
                 if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
-                    panel.set_items(items);
+                    panel.page(&id, paged, result);
                 }
             }
             Update::Toast(text) => self.set_notice(text),
@@ -2125,6 +2137,9 @@ impl App {
         match effect {
             Effect::None => {}
             Effect::Close => {
+                if matches!(self.prompt, Some(Prompt::Sessions(_))) {
+                    self.host.send(Command::CloseSessions);
+                }
                 self.prompt = None;
                 self.reopen_upgrade();
             }
@@ -2207,15 +2222,20 @@ impl App {
                 });
             }
             Effect::Resume(id) => {
+                self.host.send(Command::CloseSessions);
                 self.prompt = None;
                 self.composer.clear();
                 self.host.send(Command::Resume(id));
             }
-            Effect::Refresh => self.host.send(match self.prompt {
-                Some(Prompt::Providers(_)) => Command::ListProviders,
-                Some(Prompt::Plugins(_)) => Command::ListPlugins,
-                _ => Command::ListSessions,
-            }),
+            Effect::Refresh => match &mut self.prompt {
+                Some(Prompt::Providers(_)) => self.host.send(Command::ListProviders),
+                Some(Prompt::Plugins(_)) => self.host.send(Command::ListPlugins),
+                Some(Prompt::Sessions(panel)) => {
+                    panel.refresh();
+                    self.sync_sessions();
+                }
+                _ => {}
+            },
             Effect::FullAccess {
                 request_id,
                 branch_id,
@@ -2690,7 +2710,7 @@ impl App {
             "web" => Outcome::Web,
             "resume" => {
                 self.open_prompt(Prompt::Sessions(SessionsPanel::new()));
-                self.host.send(Command::ListSessions);
+                self.sync_sessions();
                 Outcome::Continue
             }
             "lines" => {
