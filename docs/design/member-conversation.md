@@ -380,6 +380,14 @@ terminal delegation result.
 | [Open member conversation]                                     |
 +---------------------------------------------------------------+
 
++-- Agent: default -----------------------------------------------+
+| Task: Check the imports                                        |
+| Not started · 2s                                               |
+| Reason: agent_not_found: no visible Agent has this agentId;    |
+|         call list and use an exact agents[].agentId, or give   |
+|         a profile to create a temporary Agent                  |
++---------------------------------------------------------------+
+
 +-- Provider member: external-agent:<node>:<agent> ---------------+
 | Task: Inspect the repository                                   |
 | State: Running                                       00:42     |
@@ -390,12 +398,20 @@ terminal delegation result.
 
 A card is still part of its original leader transcript, not a synthetic model
 message. A delivery failure shows its real error and no actionable member
-Session. The initial request shows Starting until actual delivery; delivered
-unfinished work shows Running, independently of whether the member is between
-turns. `collaboration/result` supplies Completed, Failed or Cancelled. Use the
-request/result timestamps and existing UI tick; no stop/idle heuristic creates
-an end timestamp. Stored result detail remains available without observing a
-live member.
+Session. A request the server refused before a member Session existed is a
+rejected attempt, not an Agent the leader worked with: its card shows the
+target the model asked for, `Not started` in place of a member state, the
+refusal's own text as its reason and no model line, since there was no member
+to observe. The group's header counts started delegations and rejected
+attempts apart — `Worked with 2 agents · 1 rejected`, or `3 delegations
+rejected` when none started. A member that started and then failed keeps
+`Failed`, its result and its model line, including `No model observed` when
+none was observed. The initial request shows Starting until actual delivery;
+delivered unfinished work shows Running, independently of whether the member
+is between turns. `collaboration/result` supplies Completed, Failed or
+Cancelled. Use the request/result timestamps and existing UI tick; no
+stop/idle heuristic creates an end timestamp. Stored result detail remains
+available without observing a live member.
 
 Use the existing canonical transcript renderer below the App layer. Collapsed
 cards show the task's first display line, model/state and elapsed time. Expanded
