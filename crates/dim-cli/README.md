@@ -402,21 +402,22 @@ On macOS only, the default also lets common developer tools run:
 A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
 macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
 for a read-only one. When an isolated command fails with a typical denial, its result tells the
-model that isolation may be the cause and names the policy file. The CLI does not display
-whether isolation is on; the policy file decides it.
+model that isolation may be the cause and names the policy file. `/settings` shows whether
+isolation is on and turns it off or on. Windows has no switch: Windows does not isolate commands.
 
 ### Policy file
 
-The daemon reads `host-isolation.json` from its home:
+The daemon reads `host-isolation.json` from its home. `/settings` reads and writes that same file:
 
 | Profile | Policy file |
 | --- | --- |
 | Product (`dimcode`, `--home PATH`) | `<home>/host-isolation.json`, by default `~/.dimcode/host-isolation.json` |
 | API-key configuration (`--model-config`) | `<home>/rust/host-isolation.json`, because this profile starts the daemon with `--home <home>/rust` |
 
-dimcode never creates the file. It is read each time a command starts, so an edit applies to the
-next command without restarting the daemon; a running command keeps the policy it started with.
-An invalid file makes every command fail with `isolation_config_invalid` until it is fixed.
+The file is read each time a command starts, so an edit applies to the next command without
+restarting the daemon; a running command keeps the policy it started with. An invalid file makes
+every command fail with `isolation_config_invalid` until it is fixed, and `/settings` reports the
+error and leaves the file unchanged.
 
 Only `version` is required. Version 2 is current; an existing version 1 file keeps working.
 Each other field replaces its default:
@@ -457,14 +458,19 @@ when unset); and every file that `include.path` or `includeIf` pulls in. Listing
 not exist makes the policy invalid. Prefer the files to their directory: listing `~/.config/git`
 also exposes every other file in it, including a `credentials` file if git keeps one there.
 
-To turn isolation off:
+To turn isolation off, switch Command isolation off in `/settings`, or write the file yourself:
 
 ```json
 {"version": 2, "sandbox": "host"}
 ```
 
-Commands then have your user's ordinary access. On Linux without bubblewrap, every command fails
-with `isolation_unavailable` until bubblewrap is installed or the file names the `host` tier.
+`/settings` writes that when no file exists. On an existing version 2 file it sets `sandbox` to
+`host`; on a version 1 file it sets `enabled` to `false`. Other fields stay. Switching it back on
+removes that field. When only `version` remains, the file is deleted and the default `workspace`
+tier applies again, so a file whose only other field was `"sandbox": "network"` returns to
+`workspace`. Commands then have your user's ordinary access while isolation is off. On Linux
+without bubblewrap, every command fails with `isolation_unavailable` until bubblewrap is
+installed or the file names the `host` tier.
 
 ### Toolchains outside system directories
 

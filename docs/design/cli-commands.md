@@ -549,7 +549,7 @@ filter.
 | --- | --- |
 | A reviewer model that answers approvals for the user | An approval answerer that responds through Approval's public respond operation, with its own model call and design, like the Collaboration leader route; not a CLI change |
 | Allows remembered only for one Session | A recorded fact or a Session-scoped rules source (F2 §10.2 defers per-workspace user rules); a CLI-process memory would answer without a recorded decision |
-| Sandbox settings in the CLI | F5 exposes `host-isolation.json` without a read or write method; HostPlatform management methods with a revision, local only, like `permission.rules` |
+| Isolation fields other than on/off | `/settings` turns the local `host-isolation.json` sandbox on or off and keeps every other field. Paths, escalation and an explicit tier still need a hand edit; a remote client still needs a HostPlatform method with a revision |
 | Shift+Tab cycle | CLI only: an editor action result and a confirmation path (decision 4) |
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
 | `/approvals` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
