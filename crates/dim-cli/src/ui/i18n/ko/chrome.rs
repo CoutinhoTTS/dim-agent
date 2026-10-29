@@ -153,6 +153,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "결과: {result}",
         "Controlled by the leader" => "리더가 제어",
         "› Open member conversation" => "› 멤버 대화 열기",
+        "Not started" => "시작 안 함",
+        "Reason: {reason}" => "이유: {reason}",
         "Copied to clipboard" => "클립보드에 복사됨",
         "Opened link" => "링크 열림",
         "Link: {url}" => "링크: {url}",

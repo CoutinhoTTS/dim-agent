@@ -127,9 +127,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{count} tasks" => "{count} 個任務",
         "1 tool" => "1 個工具",
         "{count} tools" => "{count} 個工具",
+        "1 delegation rejected" => "1 個委派被拒絕",
+        "{count} delegations rejected" => "{count} 個委派被拒絕",
         "{files} and {pages}" => "{files}和{pages}",
         ", " => "，",
         " · {count} failed" => " · {count} 個失敗",
+        " · {count} rejected" => " · {count} 個被拒絕",
         // transcript/tool_group.rs: call rows
         "Read" => "讀取",
         "List" => "列出",

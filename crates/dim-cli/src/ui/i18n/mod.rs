@@ -235,6 +235,35 @@ mod tests {
         }
     }
 
+    /// A delegation the server refused before a member existed reads as a
+    /// rejected attempt, in every locale; a table that drops a placeholder
+    /// would print the refusal's reason or the count nowhere.
+    #[test]
+    fn every_locale_translates_the_rejected_delegation_strings() {
+        for (code, lookup) in tables() {
+            for key in [
+                "Not started",
+                "Reason: {reason}",
+                "1 delegation rejected",
+                "{count} delegations rejected",
+                " · {count} rejected",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+            for (key, placeholder) in [
+                ("Reason: {reason}", "{reason}"),
+                ("{count} delegations rejected", "{count}"),
+                (" · {count} rejected", "{count}"),
+            ] {
+                let text = lookup(key).unwrap();
+                assert!(
+                    text.contains(placeholder),
+                    "{code} drops {placeholder} in {key:?}: {text:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn environment_values_map_as_the_ts_build_does() {
         let of = Locale::from_env_value;

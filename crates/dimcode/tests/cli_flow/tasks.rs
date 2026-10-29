@@ -1643,6 +1643,49 @@ fn delivered(sequence: u64, request: &str, agent: &str, session: &str) -> Value 
     )
 }
 
+/// The refusal an unaddressable Agent gets from the server.
+const AGENT_NOT_FOUND: &str = "agent_not_found: no visible Agent has this agentId; call list and use an exact agents[].agentId, or give a profile to create a temporary Agent";
+
+/// A request the server refused before a member Session existed: the call,
+/// its request fact, the refusal the model read and the failed delivery the
+/// card is finished by.
+fn refused_request(
+    sequence: u64,
+    request: &str,
+    call: &str,
+    agent_id: &str,
+    prompt: &str,
+) -> [Value; 4] {
+    let [use_event, request_event, _] = agent_request(
+        sequence,
+        request,
+        call,
+        json!({"kind":"agent","agent_id":agent_id}),
+        prompt,
+    );
+    [
+        use_event,
+        request_event,
+        fact(
+            &format!("result-{sequence}"),
+            sequence + 2,
+            (sequence + 2) * 1000,
+            "step",
+            "tool-result",
+            json!({"turn_id":"turn","request_id":request,"results":[{"call_id":call,
+                "result":{"content":AGENT_NOT_FOUND,"isError":true}}]}),
+        ),
+        fact(
+            &format!("delivered-{sequence}"),
+            sequence + 3,
+            (sequence + 3) * 1000,
+            "collaboration",
+            "delivered",
+            json!({"op_event_id":format!("req-{sequence}"),"status":"error","error":"agent_not_found"}),
+        ),
+    ]
+}
+
 fn member_event(wire: &mut Wire, member: &str, event: Value) {
     wire.notice(
         "session.event",
@@ -1780,20 +1823,12 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         let mut events = Vec::new();
-        events.extend(agent_request(
+        events.extend(refused_request(
             1,
             "r1",
             "call-1",
-            json!({"kind":"agent","agent_id":"deleted-agent"}),
+            "deleted-agent",
             "Ask a deleted Agent",
-        ));
-        events.push(fact(
-            "failed-4",
-            4,
-            4000,
-            "collaboration",
-            "delivered",
-            json!({"op_event_id":"req-1","status":"error","error":"agent_not_found"}),
         ));
         events.extend(agent_request(
             5,
@@ -1821,6 +1856,126 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     terminal.until("Agent: unlisted-agent");
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("agent_not_found"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+/// A delegation the server refused before a member existed is a rejected
+/// attempt: the group counts it apart from the Agents the leader worked with,
+/// and its card names the target and the refusal instead of a failure and a
+/// model.
+#[test]
+fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        let mut events = Vec::new();
+        events.extend(refused_request(
+            1,
+            "a",
+            "a-1",
+            "default",
+            "Check the imports",
+        ));
+        events.extend(refused_request(
+            5,
+            "a",
+            "a-2",
+            "default",
+            "Review the tests",
+        ));
+        events.extend(refused_request(
+            9,
+            "a",
+            "a-3",
+            "default",
+            "Inspect the release",
+        ));
+        events.extend(refused_request(20, "b", "b-1", "default", "Check the docs"));
+        events.extend(agent_request(
+            24,
+            "b",
+            "b-2",
+            json!({"kind":"agent","agent_id":"reviewer"}),
+            "Review the coverage",
+        ));
+        events.push(delivered(27, "req-24", "reviewer", "member-b"));
+        events.push(fact(
+            "result-b",
+            28,
+            28000,
+            "collaboration",
+            "result",
+            json!({"request_event_id":"req-24","agent_id":"reviewer","session_id":"member-b",
+                "status":"completed","text":"the coverage is complete"}),
+        ));
+        events.extend(agent_request(
+            30,
+            "c",
+            "c-1",
+            json!({"kind":"agent","agent_id":"reviewer"}),
+            "Run the suite",
+        ));
+        events.push(delivered(33, "req-30", "reviewer", "member-c"));
+        events.push(fact(
+            "result-c",
+            34,
+            40000,
+            "collaboration",
+            "result",
+            json!({"request_event_id":"req-30","agent_id":"reviewer","session_id":"member-c",
+                "status":"failed","reason":"the member stopped","text":"two tests failed"}),
+        ));
+        wire.reply(
+            &history,
+            json!({"events":events,"through":34,"nextAfter":34,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.quiet(Duration::from_millis(1000));
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    let size = libc::winsize {
+        ws_row: 60,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
+        0
+    );
+    terminal.signal(libc::SIGWINCH);
+    terminal.until("3 delegations rejected");
+    for _ in 0..3 {
+        terminal.until("Not started");
+    }
+    terminal.until("Reason: agent_not_found:");
+    terminal.until("no visible Agent has this agentId");
+    assert!(
+        !terminal.transcript.contains("· Not started"),
+        "a rejected delegation has no model line"
+    );
+    terminal.until("Worked with 1 agent · 1 rejected");
+    terminal.until("Not started");
+    terminal.until("No model observed · Failed");
+    assert!(
+        terminal.transcript.contains("the member stopped"),
+        "a member that ran and failed keeps its real result"
+    );
+    daemon.join().unwrap();
     terminal.signal(libc::SIGKILL);
     terminal.wait();
 }

@@ -288,6 +288,17 @@ impl<'a> Item<'a> {
             _ => None,
         }
     }
+
+    /// A `request` the server refused before a member Session existed.
+    fn rejected(&self) -> bool {
+        self.call().member.is_some_and(rejected)
+    }
+}
+
+/// A delegation the server refused before a member Session existed: its
+/// delivery carries an error and its target never became a member.
+fn rejected(card: &MemberCard) -> bool {
+    card.task.finished.is_some() && card.task.kind == TaskKind::Member(MemberTarget::Starting)
 }
 
 /// One batch of calls as a group.
@@ -308,8 +319,12 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
         }
     }
     let mut header = header;
-    let failed = states.iter().filter(|s| **s == State::Failed).count();
-    if failed > 0 && failed < states.len() {
+    let started = items.iter().filter(|item| !item.rejected()).count();
+    let failed = items
+        .iter()
+        .filter(|item| !item.rejected() && item.call().state == State::Failed)
+        .count();
+    if failed > 0 && failed < started {
         header.push(span(
             tf(" · {count} failed", &[("count", &failed.to_string())]),
             Tone::Danger,
@@ -322,9 +337,9 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
     let now = now_ms();
     for item in &items {
         if let Item::Agent { call, .. } = item
-            && let Some(card) = call.member
+            && call.member.is_some()
         {
-            append_card(&mut collapsed, card, now, Detail::Collapsed);
+            append_card(&mut collapsed, call, now, Detail::Collapsed);
         }
     }
     ToolGroup {
@@ -608,11 +623,25 @@ fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> String {
             format!("{verb} {}", counted(edited_paths(members), FILE))
         }
         PhraseKey::Check => format!("{} {}", verb("checked on", "checking on"), counted(n, TASK)),
-        PhraseKey::Agent => format!(
-            "{} {}",
-            verb("worked with", "working with"),
-            counted(n, AGENT)
-        ),
+        PhraseKey::Agent => {
+            let rejected = members.iter().filter(|item| item.rejected()).count();
+            let started = n - rejected;
+            if started == 0 {
+                return counted(rejected, DELEGATION);
+            }
+            let mut phrase = format!(
+                "{} {}",
+                verb("worked with", "working with"),
+                counted(started, AGENT)
+            );
+            if rejected > 0 {
+                phrase.push_str(&tf(
+                    " · {count} rejected",
+                    &[("count", &rejected.to_string())],
+                ));
+            }
+            phrase
+        }
         PhraseKey::Tool => format!("{} {}", verb("ran", "running"), counted(n, TOOL)),
     }
 }
@@ -767,8 +796,8 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
 /// A call to the team: the action and its words; a failure's first line.
 /// A request that started a delegation is drawn as its card.
 fn append_agent(lines: &mut Vec<Line>, call: &Call<'_>, detail: &str) {
-    if let Some(card) = call.member {
-        append_card(lines, card, now_ms(), Detail::Expanded);
+    if call.member.is_some() {
+        append_card(lines, call, now_ms(), Detail::Expanded);
         return;
     }
     let mut spans = vec![span(t("Agent"), Tone::Text)];
@@ -798,12 +827,19 @@ fn elapsed_text(ms: u64) -> String {
 }
 
 /// A delegation card: who took the task, the task, the member's observed
-/// model and activity, the delegation's own state and time, and its result.
-/// Externally supplied text is sanitized before it is styled.
-fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detail) {
+/// model and activity, the delegation's own state and time, and its result —
+/// or, for a request the server refused before a member existed, that
+/// refusal's own text as the reason. Externally supplied text is sanitized
+/// before it is styled.
+fn append_card(lines: &mut Vec<Line>, call: &Call<'_>, now: u64, detail: Detail) {
     use crate::sanitize::safe;
+    let Some(card) = call.member else {
+        return;
+    };
+    let refused = rejected(card);
     let task = &card.task;
     let (status, state) = match &task.finished {
+        Some(_) if refused => (t("Not started"), State::Failed),
         Some(finish) if finish.failed => (t(finish.status), State::Failed),
         Some(finish) => (t(finish.status), State::Done),
         None if task.kind == TaskKind::Member(MemberTarget::Starting) => {
@@ -825,7 +861,7 @@ fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detai
     } else {
         tf("Agent: {name}", &[("name", &safe(&card.agent))])
     };
-    let model = if provider {
+    let model = if provider || refused {
         None
     } else {
         let mut model = card
@@ -907,13 +943,15 @@ fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detai
         } else {
             Tone::Text
         };
+        let summary = if refused {
+            let reason = call.result.unwrap_or(&finish.text);
+            tf("Reason: {reason}", &[("reason", safe(reason).trim())])
+        } else {
+            tf("Result: {result}", &[("result", safe(&finish.text).trim())])
+        };
         lines.push(Line {
             hang: 8,
-            ..line(
-                tf("Result: {result}", &[("result", safe(&finish.text).trim())]),
-                tone,
-                Overflow::Rows(6),
-            )
+            ..line(summary, tone, Overflow::Rows(6))
         });
     }
     lines.push(if provider {
@@ -1288,6 +1326,7 @@ const COMMAND: Noun = ("1 command", "{count} commands");
 const TASK: Noun = ("1 task", "{count} tasks");
 const TOOL: Noun = ("1 tool", "{count} tools");
 const AGENT: Noun = ("1 agent", "{count} agents");
+const DELEGATION: Noun = ("1 delegation rejected", "{count} delegations rejected");
 
 fn counted(count: usize, (one, other): Noun) -> String {
     if count == 1 {

@@ -167,6 +167,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Result: {result}" => "Résultat: {result}",
         "Controlled by the leader" => "Géré par le leader",
         "› Open member conversation" => "› Ouvrir la conversation",
+        "Not started" => "Non démarré",
+        "Reason: {reason}" => "Raison: {reason}",
         "Copied to clipboard" => "Copié",
         "Opened link" => "Lien ouvert",
         "Link: {url}" => "Lien: {url}",
