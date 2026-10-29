@@ -1472,10 +1472,7 @@ impl Worker {
     /// Refreshes the composer's context reading once it is stale; a session
     /// whose usage is unknown shows none.
     async fn poll_context(&mut self) {
-        if !std::mem::take(&mut self.context_stale)
-            || self.session_id.is_empty()
-            || !self.client.supports(&["session.context.usage"])
-        {
+        if !std::mem::take(&mut self.context_stale) || self.session_id.is_empty() {
             return;
         }
         let reading = self.context_usage().await.ok().map(|usage| ContextReading {
