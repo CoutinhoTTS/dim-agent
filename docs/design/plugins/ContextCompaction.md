@@ -1019,7 +1019,8 @@ ran with their exit status, and nothing else.
   that declares nothing contributes nothing. A command handed to the background is listed from
   its handoff result, without an exit status; its later outcome reaches the model through
   BackgroundExec's wake notification, which is history like any other input — summarized (class
-  3b) or Recall-reachable — and not digested.
+  3b) or Recall-reachable — and not digested. A command cancelled after it started is listed from
+  the result its tool returns for that call, without an exit status unless the tool observed one.
 - **Rejected: also reading `exec/ended` and the progress copies.** The model is never handed
   `exec/ended`, and its context holds only events it was handed (principles §4 rule 6); some
   ends never wake, so the digest would list an end the model was never told about; it has a
@@ -1030,16 +1031,18 @@ ran with their exit status, and nothing else.
   as data: `digest_entries {entries, dropped}` next to `replacement_parts` (§4.3), each entry the
   A.6 object, in order, and `dropped` set once the bound dropped an earlier entry. The message
   below is rendered from that field; the next compaction reads the field, never the rendered
-  text, and the TUI reads the same field. The rendering is therefore presentation only:
-  unambiguous to the model, and never read back. A record without the field contributes no
-  entries, and once `dropped` is true every later digest carries it, because those entries
-  cannot come back.
-- **Rolled forward.** The `digest_entries` of the latest completed compaction in the fixed
-  context supplies the entries declared before that compaction's cut, copied from the committed
-  record as the pins are (§5.9), so the roll-forward reads no event before the previous cut and
-  parses no content. The previous digest message is never sent to the summarizer (§5.2): only
-  the strategy's part is the carried summary. The model neither writes nor chooses the digest,
-  and no strategy can drop or change it, because the policy composes it after the strategy
+  text. The rendering is therefore presentation only: unambiguous to the model, and never read
+  back. A record without the field contributes no entries, and once `dropped` is true every later
+  digest carries it, because those entries cannot come back.
+- **Rolled forward.** The `digest_entries` of the latest completed compaction in the fixed context
+  supplies the entries declared before that compaction's cut, copied from the committed record as
+  the pins are (§5.9), so the roll-forward reads no event before the previous cut and parses no
+  content. The scan of the events since that cut starts at the first event the fixed context carries
+  at or after it: a cut that places no entry of its own resolves to the next event the replay
+  carries. A cut the view can place neither as an event it carries nor as the cut of the compaction
+  it applies records no digest. The previous digest message is never sent to the summarizer
+  (§5.2): only the strategy's part is the carried summary. The model neither writes nor chooses the
+  digest, and no strategy can drop or change it, because the policy composes it after the strategy
   returns.
 - **One entry per key.** An entry's key is its kind together with its path or its shortened
   command. A declaration whose key is already present replaces that entry and takes the position
@@ -1066,8 +1069,10 @@ ran with their exit status, and nothing else.
   `dropped` becomes true and the note stays in every later digest, because those entries cannot
   come back. The dropped declarations are not lost: their results and events stay in the
   Timeline, and Recall reads them
-  ([requirements §7.2](../compaction-quality.md#72-recall)). The retention rule plans the digest
-  at this bound, because its entries depend on the cut the plan is choosing (§5.3 step 1).
+  ([requirements §7.2](../compaction-quality.md#72-recall)). When the bound holds nothing, not
+  even the note, the entries still go and the note stays: a later digest must keep it. The
+  retention rule plans the digest at this bound, because its entries depend on the cut the plan
+  is choosing (§5.3 step 1).
 - **One message, after the strategy's.** The digest is one message wrapped as data like the
   summary, after the strategy's messages and before the pinned inputs (§4.3). It is a user
   message carrying `<dim-digest>` … `</dim-digest>`, with the same warning as `<dim-summary>`:
@@ -1086,10 +1091,12 @@ ran with their exit status, and nothing else.
 - **Rendering.** Each entry is one line: `wrote <path>`; or `ran exit <code>: <command>`,
   `ran signal <name>: <command>`, or `ran exit not observed: <command>`, where the status is the
   one the latest declaration recorded. `ran exit not observed` claims only that, and covers a
-  handoff, a stop by the tool and lost output. A backslash in a path or a command is written
-  `\\`, a newline `\n`, and the surrounding text escapes `&`, `<` and `>` as the summary's does.
-  The status has a fixed grammar at the start of the entry and the command is everything after
-  it, so no command text can read as a status. These lines are never read back.
+  handoff, a cancelled call, a stop by the tool and lost output. A backslash in a path or a
+  command is written `\\`, and every line terminator as an escape of its own: `\n`, `\r`,
+  `\u0085`, `\u2028` and `\u2029`. The surrounding text escapes `&`, `<` and `>` as the
+  summary's does. The status has a fixed grammar at the start of the entry and the command is
+  everything after it, so no command text can read as a status or start a line of its own. These
+  lines are never read back.
 - **Empty, and old records.** With no entries and nothing dropped the replacement carries no
   digest message and the record no `digest_entries`; a digest whose bound dropped every entry
   still carries the message, holding the note alone, with `digest_entries {entries: [],
@@ -1380,9 +1387,12 @@ window, and the same App Server on a `--models` file whose entry declares a smal
     summary is the last reply, so it is never empty; the parts are checked when the prompt that
     declares them lands.
 18. **The digest.** (a) A `write`, `edit` or `exec` result carries its declarations in
-    `step/tool-result`, a `read` result carries none, and a failed or cancelled call carries only
-    what it completed. (b) A completed compaction whose replaced events declared effects carries
-    one `<dim-digest>` message after the strategy's messages and before the pinned inputs, with
+    `step/tool-result`, as does the persistent shell's `execute` result for its command, a `read`
+    result carries none, and a failed call carries only what it completed. A cancelled call
+    carries the declaration its tool returned for it: a command that started is listed with no
+    exit status, and `write` and `edit` declare nothing. (b) A completed compaction whose
+    replaced events declared effects carries one `<dim-digest>` message after the strategy's
+    messages and before the pinned inputs, with
     `replacement_parts.digest = 1` and `digest_entries` holding the same entries as data; it
     holds one entry per path or command with its latest outcome, in the order of the latest
     declaration, the same messages project after a reload and on a branch forked after it, and a

@@ -104,12 +104,16 @@ is written to.
     nothing more, and its later outcome reaches the model as BackgroundExec's
     wake notice, not as a declaration;
   - no exit status when the result observed none: the command was stopped by the
-    tool, its output was lost, or its handoff to the background failed.
+    tool, its output was lost, its handoff to the background failed, or the call
+    was cancelled after the command started. A cancelled call still declares:
+    the tool stops the command and returns its own result, with the signal only
+    if one was observed.
 
   A command that never started — refused input, a refused high-cost scan, a
-  denied isolation tier, an unavailable shell — declares nothing.
-- A cancelled call's result is settled by ToolExecutor, not by these tools, so
-  it carries no declaration.
+  denied isolation tier, an unavailable shell, a cancel before the spawn —
+  declares nothing.
+- A `write` or `edit` cancelled before it publishes is settled by ToolExecutor
+  without a result of its own, so it carries no declaration.
 - The tools declare the files they change in the workspace. Their own temporary
   and output files — the staging file `write` and `edit` install, the file a
   large `read` result spills to, and the output log an `exec` command writes —
