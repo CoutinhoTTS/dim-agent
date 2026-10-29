@@ -164,14 +164,18 @@ A user message is written, applied and then consumed. The client draws the row f
 | applied | `input/applied`, waiting for Loop's next request | no | a pending message row |
 | consumed | `input/consumed`, in the request that carries it | yes | a user message row |
 
-A pending row keeps its text and its cut, and draws in the faint colour without the band. In fullscreen the row is committed where the message was said, and `input/consumed` redraws that block in place. Scrollback is append-only, so there a row that can still change stays in the live tail (as a streaming answer and a running tool group do) and enters scrollback once it settles, in the user colour. The tail is drawn after everything committed, so a pending row stays there only while it is the newest: when a later row settles first — an applied input that outlives a stop — the message is committed in Timeline order in the user colour, and scrollback cannot take the hint back. A message waiting for the next request therefore reads as unanswered wherever the drawing can still change it:
+A pending row keeps its text and its cut, and draws in the muted colour without the band. In fullscreen the row is committed where the message was said, and `input/consumed` redraws that block in place. Scrollback is append-only, so there a row that can still change stays in the live tail (as a streaming answer and a running tool group do) and enters scrollback once it settles, in the user colour. The tail is drawn after everything committed, so a pending row stays there only while it is the newest: when a later row settles first — an applied input that outlives a stop — the message is committed in Timeline order in the user colour, and scrollback cannot take the hint back. A message waiting for the next request therefore reads as unanswered wherever the drawing can still change it:
 
 ```
  › how do we fix this deadlock                       the model has read this
- › add the missing test too                          still faint: not read yet
+ › add the missing test too                          still muted: not read yet
 ```
 
 An applied input can stay pending across a stop, which is the state the next turn consumes ([interrupt](../architecture/rust-agent/interrupt.md)).
+
+A row the interface commits itself, outside the transcript rows — a notice, a `!!` run, the failure line, the boundary of a resume — is not part of that ordering, and can stand above a pending message.
+
+The pending style is the terminal UI's: Web and ACP do not receive `input/consumed`, so they go on showing a message as sent.
 
 The row is keyed by input id from the `input/message` that wrote it to the `input/consumed` that settles it, so a reattached client that folds the same events draws the state it reached, not the state at the time of the write.
 
