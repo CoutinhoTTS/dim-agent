@@ -45,6 +45,10 @@ pub trait TimelineStore: Send + Sync + 'static {
     /// removes its directory, ownership, events, branches, and content atomically.
     /// Never used for restore failures or ordinary Session close.
     fn rollback_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Releases runtime admission state after all Session producers stop.
+    /// Completion drains prior writes and clears this load's failure state
+    /// without deleting stored history, so a later restore can write again.
+    fn release_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>>;
     fn session_config<'a>(
         &'a self,
         session_id: &'a str,
