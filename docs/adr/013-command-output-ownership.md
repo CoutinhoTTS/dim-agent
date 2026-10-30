@@ -9,18 +9,20 @@ can read them after the source session is deleted. ADR 003 is unchanged.
 
 ## Context
 
-A host-produced output file is handed to the model by path under
-`<database dir>/command-output/<session>/`. It has no `session_files` row or id, it can grow while
-a command runs, and delete removes the directory. A fork's copied history quotes those paths, so
-ownership has to follow a row, not the source directory.
+Two producers hand host output paths to the model. WorkspaceTools writes under
+`<database dir>/command-output/<session>/`: `exec` logs and offloaded `read` results. The
+persistent shell writes under `<HostPlatform.home>/.dim/exec/<session>/<branch>/`. Neither has a
+`session_files` row or id; a log can grow while a command runs; delete removes the directory. A
+fork's copied history quotes those paths, so ownership has to follow a row, not the source
+directory.
 
 ## Decision
 
 ### D1. Two tables, one fact
 
 Attachments keep `session_file_owners (session_id, file_id)`. Output uses
-`session_output_owners (session_id, path)`. Both feed the `session-owned` fact defined by
-ADR 014.
+`session_output_owners (session_id, path)`. Both feed the `session-owned` fact defined by ADR 014;
+the fact reads both tables.
 
 Two keys are deliberate. Output has no `session_files` row or id, is appended while running and
 is removed as a directory. A single polymorphic table would need a nullable key, could not use
@@ -30,13 +32,14 @@ directory rule is cheaper.
 
 ### D2. Registration
 
-The output owner calls `register(session_id, path)` before it returns the tool result that hands
-the path to the model. If registration fails, the call fails; a path with no row is unowned.
-Registration accepts only a canonical path under `<output root>/<session_id>/`; it guards misuse
-among trusted parts, not isolation.
+WorkspaceTools and the persistent shell both call `register(session_id, path)` before they return
+the tool result that hands the path to the model. If registration fails, the call fails; a path
+with no row is unowned. Each checks only its own root: `<database dir>/command-output/<session>/`
+for WorkspaceTools, `<HostPlatform.home>/.dim/exec/<session>/<branch>/` for the shell. It guards
+misuse among trusted parts, not isolation.
 
-`exec` output, offloaded `read` results and a running background log all register. A log may
-grow after registration; ownership is stable.
+`exec` output, offloaded `read` results, a running background log and shell output all register.
+A log may grow after registration; ownership is stable.
 
 ### D3. Queries and escapes
 
@@ -52,11 +55,13 @@ is not one primary-key read. A query failure denies.
 
 ### D4. Fork, delete and growth
 
-A fork copies the source's rows in both tables at the fork's commit. The fork owns those files; a
-file the source adds later is not owned.
+A fork copies every current row in both tables at the fork's commit, including a row registered
+by a command that was still running at the fork point. The fork owns those files; a file the
+source registers later is not owned.
 
-Delete releases the session's rows. The output directory is removed only when no row names any
-path under it; the last owner removes it. This replaces the unconditional directory removal in
+Delete releases the session's rows. Either output directory — `command-output/<session>/` or
+`.dim/exec/<session>/<branch>/` — is removed only when no row names any path under it; the last
+owner removes it. This replaces the unconditional directory removal in
 `session-deletion-and-fork.md`, which recorded the old rule because no row named the output.
 
 The new table is part of the next native storage format version; its upgrade creates it empty,
@@ -67,18 +72,28 @@ point-in-time copy is a separate concern.
 
 ### D5. Process start
 
-A process start asks the ownership owner for the session's artifact paths and mounts them
-read-only, together with the workspace, platform roots and grants. A running persistent shell
-keeps the mounts it started with.
+A process start asks the ownership owner for the session's artifact paths. Workspace and platform
+roots are ADR 010's mounts; grants are ADR 012's mounts. This decision owns the artifact mounts:
+an owned path outside the session's own writable output root is mounted read-only; a path inside
+that root is already writable and is not mounted again, so the sandbox overlap check is not
+triggered. Inherited output outside the current root is mounted read-only. A running persistent
+shell keeps the mounts it started with.
 
 ## Consequences
 
 - A new `session_output_owners` table, a native format version and `register`, `owns`,
   `owned_paths`.
 - `native-storage-format.md`, `session-deletion-and-fork.md`, `session-files.md` §11, the
-  Attachments and WorkspaceTools designs and the CLI tables are updated under their owners after
-  acceptance.
-- No Timeline event is added; the table is storage state.
+  Attachments, WorkspaceTools and shell-session designs, the CLI tables and the `session-owned`
+  source row in ADR 014 are updated under their owners after acceptance.
+- No Timeline event is added; the table is storage state. The decision reverses the S5c rejection
+  of keeping a source's output for its forks, as recorded in `session-deletion-and-fork.md`.
+
+## Supersession
+
+Extends ADR 010 and uses ADR 014's `session-owned` fact; ADR 012 owns the grant mounts. It
+reverses the S5c decision in `session-deletion-and-fork.md` that removed an output directory
+unconditionally. ADR 003 remains as written.
 
 ## Non-goals
 
@@ -90,14 +105,14 @@ keeps the mounts it started with.
 
 | Rule | Application |
 | --- | --- |
-| §1, ADR 002 D1 | Ownership stays in the session-files owner; WorkspaceTools keeps producing output. |
+| §1, ADR 002 D1 | Ownership stays in the session-files owner; WorkspaceTools and the persistent shell keep producing output. |
 | §4 rule 1 | Registration is a typed owner operation; no command event. |
 | §4 rule 2 | The model reads the registered path; no call handover changes. |
 | §4 rule 3 | No `before` callback. |
 | §4 rule 4 | No core mechanism change. |
 | §4 rule 5 | No Timeline batch. |
 | §4 rule 6 | No context-input change. |
-| §4 rule 7 | Parts call the session-files owner; no other plugin state. |
+| §4 rule 7 | Both producers call the session-files owner; no other plugin state. |
 | §4 rule 8 | No infrastructure change; the native table is a storage format version owned by SessionStore. |
 | §4 rule 9 | No new Timeline fact. |
 | ADR 002 D2 | No wiring plugin. |
