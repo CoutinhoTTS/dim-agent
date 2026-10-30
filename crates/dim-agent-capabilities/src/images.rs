@@ -18,6 +18,9 @@ pub const MAX_EDGE: u32 = 2048;
 pub const MAX_BASE64_BYTES: u64 = 5_000_000;
 /// The pixel guard: a header claiming more pixels is refused before decoding.
 pub const MAX_PIXELS: u64 = 100_000_000;
+/// The largest allocation one decoder may make, in bytes: [`MAX_PIXELS`] in the
+/// largest pixel format this module decodes, 16-bit RGBA at eight bytes each.
+pub const MAX_DECODE_BYTES: u64 = MAX_PIXELS * 8;
 /// The quality of a JPEG this module encodes.
 const JPEG_QUALITY: u8 = 85;
 /// The leading bytes read to recognize the format.
@@ -142,10 +145,11 @@ pub enum ImageRefusal {
     NotAnImage,
     /// A known image format this build cannot decode.
     UnsupportedFormat(&'static str),
-    /// The header claims more pixels than the guard allows; nothing was
-    /// decoded.
+    /// The header claims more pixels than the guard allows, or decoding hit
+    /// the guard's allocation bound; nothing was sent.
     TooManyPixels(ImageSize),
-    /// The bytes are a recognized format but do not decode.
+    /// The bytes are a recognized format this module cannot use; `reason` says
+    /// why.
     Invalid { kind: ImageKind, reason: String },
 }
 
@@ -170,7 +174,11 @@ pub enum ImageRefusal {
 /// edge stepping down until the encoding fits. The EXIF orientation is applied
 /// before anything else, so the sent pixels are upright, and an animation is
 /// sent as its first frame. A header above [`MAX_PIXELS`] is refused before the
-/// pixels are decoded.
+/// pixels are decoded. Every decoder that supports one is given
+/// [`MAX_DECODE_BYTES`] as its allocation limit, and an allocation refused there
+/// is reported as the pixel-guard refusal; the WebP decoder takes no allocation
+/// limit, so a metadata chunk larger than that bound, or than the file that
+/// declares it, is refused before the decoder reads it.
 pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, ImageRefusal> {
     let kind = match sniffed(&mut source)? {
         Some(Sniffed::Image(kind)) => kind,
@@ -183,9 +191,12 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             let (stored, _) = read_header(&mut source, kind)?;
             rewind(&mut source, kind)?;
             let (image, animated) = {
-                let decoder = image::codecs::gif::GifDecoder::new(&mut source)
+                let mut decoder = image::codecs::gif::GifDecoder::new(&mut source)
                     .map_err(|error| invalid(kind, error))?;
-                first_frame(kind, decoder.into_frames())?
+                decoder
+                    .set_limits(decode_limits())
+                    .map_err(|error| decode_error(kind, stored, error))?;
+                first_frame(kind, stored, decoder.into_frames())?
             };
             if let Some(image) = unchanged(
                 &mut source,
@@ -200,6 +211,8 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
         }
         ImageKind::WebP => {
             rewind(&mut source, kind)?;
+            check_webp_metadata(&mut source, kind)?;
+            rewind(&mut source, kind)?;
             let decoder = image::codecs::webp::WebPDecoder::new(&mut source)
                 .map_err(|error| invalid(kind, error))?;
             let stored = size(decoder.dimensions());
@@ -210,9 +223,9 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             // decoder.
             let orientation = decoder
                 .orientation()
-                .map_err(|error| invalid(kind, error))?;
+                .map_err(|error| decode_error(kind, stored, error))?;
             if decoder.has_animation() {
-                let (image, animated) = first_frame(kind, decoder.into_frames())?;
+                let (image, animated) = first_frame(kind, stored, decoder.into_frames())?;
                 return reencoded(kind, stored, orientation, image, animated);
             }
             drop(decoder);
@@ -222,8 +235,8 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             rewind(&mut source, kind)?;
             let decoder = image::codecs::webp::WebPDecoder::new(&mut source)
                 .map_err(|error| invalid(kind, error))?;
-            let image =
-                DynamicImage::from_decoder(decoder).map_err(|error| invalid(kind, error))?;
+            let image = DynamicImage::from_decoder(decoder)
+                .map_err(|error| decode_error(kind, stored, error))?;
             reencoded(kind, stored, orientation, image, false)
         }
         _ => {
@@ -233,14 +246,37 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
                 return Ok(image);
             }
             rewind(&mut source, kind)?;
-            let decoder = ImageReader::with_format(&mut source, kind.format())
+            let mut reader = ImageReader::with_format(&mut source, kind.format());
+            reader.limits(decode_limits());
+            let decoder = reader
                 .into_decoder()
-                .map_err(|error| invalid(kind, error))?;
-            let image =
-                DynamicImage::from_decoder(decoder).map_err(|error| invalid(kind, error))?;
+                .map_err(|error| decode_error(kind, stored, error))?;
+            let image = DynamicImage::from_decoder(decoder)
+                .map_err(|error| decode_error(kind, stored, error))?;
             reencoded(kind, stored, orientation, image, false)
         }
     }
+}
+
+/// The allocation limit every decoder that takes one is given.
+fn decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    limits
+}
+
+/// A decoder error, with an allocation refused for size reported as the
+/// pixel-guard refusal: at [`MAX_PIXELS`] in the largest decoded format the
+/// image is exactly what the guard is for, not a broken file.
+fn decode_error(kind: ImageKind, stored: ImageSize, error: image::ImageError) -> ImageRefusal {
+    if matches!(
+        &error,
+        image::ImageError::Limits(limit)
+            if limit.kind() == image::error::LimitErrorKind::InsufficientMemory
+    ) {
+        return ImageRefusal::TooManyPixels(stored);
+    }
+    invalid(kind, error)
 }
 
 /// The leading bytes of the source, recognizing its format.
@@ -265,22 +301,63 @@ fn read_header<R: BufRead + Seek>(
     kind: ImageKind,
 ) -> Result<(ImageSize, Orientation), ImageRefusal> {
     let (stored, orientation) = {
-        let mut decoder = ImageReader::with_format(&mut *source, kind.format())
+        let mut reader = ImageReader::with_format(&mut *source, kind.format());
+        reader.limits(decode_limits());
+        let mut decoder = reader
             .into_decoder()
             .map_err(|error| invalid(kind, error))?;
         let stored = size(decoder.dimensions());
         let orientation = decoder
             .orientation()
-            .map_err(|error| invalid(kind, error))?;
+            .map_err(|error| decode_error(kind, stored, error))?;
         (stored, orientation)
     };
     guard(stored)?;
     Ok((stored, orientation))
 }
 
+/// Refuses a WebP whose EXIF chunk is larger than [`MAX_DECODE_BYTES`] or than
+/// the file that declares it. `image`'s WebP decoder reads that chunk into a
+/// vector of the size its header states and takes no allocation limit of its
+/// own, so the declaration is checked before the decoder is built.
+fn check_webp_metadata<R: BufRead + Seek>(
+    source: &mut R,
+    kind: ImageKind,
+) -> Result<(), ImageRefusal> {
+    let length = source
+        .seek(SeekFrom::End(0))
+        .map_err(|error| invalid(kind, error))?;
+    let mut position = 12u64;
+    loop {
+        if position + 8 > length {
+            return Ok(());
+        }
+        source
+            .seek(SeekFrom::Start(position))
+            .map_err(|error| invalid(kind, error))?;
+        let mut chunk = [0u8; 8];
+        source
+            .read_exact(&mut chunk)
+            .map_err(|error| invalid(kind, error))?;
+        let size = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
+        if &chunk[..4] == b"EXIF" && (size > MAX_DECODE_BYTES || position + 8 + size > length) {
+            return Err(ImageRefusal::Invalid {
+                kind,
+                reason: "the EXIF metadata is larger than the memory bound or the file".into(),
+            });
+        }
+        if position == 12 && &chunk[..4] != b"VP8X" {
+            // A simple file: its one chunk is the image data, with no EXIF.
+            return Ok(());
+        }
+        position += 8 + size + (size & 1);
+    }
+}
+
 /// The first frame and whether a second one follows.
 fn first_frame(
     kind: ImageKind,
+    stored: ImageSize,
     mut frames: image::Frames<'_>,
 ) -> Result<(DynamicImage, bool), ImageRefusal> {
     let first = frames
@@ -289,7 +366,7 @@ fn first_frame(
             kind,
             reason: "the animation has no frames".into(),
         })?
-        .map_err(|error| invalid(kind, error))?;
+        .map_err(|error| decode_error(kind, stored, error))?;
     let animated = frames.next().is_some();
     Ok((DynamicImage::ImageRgba8(first.into_buffer()), animated))
 }

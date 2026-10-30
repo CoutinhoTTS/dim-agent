@@ -126,6 +126,12 @@ frame, its EXIF orientation applied the same way, so the frame sent is upright
 as a still's pixels are. One guard keeps memory bounded: a header claiming more
 than 100 megapixels is refused from its dimensions before the pixels are
 decoded, and the refusal names the dimensions and asks for a smaller copy.
+Decoding is bounded by that guard too: a decoder that takes an allocation
+limit may allocate at most 800 MB, the guard at eight bytes per pixel — the
+largest format `read` decodes, 16-bit RGBA — and an allocation refused for size
+takes the pixel-guard form; the WebP decoder takes no allocation limit of its
+own, so a metadata chunk larger than that bound, or than the file that declares
+it, is refused before it is read.
 HEIC/HEIF and AVIF are refused with the format named; every other binary file is
 refused as before. `read` never decides for the model: the same image block goes
 into the tool result whatever the model, and the stored result holds what was

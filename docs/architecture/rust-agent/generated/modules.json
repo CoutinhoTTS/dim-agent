@@ -541,7 +541,9 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/images.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_agent_capabilities::input_queue",

@@ -1673,6 +1673,41 @@ async fn read_sends_transparent_pixels_on_white_when_it_encodes_jpeg() {
     assert!(opaque[2] > 200 && opaque[0] < 60, "opaque pixel {opaque:?}");
 }
 
+/// An animated WebP whose EXIF chunk header claims 1 GiB but holds no bytes:
+/// its declared size must not become an allocation.
+fn webp_with_oversized_exif() -> Vec<u8> {
+    let frame = RgbaImage::from_pixel(20, 20, Rgba([255, 0, 0, 255]));
+    let mut body = Vec::new();
+    let mut vp8x = vec![0x0A, 0, 0, 0];
+    vp8x.extend_from_slice(&19u32.to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&19u32.to_le_bytes()[..3]);
+    body.extend_from_slice(&riff_chunk(b"VP8X", &vp8x));
+    body.extend_from_slice(&riff_chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    let mut anmf = vec![0; 16];
+    anmf[6..9].copy_from_slice(&19u32.to_le_bytes()[..3]);
+    anmf[9..12].copy_from_slice(&19u32.to_le_bytes()[..3]);
+    anmf[12..15].copy_from_slice(&100u32.to_le_bytes()[..3]);
+    anmf.extend_from_slice(&riff_chunk(b"VP8L", &vp8l(&frame)));
+    body.extend_from_slice(&riff_chunk(b"ANMF", &anmf));
+    body.extend_from_slice(b"EXIF");
+    body.extend_from_slice(&0x4000_0000u32.to_le_bytes());
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    out
+}
+
+#[tokio::test]
+async fn read_refuses_a_webp_exif_chunk_larger_than_the_file() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    workspace.put("exif.webp", &webp_with_oversized_exif());
+    let result = workspace.read(&reads, "exif.webp").await;
+    assert_eq!(code(&result), "binary_unsupported");
+    assert!(text(&result).contains("EXIF metadata"), "{}", text(&result));
+}
+
 fn crc32(bytes: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (index, entry) in table.iter_mut().enumerate() {
