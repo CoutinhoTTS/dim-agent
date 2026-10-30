@@ -157,7 +157,8 @@ pub enum Effect {
     ReadIsolation,
     SaveIsolation {
         expected_revision: String,
-        policy: dim_agent_types::isolation::IsolationPolicy,
+        sandbox: bool,
+        network: bool,
     },
     ResetIsolation(String),
     SetModelPolicy {

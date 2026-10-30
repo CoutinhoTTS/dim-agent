@@ -13,13 +13,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use dim_agent_types::{
-    ApprovalCallData, ApprovalDecision, ModelId,
-    isolation::{
-        IsolationEscalation, IsolationPolicy, IsolationPolicyEffective, IsolationPolicySnapshot,
-        IsolationPolicySource, Sandbox,
-    },
-};
+use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -28,8 +22,8 @@ use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
     Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
-    ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
+    ExecutionSnapshot, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent,
+    OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
     SubagentModelPolicy, SwitchKind, Update,
 };
 use crate::model::view::{
@@ -1173,7 +1167,8 @@ impl Worker {
             }
             Command::SaveIsolation {
                 expected_revision,
-                policy,
+                sandbox,
+                network,
             } => {
                 let result = self
                     .client
@@ -1183,7 +1178,7 @@ impl Worker {
                             "source": "execution",
                             "scope": "user",
                             "expectedRevision": expected_revision,
-                            "document": execution_document(&policy),
+                            "document": {"sandbox": sandbox, "network": network},
                         }),
                     )
                     .await
@@ -3784,53 +3779,22 @@ mod tests {
     }
 }
 
-fn execution_snapshot(value: serde_json::Value) -> Result<IsolationPolicySnapshot, String> {
+fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
     let revision = value
         .get("revision")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "execution settings response has no revision".to_string())?
         .to_owned();
     let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
-    let sandbox_on = document
-        .get("sandbox")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let network = document
-        .get("network")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let sandbox = if !sandbox_on {
-        Sandbox::Host
-    } else if network {
-        Sandbox::Network
-    } else {
-        Sandbox::Workspace
-    };
-    Ok(IsolationPolicySnapshot {
+    Ok(ExecutionSnapshot {
         revision,
-        path: "execution.json".into(),
-        source: IsolationPolicySource::Defaults,
-        policy: IsolationPolicy {
-            version: 2,
-            enabled: None,
-            network: None,
-            sandbox: Some(sandbox),
-            escalation: Some(IsolationEscalation::Ask),
-            read_only_paths: None,
-            writable_paths: None,
-            environment: None,
-        },
-        effective: IsolationPolicyEffective {
-            sandbox,
-            escalation: IsolationEscalation::Ask,
-        },
-    })
-}
-
-fn execution_document(policy: &IsolationPolicy) -> serde_json::Value {
-    let sandbox = policy.sandbox.unwrap_or(Sandbox::Host);
-    json!({
-        "sandbox": sandbox != Sandbox::Host,
-        "network": sandbox == Sandbox::Network,
+        sandbox: document
+            .get("sandbox")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        network: document
+            .get("network")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
     })
 }

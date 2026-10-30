@@ -25,12 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
 mod isolation;
-mod isolation_policy;
-pub use dim_agent_types::{
-    IsolationEscalation, IsolationPolicy, IsolationPolicyEffective, IsolationPolicySnapshot,
-    IsolationPolicySource, Sandbox,
-};
-pub use isolation_policy::IsolationPolicyError;
+pub use dim_agent_types::Sandbox;
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
@@ -159,8 +154,6 @@ pub struct HostPlatform {
     pub env: Vec<(OsString, OsString)>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
-    #[cfg(unix)]
-    isolation_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<dyn ExecutionSettingsSource>>,
 }
 
@@ -283,7 +276,6 @@ impl HostPlatform {
             })),
             shell_file: None,
             #[cfg(unix)]
-            isolation_file: None,
             execution: None,
         })
     }
@@ -682,8 +674,6 @@ pub struct HostPlatformConfig {
     /// `exec-shell.json`: FileStorage root index and relative path. `None`
     /// means the profile has no home; the shell is resolved automatically.
     pub exec_shell_file: Option<(usize, PathBuf)>,
-    /// Node-local `host-isolation.json`; missing files use the default policy.
-    pub isolation_file: Option<(usize, PathBuf)>,
 }
 
 /// Process plugin providing `P:HostPlatform`.
@@ -708,7 +698,7 @@ impl HostPlatformPlugin {
 }
 /// File storage only when a local configuration source is configured.
 fn uses_storage(config: &HostPlatformConfig) -> bool {
-    config.exec_shell_file.is_some() || (cfg!(unix) && config.isolation_file.is_some())
+    config.exec_shell_file.is_some()
 }
 impl DynPlugin for HostPlatformPlugin {
     fn name(&self) -> &str {
@@ -742,15 +732,6 @@ impl DynPlugin for HostPlatformPlugin {
             let mut platform = HostPlatform::current(shell)
                 .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             platform.shell_file = shell_file;
-            #[cfg(unix)]
-            {
-                platform.isolation_file = self
-                    .config
-                    .isolation_file
-                    .clone()
-                    .zip(storage)
-                    .map(|((root, relative), storage)| (storage, root, relative));
-            }
             if let Some(execution) = &self.execution {
                 let host = ctx.require_at(execution)?;
                 platform.execution = Some(host.0.clone());
