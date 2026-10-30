@@ -64,6 +64,7 @@ import ledger_tools  # noqa: E402
 import corpus  # noqa: E402
 import daily_batch  # noqa: E402
 import results  # noqa: E402
+import run_l2  # noqa: E402
 
 #: Machine-specific settings come from the eval machine's environment file
 #: (benchmarks/host/README.md), never from this public repository.
@@ -440,9 +441,16 @@ def run_l2_remote(host: str, remote: str, tag: str, run_id: str, k: int,
         "DIM_EVAL_K": str(k),
         "DIM_EVAL_CONCURRENCY": str(concurrency),
     }
-    if os.environ.get("DIM_EVAL_VERIFIER_PROXY"):
-        # From the eval machine's config.env, which the remote shell does not read.
-        env["DIM_EVAL_VERIFIER_PROXY"] = os.environ["DIM_EVAL_VERIFIER_PROXY"]
+    # Always override the values the remote shell sources from ~/.dim-eval-env.
+    # daily_run records the condition from this process's environment; if the
+    # remote file could supply a different proxy or bypass list, the job would
+    # run under a condition the manifest never saw.
+    env["DIM_EVAL_VERIFIER_PROXY"] = os.environ.get(
+        "DIM_EVAL_VERIFIER_PROXY", ""
+    )
+    env["DIM_EVAL_VERIFIER_NO_PROXY"] = os.environ.get(
+        "DIM_EVAL_VERIFIER_NO_PROXY", ""
+    )
     if baseline:
         # run_l2 refuses to run when the endpoint no longer serves the model the
         # baseline recorded. Without this the check runs and reports it has
@@ -762,7 +770,7 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
         # replaced the file.
         summary["problems"].append(f"baseline {existing.name[:12]} refused: {error}")
         return summary
-    comparison = baselines.compare(reference, report, k)
+    comparison = baselines.compare(reference, report, k, candidate_params=params)
     print("\n" + baselines.render(comparison))
     summary["comparison"] = {
         "baseline": str(existing),
@@ -775,6 +783,11 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
         "turns_change": comparison.turns_change,
         "end_reason_deltas": comparison.end_reasons,
         "comparable": comparison.comparable,
+        "baseline_verifier_proxy": comparison.baseline_verifier_proxy,
+        "candidate_verifier_proxy": comparison.candidate_verifier_proxy,
+        "baseline_verifier_no_proxy": comparison.baseline_verifier_no_proxy,
+        "candidate_verifier_no_proxy": comparison.candidate_verifier_no_proxy,
+        "verifier_proxy_comparable": comparison.verifier_proxy_comparable,
         "blocking_breaches": [c.name for c in comparison.blocking_breaches],
     }
     if not comparison.comparable and run_type.conclusive:
@@ -797,10 +810,16 @@ def settle(out: Path, run_id: str, run_type: RunType, k: int, pin: str,
         # told the reader to re-take the baseline at k=1, which would destroy the
         # reference. A k=1 screen is not a misconfiguration; a k=3 checkpoint
         # against a k=2 baseline is.
-        summary["problems"].append(
-            f"baseline k={comparison.baseline_k} but this run is k="
-            f"{comparison.candidate_k}; re-take the baseline at k={k}"
-        )
+        if comparison.baseline_k != comparison.candidate_k:
+            summary["problems"].append(
+                f"baseline k={comparison.baseline_k} but this run is k="
+                f"{comparison.candidate_k}; re-take the baseline at k={k}"
+            )
+        else:
+            summary["problems"].append(
+                f"baseline is not comparable: {comparison.incomparable_detail}; "
+                "re-take the baseline under the same verifier proxy condition"
+            )
     return summary
 
 
@@ -811,7 +830,8 @@ def write_manifest(path: Path, *, run_id: str, run_type: RunType, k: int,
                    conclusive: bool, head: str, base: str | None, corpus_pin: str,
                    baseline: Path | None, records: list[daily_batch.MergeRecord],
                    direct: tuple[tuple[str, str], ...], image: dict | None,
-                   runner_sha: str, runner_dirty: bool, l2_exit: int | None,
+                   runner_sha: str, runner_dirty: bool, verifier_proxy: bool,
+                   verifier_no_proxy: str | None, l2_exit: int | None,
                    l2: dict | None = None, settle_error: str | None = None,
                    fetch_error: str | None = None) -> None:
     """The run's evidence, in one file.
@@ -822,6 +842,14 @@ def write_manifest(path: Path, *, run_id: str, run_type: RunType, k: int,
     run at k=3 may. Everything else here is what a ledger writer needs to attach
     that decision to something: the range answered for, the per-merge L1 verdicts,
     the corpus the numbers came from, and what was built and run.
+
+    ``verifier_proxy`` is recorded even on a run that never reached L2: it is a
+    condition of the measurement, and the baseline comparison refuses two arms
+    whose conditions differ. A run whose manifest says False cannot have used the
+    proxy configured in the job config, because both are derived from the same
+    environment variable in run_l2. ``verifier_no_proxy`` is the effective
+    bypass list when the proxy is on; changing it changes which services the
+    verifier reaches directly, so it is part of the same comparison.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -836,6 +864,8 @@ def write_manifest(path: Path, *, run_id: str, run_type: RunType, k: int,
         "baseline": str(baseline) if baseline else None,
         "image": image,
         "harness": {"runner_sha": runner_sha, "dirty": runner_dirty},
+        "verifier_proxy": verifier_proxy,
+        "verifier_no_proxy": verifier_no_proxy,
         "l2_exit_code": l2_exit,
         "l2": l2,
         # Set when the job was fetched but could not be turned into scores. The
@@ -1022,6 +1052,11 @@ def main() -> int:
     # here on writes a manifest that records them.
     runner_sha = git(TOOLING_ROOT, "rev-parse", "HEAD")
     runner_dirty = git(TOOLING_ROOT, "status", "--porcelain", "--", HERE.name) != ""
+    # Read once and carry them through the manifest, the baseline params and the
+    # comparison. The remote run reads the same variables when it builds the job,
+    # so the record and the condition cannot drift.
+    verifier_proxy = run_l2.verifier_proxy_enabled()
+    verifier_no_proxy = run_l2.verifier_no_proxy()
 
     if runner_dirty:
         # Refused here, before the judge is paid and the image is built. It used
@@ -1103,7 +1138,9 @@ def main() -> int:
                            conclusive=conclusive, head=head, base=base,
                            corpus_pin=pin, baseline=baseline, records=records,
                            direct=direct, runner_sha=runner_sha,
-                           runner_dirty=runner_dirty)
+                           runner_dirty=runner_dirty,
+                           verifier_proxy=verifier_proxy,
+                           verifier_no_proxy=verifier_no_proxy)
             return EXIT_JUDGE_DOWN
 
     if baseline is None:
@@ -1118,6 +1155,8 @@ def main() -> int:
         head=head, base=base, corpus_pin=pin, baseline=baseline,
         records=records, direct=direct,
         runner_sha=runner_sha, runner_dirty=runner_dirty,
+        verifier_proxy=verifier_proxy,
+        verifier_no_proxy=verifier_no_proxy,
     )
 
     if args.dry_run:
@@ -1196,7 +1235,9 @@ def main() -> int:
                     params={"timeout_multiplier": 1.0,
                             "agent_timeout_multiplier": 1.0,
                             "n_concurrent_trials": args.concurrency,
-                            "harbor_version": harbor_version},
+                            "harbor_version": harbor_version,
+                            "verifier_proxy": verifier_proxy,
+                            "verifier_no_proxy": verifier_no_proxy},
                     baselines_dir=args.baselines_dir,
                 )
             except Exception as error:  # noqa: BLE001 - see below

@@ -12,7 +12,9 @@ Run: python3 -m unittest discover -s benchmarks/runner -p 'flow_test.py'
 from __future__ import annotations
 
 import json
+import os
 import random
+import stat
 import sys
 import tempfile
 import unittest
@@ -25,6 +27,7 @@ import baseline  # noqa: E402
 import calibrate  # noqa: E402
 import dim_events  # noqa: E402
 import results  # noqa: E402
+import run_l2  # noqa: E402
 
 
 #: What run_l2 captures from the endpoint and writes beside the results. Every
@@ -269,12 +272,14 @@ class BaselineFlowTest(unittest.TestCase):
         helper.write_job(trials, exceptions or {})
         return results.read_job(job)
 
-    def frozen(self, trials: list[dict], k: int = 2, **kwargs) -> dict:
+    def frozen(self, trials: list[dict], k: int = 2, params: dict | None = None,
+               **kwargs) -> dict:
         kwargs.setdefault("model", MODEL_IDENTITY)
         kwargs.setdefault("harness", HARNESS)
         return baseline.build(
             self.report(trials), corpus_pin="pin", run_id="r", k=k, subject=None,
-            params={"reasoning_effort": "high"}, **kwargs,
+            params=params if params is not None else {"reasoning_effort": "high"},
+            **kwargs,
         )
 
     def test_a_baseline_without_a_model_identity_is_refused(self) -> None:
@@ -438,6 +443,208 @@ class BaselineFlowTest(unittest.TestCase):
         self.assertEqual(names, ["arms not comparable"])     # but no criterion applies
         self.assertEqual(comparison.blocking_breaches, ())
         self.assertIn("criteria not evaluated", baseline.render(comparison))
+
+    def test_a_verifier_proxy_mismatch_is_not_comparable(self) -> None:
+        """The proxy decides whether eighteen verifiers can fetch their tooling.
+
+        A pass-rate difference between a proxied and an unproxied arm can be
+        entirely network access, not code. It must disqualify the comparison the
+        same way unequal k does, while still reporting the raw deltas.
+        """
+        before = self.frozen(
+            [trial_record("a__1", "tb/a", 1.0),
+             trial_record("a__2", "tb/a", 1.0)],
+            params={"verifier_proxy": False},
+        )
+        after = self.report([trial_record("a__9", "tb/a", 1.0),
+                             trial_record("a__8", "tb/a", 1.0)])
+        comparison = baseline.compare(
+            before, after, 2, candidate_params={"verifier_proxy": True})
+
+        self.assertFalse(comparison.comparable)
+        self.assertFalse(comparison.verifier_proxy_comparable)
+        self.assertEqual([c.name for c in comparison.criteria()],
+                         ["arms not comparable"])
+        self.assertIn("verifier proxy differs (baseline off, this run on)",
+                      comparison.criteria()[0].detail)
+        self.assertIn("criteria not evaluated", baseline.render(comparison))
+        self.assertEqual(comparison.blocking_breaches, ())
+
+    def test_an_unknown_verifier_proxy_is_not_treated_as_off(self) -> None:
+        """A baseline frozen before proxy support existed cannot be assumed clean.
+
+        The field's absence means the record cannot say whether the verifier
+        reached GitHub directly. Defaulting it to False would silently compare
+        that reference with a proxied run and hide the condition change.
+        """
+        trials = [trial_record("a__1", "tb/a", 1.0),
+                  trial_record("a__2", "tb/a", 1.0)]
+        legacy = self.frozen(trials, params={})
+        after = self.report([trial_record("a__9", "tb/a", 1.0),
+                             trial_record("a__8", "tb/a", 1.0)])
+        comparison = baseline.compare(
+            legacy, after, 2, candidate_params={"verifier_proxy": False})
+        self.assertFalse(comparison.comparable)
+        self.assertIn("baseline verifier proxy is unknown",
+                      comparison.criteria()[0].detail)
+
+        # The same applies when the candidate's record is the one that cannot say.
+        recorded = self.frozen(trials, params={"verifier_proxy": False})
+        comparison = baseline.compare(recorded, after, 2, candidate_params={})
+        self.assertFalse(comparison.comparable)
+        self.assertIn("this run's verifier proxy is unknown",
+                      comparison.criteria()[0].detail)
+
+    def test_matching_verifier_proxy_conditions_remain_comparable(self) -> None:
+        trials = [trial_record("a__1", "tb/a", 1.0),
+                  trial_record("a__2", "tb/a", 1.0)]
+        no_proxy = "localhost,127.0.0.1,::1,host.docker.internal"
+        before = self.frozen(trials, params={
+            "verifier_proxy": True, "verifier_no_proxy": no_proxy})
+        after = self.report([trial_record("a__9", "tb/a", 1.0),
+                             trial_record("a__8", "tb/a", 1.0)])
+        comparison = baseline.compare(
+            before, after, 2,
+            candidate_params={"verifier_proxy": True,
+                              "verifier_no_proxy": no_proxy})
+        self.assertTrue(comparison.comparable)
+        self.assertTrue(comparison.verifier_proxy_comparable)
+        self.assertNotIn("arms not comparable",
+                         [c.name for c in comparison.criteria()])
+
+    def test_a_verifier_no_proxy_change_is_not_comparable(self) -> None:
+        """Which hosts bypass the proxy is part of the same experiment condition."""
+        trials = [trial_record("a__1", "tb/a", 1.0),
+                  trial_record("a__2", "tb/a", 1.0)]
+        no_proxy = "localhost,127.0.0.1,::1,host.docker.internal"
+        before = self.frozen(trials, params={
+            "verifier_proxy": True, "verifier_no_proxy": no_proxy})
+        after = self.report([trial_record("a__9", "tb/a", 1.0),
+                             trial_record("a__8", "tb/a", 1.0)])
+        comparison = baseline.compare(
+            before, after, 2,
+            candidate_params={"verifier_proxy": True,
+                              "verifier_no_proxy": no_proxy + ",main"},
+        )
+        self.assertFalse(comparison.comparable)
+        self.assertIn("verifier NO_PROXY differs", comparison.criteria()[0].detail)
+
+    def test_an_unknown_verifier_no_proxy_is_not_treated_as_default(self) -> None:
+        trials = [trial_record("a__1", "tb/a", 1.0),
+                  trial_record("a__2", "tb/a", 1.0)]
+        before = self.frozen(trials, params={"verifier_proxy": True})
+        after = self.report([trial_record("a__9", "tb/a", 1.0),
+                             trial_record("a__8", "tb/a", 1.0)])
+        comparison = baseline.compare(
+            before, after, 2,
+            candidate_params={
+                "verifier_proxy": True,
+                "verifier_no_proxy": "localhost,127.0.0.1,::1,host.docker.internal",
+            },
+        )
+        self.assertFalse(comparison.comparable)
+        self.assertIn("baseline verifier NO_PROXY is unknown",
+                      comparison.criteria()[0].detail)
+
+    def test_params_from_config_records_proxy_presence_without_guessing(self) -> None:
+        no_proxy = "localhost,127.0.0.1,::1,host.docker.internal"
+        config = {
+            "n_attempts": 3,
+            "agents": [{"model_name": "m", "env": {}}],
+            "verifier": {"env": {
+                "HTTP_PROXY": "http://proxy.invalid:3128",
+                "NO_PROXY": no_proxy,
+            }},
+        }
+        params = baseline.params_from_config(config)
+        self.assertIs(params["verifier_proxy"], True)
+        self.assertEqual(params["verifier_no_proxy"], no_proxy)
+        config["verifier"] = {"env": {}}
+        params = baseline.params_from_config(config)
+        self.assertIs(params["verifier_proxy"], False)
+        self.assertIsNone(params["verifier_no_proxy"])
+        # A job config from before proxy support has nothing to read.
+        del config["verifier"]
+        params = baseline.params_from_config(config)
+        self.assertIsNone(params["verifier_proxy"])
+        self.assertIsNone(params["verifier_no_proxy"])
+
+    def test_verifier_proxy_is_scoped_to_the_verifier_environment(self) -> None:
+        proxy = "http://proxy.invalid:3128"
+        with mock.patch.dict(os.environ, {
+            "DIM_EVAL_VERIFIER_PROXY": proxy,
+            "DIM_EVAL_VERIFIER_NO_PROXY": "",
+        }):
+            self.assertTrue(run_l2.verifier_proxy_enabled())
+            env = run_l2.verifier_env()
+            self.assertEqual(env["HTTP_PROXY"], proxy)
+            self.assertEqual(env["HTTPS_PROXY"], proxy)
+            self.assertEqual(
+                env["NO_PROXY"],
+                "localhost,127.0.0.1,::1,host.docker.internal",
+            )
+            self.assertNotIn("DIM_EVAL_VERIFIER_PROXY", env)
+        with mock.patch.dict(os.environ, {"DIM_EVAL_VERIFIER_PROXY": ""}):
+            self.assertFalse(run_l2.verifier_proxy_enabled())
+            self.assertEqual(run_l2.verifier_env(), {})
+
+    def test_verifier_no_proxy_can_add_container_service_names(self) -> None:
+        proxy = "http://proxy.invalid:3128"
+        with mock.patch.dict(os.environ, {
+            "DIM_EVAL_VERIFIER_PROXY": proxy,
+            "DIM_EVAL_VERIFIER_NO_PROXY": "main, host.docker.internal",
+        }):
+            self.assertEqual(
+                run_l2.verifier_no_proxy(),
+                "localhost,127.0.0.1,::1,host.docker.internal,main",
+            )
+            env = run_l2.verifier_env()
+            self.assertEqual(env["NO_PROXY"], env["no_proxy"])
+            self.assertIn("main", env["NO_PROXY"])
+
+    def test_verifier_proxy_rejects_credentials_without_echoing_them(self) -> None:
+        secret = "s3cret-value"
+        with mock.patch.dict(os.environ, {
+            "DIM_EVAL_VERIFIER_PROXY": f"http://user:{secret}@proxy.invalid:3128",
+        }):
+            with self.assertRaises(RuntimeError) as caught:
+                run_l2.verifier_env()
+        self.assertIn("must not contain credentials", str(caught.exception))
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertNotIn("proxy.invalid", str(caught.exception))
+
+    def test_verifier_proxy_requires_a_bare_http_endpoint(self) -> None:
+        for value in (
+            "proxy.invalid:3128",
+            "ftp://proxy.invalid:3128",
+            "http://proxy.invalid:3128/path",
+            "http://proxy.invalid:3128?query=1",
+            "http://",
+        ):
+            with self.subTest(value=value), \
+                 mock.patch.dict(os.environ,
+                                 {"DIM_EVAL_VERIFIER_PROXY": value}):
+                with self.assertRaises(RuntimeError):
+                    run_l2.verifier_env()
+
+    def test_verifier_no_proxy_rejects_urls(self) -> None:
+        with mock.patch.dict(os.environ, {
+            "DIM_EVAL_VERIFIER_PROXY": "http://proxy.invalid:3128",
+            "DIM_EVAL_VERIFIER_NO_PROXY": "http://main.internal",
+        }):
+            with self.assertRaises(RuntimeError) as caught:
+                run_l2.verifier_no_proxy()
+        self.assertIn("must be hostnames", str(caught.exception))
+
+    def test_job_config_is_written_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"jobs_dir": tmp, "job_name": "run"}
+            path = run_l2.write_job_config(config)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            # O_TRUNC does not repair the mode of an existing world-readable file.
+            path.chmod(0o644)
+            run_l2.write_job_config(config)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_no_criterion_blocks_while_the_thresholds_await_recalibration(self) -> None:
         """trigger-policy.md disarms the L2 table as a whole, not one row of it.
