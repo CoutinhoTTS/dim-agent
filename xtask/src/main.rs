@@ -19,6 +19,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
+        Some("context-replay") => context_replay().await?,
         Some("summary-eval") => summary_eval::run().await?,
         Some("scenario-eval") => scenario_eval::run().await?,
         Some("check") => {
@@ -29,7 +30,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|context-replay|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
                     .into(),
             );
         }
@@ -411,6 +412,105 @@ async fn measure() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let report = json!({"modelHost": if native { "aimux" } else { "mock" }, "debugAssertions":cfg!(debug_assertions),"runtimeWorkers":2,"taskBaseline":before,"peakRustAllocationBytes":allocation::peak(),"runs":runs,"concurrentMockTurns":concurrent,"agentEventBytes":std::mem::size_of::<dim_agent_types::AgentEvent>(),"modelRequestBytes":std::mem::size_of::<dim_agent_types::ModelRequest>()});
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// Opt-in baseline: 100 turns of 10k characters through the mock model, no
+/// compaction. Run with `cargo run --release -p xtask -- context-replay`.
+async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    const TURNS: usize = 100;
+    const CHARS_PER_TURN: usize = 10_000;
+    let chunk = "x".repeat(CHARS_PER_TURN);
+    let baseline = allocation::live();
+    let rss_baseline = rss_kb();
+    let agent = agent();
+    let live_agent = allocation::live();
+    let rss_agent = rss_kb();
+    let session = agent.create_session(SessionConfig::default()).await?;
+    let live_session = allocation::live();
+    let rss_session = rss_kb();
+    let mut steps = Vec::new();
+    for turn in 1..=TURNS {
+        let start = Instant::now();
+        session
+            .submit(
+                format!("Turn {turn}: {chunk}"),
+                dim_agent_types::InputMode::Queue,
+                "main",
+            )
+            .await?;
+        let live_submit = allocation::live();
+        session.idle("main").await?;
+        steps.push(json!({
+            "turn": turn,
+            "liveSubmit": live_submit,
+            "live": allocation::live(),
+            "peak": allocation::peak(),
+            "rssKb": rss_kb(),
+            "elapsedMs": start.elapsed().as_secs_f64() * 1000.,
+        }));
+    }
+    let live_active = allocation::live();
+    let peak = allocation::peak();
+    let rss_active = rss_kb();
+    let tasks_active = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    session.close().await?;
+    let live_close_immediate = allocation::live();
+    let tasks_close_immediate = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let live_settled = allocation::live();
+    let tasks_settled = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let rss_settled = rss_kb();
+    agent.close().await?;
+    let live_after_agent = allocation::live();
+    let rss_after_agent = rss_kb();
+    let report = json!({
+        "modelHost": "mock",
+        "turns": TURNS,
+        "charsPerTurn": CHARS_PER_TURN,
+        "approxInputTokens": TURNS * CHARS_PER_TURN * 2 / 4,
+        "liveBaseline": baseline,
+        "liveAfterAgent": live_agent,
+        "liveSession": live_session,
+        "liveActive": live_active,
+        "peak": peak,
+        "liveCloseImmediate": live_close_immediate,
+        "liveSettled": live_settled,
+        "liveAfterAgentClose": live_after_agent,
+        "rssKb": {
+            "baseline": rss_baseline,
+            "agent": rss_agent,
+            "session": rss_session,
+            "active": rss_active,
+            "settled": rss_settled,
+            "afterAgentClose": rss_after_agent,
+        },
+        "tasks": {
+            "active": tasks_active,
+            "closeImmediate": tasks_close_immediate,
+            "settled": tasks_settled,
+        },
+        "steps": steps,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")
+                    .and_then(|value| value.trim().trim_end_matches(" kB").parse().ok())
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn instances(
