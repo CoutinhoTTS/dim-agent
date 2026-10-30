@@ -63,8 +63,6 @@ use crate::ui::transcript::tool_group::{
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
 
-/// The stop reason and the note committed when the user interrupts a run.
-pub const INTERRUPT_REASON: &str = "User interrupted the run.";
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
 /// `config.json` key of the tool detail toggle, shared with the TS CLI.
@@ -1783,6 +1781,9 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Enter if key.mods.0 == 0 && self.clipboard.is_some() => {
+                if self.composer.mention_key(key).is_some() {
+                    return Outcome::Continue;
+                }
                 self.set_notice(t("Wait for clipboard insertion before sending"));
                 return Outcome::Continue;
             }
@@ -2093,8 +2094,6 @@ impl App {
         Outcome::Continue
     }
 
-    /// Stops the run and records it at once: the note lands in the transcript
-    /// ahead of whatever the interrupted answer still commits.
     fn interrupt(&mut self) {
         if let Some(Prompt::Ask(prompt)) = &self.prompt {
             self.host.send(Command::StopQuestion {
@@ -2105,7 +2104,7 @@ impl App {
         } else {
             self.host.stop();
         }
-        self.notices.push(t(INTERRUPT_REASON).to_owned());
+        self.set_notice(t("Stopping"));
     }
 
     fn place_label(&self) -> String {
@@ -3064,19 +3063,9 @@ impl App {
             }
         }
         for notice in std::mem::take(&mut self.notices) {
-            let interrupted = notice == t(INTERRUPT_REASON);
-            let tone = if interrupted {
-                &self.palette.warning
-            } else {
-                &self.palette.muted
-            };
-            let rows = gutter_text(STATUS_MARK, &notice, width, tone);
+            let rows = gutter_text(STATUS_MARK, &notice, width, &self.palette.muted);
             let text = chunk(&rows);
-            let tone = if interrupted {
-                Tone::Warning
-            } else {
-                Tone::Muted
-            };
+            let tone = Tone::Muted;
             self.record(Block::Status { text: notice, tone });
             frame.commits.push(text);
         }
@@ -3146,7 +3135,18 @@ impl App {
         }
         frame.dock = live.len();
         if self.prompt.is_none() {
-            let queued = self.queued();
+            let queued: Vec<_> = self
+                .snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|snapshot| &snapshot.queued)
+                .map(|input| {
+                    (
+                        input.id.clone(),
+                        input.display.as_deref().unwrap_or(&input.text).to_owned(),
+                    )
+                })
+                .collect();
             // An empty queue draws no strip; the composer keeps its row and
             // the strip's rows are given back above it.
             self.queue_rows = if queued.is_empty() {
@@ -3547,7 +3547,6 @@ impl App {
                         settled_ids.push(row.row_id.clone());
                     }
                 },
-                RowKind::Status if text == INTERRUPT_REASON => {}
                 _ => settled_ids.push(row.row_id.clone()),
             }
         }
@@ -3900,7 +3899,7 @@ impl App {
         self.history
             .iter()
             .rposition(|block| {
-                matches!(block, Block::User { text, cut } if *cut == row.cut && *text == row.text)
+                matches!(block, Block::User { text, cut, .. } if *cut == row.cut && *text == row.text)
             })
             .map(|index| self.dropped + index)
     }
@@ -4854,6 +4853,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_clipboard_allows_file_selection_but_waits_before_submission() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("first.txt"), "").unwrap();
+        std::fs::write(home.path().join("second.txt"), "").unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            home.path().to_string_lossy().into_owned(),
+        );
+        typed(&mut app, "@first");
+        let started = Instant::now();
+        while !app
+            .frame((80, 24))
+            .live
+            .iter()
+            .any(|row| row.contains("@first.txt"))
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "file picker did not populate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer.text(), "@first.txt ");
+
+        let (send, receive) = std::sync::mpsc::channel();
+        app.clipboard = Some(ClipboardRead::Native(receive));
+        typed(&mut app, "compare with @second");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer.text(), "@first.txt compare with @second.txt ");
+        assert!(sent.borrow().is_empty(), "file selection must not submit");
+
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            sent.borrow().is_empty(),
+            "submission waits for clipboard data"
+        );
+        typed(&mut app, "@missing");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            sent.borrow().is_empty(),
+            "an empty picker must not bypass the clipboard wait"
+        );
+        for _ in 0.."@missing".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        send.send(Ok(crate::clipboard::Source::Text(" appended".into())))
+            .unwrap();
+        app.tick();
+        let expected = app.composer.expanded_text().trim().to_owned();
+        assert!(expected.ends_with(" appended"));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(sent.borrow().as_slice(), [Command::Submit(text)] if text == &expected));
+    }
+
+    #[test]
     fn a_termux_keyboard_toggle_uses_the_frame_path() {
         assert!(termux_height_only(80, (80, 20), true));
         assert!(!termux_height_only(80, (100, 20), true));
@@ -5200,6 +5260,7 @@ mod tests {
                 row_id: text.into(),
                 kind,
                 text: text.into(),
+                display: None,
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
@@ -5438,6 +5499,7 @@ mod tests {
                         row_id: (*id).into(),
                         kind: RowKind::AssistantMessage,
                         text: (*text).into(),
+                        display: None,
                         streaming: false,
                         elapsed_ms: None,
                         tone: None,
@@ -5465,6 +5527,91 @@ mod tests {
                 ..ViewSnapshot::default()
             })));
             self.draw();
+        }
+    }
+
+    #[test]
+    fn escape_commits_the_interrupt_after_the_answer_tail_and_before_stopped() {
+        use crate::model::view::INTERRUPT_REASON;
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 40), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let mut projection = Projection::default();
+            let event: crate::wire::Event = serde_json::from_value(json!({
+                "sequence": 1, "create_at": 1, "type": "step", "name": "text",
+                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Answer tail."}
+            }))
+            .unwrap();
+            projection.apply("main", &event);
+            projection.set_running(true);
+            let publish = |drawn: &mut Drawn, projection: &Projection| {
+                let mut snapshot = projection.snapshot();
+                snapshot.session_id = "s1".into();
+                snapshot.focus = "main".into();
+                snapshot.history_complete = true;
+                drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+            };
+            publish(&mut drawn, &projection);
+            drawn.draw();
+            drawn.key(KeyCode::Esc);
+            drawn.key(KeyCode::Esc);
+            assert_eq!(
+                drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(t("Stopping"))
+            );
+            assert!(!drawn.transcript().contains(INTERRUPT_REASON));
+
+            for value in [
+                json!({
+                    "sequence": 2, "create_at": 2, "type": "step", "name": "model-output-end",
+                    "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled", "reason": INTERRUPT_REASON}
+                }),
+                json!({
+                    "sequence": 3, "create_at": 3, "type": "turn", "name": "end",
+                    "data": {"turn_id": "t1", "status": "cancelled", "reason": INTERRUPT_REASON}
+                }),
+            ] {
+                projection.apply("main", &serde_json::from_value(value).unwrap());
+            }
+            projection.set_running(false);
+            publish(&mut drawn, &projection);
+            for (_, shown) in drawn.app.revealed.values_mut() {
+                *shown = 0;
+            }
+            let (commits, _, _) = drawn.app.transcript(97);
+            assert!(
+                commits.is_empty(),
+                "the answer is still revealing: {commits:?}"
+            );
+
+            let now = Instant::now();
+            for (pace, shown) in drawn.app.revealed.values_mut() {
+                *shown = pace.advance(now + Duration::from_secs(1), "Answer tail.".len(), true);
+            }
+            drawn.draw();
+            drawn.draw();
+            let text = drawn.transcript();
+            let answer = text.find("Answer tail.").unwrap();
+            let interrupt = text.find(INTERRUPT_REASON).unwrap();
+            let stopped = text.find("stopped").unwrap();
+            assert!(answer < interrupt && interrupt < stopped, "{text}");
+            assert_eq!(text.matches(INTERRUPT_REASON).count(), 1, "{text}");
+
+            let mut resumed = Drawn::new((100, 40), None, true);
+            publish(&mut resumed, &projection);
+            resumed.draw();
+            let text = resumed.transcript();
+            assert!(
+                text.find("Answer tail.").unwrap() < text.find(INTERRUPT_REASON).unwrap(),
+                "{text}"
+            );
+            assert!(
+                text.find(INTERRUPT_REASON).unwrap() < text.find("stopped").unwrap(),
+                "{text}"
+            );
         }
     }
 
@@ -5575,6 +5722,7 @@ mod tests {
                 row_id: "r1".into(),
                 kind: RowKind::UserMessage,
                 text: "line work".into(),
+                display: None,
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
@@ -5642,6 +5790,7 @@ mod tests {
                     row_id: format!("u{n}"),
                     kind: RowKind::UserMessage,
                     text: format!("ask {n}"),
+                    display: None,
                     streaming: false,
                     elapsed_ms: None,
                     tone: None,
@@ -5758,6 +5907,84 @@ mod tests {
         assert_eq!(
             drawn.app.jump,
             Some(Jump::Block(drawn.app.dropped + picked))
+        );
+    }
+
+    #[test]
+    fn image_markers_stay_out_of_reused_message_drafts() {
+        let mut projection = crate::projection::Projection::default();
+        let input: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "image", "sequence": 1, "create_at": 1, "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "look [Image #7]"},
+                {"type": "image", "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"}},
+            ]}, "mode": "queue"},
+        })).unwrap();
+        projection.apply("main", &input);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        assert!(drawn.transcript().contains("[Image #1]"));
+        let row_id = drawn.app.snapshot.as_ref().unwrap().rows[0].row_id.clone();
+        let message = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .unwrap();
+        assert_eq!(
+            Document::message(&drawn.app, message),
+            Some("look [Image #7]")
+        );
+        for action in [
+            TimelineAction::Edit,
+            TimelineAction::Quote,
+            TimelineAction::Branch,
+            TimelineAction::Fork,
+        ] {
+            drawn.app.composer.clear();
+            drawn.app.line_draft = None;
+            drawn.app.timeline(&row_id, action);
+            if action == TimelineAction::Fork {
+                drawn.key(KeyCode::Char('y'));
+                drawn.app.apply(Update::Switched {
+                    session_id: "forked".into(),
+                    kind: SwitchKind::Forked,
+                });
+            }
+            assert!(drawn.app.composer.text().contains("look [Image #7]"));
+            assert!(!drawn.app.composer.text().contains("[Image #1]"));
+            drawn.key(KeyCode::Enter);
+            match sent.borrow().last().unwrap() {
+                Command::Submit(text) => assert!(!text.contains("[Image #1]")),
+                Command::OpenLine { prompt, .. } => assert_eq!(prompt, "look [Image #7]"),
+                _ => panic!("message reuse must submit text or open a line"),
+            }
+        }
+        projection.set_running(true);
+        let mut queued = input;
+        queued.id = "queued-image".into();
+        queued.sequence = 2;
+        projection.apply("main", &queued);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.app.composer.clear();
+        drawn.key(KeyCode::Up);
+        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
+        );
+        drawn.key(KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Submit(text)) if text == "look [Image #7]")
         );
     }
 

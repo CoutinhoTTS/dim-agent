@@ -41,6 +41,8 @@ Model adapters validate incoming HTTP/SSE data at their boundary. Event serializ
 
 AiMux text and reasoning IDs identify active segments: a completed ID may start a new segment, while overlapping starts, unpaired deltas/ends and unfinished successful output remain errors. Each lifetime keeps its own content and continuation metadata. Tool-call identity and native provider metadata follow their separate contracts; neither is rewritten to accommodate text/reasoning ID reuse.
 
+Thinking without native continuation data stays visible, in the reply and in the Timeline, but is not sent back: a finished reply never fails for a missing Anthropic signature or Responses encrypted payload, and a later request leaves the part out with one warning instead of sending an empty or invented signature.
+
 ## Crates
 
 | Crate | Contents | Dependency limits |

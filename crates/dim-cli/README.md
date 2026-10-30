@@ -140,7 +140,8 @@ A path attached while the model takes images is read and scaled at insertion,
 and a model that takes no images still receives the link.
 
 Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
-macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+macOS uses AppKit and resolves native file-reference URLs to real paths before image
+classification or file linking; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
 X11. Missing or failed clipboard access reports an inline error and retains the draft.
 The CLI reads only on that action and never changes the clipboard. A terminal that
 intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while
@@ -713,6 +714,14 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
+
+Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening preserves this order for turns interrupted by this version of the TUI. Older cancellations and cancellations from the line client retain their existing `stopped` display.
+
+```text
+answer text (including its retained streaming tail)
+· User interrupted the run.
+· stopped
+```
 
 The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 

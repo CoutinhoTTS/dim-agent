@@ -264,9 +264,7 @@ impl Composer {
         {
             return outcome;
         }
-        if let Some(trigger) = self.mention()
-            && let Some(outcome) = self.mention_key(key, trigger)
-        {
+        if let Some(outcome) = self.mention_key(key) {
             return outcome;
         }
         if self.area.text().is_empty() {
@@ -427,7 +425,8 @@ impl Composer {
             .unwrap_or_default()
     }
 
-    fn mention_key(&mut self, key: KeyEvent, trigger: mentions::Trigger) -> Option<Outcome> {
+    pub fn mention_key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        let trigger = self.mention()?;
         if key.mods.0 != 0 {
             return None;
         }

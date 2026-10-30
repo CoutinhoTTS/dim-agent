@@ -3,6 +3,7 @@ use crate::{
     context_block,
     context_preparation::{ConfigurationPublisher, ToolSetAdoption},
     host::{HostError, PromptHost},
+    prompt_guide::GuideEntries,
     prompt_state::PromptSnapshot,
 };
 use dim_agent_runtime::*;
@@ -15,7 +16,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
@@ -82,6 +83,9 @@ enum Adoption {
         event: Arc<AgentEvent>,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// The entries in force changed: adopt the guide if its composition over
+    /// them moved.
+    Guide,
     Tools {
         tools: ToolSetAdoption,
         cancel: CancellationToken,
@@ -118,6 +122,8 @@ pub struct Prompt {
     branch_phase: Arc<BranchLifecycle>,
     opening: Arc<BranchOpening>,
     opened: tokio::sync::watch::Sender<Option<Result<()>>>,
+    /// The Session's guide entries: the composition the listener adopts.
+    guide: Arc<GuideEntries>,
     tasks: TaskTracker,
     state: Mutex<PromptState>,
     adoption: tokio::sync::mpsc::UnboundedSender<Adoption>,
@@ -417,6 +423,75 @@ impl Prompt {
         }
     }
 
+    /// The registrations watch and the composition it starts from, both
+    /// taken before the branch's `Open` adoption composes the System. A
+    /// registration made while that adoption runs therefore moves the
+    /// composition the listener compares against, rather than entering a
+    /// baseline taken afterwards and marked as already seen.
+    fn guide_watch(&self) -> (watch::Receiver<u64>, String) {
+        (
+            self.guide.changes(),
+            self.guide.compose(&self.identity.branch_id),
+        )
+    }
+
+    /// Listens for guide registrations over the watch and composition the
+    /// `Open` handler took before its adoption composed, and starts before
+    /// that adoption runs: a change during the adoption moves the
+    /// composition the listener compares against and is queued behind the
+    /// open's own arm, instead of finding a baseline taken afterwards. A
+    /// change that composes the same guide for this branch, such as another
+    /// branch's entry, costs one composition and no read of the branch's
+    /// context. The listener ends when the branch starts closing: an entry
+    /// that withdraws only because the branch is shutting down must not
+    /// move its System.
+    fn listen_guide(self: &Arc<Self>, mut changes: watch::Receiver<u64>, mut composed: String) {
+        let branch_id = self.identity.branch_id.clone();
+        let branch_phase = self.branch_phase.clone();
+        let owner = self.clone();
+        self.tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = branch_phase.closing() => return,
+                    _ = owner.lifecycle.cancelled() => return,
+                    changed = changes.changed() => if changed.is_err() {
+                        return;
+                    },
+                }
+                if owner.branch_phase.phase() >= BranchPhase::Closing {
+                    return;
+                }
+                let guide = owner.guide.compose(&branch_id);
+                if guide == composed {
+                    continue;
+                }
+                composed = guide;
+                if owner.adoption.send(Adoption::Guide).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Runs one guide adoption and reports a failure the way the queue
+    /// reports it: a branch that closed while the adoption ran is not a
+    /// fault, so the item is dropped with the others.
+    async fn adopt_guide(&self) {
+        let result = AssertUnwindSafe(self.publisher.adopt_guide())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(AgentError::fault("Prompt", panic_message(panic))));
+        if let Err(error) = result
+            && !matches!(
+                error,
+                AgentError::Storage(_) | AgentError::Closed(_) | AgentError::Cancelled(_)
+            )
+        {
+            self.faults.report(error);
+        }
+    }
+
     fn schedule_adoption(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
         match self.adoption.send(Adoption::Event(event)) {
             Ok(()) => Ok(()),
@@ -612,6 +687,7 @@ pub struct PromptPlugin {
     faults: rutis::host::Key<FaultReporter>,
     branch_phase: rutis::host::Key<BranchLifecycle>,
     opening: rutis::host::Key<BranchOpening>,
+    guide: rutis::host::Key<GuideEntries>,
     state: rutis::host::Key<StateCell<PromptSnapshot>>,
     prompt: rutis::host::Key<Prompt>,
     configure: rutis::host::Key<dyn ConfigureControl>,
@@ -628,6 +704,7 @@ impl PromptPlugin {
             faults: names.key()?,
             branch_phase: names.key()?,
             opening: names.key()?,
+            guide: names.key()?,
             state: names.state_cell()?,
             prompt: names.key()?,
             configure: names.key()?,
@@ -649,6 +726,7 @@ impl DynPlugin for PromptPlugin {
             self.faults.erase(),
             self.branch_phase.erase(),
             self.opening.erase(),
+            self.guide.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -662,6 +740,7 @@ impl DynPlugin for PromptPlugin {
             let faults = ctx.require_at(&self.faults)?;
             let branch_phase = ctx.require_at(&self.branch_phase)?;
             let opening = ctx.require_at(&self.opening)?;
+            let guide = ctx.require_at(&self.guide)?;
             if ctx.cancellation_token().is_cancelled() {
                 return Ok(Effect::Done);
             }
@@ -677,6 +756,7 @@ impl DynPlugin for PromptPlugin {
                 branch_phase,
                 opening,
                 opened: tokio::sync::watch::channel(None).0,
+                guide,
                 tasks: TaskTracker::new(),
                 state: Mutex::new(PromptState::default()),
                 adoption,
@@ -719,14 +799,37 @@ impl DynPlugin for PromptPlugin {
                         None => break,
                         Some(Adoption::Event(event)) => event,
                         Some(Adoption::Open { event, reply }) => {
+                            let (changes, composed) = owner.guide_watch();
                             let result = AssertUnwindSafe(owner.open(&event))
                                 .catch_unwind()
                                 .await
                                 .unwrap_or_else(|panic| {
                                     Err(AgentError::fault("Prompt", panic_message(panic)))
                                 });
+                            let opened = result.is_ok();
                             owner.opened.send_replace(Some(result.clone()));
+                            // The reconciliation is part of the open: a fork
+                            // inherits its parent's configuration and a
+                            // restore finds whatever its writers registered at
+                            // load, so the branch reports itself open only
+                            // once it has adopted the entries in force, and
+                            // the first request after the open carries them.
+                            // The baseline is a composition, not the System
+                            // the branch carries; an unchanged System
+                            // publishes nothing, and every successful open
+                            // pays one context read whatever the configuration
+                            // it carries. The listener starts before that
+                            // adoption, so a change made during it is queued
+                            // as an adoption behind this arm.
+                            owner.listen_guide(changes, composed);
+                            if opened {
+                                owner.adopt_guide().await;
+                            }
                             let _ = reply.send(result);
+                            continue;
+                        }
+                        Some(Adoption::Guide) => {
+                            owner.adopt_guide().await;
                             continue;
                         }
                         Some(Adoption::Tools {
