@@ -7,6 +7,10 @@ The ToolExecution plugin registers two branch parts: ToolBinding, which adopts t
 Owner: [tool_binding.rs](../../../../crates/dim-agent-capabilities/src/tool_binding.rs).
 Adopts a Session tool set into branch model configuration and pins handlers to
 requests so later registry changes cannot silently replace executing tools.
+ToolBinding carries the declarations it adopts and owns no wording. It fixes
+each request's declarations exactly as their owners wrote them. How a
+declaration splits into protocol and policy is ToolRegistry's
+[Declarations](ToolRegistry.md#declarations) rule.
 
 ### Dependencies
 
