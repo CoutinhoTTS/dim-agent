@@ -525,8 +525,8 @@ async fn before_keys_accept_a_domain_wildcard() {
     assert_eq!(other.tags, None);
 }
 
-/// A checkpointed read decodes the anchor as one row and then the
-/// `resume..=through` range, instead of decoding the tail twice.
+/// A checkpointed read reads the anchor as one row and never a range that
+/// spans it to the cut, so the tail is not decoded twice.
 #[tokio::test]
 async fn a_checkpointed_read_decodes_one_anchor_event() {
     let store = Arc::new(Reads::default());
@@ -578,13 +578,19 @@ async fn a_checkpointed_read_decodes_one_anchor_event() {
         .unwrap();
     assert!(context.checkpoint.is_some());
     assert_eq!(context.events.len(), (through - 39) as usize);
+    let segments = store.segments.lock().unwrap();
     assert_eq!(
-        *store.segments.lock().unwrap(),
-        [
-            ("main".to_string(), 51..=51),
-            ("main".to_string(), 40..=through),
-        ],
-        "the anchor read is one event, then the resume..=through range"
+        segments
+            .first()
+            .map(|(branch, range)| (branch.as_str(), range.clone())),
+        Some(("main", 51..=51)),
+        "the anchor check reads the anchor row"
+    );
+    assert!(
+        !segments
+            .iter()
+            .any(|(_, range)| *range.start() >= 51 && *range.end() >= through),
+        "no read runs from the anchor row to the cut"
     );
 }
 
