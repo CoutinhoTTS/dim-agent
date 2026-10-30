@@ -1265,6 +1265,39 @@ async fn read_returns_a_png_as_an_image_block_and_a_line() {
 }
 
 #[tokio::test]
+async fn read_recognizes_an_image_ahead_of_the_binary_extension_refusal() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let bytes = png(320, 240, |x, _| {
+        if x < 160 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    workspace.put("screenshot.bin", &bytes);
+    let result = workspace.read(&reads, "screenshot.bin").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert_eq!(line, "Read image: screenshot.bin (320x240 px).");
+    assert_eq!(source.media_type, "image/png");
+    assert_eq!(sent(source), bytes);
+    assert_eq!(structured(&result)["kind"], "image");
+
+    // The extension still refuses content that is not an image, text included.
+    workspace.put("blob.bin", b"ab\0cd");
+    assert_eq!(
+        code(&workspace.read(&reads, "blob.bin").await),
+        "binary_unsupported"
+    );
+    workspace.put("notes.bin", b"plain text\n");
+    assert_eq!(
+        code(&workspace.read(&reads, "notes.bin").await),
+        "binary_unsupported"
+    );
+}
+
+#[tokio::test]
 async fn read_scales_a_large_jpeg_within_the_limits() {
     let workspace = Workspace::new();
     let reads = branch();

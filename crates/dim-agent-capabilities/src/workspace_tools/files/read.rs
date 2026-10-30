@@ -32,7 +32,8 @@ const READ_OFFLOAD_PREVIEW_CHARS: usize = 2_000;
 const DETECT_BYTES: usize = 4096;
 const CHUNK_BYTES: usize = 64 * 1024;
 
-/// Known binary extensions, rejected without reading the file.
+/// Known binary extensions, refused once the head shows the content is not an
+/// image.
 const BINARY_EXTENSIONS: &[&str] = &[
     "zip", "gz", "tar", "bz2", "xz", "7z", "rar", "exe", "dll", "so", "dylib", "bin", "wasm",
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "class", "pyc", "pyo", "o", "obj", "a",
@@ -231,12 +232,6 @@ fn read_text(
 ) -> Result<Outcome, Cancelled> {
     let done = |result| Ok((result, None));
     let display = &input.path;
-    let extension = path
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_lowercase());
-    if extension.is_some_and(|extension| BINARY_EXTENSIONS.contains(&extension.as_str())) {
-        return done(binary(display));
-    }
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) => return done(stat_failure(&error, &path, display)),
@@ -266,6 +261,14 @@ fn read_text(
             )),
             Sniffed::Unsupported(name) => done(unsupported_image(display, name)),
         };
+    }
+    // The extension is a hint against content that is not an image: an image
+    // is recognized from its bytes whatever the file is called.
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase());
+    if extension.is_some_and(|extension| BINARY_EXTENSIONS.contains(&extension.as_str())) {
+        return done(binary(display));
     }
     let resolved = match codec::resolve_encoding(&head, input.encoding.as_deref()) {
         Ok(resolved) => resolved,

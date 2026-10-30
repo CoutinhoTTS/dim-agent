@@ -106,6 +106,12 @@ the size sent, in pixels and bytes; an animation says only its first frame was
 sent; `offset` or `limit` on an image adds one sentence saying they do not
 apply.
 
+Recognition comes before the extension refusal. The stat and directory checks
+run first, then `read` opens the file and reads its head: content that is an
+image takes the image path whatever the file is called, a PNG named
+`screenshot.bin` included, and only content that is not an image is refused by
+its extension, or by the text rules when it has none.
+
 One shared function, `images::scale_image`, makes the image acceptable to a
 model. It reads from a seekable source — the file, not its bytes — so the whole
 source is never buffered: it reads the header, runs the guard, and only then
