@@ -4986,3 +4986,61 @@ async fn a_v23_store_upgrades_in_place_once() {
     assert_eq!(schema(&connection), schema_of(23));
     upgrades_in_place_once(&database, connection, 23).await;
 }
+
+/// A batch of starts larger than one SQLite compound statement still reads
+/// whole: the store chunks the keys inside one read and merges the rows.
+#[tokio::test]
+async fn a_large_batch_of_tool_use_starts_is_read_in_chunks() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = sessions.timeline_store();
+    store
+        .create_session("many-starts", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut records: Vec<_> = (1..=520)
+        .map(|at| {
+            record(
+                at,
+                EventKind::ToolUseStart(ToolUseStartData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_id: format!("call-{at}"),
+                    name: format!("tool-{at}"),
+                }),
+            )
+        })
+        .collect();
+    records.extend((521..=640).map(|sequence| text(sequence, "delta")));
+    let (done, wait) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key("many-starts", "main"),
+            records,
+            Box::new(move |result| {
+                let _ = done.send(result);
+            }),
+        )
+        .unwrap();
+    wait.await.unwrap().unwrap();
+    let wanted: Vec<(String, String)> = (1..=520)
+        .map(|at| ("request".to_owned(), format!("call-{at}")))
+        .collect();
+    let starts = sessions
+        .read_tool_use_starts("many-starts", &wanted)
+        .await
+        .unwrap();
+    assert_eq!(starts.len(), 520);
+    for at in 1..=520u64 {
+        let name = match &starts[&("request".to_owned(), format!("call-{at}"))].kind {
+            EventKind::ToolUseStart(data) => data.name.clone(),
+            kind => panic!("unexpected {}", kind.key()),
+        };
+        assert_eq!(name, format!("tool-{at}"));
+    }
+    drop(store);
+    drop(sessions);
+    db.close().await.unwrap();
+}

@@ -34,6 +34,11 @@ use std::{
 /// Rounds of output deltas alone wait until this long after the previous
 /// round started (timeline storage §3).
 const ROUND_WINDOW: Duration = Duration::from_millis(20);
+
+/// Starts one `read_tool_use_starts` statement looks up. Each start is one
+/// term of a `UNION ALL`, and SQLite's default `SQLITE_MAX_COMPOUND_SELECT`
+/// is 500 terms, so a batch is read in statements of half that.
+const STARTS_PER_STATEMENT: usize = 250;
 struct Pending {
     key: TimelineKey,
     events: Vec<StoredEvent>,
@@ -959,9 +964,8 @@ impl SessionStore {
         }
         Ok(events)
     }
-    /// The main-branch `step/tool-use-start`s of `keys`, found through
-    /// `timeline_tool_use_starts` in one statement; calls the store does not
-    /// hold are absent.
+    /// The main-branch `step/tool-use-start`s of `keys`; calls the store does
+    /// not hold are absent. The keys are read in bounded statement chunks.
     pub async fn read_tool_use_starts(
         &self,
         id: &str,
@@ -974,27 +978,34 @@ impl SessionStore {
         let wanted = keys.to_vec();
         let rows = self
             .read_rows(id, move |connection| {
-                let selects = (0..wanted.len())
-                    .map(|at| {
-                        format!(
-                            "SELECT sequence, last_sequence, kind, body, event_id FROM \
-                         timeline_events WHERE session_id=?1 AND branch_id='main' AND \
-                         kind='step/tool-use-start' AND \
-                         json_extract(body, '$.record.event.data.request_id')=?{} AND \
-                         json_extract(body, '$.record.event.data.call_id')=?{}",
-                            at * 2 + 2,
-                            at * 2 + 3
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" UNION ALL ");
-                let mut query = connection.prepare(&selects).map_err(error)?;
-                let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&session];
-                for (request_id, call_id) in &wanted {
-                    parameters.push(request_id);
-                    parameters.push(call_id);
+                let mut rows = Vec::with_capacity(wanted.len());
+                for chunk in wanted.chunks(STARTS_PER_STATEMENT) {
+                    let selects = (0..chunk.len())
+                        .map(|at| {
+                            format!(
+                                "SELECT sequence, last_sequence, kind, body, event_id FROM \
+                             timeline_events WHERE session_id=?1 AND branch_id='main' AND \
+                             kind='step/tool-use-start' AND \
+                             json_extract(body, '$.record.event.data.request_id')=?{} AND \
+                             json_extract(body, '$.record.event.data.call_id')=?{}",
+                                at * 2 + 2,
+                                at * 2 + 3
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" UNION ALL ");
+                    let mut query = connection.prepare(&selects).map_err(error)?;
+                    let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&session];
+                    for (request_id, call_id) in chunk {
+                        parameters.push(request_id);
+                        parameters.push(call_id);
+                    }
+                    rows.extend(query_fetched(
+                        &mut query,
+                        rusqlite::params_from_iter(parameters),
+                    )?);
                 }
-                query_fetched(&mut query, rusqlite::params_from_iter(parameters))
+                Ok(rows)
             })
             .await?;
         let mut starts = HashMap::with_capacity(rows.len());
