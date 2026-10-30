@@ -486,10 +486,11 @@ new core field, epoch or registry. Managed route/lease checks remain unchanged.
 
 Legacy TypeScript import stays explicit, read-only and per-entry:
 `imported`/`already_imported`/`rejected`, and Provider owns the frozen mapping
-below as one pure conversion of a legacy row: the row's fields and the existing
-target record in, the native record and the omitted source fields out, or a
-rejection reason. `provider.import_legacy` and the Migration provider step both
-call it; Migration keeps its snapshot, receipts, ledger and report. Map
+below as one pure conversion of a legacy row: the row's fields, the existing
+target record and the bundled catalog in, the native record and the omitted
+source fields out, or a rejection reason. `provider.import_legacy` and the
+Migration provider step both call it; Migration keeps its snapshot, receipts,
+ledger and report. Map
 connections, defaults, user overrides, user models, disables, preferences and
 scoped selections explicitly. `activeModelId` is only a hint and cannot
 overwrite an existing scoped choice. A field with no native counterpart is
@@ -514,19 +515,26 @@ The frozen legacy schema uses `modelsSource` to distinguish model origins:
 | `activeModelId` | A per-Provider hint; no authority to create or overwrite a scoped selection |
 | `provider_selections` | Explicit scoped choices, subject to existing target and import-ledger checks |
 
-A `builtin` row maps onto the builtin of its id: without a target the import
-creates that builtin, and over an existing target the target must be the
-pristine seeded record. A `custom` row whose id belongs to the bundled catalog
-is rejected. Both entries parse and validate an existing target record with the
-same parser, and a target that does not validate rejects the row.
+A `builtin` row maps onto the builtin of its id. Without a target the import
+starts from that builtin's bundled definition, exactly as an import over a
+seeded target does, so a `builtin` row whose id has no bundled definition is
+rejected; over an existing target the target must be the pristine seeded
+record. A `custom` row whose id belongs to the bundled catalog is rejected.
+Both entries parse and validate an existing target record with the same
+parser, and a target that does not validate rejects the row. Migration
+classifies a non-pristine target as `Conflict` with no reason before the
+conversion runs; otherwise both entries report the conversion's reason.
 
 `provider_selections` share one conversion as well: a workspace scope is the
 canonical path of an existing directory, and the chosen model must be available
 in Provider's catalog for the imported record. A selection whose directory no
-longer exists is rejected with that reason; it could never be matched. The
+longer exists is rejected with that reason; it could never be matched. A
+provider row an earlier import recorded stays usable for its selections: both
+entries read that record from the import ledger, and a stored record that
+cannot be read rejects the selection with the read error. The
 `provider.import_legacy` reply adds `omitted` to imported items, the source
-field names the conversion dropped; the field is additive and protocol v3 is
-unchanged.
+field names the conversion dropped, and imports selections without it; the
+field is additive and protocol v3 is unchanged.
 
 Null or empty objects/arrays in those settings carry no configuration and are
 not reported. Source bytes remain unchanged.
