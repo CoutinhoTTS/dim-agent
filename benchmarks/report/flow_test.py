@@ -224,7 +224,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def night(self, outcomes: dict[str, float | list[float]], replies: dict[str, dict],
-              known: dict, baseline: dict[str, int] | None = None, exit_code: int = 0) -> tuple:
+              known: dict, baseline: dict[str, int] | None = None, exit_code: int = 0,
+              verifier: str | None = None) -> tuple:
         run_dir = self.root / f"run{len(list(self.root.iterdir()))}"
         harbor = run_dir / "harbor"
         harbor.mkdir(parents=True)
@@ -240,7 +241,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
             task_dir.mkdir(parents=True, exist_ok=True)
             (task_dir / "instruction.md").write_text(f"Solve {task}.")
             (trial / "lock.json").write_text(json.dumps({"task": {"path": str(task_dir)}}))
-            (trial / "verifier" / "test-stdout.txt").write_text(f"FAILED test_{task}\n")
+            (trial / "verifier" / "test-stdout.txt").write_text(
+                verifier if verifier is not None else f"FAILED test_{task}\n")
             (trial / "agent" / "dim-timeline.jsonl").write_text("\n".join(json.dumps(line) for line in [
                 {"kind": "event", "branch_id": "main", "event": {"type": "step", "name": "tool-call",
                  "data": {"calls": [{"name": "grep", "input": {"pattern": task}}]}}},
@@ -359,6 +361,18 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         *_, done = self.night({"regex": -1.0}, {}, known, exit_code=6)
         self.assertEqual(done, [])
         self.assertEqual(self.github.issues[1]["state"], "open")
+
+    def test_the_expected_answer_never_reaches_the_prompt_or_the_issue(self) -> None:
+        """OfficeQA's verifier used to print the answer it compares against;
+        neither the analysis prompt nor the public issue may carry it."""
+        reply = {"category": "agent", "cause": "Wrong.", "evidence": "expected: '1002'",
+                 "same_as_known": False, "suspects": []}
+        _, _, track, _ = self.night(
+            {"answer": 0.0}, {"answer": reply}, {},
+            verifier="expected: '1002'\npredicted: '999'\nFAILED\n")
+        self.assertNotIn("1002", self.prompts[0])
+        self.assertNotIn("1002", track.body)
+        self.assertNotIn("1002", track.news)
 
     def test_an_unscoreable_night_leaves_the_body_as_last_measured(self) -> None:
         """A tracked task left unscored tonight must not drop out of the body."""

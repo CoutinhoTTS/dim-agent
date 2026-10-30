@@ -91,9 +91,10 @@ def marker(key: str) -> str:
 
 
 def redact(text: str) -> str:
-    """Keep the eval machine, its endpoints and anything token-shaped out of
-    the issue tracker. ``DIM_EVAL_REDACT`` adds strings, such as the model
-    endpoint's host, that only the eval machine's config knows."""
+    """Keep the eval machine, its endpoints, token-shaped strings and any
+    printed expected answer out of the issue tracker. ``DIM_EVAL_REDACT`` adds
+    strings, such as the model endpoint's host, that only the eval machine's
+    config knows."""
     values = [os.environ.get(name, "") for name in
               ("DIM_EVAL_HOST", "DIM_EVAL_SCRATCH", "DIM_EVAL_REMOTE_PYTHON", "HOME")]
     host = os.environ.get("DIM_EVAL_HOST", "")
@@ -103,6 +104,7 @@ def redact(text: str) -> str:
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", text)
     text = re.sub(r"\b(sk-|ghp_|gho_|ghs_|github_pat_|hf_|xox[abprs]-)[A-Za-z0-9_-]{8,}",
                   "<token>", text)
+    text = re.sub(r"expected:.*", "expected: <redacted>", text)
     return re.sub(r"\bAKIA[0-9A-Z]{16}\b", "<token>", text)
 
 

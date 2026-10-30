@@ -21,6 +21,10 @@ L2 的第二个语料：Databricks OfficeQA Pro 的 133 道 hard 题。设计与
 | 语料镜像 | `docker.io/benediktstroebl/officeqa-corpus@sha256:731237e3b35277ca3c08b1b5e6063c4c6ae0c88a4eb4d7cef201c4f14a3e333d` |
 | tolerance | 0 |
 
+失败分析会把题目文本、判分输出末尾和 Timeline 末段发给分析模型（默认 DeepSeek），题目文本
+因此离开评测机；这是已知并接受的决定。标准答案不进这条链：verifier 不打印 `expected`，
+`report/analyze.py` 在发给模型前再抹一次，`report/issues.py` 在写进 issue 前抹第三次。
+
 语料镜像是 harbor officeqa adapter 公开在 Docker Hub 上的那个，没有自建。采用前把镜像内
 697 个文件的 sha256 与上表 revision 的 `treasury_bulletins_parsed/transformed/` 逐个比对过，
 全部一致。生成后在该镜像里对 133 题逐题跑 `solution/solve.sh` + `tests/test.sh`（`--network none`），

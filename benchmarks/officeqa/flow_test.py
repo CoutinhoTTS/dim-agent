@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 import tomllib
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -109,7 +111,11 @@ class OfficeQAFlowTest(unittest.TestCase):
         for answer, reward in (("1002\n", "1"), ("999", "0"), ("", "0"), (None, "0")):
             with self.subTest(answer=answer):
                 verifier = self._verifier("UID0002", answer)
-                verifier.main()
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    verifier.main()
+                self.assertNotIn("expected:", output.getvalue())
+                self.assertIn("score:", output.getvalue())
                 self.assertEqual(verifier.REWARD.read_text().strip(), reward)
 
     def test_a_broken_verifier_leaves_the_trial_unscored(self) -> None:

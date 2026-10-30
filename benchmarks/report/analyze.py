@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -171,6 +172,12 @@ def tail(path: Path, count: int) -> str:
     return "\n".join(path.read_text(errors="replace").splitlines()[-count:])
 
 
+def without_expected(text: str) -> str:
+    """Drop the answer a verifier may print. The analysis prompt goes to an
+    external endpoint, and the answer is not ours to send."""
+    return re.sub(r"^expected:.*$", "expected: <redacted>", text, flags=re.MULTILINE)
+
+
 def window_changes(repo: Path, run: dict) -> tuple[str, list[str]]:
     """The window's model-visible PRs and their diffs, within a size budget."""
     parts, names, budget = [], [], DIFF_CHARS_TOTAL
@@ -219,7 +226,8 @@ def evidence_for(trial: results.Trial, trial_dir: Path) -> dict:
         "task": clip(instruction.read_text(errors="replace"), 3000)
                 if instruction.exists() else trial.task_name,
         "outcome": outcome,
-        "verifier": tail(trial_dir / "verifier" / "test-stdout.txt", VERIFIER_LINES),
+        "verifier": without_expected(
+            tail(trial_dir / "verifier" / "test-stdout.txt", VERIFIER_LINES)),
         "timeline": render_timeline(trial_dir / "agent" / "dim-timeline.jsonl"),
     }
 

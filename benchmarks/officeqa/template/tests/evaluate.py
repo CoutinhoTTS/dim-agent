@@ -32,7 +32,9 @@ def main() -> None:
     if score not in (0.0, 1.0):
         raise RuntimeError(f"score_answer returned {score!r}, not 0 or 1")
 
-    print(f"expected: {expected!r}\npredicted: {predicted!r}\nscore: {score}")
+    # The expected answer stays in the private task tree: this output is read by
+    # the failure analysis, whose prompt goes to an external endpoint.
+    print(f"predicted: {predicted!r}\nscore: {score}")
     REWARD.parent.mkdir(parents=True, exist_ok=True)
     REWARD.write_text(f"{score:.0f}\n")
 
