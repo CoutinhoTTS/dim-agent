@@ -56,10 +56,10 @@ applied is logged as a warning and leaves the previous state.
 
 ## Observation layers
 
-[ADR 005](../adr/005-observability.md) D1 keeps two observation layers and says
-there is no third. This source adds an opt-in diagnostic record that the
-Timeline cannot carry: wire bytes and per-exchange timings. ADR 005 needs to
-accept or reject it before anything depends on this switch.
+[ADR 005](../adr/005-observability.md) D1 keeps the Timeline and process logs;
+[ADR 009](../adr/009-model-request-log.md) supersedes its "no third channel" for
+this opt-in record and leaves the other two layers unchanged. The record is never
+read back into Dim.
 
 ## Verification
 
