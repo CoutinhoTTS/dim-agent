@@ -139,6 +139,7 @@ impl SessionStore {
         version: u32,
         hosts: Vec<String>,
         closed: Vec<String>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<CatalogResult> {
         let digest = format!(
             "{:x}",
@@ -161,7 +162,7 @@ impl SessionStore {
                 Ok((time, id))
             })
             .transpose()?;
-        self.timeline.db.run(move |connection| {
+        self.timeline.db.run_cancellable(cancel, move |connection| {
             let index = if request.with_preview { "session_catalog_with_preview" } else { "session_catalog_by_activity" };
             let mut sql = format!(
                 "SELECT c.session_id AS session_id, c.cwd, s.created_at_ms, b.sequence, o.agent_id, \
@@ -212,5 +213,214 @@ impl SessionStore {
             } else { None };
             Ok(CatalogResult { sessions, next_cursor })
         }).await
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::{ServerConfig, serve, storage::SqliteStorage};
+    use dim_agent_runtime::{AgentBuilder, AgentConfig};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+
+    type Wire = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+    async fn send(wire: &mut Wire, id: u64, method: &str, params: Value) {
+        wire.send(Message::Text(
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn response(wire: &mut Wire, id: u64) -> Value {
+        loop {
+            let frame = wire.next().await.unwrap().unwrap();
+            let value: Value = serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            if value["id"] == id {
+                return value;
+            }
+        }
+    }
+
+    async fn connect(address: std::net::SocketAddr) -> Wire {
+        let mut wire = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap()
+            .0;
+        send(
+            &mut wire,
+            1,
+            "hello",
+            json!({"protocolVersion":3,"clientKind":"other"}),
+        )
+        .await;
+        assert!(
+            response(&mut wire, 1).await["result"]["features"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session.catalog.cancel"))
+        );
+        wire
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn catalog_cancellation_interrupts_running_sql_and_preserves_following_writes() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-catalog-cancel-{}", uuid::Uuid::new_v4()));
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+        dim_agent_capabilities::defaults::install(&mut builder);
+        let server = serve(
+            builder,
+            ServerConfig {
+                database_path: Some(directory.join("store.sqlite")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let address = server.websocket_address.unwrap();
+        let mut wire = connect(address).await;
+        send(
+            &mut wire,
+            2,
+            "session.create",
+            json!({"cwd":std::env::temp_dir()}),
+        )
+        .await;
+        let created = response(&mut wire, 2).await;
+        let seed = created["result"]["sessionId"]
+            .as_str()
+            .expect("a native Session")
+            .to_owned();
+        drop(wire);
+        let database = server.root.get::<SqliteStorage>().unwrap();
+        database.run(move |connection| {
+            let tx = connection.transaction().map_err(error)?;
+            for index in 0..2300 {
+                let id = format!("catalog-{index:04}");
+                tx.execute("INSERT INTO agent_sessions SELECT ?1, config, created_at_ms FROM agent_sessions WHERE session_id=?2", params![id,seed]).map_err(error)?;
+                tx.execute("INSERT INTO session_owners SELECT ?1,agent_id,protocol_version FROM session_owners WHERE session_id=?2", params![id,seed]).map_err(error)?;
+                tx.execute("INSERT INTO timeline_branches VALUES (?1,'main','{\"id\":\"main\"}',0)", [&id]).map_err(error)?;
+                create(&tx, &id)?;
+            }
+            tx.commit().map_err(error)
+        }).await.unwrap();
+
+        for disconnect in [false, true] {
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            database
+                .run(move |connection| {
+                    let entered = std::sync::Mutex::new(Some(entered));
+                    connection
+                        .create_scalar_function(
+                            "catalog_fold",
+                            1,
+                            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                            move |ctx| {
+                                observed.fetch_add(1, Ordering::SeqCst);
+                                if let Some(entered) = entered.lock().unwrap().take() {
+                                    let _ = entered.send(());
+                                    blocked
+                                        .recv_timeout(Duration::from_secs(10))
+                                        .expect("the running SQL is released");
+                                }
+                                Ok(ctx
+                                    .get::<Option<String>>(0)?
+                                    .map(|text| text.to_lowercase()))
+                            },
+                        )
+                        .map_err(error)
+                })
+                .await
+                .unwrap();
+            let mut wire = connect(address).await;
+            send(
+                &mut wire,
+                2,
+                "session.catalog",
+                json!({"query":"no such catalog row"}),
+            )
+            .await;
+            tokio::time::timeout(Duration::from_secs(10), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            if disconnect {
+                wire.close(None).await.unwrap();
+            } else {
+                send(
+                    &mut wire,
+                    3,
+                    "session.catalog.cancel",
+                    json!({"requestId":2.0}),
+                )
+                .await;
+                assert_eq!(response(&mut wire, 3).await["result"], json!({}));
+            }
+            let writing = database.run(|connection| {
+                connection.execute("UPDATE session_catalog SET preview='write after cancellation' WHERE session_id='catalog-0000'", []).map_err(error)
+            });
+            tokio::pin!(writing);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut writing)
+                    .await
+                    .is_err(),
+                "the query owns the real SQLite connection"
+            );
+            release.send(()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), writing)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                1
+            );
+            assert!(
+                calls.load(Ordering::SeqCst) < 2300,
+                "cancellation interrupted the scan before it visited every Session"
+            );
+            if !disconnect {
+                let reply = response(&mut wire, 2).await;
+                assert_eq!(reply["error"]["data"]["appError"], "cancelled", "{reply}");
+                send(
+                    &mut wire,
+                    4,
+                    "session.catalog.cancel",
+                    json!({"requestId":2}),
+                )
+                .await;
+                assert_eq!(response(&mut wire, 4).await["result"], json!({}));
+                send(
+                    &mut wire,
+                    5,
+                    "session.catalog",
+                    json!({"query":"write after cancellation"}),
+                )
+                .await;
+                let page = response(&mut wire, 5).await;
+                assert_eq!(
+                    page["result"]["sessions"].as_array().unwrap().len(),
+                    1,
+                    "{page}"
+                );
+            }
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

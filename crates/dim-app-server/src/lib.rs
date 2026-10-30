@@ -40,7 +40,8 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, Modules, SessionConfig, register_part, wait_active,
+    Agent, AgentBuilder, AgentError, Modules, SessionConfig, StartupProgress, register_part,
+    wait_active,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
@@ -77,6 +78,7 @@ pub struct ServerConfig {
     pub session_defaults: SessionConfig,
     pub hello_timeout: Duration,
     pub write_timeout: Duration,
+    /// Maximum time without an opening process row becoming Active.
     pub startup_timeout: Duration,
     /// Grace period `G` of idle unload: with a native store, Agents unloads a
     /// loaded Session that no lease has held for at least this long.
@@ -277,14 +279,19 @@ impl Processes {
     }
 
     async fn wait_active(&self, root: &Ctx, timeout: Duration) -> dim_agent_runtime::Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let mut deadline = tokio::time::Instant::now() + timeout;
+        let mut active = std::collections::HashSet::new();
         loop {
             let views = self.views();
             let mut ready = true;
             for view in &views {
                 let snapshot = view.watch().borrow().clone();
                 match snapshot.state {
-                    rutis::host::FiberState::Active => {}
+                    rutis::host::FiberState::Active => {
+                        if active.insert((view.id, snapshot.generation)) {
+                            deadline = tokio::time::Instant::now() + timeout;
+                        }
+                    }
                     rutis::host::FiberState::Failed => {
                         return Err(snapshot.error.map(AgentError::from).unwrap_or_else(|| {
                             AgentError::Build(format!("{}: Failed", view.name()))
@@ -995,50 +1002,44 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ..Default::default()
         }],
     );
-    let deadline = tokio::time::Instant::now() + config.startup_timeout;
-    let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
-    let started = tokio::time::timeout_at(deadline, async {
-        wait_active(
-            &root,
-            std::slice::from_ref(&processes.view),
-            remaining(),
-            &CancellationToken::new(),
-        )
-        .await?;
-        let layers = std::iter::once(assembly.clone())
-            .chain(plugin_layer.clone())
-            .collect();
-        let reconcile = processes.loader.reconcile(layers, None);
-        let report = match tokio::time::timeout_at(deadline, reconcile).await {
-            Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
-            Err(_) => {
+    let mut progress = StartupProgress::new(&root, config.startup_timeout)?;
+    let started = progress
+        .wait(
+            async {
                 wait_active(
                     &root,
-                    &processes.views(),
-                    Duration::ZERO,
+                    std::slice::from_ref(&processes.view),
+                    config.startup_timeout,
                     &CancellationToken::new(),
                 )
                 .await?;
-                return Err(AgentError::Build("process assembly timed out".into()));
-            }
-        };
-        let failures: Vec<_> = report
-            .failures
-            .iter()
-            .filter(|failure| processes.required.contains(&failure.id))
-            .collect();
-        if !failures.is_empty() || !report.issues.is_empty() {
-            return Err(AgentError::Build(format!(
-                "process assembly: {:?} {:?}",
-                failures, report.issues
-            )));
-        }
-        processes.wait_active(&root, remaining()).await
-    })
-    .await;
+                let layers = std::iter::once(assembly.clone())
+                    .chain(plugin_layer.clone())
+                    .collect();
+                let report = processes
+                    .loader
+                    .reconcile(layers, None)
+                    .await
+                    .map_err(|error| AgentError::Build(error.to_string()))?;
+                let failures: Vec<_> = report
+                    .failures
+                    .iter()
+                    .filter(|failure| processes.required.contains(&failure.id))
+                    .collect();
+                if !failures.is_empty() || !report.issues.is_empty() {
+                    return Err(AgentError::Build(format!(
+                        "process assembly: {:?} {:?}",
+                        failures, report.issues
+                    )));
+                }
+                processes.wait_active(&root, config.startup_timeout).await
+            },
+            || processes.views().iter().map(|view| view.id).collect(),
+        )
+        .await;
     let started = match started {
-        Ok(result) => result,
-        Err(_) => match wait_active(
+        Some(result) => result,
+        None => match wait_active(
             &root,
             &processes.views(),
             Duration::ZERO,

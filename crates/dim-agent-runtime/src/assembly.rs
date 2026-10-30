@@ -2,8 +2,8 @@ use crate::core::OpeningCount;
 use crate::*;
 use futures_util::FutureExt;
 use rutis::host::{
-    BoxFuture as RutisFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key,
-    PluginFactory, PluginId, TypeKey,
+    BoxFuture as RutisFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState,
+    FiberStatusChanged, FiberView, Key, PluginFactory, PluginId, TypeKey,
 };
 use rutis::{Ctx, Error};
 use rutis_loader::edit::{CreateInstance, InstanceResult};
@@ -14,7 +14,7 @@ use rutis_loader::{Builtins, Loader, LoaderError, Resolver};
 use serde_json::{Value, json};
 use std::time::Duration;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, Weak},
 };
@@ -26,6 +26,89 @@ pub const AGENT_GROUP: &str = "agent";
 pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
+
+/// Bounds an opening by inactivity in its own fiber subtrees, including rows
+/// created while the opening is in flight. Other scopes cannot extend it.
+pub struct StartupProgress {
+    ctx: Ctx,
+    started: tokio::time::Instant,
+    timeout: Duration,
+    active: Arc<Mutex<HashMap<PluginId, tokio::time::Instant>>>,
+    listener: Option<rutis::Disposer>,
+}
+
+impl StartupProgress {
+    pub fn new(ctx: &Ctx, timeout: Duration) -> Result<Self> {
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let changes = active.clone();
+        let started = tokio::time::Instant::now();
+        let listener = ctx.on_sync::<FiberStatusChanged>(move |event, _| {
+            if event.to == FiberState::Active {
+                changes
+                    .lock()
+                    .unwrap()
+                    .insert(event.plugin_id, tokio::time::Instant::now());
+            }
+            Ok(None)
+        })?;
+        Ok(Self {
+            ctx: ctx.clone(),
+            started,
+            timeout,
+            active,
+            listener: Some(listener),
+        })
+    }
+
+    /// Returns `None` after no row in `roots` became Active for the timeout.
+    /// The root identities are read when the inactivity interval expires.
+    pub async fn wait<F: std::future::Future>(
+        &mut self,
+        future: F,
+        roots: impl Fn() -> Vec<PluginId>,
+    ) -> Option<F::Output> {
+        tokio::pin!(future);
+        let mut deadline = self.started + self.timeout;
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut future => return Some(result),
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
+            let snapshot = self.ctx.diagnostics();
+            let members: HashSet<_> = roots()
+                .into_iter()
+                .flat_map(|id| subtree(&snapshot, id))
+                .collect();
+            let last = self
+                .active
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| members.contains(id))
+                .map(|(_, time)| *time)
+                .max()
+                .unwrap_or(self.started);
+            deadline = last + self.timeout;
+            if deadline <= tokio::time::Instant::now() {
+                return None;
+            }
+        }
+    }
+}
+
+impl Drop for StartupProgress {
+    fn drop(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            let sink = self.ctx.error_sink();
+            self.ctx.handle().spawn(async move {
+                if let Err(error) = listener.dispose().await {
+                    sink(error);
+                }
+            });
+        }
+    }
+}
 
 /// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
 type PartMake =
@@ -54,7 +137,7 @@ const PROCESS_VALUES: &str = "ProcessValues";
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
-    /// Deadline for a Session or branch to become Active.
+    /// Maximum time without an opening Session or branch row becoming Active.
     pub startup_timeout: Duration,
     pub store: Arc<dyn TimelineStore>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
@@ -115,6 +198,7 @@ impl AgentBuilder {
         self.custom_store = true;
         self
     }
+    /// Maximum time without a row becoming Active in an opening scope.
     pub fn startup_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.assembly.startup_timeout = timeout;
         self
@@ -1255,22 +1339,6 @@ impl TimelineFactory {
         ancestors: Vec<(String, u64)>,
         cancel: CancellationToken,
     ) -> BoxFuture<'_, std::result::Result<Arc<TimelineContext>, TimelineBuildError>> {
-        self.build_until(
-            id,
-            ancestors,
-            cancel,
-            tokio::time::Instant::now() + self.startup_timeout(),
-        )
-    }
-
-    /// Uses the tree's complete opening budget, including parent readiness.
-    pub fn build_until(
-        &self,
-        id: String,
-        ancestors: Vec<(String, u64)>,
-        cancel: CancellationToken,
-        deadline: tokio::time::Instant,
-    ) -> BoxFuture<'_, std::result::Result<Arc<TimelineContext>, TimelineBuildError>> {
         Box::pin(async move {
             let parent = self
                 .0
@@ -1285,9 +1353,9 @@ impl TimelineFactory {
                 branch_id: id.clone(),
             };
             let sequence = tokio::select! {
-                result = parent.assembly.store.head(&key) => result?,
+                result = tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key)) =>
+                    result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                 _ = cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into()).into()),
-                _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into()).into()),
             };
             let owner = Arc::new(BranchAssembly {
                 session: parent.clone(),
@@ -1306,7 +1374,7 @@ impl TimelineFactory {
                     &session.ctx,
                     BRANCH_GROUP.into(),
                     move |create| create.with(value),
-                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    self.startup_timeout(),
                     &cancel,
                     {
                         let owner = owner.clone();
@@ -1437,16 +1505,29 @@ async fn create_instance(
         crate::parts::Opened,
     ),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let mut progress = StartupProgress::new(ctx, timeout).map_err(|error| (error, None))?;
     let mut creation = {
         let (loader, ctx, group) = (loader.clone(), ctx.clone(), group.clone());
         tokio::spawn(async move { configure(loader.create_instance(&ctx, &group)).await })
     };
-    let ended = tokio::select! {
-        joined = &mut creation => Some(joined),
-        _ = cancel.cancelled() => None,
-        _ = tokio::time::sleep_until(deadline) => None,
-    };
+    let ended = progress
+        .wait(
+            async {
+                tokio::select! {
+                    joined = &mut creation => Some(joined),
+                    _ = cancel.cancelled() => None,
+                }
+            },
+            || {
+                instance()
+                    .0
+                    .and_then(|id| locate(loader, ctx, id))
+                    .map(|created| vec![created.view.id])
+                    .unwrap_or_default()
+            },
+        )
+        .await
+        .flatten();
     let created = match ended {
         Some(Ok(Ok(instance))) => instance,
         Some(Ok(Err(error))) => return Err((loader_error(error), None)),
@@ -1503,8 +1584,12 @@ async fn create_instance(
     };
     let mut waiting = rows(&loader.entries(), &created.view, Some(&required));
     waiting.extend(instance().2.required);
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let ready = wait_active(ctx, &waiting, remaining, cancel).await;
+    let ready = progress
+        .wait(wait_active(ctx, &waiting, timeout, cancel), || {
+            vec![created.view.id]
+        })
+        .await
+        .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
     created.children = rows(&loader.entries(), &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
@@ -1521,14 +1606,21 @@ async fn create_instance(
             let _ = view.await;
         }
     };
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    tokio::select! {
-        () = settled => Ok(created),
-        _ = cancel.cancelled() => Err((AgentError::Cancelled("initialization".into()), Some(created))),
-        _ = tokio::time::sleep(remaining) => {
-            let error = timed_out(ctx, &created.children);
-            Err((error, Some(created)))
-        }
+    let settled = progress
+        .wait(
+            async {
+                tokio::select! {
+                    () = settled => Ok(()),
+                    _ = cancel.cancelled() => Err(AgentError::Cancelled("initialization".into())),
+                }
+            },
+            || vec![created.view.id],
+        )
+        .await
+        .unwrap_or_else(|| Err(timed_out(ctx, &created.children)));
+    match settled {
+        Ok(()) => Ok(created),
+        Err(error) => Err((error, Some(created))),
     }
 }
 /// Candidate rows, including nested extensions. Main and child branches do
@@ -1649,7 +1741,6 @@ pub(crate) async fn build_session(
         copies: Arc::default(),
     });
     let startup_timeout = owner.assembly.startup_timeout;
-    let deadline = tokio::time::Instant::now() + startup_timeout;
     let instance = |owner: &Arc<SessionAssembly>| {
         let owner = owner.clone();
         move || {
@@ -1700,18 +1791,23 @@ pub(crate) async fn build_session(
             }
         };
         tokio::pin!(initialize);
+        let mut progress = StartupProgress::new(host, startup_timeout)?;
         let initialize = tokio::select! {
-            result = &mut initialize => result,
+            result = progress.wait(&mut initialize, || vec![created.view.id]) => {
+                match result {
+                    Some(result) => result,
+                    None => {
+                        let error = timed_out(host, std::slice::from_ref(&created.view));
+                        tree.begin_close();
+                        let _ = initialize.await;
+                        Err(error)
+                    }
+                }
+            },
             _ = owner.closing.cancelled() => {
                 tree.begin_close();
                 let _ = initialize.await;
                 Err(AgentError::Cancelled("session initialization".into()))
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                let error = timed_out(host, std::slice::from_ref(&created.view));
-                tree.begin_close();
-                let _ = initialize.await;
-                Err(error)
             }
         };
         if let Err(error) = initialize {
@@ -1761,7 +1857,7 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: Key<T>) -> Result
     })
 }
 /// Waits until every view is Active; a failure or disposal of any view,
-/// cancellation or the deadline ends the wait. Views are watched together, so
+/// cancellation or an interval without progress ends the wait. Views are watched together, so
 /// a Failed view ends the wait even while a dependent of it stays Pending.
 /// `ctx` only describes unmet dependencies on timeout.
 pub async fn wait_active(
@@ -1770,7 +1866,7 @@ pub async fn wait_active(
     timeout: std::time::Duration,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let mut deadline = tokio::time::Instant::now() + timeout;
     let mut waiting: Vec<_> = views.iter().map(|view| (view, view.watch())).collect();
     loop {
         let mut index = 0;
@@ -1779,6 +1875,7 @@ pub async fn wait_active(
             let snapshot = state.borrow_and_update().clone();
             match snapshot.state {
                 FiberState::Active => {
+                    deadline = tokio::time::Instant::now() + timeout;
                     waiting.swap_remove(index);
                     continue;
                 }

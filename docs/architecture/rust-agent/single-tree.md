@@ -287,7 +287,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 1. `serve(builder, config)` 校验配置，建立 root 并注册全部进程 Plugin；Plugin 构造器只接收配置。
 2. `TransportPlugin` 绑定监听器并登记清理；accept 任务等待 `ServerControl` 的就绪门闩。
-3. 全部进程 Plugin 在 `startup_timeout` 内 Active 后（`Agents` 的 Active 含上述归属登记），门闩打开，`serve` 返回 `RunningServer` 与真实监听地址。
+3. 全部进程 Plugin Active 后（`Agents` 的 Active 含上述归属登记），门闩打开，`serve` 返回 `RunningServer` 与真实监听地址。启动作用域连续 `startup_timeout` 没有行变为 Active 才超时；持续进展可超过该总时长，详见 [rutis 使用约定](../../design/rutis-usage.md#a3-settled-questions)。
 4. 任一 Plugin 失败或超期：门闩不打开，root shutdown 并等待回滚，返回原始错误并汇总清理错误；不留下 socket、登录轮询或 Session。
 5. `serve` 在交出 `RunningServer` 前被丢弃时，同样请求 root shutdown。
 

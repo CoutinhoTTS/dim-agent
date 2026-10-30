@@ -519,7 +519,6 @@ impl TimelineTree {
         });
         let owner = self.weak.upgrade().expect("tree owns branch creation");
         self.builds.spawn(async move {
-            let deadline = tokio::time::Instant::now() + owner.factory.startup_timeout();
             let mut acquired = None;
             let mut cleanup_failure = None;
             let mut started = false;
@@ -530,23 +529,20 @@ impl TimelineTree {
                         _ = owner.cancel.cancelled() => {
                             return Err(AgentError::Cancelled("branch creation".into()));
                         }
-                        _ = tokio::time::sleep_until(deadline) => {
-                            return Err(AgentError::Build("branch opening timed out".into()));
-                        }
                     }
                 }
                 if let Some((timeline, through)) = validate {
                     let context = tokio::select! {
-                        result = crate::history::read_context(&timeline, through) => result?,
+                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::read_context(&timeline, through)) =>
+                            result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
-                        _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                     };
                     crate::history::validate_context_boundary(&context)
                         .map_err(AgentError::InvalidInput)?;
                 }
                 let built = owner
                     .factory
-                    .build_until(id.clone(), ancestors, owner.cancel.child_token(), deadline)
+                    .build(id.clone(), ancestors, owner.cancel.child_token())
                     .await;
                 let context = match built {
                     Err(error) => {
@@ -556,6 +552,7 @@ impl TimelineTree {
                     Ok(context) => context,
                 };
                 acquired = Some(context.clone());
+                let deadline = tokio::time::Instant::now() + owner.factory.startup_timeout();
                 owner
                     .state
                     .lock()

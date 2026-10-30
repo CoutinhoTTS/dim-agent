@@ -485,6 +485,82 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
 struct Stuck {
     identity: Key<SessionIdentity>,
 }
+
+struct Progressing {
+    name: String,
+    identity: TypeKey,
+    step: usize,
+    completed: tokio::sync::watch::Sender<usize>,
+}
+impl DynPlugin for Progressing {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.clone()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let mut completed = self.completed.subscribe();
+            while *completed.borrow_and_update() < self.step {
+                tokio::select! {
+                    result = completed.changed() => result.map_err(|error| ErrorKind::PluginFailed(error.into()))?,
+                    _ = ctx.cancelled() => return Err(ErrorKind::PluginFailed("opening cancelled".into()).into()),
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                _ = ctx.cancelled() => return Err(ErrorKind::PluginFailed("opening cancelled".into()).into()),
+            }
+            self.completed.send_replace(self.step + 1);
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_and_its_main_branch_keep_opening_while_rows_become_active() {
+    let mut builder = builder();
+    builder.startup_timeout(Duration::from_millis(500));
+    let (completed, _) = tokio::sync::watch::channel(0);
+    let mut feature = Feature::new("test.progress");
+    for step in 0..4 {
+        let completed = completed.clone();
+        let name = format!("test.progress-session-{step}");
+        feature = feature.session(name.clone(), move |names| {
+            Ok(Box::new(Progressing {
+                name: name.clone(),
+                identity: names.key::<SessionIdentity>()?.erase(),
+                step,
+                completed: completed.clone(),
+            }))
+        });
+    }
+    for step in 4..8 {
+        let completed = completed.clone();
+        let name = format!("test.progress-branch-{step}");
+        feature = feature.branch(name.clone(), move |names| {
+            Ok(Box::new(Progressing {
+                name: name.clone(),
+                identity: names.key::<TimelineIdentity>()?.erase(),
+                step,
+                completed: completed.clone(),
+            }))
+        });
+    }
+    builder.require_feature(feature);
+    let agent = builder.build();
+    let session = tokio::time::timeout(
+        Duration::from_secs(20),
+        agent.create_session(SessionConfig::default()),
+    )
+    .await
+    .expect("a progressing opening finishes")
+    .unwrap();
+    assert_eq!(*completed.borrow(), 8);
+    assert!(session.state("main").is_ok());
+    agent.close().await.unwrap();
+}
 impl Stuck {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
@@ -509,11 +585,8 @@ impl DynPlugin for Stuck {
     }
 }
 
-/// One deadline covers loader startup, reconcile and rows becoming Active
-/// (#6): a row that never finishes `apply` fails the creation, and nothing
-/// of the Session stays.
 #[tokio::test]
-async fn a_row_blocking_in_apply_fails_creation_at_the_startup_deadline() {
+async fn a_row_blocking_in_apply_fails_creation_after_no_progress() {
     let mut builder = builder();
     builder
         .startup_timeout(Duration::from_millis(100))
@@ -528,7 +601,7 @@ async fn a_row_blocking_in_apply_fails_creation_at_the_startup_deadline() {
         agent.create_session(SessionConfig::default()),
     )
     .await
-    .expect("creation returns at the deadline")
+    .expect("creation returns after no progress")
     .err()
     .expect("the stuck row fails the creation");
     assert!(started.elapsed() < Duration::from_secs(5), "{error}");
@@ -538,4 +611,32 @@ async fn a_row_blocking_in_apply_fails_creation_at_the_startup_deadline() {
         .await
         .expect("close returns")
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_outside_an_opening_cannot_keep_a_stuck_session_alive() {
+    let root = Ctx::root().unwrap();
+    let mut builder = builder();
+    builder
+        .startup_timeout(Duration::from_millis(100))
+        .require_feature(
+            Feature::new("test.stuck")
+                .session("test.stuck", |names| Ok(Box::new(Stuck::new(names)?))),
+        );
+    let agent = builder.build_in(&root);
+    let unrelated = async {
+        for _ in 0..8 {
+            let view = root.plugin(ClockPart);
+            (&view).await.unwrap();
+            view.dispose().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let error = tokio::select! {
+        result = agent.create_session(SessionConfig::default()) => result.err().expect("the stuck opening fails"),
+        () = unrelated => panic!("unrelated Active rows kept the opening alive"),
+    };
+    assert!(error.to_string().contains("test.stuck"), "{error}");
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
 }
