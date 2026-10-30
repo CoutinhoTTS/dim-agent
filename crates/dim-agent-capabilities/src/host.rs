@@ -96,12 +96,12 @@ impl ModelSettings {
             metadata: None,
         }
     }
-    pub fn request(self, messages: Vec<Message>) -> ModelRequest {
+    pub fn request(self, messages: Vec<Arc<Message>>) -> ModelRequest {
         ModelRequest {
             provider_id: self.provider_id,
             model_id: self.model_id,
             capability_snapshot: self.capability_snapshot,
-            messages: messages.into_iter().map(Arc::new).collect(),
+            messages,
             tools: self.tools.map(Arc::new),
             system: self.system.map(Arc::new),
             config: self.config,
@@ -117,7 +117,7 @@ pub trait PrepareModel: Send + Sync + 'static {
         &self,
         turn_id: &str,
         request_id: &str,
-        history: &[Message],
+        history: &[Arc<Message>],
         available_tools: &[ToolDefinition],
     ) -> Result<ModelSettings, HostError>;
 }

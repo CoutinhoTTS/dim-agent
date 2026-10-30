@@ -230,7 +230,7 @@ fn builder_with_context(
 fn external_history(events: &ContextHistory) -> std::result::Result<Vec<HistoryEntry>, String> {
     let mut history = project_context_history(events)?;
     for entry in &mut history {
-        if let MessageContent::Text(text) = &mut entry.message.content {
+        if let MessageContent::Text(text) = &mut Arc::make_mut(&mut entry.message).content {
             *text = format!("External: {text}");
         }
     }

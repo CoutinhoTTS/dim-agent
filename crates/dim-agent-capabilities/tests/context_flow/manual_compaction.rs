@@ -363,6 +363,9 @@ async fn projected(timeline_session: &Session, branch: &str) -> Vec<Message> {
     let context = timeline_session.context(branch, through).await.unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
+        .into_iter()
+        .map(Arc::unwrap_or_clone)
+        .collect()
 }
 
 /// Acceptance 3: with no turn, `context/compact` is served at once and
@@ -873,7 +876,13 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     }
     let context = session.context("main", fact).await.unwrap();
     let renamed = renamed_history(&context).unwrap();
-    assert_eq!(context_messages(&context, &renamed), messages);
+    assert_eq!(
+        context_messages(&context, &renamed)
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
+        messages
+    );
     let id = session.id().to_owned();
     agent.close().await.unwrap();
     let head = async |branch: &str| {
@@ -997,7 +1006,13 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     );
     let timeline_context = session.context("main", fact).await.unwrap();
     let history = renamed_history(&timeline_context).unwrap();
-    assert_eq!(context_messages(&timeline_context, &history), messages);
+    assert_eq!(
+        context_messages(&timeline_context, &history)
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
+        messages
+    );
     let command = session
         .service::<AgentLoop>("main")
         .unwrap()

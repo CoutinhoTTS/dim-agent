@@ -268,7 +268,7 @@ impl ContextPolicy {
         history: Vec<HistoryEntry>,
         reusable: Vec<Arc<AgentEvent>>,
     ) -> Result<View, HostError> {
-        let prefix_len = context_messages(&context, &history).len();
+        let prefix_len = crate::history::context_messages_len(&context, &history);
         let reused = reusable.iter().rev().find_map(|event| match &event.kind {
             EventKind::ContextCompaction(data) => checkpoint(data).and_then(|checkpoint| {
                 retained_entry(&context, &history, &checkpoint.retain_from)
@@ -718,7 +718,7 @@ impl ContextPolicy {
         let dropped = count(
             view.history[..cut.entry]
                 .iter()
-                .map(|entry| entry.message.clone())
+                .map(|entry| entry.message.as_ref().clone())
                 .collect(),
         ) - empty;
         let pinned = count(pinned_inputs(view, turn, &cut.retain_from, model).messages) - empty;
@@ -1010,7 +1010,7 @@ fn project(
         .cloned()
         .map(Arc::new)
         .chain(baseline.iter().map(|entry| Arc::new(entry.message.clone())))
-        .chain(kept.iter().map(|entry| Arc::new(entry.message.clone())))
+        .chain(kept.iter().map(|entry| entry.message.clone()))
         .chain(request.messages[prefix_len..].iter().cloned())
         .collect();
     Arc::new(result)
@@ -1516,7 +1516,7 @@ fn regrown(view: &View, model: &dyn ContextModel) -> bool {
                     None => true,
                 })
         })
-        .map(|entry| count(vec![entry.message.clone()]) - empty)
+        .map(|entry| count(vec![entry.message.as_ref().clone()]) - empty)
         .sum();
     new >= RETAINED_SHARE * input_budget(model)
 }
@@ -1618,7 +1618,8 @@ impl<'a> Retention<'a> {
         };
         let mut tail = vec![0.; history.len() + 1];
         for (index, entry) in history.iter().enumerate().rev() {
-            tail[index] = tail[index + 1] + count(vec![entry.message.clone()]) - self.empty;
+            tail[index] =
+                tail[index + 1] + count(vec![entry.message.as_ref().clone()]) - self.empty;
         }
         let budget = input_budget(self.model);
         let fits = cuts.iter().position(|cut| {

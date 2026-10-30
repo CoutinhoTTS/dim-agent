@@ -616,7 +616,7 @@ impl ContextPreparation {
             || !prefix
                 .iter()
                 .zip(&request.messages)
-                .all(|(entry, message)| entry == message.as_ref())
+                .all(|(entry, message)| entry.as_ref() == message.as_ref())
         {
             return Err(HostError::failed(
                 "Context preparation must preserve the timeline history prefix; additional messages may be appended.",

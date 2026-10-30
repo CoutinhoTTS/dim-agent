@@ -205,7 +205,10 @@ fn a_record_without_replacement_parts_deserializes_and_replays() {
     ]);
     let history = project_context_history(&context).unwrap();
     assert_eq!(
-        context_messages(&context, &history),
+        context_messages(&context, &history)
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
         vec![
             summary_message("recorded"),
             Message::text(Role::User, "second")
@@ -283,7 +286,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         dim_agent_capabilities::history::context_messages(
             &replay,
             &(renderer.render)(&replay).unwrap()
-        ),
+        )
+        .into_iter()
+        .map(Arc::unwrap_or_clone)
+        .collect::<Vec<_>>(),
         vec![dim_agent_capabilities::history::summary_message(
             "authoritative"
         )]
@@ -617,7 +623,14 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
             }
         };
         let history = project_context_history(&candidate).unwrap();
-        assert_eq!(context_messages(&candidate, &history), expected, "{cut:?}");
+        assert_eq!(
+            context_messages(&candidate, &history)
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
+            expected,
+            "{cut:?}"
+        );
         assert!(history.last().unwrap().baseline.is_empty());
     }
     assert_eq!(project_history(&context.events).unwrap().len(), 6);
@@ -1046,7 +1059,7 @@ fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking
         ["event-1", "event-9", "event-9:0", "event-9:1", "event-12"]
     );
     assert_eq!(
-        history[1].message,
+        history[1].message.as_ref().clone(),
         assistant(vec![
             text_part("Hello"),
             tool_part("a", tool_input()),
@@ -1073,7 +1086,10 @@ fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking
         end("r1", failed.clone()),
     ]);
     assert_eq!(
-        project_context_history(&text_only).unwrap()[0].message,
+        project_context_history(&text_only).unwrap()[0]
+            .message
+            .as_ref()
+            .clone(),
         assistant(vec![text_part("half")])
     );
     let thinking_only = fixed(vec![start("r1"), thinking("r1", "plan"), end("r1", failed)]);
@@ -1101,7 +1117,7 @@ fn a_completed_output_closed_by_the_loop_before_turn_end_keeps_its_thinking() {
         ["event-4", "event-5:0"]
     );
     assert_eq!(
-        history[0].message,
+        history[0].message.as_ref().clone(),
         assistant(vec![
             MessagePart::Thinking {
                 provider_metadata: None,

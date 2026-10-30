@@ -415,7 +415,11 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
     let expected: Vec<_> = replacement
         .iter()
         .cloned()
-        .chain(history[1..].iter().map(|entry| entry.message.clone()))
+        .chain(
+            history[1..]
+                .iter()
+                .map(|entry| entry.message.as_ref().clone()),
+        )
         .collect();
     let request = events
         .iter()

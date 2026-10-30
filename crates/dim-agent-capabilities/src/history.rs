@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
     pub id: String,
-    pub message: Message,
+    pub message: Arc<Message>,
     pub tool_context: bool,
     /// Deterministic state immediately after this entry's source event.
     pub baseline: Arc<[ContextBaselineEntry]>,
@@ -552,8 +552,8 @@ pub fn project_context_history(context: &ContextHistory) -> Result<Vec<HistoryEn
 
 /// The replay rule of every strategy: the stored replacement, the keyed
 /// baseline, then the entries the cut keeps.
-pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<Message> {
-    let mut messages = Vec::new();
+pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<Arc<Message>> {
+    let mut messages = Vec::with_capacity(context_messages_len(context, history));
     if let Some(ContextCompactionData {
         outcome:
             ContextCompactionResult::Completed {
@@ -564,11 +564,33 @@ pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> V
         ..
     }) = context_compaction(context)
     {
-        messages.extend(replacement.iter().cloned());
-        messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));
+        messages.extend(replacement.iter().cloned().map(Arc::new));
+        messages.extend(
+            context_baseline
+                .iter()
+                .map(|entry| Arc::new(entry.message.clone())),
+        );
     }
     messages.extend(history.iter().map(|entry| entry.message.clone()));
     messages
+}
+
+/// The number of messages `context_messages` returns, without building it.
+pub fn context_messages_len(context: &ContextHistory, history: &[HistoryEntry]) -> usize {
+    let mut len = history.len();
+    if let Some(ContextCompactionData {
+        outcome:
+            ContextCompactionResult::Completed {
+                replacement,
+                context_baseline,
+                ..
+            },
+        ..
+    }) = context_compaction(context)
+    {
+        len += replacement.len() + context_baseline.len();
+    }
+    len
 }
 
 pub fn context_configuration(context: &ContextHistory) -> Option<ContextConfiguredData> {
@@ -649,7 +671,7 @@ fn entry(
 ) -> HistoryEntry {
     HistoryEntry {
         id,
-        message,
+        message: Arc::new(message),
         tool_context,
         baseline,
         source: String::new(),
@@ -749,6 +771,6 @@ fn digest_line(entry: &ToolEffect) -> String {
 pub fn project_messages(events: &[Arc<AgentEvent>]) -> Result<Vec<Message>, String> {
     Ok(project_history(events)?
         .into_iter()
-        .map(|entry| entry.message)
+        .map(|entry| Arc::unwrap_or_clone(entry.message))
         .collect())
 }

@@ -739,7 +739,7 @@ impl PreparedStep {
             .enumerate()
             .map(|(index, message)| HistoryEntry {
                 id: format!("m{index}"),
-                message: message.clone(),
+                message: Arc::new(message.clone()),
                 tool_context: message.role == Role::ToolResult,
                 baseline: Arc::from([]),
                 source: format!("m{index}"),
