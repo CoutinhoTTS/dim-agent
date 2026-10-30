@@ -102,6 +102,7 @@ rechecks the fold before writing.
 
 [branch_flow.rs](../../../../crates/dim-agent-capabilities/tests/branch_flow.rs):
 `main_lists_its_open_tool_lines_under_one_key`,
+`a_configured_roster_closing_reaches_the_roster`,
 `an_idle_line_tells_main_once_when_its_turn_ends_without_a_word`,
 `a_tool_line_ends_itself_and_main_learns_it_from_the_roster`,
 `an_end_from_outside_a_tool_line_wakes_main_with_a_notice`,

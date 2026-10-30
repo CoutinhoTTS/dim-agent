@@ -8,7 +8,7 @@ use dim_agent_capabilities::{
         ModelHost, ModelStopReason, ModelStream, PrepareContextHost, ResolveContextModel,
         StrategyDiagnostics, StrategyOutcome, ToolHost,
     },
-    timeline_tree::TreeCommands,
+    timeline_tree::{BranchToolConfig, TreeCommands},
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::*;
@@ -349,10 +349,24 @@ fn setup(probe: &Arc<Probe>) -> Agent {
     builder(probe).build()
 }
 fn builder(probe: &Arc<Probe>) -> AgentBuilder {
+    builder_with(probe, defaults::install)
+}
+
+/// [`builder`] with the branch texts at a candidate's factory configuration
+/// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)):
+/// #636 evaluates the roster's closing sentence, which BranchLine reads from
+/// its member.
+fn builder_with_branch_config(probe: &Arc<Probe>, config: BranchToolConfig) -> AgentBuilder {
+    builder_with(probe, move |builder| {
+        defaults::install_with_branch_config(builder, config)
+    })
+}
+
+fn builder_with(probe: &Arc<Probe>, install: impl FnOnce(&mut AgentBuilder)) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     mock_hosts(&mut builder);
-    defaults::install(&mut builder);
+    install(&mut builder);
     let writer = probe.clone();
     builder.require_feature(
         Feature::new("test.cleanup-writer").branch("test.cleanup-writer", move |names| {
@@ -2924,6 +2938,13 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
     assert!(text.contains(&format!("\n- {second}: second purpose\n")));
     assert!(!text.contains("more detail"));
     assert!(text.ends_with("</dim-branch-lines>"));
+    assert!(
+        text.contains(
+            "\nThey message you when they find something, need you, or end. Use the branch \
+             tool to message or read them, and wait to wait for them.\n"
+        ),
+        "the built-in closing sentence is unchanged: {text}"
+    );
     let history = session.history(&first, None).await.unwrap();
     let (identity, retired) = line_block(&history).unwrap();
     assert!(!retired);
@@ -2939,6 +2960,42 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
              You are line {first} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.\n\n\
              Your purpose, as main wrote it:\nfirst purpose"
         )
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// #636: the roster's closing sentence is the factory member
+/// `BranchToolConfig::roster_closing`, and a configured value reaches the
+/// roster byte for byte in place of the built-in sentence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_roster_closing_reaches_the_roster() {
+    let closing = "Configured: report once and end your wait when nothing is left to tell.";
+    let probe = Arc::new(Probe::default());
+    let agent = builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            roster_closing: Some(closing.into()),
+            ..Default::default()
+        },
+    )
+    .build();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    let events = until_events(&session, "main", |events| {
+        line_block(events).is_some_and(|(text, retired)| !retired && text.contains(&child))
+    })
+    .await;
+    let (text, retired) = line_block(&events).unwrap();
+    assert!(!retired);
+    assert!(
+        text.ends_with(&format!("\n{closing}\n</dim-branch-lines>")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("They message you when they find something"),
+        "the built-in closing sentence is replaced: {text}"
     );
     soon(agent.close()).await.unwrap();
 }
