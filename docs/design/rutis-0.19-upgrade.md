@@ -69,12 +69,12 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 | `ServiceCatalog::share_registered_only()` | Removed: every name not registered otherwise is shared by name |
 | `Loader::waiting_for(entry)` | `Loader::waits(entry)` |
 | `Loader::set_overlay`, `overlays()` | Removed: a layer of one's own in the list given to `reconcile` |
-| `PeerPlugin`, `LinkConfig`, `LinkState`, `Features`, `Peer`, `peer_key`, `plugins.load` / `plugins.unload` | `Session::handshake(&ctx, channel)`, `Greeted` (`id()`, `handle()`), `SessionHandle::run(plugin, config)`, `RowHandle::loaded()` |
+| `PeerPlugin`, `LinkConfig`, `LinkState`, `Features`, `Peer`, `peer_key`, `plugins.load` / `plugins.unload` | `Session::handshake(&ctx, channel)`, then mount the `Greeted`, whose `id()` names the far end; running a plugin there is `SessionHandle::run` or a `<row>:<plugin>` loader row, which Dim does not use (M8) |
 | `Identity`, `StaticIdentity`, `IdentityPlugin`, `identity_key` | `rutis_bridge::LocalId(PeerId)`, one per kernel |
 | `Transport`, `Dial`, `transport_key` | Removed: a connection is a `Channel` handed to a session |
 | `transport::local::framed` | `pipe::framed` |
 | `Closer::close(&str)` | `Closer::close(Close)` |
-| `StaticCatalog::with(name, Described { .. }, factory)` | `StaticCatalog::with(name, Installed::new(factory).schema(..).version(..))`, provided at `catalog_key()` |
+| `StaticCatalog::with(name, Described { .. }, factory)` | `StaticCatalog::with(name, Installed::new(factory))`, provided at `catalog_key()`; not used: the leaf offers no catalog (M8) |
 | `rutis_bridge::build::Exports` | `rutis_types::Exports`, same API; the generated header changes |
 | `LoaderPlugin` provides `Loader` and the mounter | Also the marked service `loader` and the session catalog at `catalog_key()` |
 
@@ -256,84 +256,94 @@ own pull request (§5).
 - The App Server keeps its `tracing` sink. Its loader's configuration warnings go to `tracing`
   through `Loader::on_config_warning`.
 
-### M8. The UI leaf is a session
+### M8. The UI leaf is a plugin whose life is a session
 
-The leaf keeps [Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves). The daemon loads the ordinary
-`Tui` plugin into the interactive process, unloads it or replaces it. Lifecycle and liveness are rutis
-facts, and business traffic stays on protocol v3. Only the mechanism changes:
+The leaf keeps the purpose of [Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves). The daemon is
+the authority over which interfaces are alive and can close or replace them. Lifecycle and liveness
+are rutis facts, there is no UI-specific control protocol, and business traffic stays on protocol v3.
+
+On 0.19 the daemon no longer loads `Tui` into the leaf. Running a plugin on the far end is a remote run
+or a loader row. A remote run has to wait until the far end serves rows, and per-`ui.open` loader rows
+would need a second owner of the loader's layers. Neither is needed:
+
+- The daemon's `UiLeaf` is a plugin, as today.
+- Its life is the session with the leaf.
+- The leaf runs its own `Tui`.
 
 ```text
 daemon root (LocalId dim-daemon)                 dimcode leaf root
   UiHostPlugin                                     LeafNode
-    └─ UiLeaf (one per ui.open)                      ├─ LocalId ui-<id>
-         ├─ ctx isolated for catalog_key()           ├─ catalog_key(): StaticCatalog { "Tui" }
-         ├─ dial address ──── one channel ─────────► └─ accept once, pipe::framed
-         ├─ handshake: far id must be ui-<id>             handshake: far id must be dim-daemon
-         ├─ session ◄══════════ rutis session ═════════►  session
-         └─ TuiRow: run("Tui", {uiId, token,                └─ Tui (hosted; dim-daemon runs it)
-                    sessionId}) → loaded                         └─ DaemonLink ── protocol v3 ──► Rpc
+    └─ UiLeaf (ctx.plugin, one per ui.open)          ├─ LocalId ui-<id>
+         ├─ ctx isolated for catalog_key()           ├─ accept once, pipe::framed
+         ├─ dial address ──── one channel ─────────► │   handshake: far id must be dim-daemon
+         ├─ handshake: far id must be ui-<id>        ├─ session ── its end disposes the client tree
+         └─ session ◄═════════ rutis session ═══════►┘
+                                                    └─ Tui (mounted by the leaf, config from ui.open's reply)
+                                                         └─ DaemonLink ── protocol v3 ──► Rpc (ui.attach)
 ```
 
-- **Leaf.** `LeafNode` provides `LocalId(ui-<id>)` and a `StaticCatalog` holding only `Tui` at
-  `catalog_key()`. It accepts the one connection on its private address, as `Accept` does today (now a
-  plain function returning a `Channel`), and greets with `Session::handshake`. A far end whose id is not
-  `dim-daemon` is dropped, which closes the channel. The leaf then mounts the session, whose end replaces
-  `LinkState::Stopped`.
-- **Daemon.** `UiLeaf` dials the address, as `LeafDialer` does today (now a plain function). It dials
-  only the private address the leaf names:
+- **`ui.open`.** The leaf binds its private address and calls `ui.open {sessionId, kind, peer, address}`
+  over its local connection, as today.
+  - The daemon mounts a `UiLeaf`. `UiLeaf` dials the address, greets, and mounts the session.
+  - `ui.open` then replies `{uiId, generation, token}`. The token moves from the hosted `Tui`'s load
+    config into this reply; the daemon still keeps only its SHA-256 digest.
+  - A link failure is `ui_leaf_failed` and leaves no registration, as today.
+- **Leaf.** `LeafNode` provides `LocalId(ui-<id>)` and offers no plugin catalog, so the daemon can run
+  nothing on the leaf.
+  - It accepts the one connection on its private address, as `Accept` does today (now a plain function
+    returning a `Channel`), and greets with `Session::handshake`. A far end whose id is not
+    `dim-daemon` is dropped, which closes the channel.
+  - It then mounts the session, and mounts `Tui` once `ui.open` replies. `Tui` takes `uiId`, the token
+    and `sessionId` from the reply, and everything else from the leaf's own invocation, as the hosted
+    `Tui` did.
+  - The end of the session disposes the client tree, which restores the terminal through `Tui`'s own
+    effect. The process then exits with the TUI's code. This replaces `LinkState::Stopped`.
+- **Daemon.** `UiLeaf` dials only the private address the leaf names:
   - a `unix:` socket in the native home on Unix;
   - on Windows, a loopback `tcp:` address whose one-time token it sends as the first line, before the
     handshake, as today.
 
-  Ids in the handshake are self-declared, so on loopback TCP the token is what authenticates the leaf.
-  `UiLeaf` greets from a context isolated for `catalog_key()`, and drops a far end whose id is not the
-  `peer` of `ui.open`. It then mounts the session.
-- **`TuiRow`.** It calls `SessionHandle::run("Tui", config)` and settles `ui.open` on
-  `RowHandle::loaded()`.
-  - `run` fails at once while the leaf's session does not run plugins yet. `TuiRow` retries that
-    failure every 50 ms within `ui.open`'s startup deadline (`START`, 20 s), the wait §3.6 already
-    describes for the `plugins` offer.
-  - It does not await a state instead: a session offers none for this. The session key that announces
-    readiness is provided only for a session under a marked row, and marking a row is rutis-internal.
-  - Its effect drops the row handle, which unloads `Tui` on the leaf (terminal restored), within the
-    existing unload bound. On timeout it closes the channel (`Close::Done`), and the session closes
-    after the row.
-- **Stop.** The end of the session fiber replaces `LinkState::Stopped` on both sides: `UiHost::remove`
-  on the daemon, disposing the client tree on the leaf.
-- **Version mismatch.** `hello` advertises `ui.leaf.2` instead of `ui.leaf`, because the link's protocol
-  changed incompatibly. Tui §3.6's existing fallback then keeps the direct TUI for an old CLI with a new
-  daemon and for a new CLI with an old daemon.
-- **What the link now carries** (the [Tui §8](plugins/Tui.md#8-security) update):
+  Ids in the handshake are self-declared, so on loopback TCP that token is what authenticates the
+  leaf. `UiLeaf` greets from a context isolated for `catalog_key()`, so the leaf can run nothing on the
+  daemon. It drops a far end whose id is not the `peer` of `ui.open`.
+- **States.** A leaf is `starting` from `ui.open` until its `Tui` calls `ui.attach {uiId, token}`, and
+  `online` after, as today. `ui.open {replace}` closes the old interface once the new one's session is
+  mounted. Claims and generations are unchanged.
+- **Closing.** The session is the leaf's lifetime:
+  - The user quits: the leaf disposes its client tree. The terminal is restored and the session closes;
+    on the daemon, the session's end disposes `UiLeaf` and `UiHost` removes the registration.
+  - The daemon closes the leaf (`ui.close`, replacement, daemon shutdown): it sends the advisory
+    `ui.shutdown` notice, then disposes `UiLeaf`. The session closes, and the leaf disposes its tree as
+    above.
+  - A forced daemon exit ends the session as well.
+- **Version mismatch.** `hello` advertises `ui.leaf.2` instead of `ui.leaf`, because the link's
+  protocol and `ui.open`'s reply changed. Tui §3.6's existing fallback keeps the direct TUI for an old
+  CLI with a new daemon, and for a new CLI with an old daemon.
+- **What the link carries** (the [Tui §8](plugins/Tui.md#8-security) update):
   - The daemon's process-wide services provided by non-platform plugins (`sessions`, `settings`,
     `pluginFiles`, `auxiliaryModel`, `sessionMetadata`, `managementMethods`) are visible to the leaf.
-    The leaf is reached only through a private address that a local `ui.open` caller names, and the
-    hosted `Tui` keeps using protocol v3 only. The trust boundary stays the local user, but §8's
-    sentence "The leaf link exposes no Session or management method" is replaced by this statement.
+    The leaf is reached only through a private address that a local `ui.open` caller names, and its
+    `Tui` uses protocol v3 only. The trust boundary stays the local user, but §8's sentence "The leaf
+    link exposes no Session or management method" is replaced by this statement.
   - These services are not isolated from the leaf, although rutis's guidance for a service a far end
     should not see is `isolate` on the providing row. They are Dim's shared cross-language services,
     and the repository's own TypeScript plugins inject them. Isolating them would hide them from those
     plugins as well, for two reasons:
     - SessionTitle's Session part injects `sessions`, `settings`, `sessionMetadata` and
       `auxiliaryModel`. It is a definition copy and carries no row `isolate`
-      ([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)), so it could
-      not join an isolated label.
-    - A session exports to every far end alike, and the Node runtime is a session too. A label on
-      the providers cannot tell the leaf apart from the runtime.
-
-    So who may become a leaf bounds the exposure, not isolation.
-  - The leaf can run nothing on the daemon: the session catalog is isolated away.
-  - The daemon can run only `Tui` on the leaf: the leaf's catalog holds nothing else.
-  - `UiLeaf` dials only the leaf's private address, as above.
+      ([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)).
+    - A session exports to every far end alike, and the Node runtime is a session too.
+  - The token for `ui.attach` travels only in `ui.open`'s reply, on the local connection.
   - Daemon listener names are announced to each leaf. Nothing is emitted on the leaf, so no event
     crosses the link.
 - **Later UI events.** Tui §3.6 "Later" is rewritten: 0.19 has no `export`/`import` gate and no prefix
   subscriptions, so `ui/*` events from a leaf would reach every daemon listener of their names. Their
-  contract (serde payloads with `uiId` and `sessionId`, adopted inputs only) is unchanged and remains
-  unimplemented.
-- **Accepted limits.** Tui §10's two limits go: rutis no longer has a private `peer:` row or a local
-  transport. Two new ones are accepted instead of raised: the session catalog's key is
-  `#[doc(hidden)]`, though rutis-bridge's catalog module documents it as the host's, and a session has
-  no public readiness signal for running plugins, so `TuiRow` retries `run`.
+  contract is unchanged and remains unimplemented: serde payloads carrying `uiId` and `sessionId`, which
+  enter only as adopted inputs.
+- **Accepted limits.** Tui §10's two limits go: there is no `peer:` row, and no local transport.
+  - One limit is accepted instead of raised: the session catalog's key is `#[doc(hidden)]`, though
+    rutis-bridge's catalog module documents it as the host's.
+  - Dim uses it only to isolate the daemon's catalog from the leaf.
 
 ### M9. Smaller replacements
 
@@ -415,7 +425,9 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   while a Session runs, and later removes, reaches the Session's tools and leaves them again. Closing an
   Agent leaves its instance to the host, and shutting down the minimal host's root unloads it.
 - **Leaf (M8):** the existing `ui_leaf` PTY flow (start, `/new`, `/web`, exit code, replacement
-  generations, a killed leaf, `ui.close`, daemon shutdown). Three new checks:
+  generations, a killed leaf, `ui.close`, daemon shutdown). Four new checks:
+  - `ui.open`'s reply carries the token, the leaf's `Tui` attaches with it, and a wrong token is
+    `ui_token`;
   - a leaf's attempt to run a daemon plugin fails with no plugin installed;
   - a far end that greets with another id is refused on each side;
   - `hello` offers `ui.leaf.2`, and a client that does not find it runs the direct TUI.
@@ -433,8 +445,8 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - [How Dim uses rutis](rutis-usage.md): §1 and §2 (where plugins run and isolation labels, M6), §3.4 (M3), §3.5 (runtime
   rows and `isolate`), §5 ("Dim is on rutis 0.17.1"), Appendix A (`LocalId`, the runtime binding) and
   Appendix B (Python 3.12).
-- [Tui](plugins/Tui.md): §3.1, §3.6 (diagram, Link, Hosted `Tui`, the `hello` feature paragraph,
-  Later), §8, §9 and §10 (M8).
+- [Tui](plugins/Tui.md): §3.1, §3.6 (diagram, Link, Hosted `Tui` becoming the leaf's own `Tui`, Leaving,
+  the `ui.open` reply, the `hello` feature paragraph, Later), §8, §9 and §10 (M8).
 - [RuntimeManager](plugins/RuntimeManager.md): the diagram, the Python requirement, the runtime and
   resolver sections, and the service names (M4).
 - [PluginManager](plugins/PluginManager.md): `waitingFor` and reload (M9, M4), and its rutis 0.17.1
@@ -470,7 +482,7 @@ wire fixtures are untouched.
 
 ## 9. Requirements raised to mechanism owners
 
-None. Every decision uses rutis 0.19 as it is. Two limits are accepted rather than raised (M8).
+None. Every decision uses rutis 0.19 as it is. One limit is accepted rather than raised (M8).
 `LoaderService`'s key cannot be isolated, which fits a loader being per host (M6).
 
 ## 10. Rule check
@@ -490,7 +502,8 @@ The upgrade adds no part, event or fact.
 ## 11. Ablation
 
 - Removed with no replacement: `NodeRows` and its two rows; the resolver cache and `invalidate`;
-  `share_registered_only`; `TuiRow`'s wait on the `plugins` offer; the leaf's and the daemon's
+  `share_registered_only`; `TuiRow`, the daemon running `Tui` on the leaf, the leaf's catalog and the
+  daemon's unload bound for it; the leaf's and the daemon's
   `Transport` implementations, `StaticIdentity` and `UiHostPlugin`'s transport and identity;
   the loader-creating `build()`, `build_in`, `AgentHost::Private` and `Within`, and
   `own_placement`'s per-Agent isolation and its label counter (M6).

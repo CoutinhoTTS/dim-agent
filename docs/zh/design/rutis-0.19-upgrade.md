@@ -66,12 +66,12 @@ Python 行都无法连接。
 | `ServiceCatalog::share_registered_only()` | 删除：所有没有另行登记的名字都按名字共享 |
 | `Loader::waiting_for(entry)` | `Loader::waits(entry)` |
 | `Loader::set_overlay`、`overlays()` | 删除：在交给 `reconcile` 的层列表里放一层自己的 |
-| `PeerPlugin`、`LinkConfig`、`LinkState`、`Features`、`Peer`、`peer_key`、`plugins.load` / `plugins.unload` | `Session::handshake(&ctx, channel)`、`Greeted`（`id()`、`handle()`）、`SessionHandle::run(plugin, config)`、`RowHandle::loaded()` |
+| `PeerPlugin`、`LinkConfig`、`LinkState`、`Features`、`Peer`、`peer_key`、`plugins.load` / `plugins.unload` | `Session::handshake(&ctx, channel)`，再挂载 `Greeted`，它的 `id()` 给出对端的名字；在对端运行插件要用 `SessionHandle::run` 或 `<row>:<plugin>` 这样的 loader 行，Dim 都不使用（M8） |
 | `Identity`、`StaticIdentity`、`IdentityPlugin`、`identity_key` | `rutis_bridge::LocalId(PeerId)`，每个内核一个 |
 | `Transport`、`Dial`、`transport_key` | 删除：连接就是交给会话的一个 `Channel` |
 | `transport::local::framed` | `pipe::framed` |
 | `Closer::close(&str)` | `Closer::close(Close)` |
-| `StaticCatalog::with(name, Described { .. }, factory)` | `StaticCatalog::with(name, Installed::new(factory).schema(..).version(..))`，提供在 `catalog_key()` |
+| `StaticCatalog::with(name, Described { .. }, factory)` | `StaticCatalog::with(name, Installed::new(factory))`，提供在 `catalog_key()`；不使用：leaf 不提供目录（M8） |
 | `rutis_bridge::build::Exports` | `rutis_types::Exports`，API 不变；生成文件的文件头变了 |
 | `LoaderPlugin` 提供 `Loader` 和 mounter | 另外还提供标记服务 `loader`，以及 `catalog_key()` 下的会话插件目录 |
 
@@ -224,66 +224,76 @@ PluginManager 写入（[PluginManager](plugins/PluginManager.md)）。`LoaderPlu
   - 其他种类的错误，在 0.17.1 上也不会打印。
 - App Server 保留它的 `tracing` sink。它的 loader 的配置警告通过 `Loader::on_config_warning` 转到 `tracing`。
 
-### M8. UI leaf 是一个会话
+### M8. UI leaf 是一个插件，它的生命周期就是一条会话
 
-leaf 保持 [Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) 的设计：daemon 把普通的 `Tui`
-插件加载进交互进程，并负责卸载或替换它；生命周期和存活是 rutis 的事实；业务流量仍走协议 v3。变化的只是机制：
+leaf 保持 [Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) 的目的：daemon 掌握哪些界面活着，
+可以关闭或替换它们；生命周期和存活是 rutis 的事实；不另做 UI 控制协议；业务流量仍走协议 v3。
+
+在 0.19 上，daemon 不再把 `Tui` 加载进 leaf。在对端运行插件，只有远程运行和 loader 行两种方式：远程运行要等对端
+开始提供行，每次 `ui.open` 都建 loader 行则需要 loader 的层有第二个属主。这两样都不需要：
+
+- daemon 的 `UiLeaf` 是一个插件，与现在相同。
+- 它的生命周期就是与 leaf 之间的会话。
+- leaf 自己运行 `Tui`。
 
 ```text
 daemon 根（LocalId dim-daemon）                   dimcode leaf 根
   UiHostPlugin                                     LeafNode
-    └─ UiLeaf（每次 ui.open 一个）                   ├─ LocalId ui-<id>
-         ├─ 对 catalog_key() 隔离的 ctx              ├─ catalog_key()：StaticCatalog { "Tui" }
-         ├─ 拨号 address ──── 一条 channel ────────► └─ 只接受一次连接，pipe::framed
-         ├─ 握手：对端 id 必须是 ui-<id>                  握手：对端 id 必须是 dim-daemon
-         ├─ 会话 ◄═════════════ rutis 会话 ═════════════►  会话
-         └─ TuiRow：run("Tui", {uiId, token,                 └─ Tui（被托管；由 dim-daemon 运行）
-                    sessionId}) → loaded                          └─ DaemonLink ── 协议 v3 ──► Rpc
+    └─ UiLeaf（ctx.plugin，每次 ui.open 一个）       ├─ LocalId ui-<id>
+         ├─ 对 catalog_key() 隔离的 ctx              ├─ 只接受一次连接，pipe::framed
+         ├─ 拨号 address ──── 一条 channel ────────► │   握手：对端 id 必须是 dim-daemon
+         ├─ 握手：对端 id 必须是 ui-<id>              ├─ 会话 ── 它结束时销毁客户端树
+         └─ 会话 ◄═════════════ rutis 会话 ══════════►┘
+                                                    └─ Tui（由 leaf 自己挂载，配置来自 ui.open 的回复）
+                                                         └─ DaemonLink ── 协议 v3 ──► Rpc（ui.attach）
 ```
 
-- **leaf 侧。** `LeafNode` 提供 `LocalId(ui-<id>)`，并在 `catalog_key()` 提供只含 `Tui` 的 `StaticCatalog`。
-  它像现在的 `Accept` 一样，在私有地址上只接受一次连接（现在是一个返回 `Channel` 的普通函数），然后用
-  `Session::handshake` 问候。对端 id 不是 `dim-daemon` 时直接丢弃，channel 随之关闭。之后 leaf 挂载这个会话，
-  会话结束代替原来的 `LinkState::Stopped`。
-- **daemon 侧。** `UiLeaf` 像现在的 `LeafDialer` 一样拨号到这个地址（现在是一个普通函数）。它只拨号 leaf 给出的私有地址：
+- **`ui.open`。** leaf 绑定私有地址，在本地连接上调用 `ui.open {sessionId, kind, peer, address}`，与现在相同。
+  - daemon 挂载一个 `UiLeaf`。`UiLeaf` 拨号到这个地址、完成问候，并挂载会话。
+  - 随后 `ui.open` 回复 `{uiId, generation, token}`。token 从被托管 `Tui` 的加载配置挪到这条回复里，daemon 仍然只
+    保存它的 SHA-256 摘要。
+  - 链接失败仍是 `ui_leaf_failed`，不留下任何登记，与现在相同。
+- **leaf 侧。** `LeafNode` 提供 `LocalId(ui-<id>)`，不提供插件目录，所以 daemon 不能在 leaf 上运行任何插件。
+  - 它像现在的 `Accept` 一样，在私有地址上只接受一次连接（现在是一个返回 `Channel` 的普通函数），然后用
+    `Session::handshake` 问候。对端 id 不是 `dim-daemon` 时直接丢弃，channel 随之关闭。
+  - 之后它挂载会话，并在 `ui.open` 回复后挂载 `Tui`。`Tui` 从回复里取 `uiId`、token 和 `sessionId`，其余都来自
+    leaf 自己的启动参数，与原来被托管的 `Tui` 相同。
+  - 会话结束时销毁客户端树，`Tui` 自己的 effect 恢复终端，进程以 TUI 的退出码结束。这取代了 `LinkState::Stopped`。
+- **daemon 侧。** `UiLeaf` 只拨号 leaf 给出的私有地址：
   - Unix 上是原生 home 里的 `unix:` socket；
   - Windows 上是 loopback 的 `tcp:` 地址，并且和现在一样，在握手之前先把一次性 token 作为第一行发出。
 
   握手里的 id 是双方自己声明的，所以在 loopback TCP 上，真正认证 leaf 的是这个 token。`UiLeaf` 从对
-  `catalog_key()` 做了隔离的上下文发起问候；对端 id 不是 `ui.open` 给出的 `peer` 时直接丢弃。之后挂载会话。
-- **`TuiRow`。** 它调用 `SessionHandle::run("Tui", config)`，并在 `RowHandle::loaded()` 时让 `ui.open` 完成。
-  - leaf 的会话还不能运行插件时，`run` 会立即失败。`TuiRow` 在 `ui.open` 原有的启动期限（`START`，20 秒）内
-    每 50 毫秒重试一次，也就是 §3.6 已经描述过的、等待 `plugins` offer 的那段等待。
-  - 它不改为等待某个状态，因为会话没有提供这样的状态：宣告就绪的会话键只在会话位于一个被标记的行之下时才提供，
-    而标记行是 rutis 内部的操作。
-  - 它的效果是丢弃这个行句柄，从而在现有的卸载时限内卸载 leaf 上的 `Tui`（终端恢复）。超时就关闭 channel
-    （`Close::Done`）；会话在行之后关闭。
-- **停止。** 两侧都用会话 fiber 的结束代替 `LinkState::Stopped`：daemon 上调用 `UiHost::remove`，leaf 上
-  销毁客户端树。
-- **版本不一致。** 链接协议发生了不兼容的变化，所以 `hello` 公布的 feature 从 `ui.leaf` 改为 `ui.leaf.2`。
-  这样，无论是旧 CLI 连新 daemon，还是新 CLI 连旧 daemon，Tui §3.6 现有的回退机制都会改为直接运行 TUI。
+  `catalog_key()` 做了隔离的上下文发起问候，所以 leaf 不能在 daemon 上运行任何插件。对端 id 不是 `ui.open` 给出的
+  `peer` 时直接丢弃。
+- **状态。** leaf 从 `ui.open` 起处于 `starting`，直到它的 `Tui` 调用 `ui.attach {uiId, token}` 之后变为 `online`，
+  与现在相同。`ui.open {replace}` 在新界面的会话挂载后关闭旧界面。认领和代次都不变。
+- **关闭。** 会话就是 leaf 的生命周期：
+  - 用户退出：leaf 销毁客户端树，终端恢复，会话关闭；在 daemon 上，会话结束会销毁 `UiLeaf`，`UiHost` 移除登记。
+  - daemon 关闭 leaf（`ui.close`、替换、daemon 关闭）：先发出提示性的 `ui.shutdown` 通知，再销毁 `UiLeaf`。会话随之
+    关闭，leaf 照上面的方式销毁自己的树。
+  - daemon 被强制退出时，会话同样结束。
+- **版本不一致。** 链接协议和 `ui.open` 的回复都变了，所以 `hello` 公布的 feature 从 `ui.leaf` 改为 `ui.leaf.2`。
+  无论是旧 CLI 连新 daemon，还是新 CLI 连旧 daemon，Tui §3.6 现有的回退机制都会改为直接运行 TUI。
 - **链接现在承载的内容**（对 [Tui §8](../../design/plugins/Tui.md#8-security) 的更新）：
   - daemon 上由非平台插件提供的进程级服务（`sessions`、`settings`、`pluginFiles`、`auxiliaryModel`、
-    `sessionMetadata`、`managementMethods`）对 leaf 可见。leaf 只能经由本地 `ui.open` 调用方给出的私有地址
-    连通，被托管的 `Tui` 仍然只使用协议 v3。信任边界仍是本地用户，但 §8 中"leaf 链接不暴露任何 Session 或
-    管理方法"一句改为这里的说法。
-  - 这些服务没有对 leaf 做隔离，尽管 rutis 对"不应让对端看到的服务"的建议是在提供它的行上设置 `isolate`。它们是 Dim 共享的
-    跨语言服务，仓库自己的 TypeScript 插件就注入它们。隔离它们会把这些插件一起挡在外面，原因有两个：
-    - SessionTitle 的 Session 部件注入了 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`。它是插件定义的副本，
-      没有行级 `isolate`（[Dim 如何使用 rutis §3.5](rutis-usage.md#35-各运行时如何解析名字)），所以无法加入一个隔离标签。
-    - 会话会把服务一视同仁地导出给每个对端，而 Node 运行时也是一个会话。给提供方加标签，区分不了 leaf 和运行时。
-
-    所以限定暴露范围的是"谁能成为 leaf"，而不是隔离。
-  - leaf 不能在 daemon 上运行任何插件：会话插件目录被隔离掉了。
-  - daemon 只能在 leaf 上运行 `Tui`：leaf 的目录里没有别的。
-  - `UiLeaf` 只拨号 leaf 的私有地址，见上文。
+    `sessionMetadata`、`managementMethods`）对 leaf 可见。leaf 只能经由本地 `ui.open` 调用方给出的私有地址连通，
+    它的 `Tui` 只使用协议 v3。信任边界仍是本地用户，但 §8 中"leaf 链接不暴露任何 Session 或管理方法"一句改为这里
+    的说法。
+  - 这些服务没有对 leaf 做隔离，尽管 rutis 对"不应让对端看到的服务"的建议是在提供它的行上设置 `isolate`。它们是
+    Dim 共享的跨语言服务，仓库自己的 TypeScript 插件就注入它们。隔离它们会把这些插件一起挡在外面，原因有两个：
+    - SessionTitle 的 Session 部件注入了 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`。它是插件
+      定义的副本，没有行级 `isolate`（[Dim 如何使用 rutis §3.5](rutis-usage.md#35-各运行时如何解析名字)）。
+    - 会话会把服务一视同仁地导出给每个对端，而 Node 运行时也是一个会话。
+  - `ui.attach` 用的 token 只出现在本地连接上 `ui.open` 的回复里。
   - daemon 的监听器名字会公布给每个 leaf。leaf 上不发出任何事件，所以没有事件跨过链接。
-- **将来的 UI 事件。** 重写 Tui §3.6 的"Later"一节：0.19 没有 `export`/`import` 闸门，也没有前缀订阅，
-  所以 leaf 发出的 `ui/*` 事件会到达 daemon 上所有同名监听器。这些事件的契约（serde 载荷，带 `uiId` 和
-  `sessionId`，只通过 adopted input 进入）不变，仍未实现。
-- **接受的限制。** Tui §10 的两条限制不再存在：rutis 已经没有私有的 `peer:` 行，也没有本地传输。改为接受
-  两条新的限制，而不向 rutis 提需求：会话插件目录的键是 `#[doc(hidden)]`，不过 rutis-bridge 的 catalog
-  模块文档把它写成宿主提供目录的位置；会话没有"可以运行插件了"的公开就绪信号，所以 `TuiRow` 重试 `run`。
+- **将来的 UI 事件。** 重写 Tui §3.6 的"Later"一节：0.19 没有 `export`/`import` 闸门，也没有前缀订阅，所以 leaf
+  发出的 `ui/*` 事件会到达 daemon 上所有同名监听器。这些事件的契约不变，仍未实现：serde 载荷，带 `uiId` 和
+  `sessionId`，只通过 adopted input 进入。
+- **接受的限制。** Tui §10 的两条限制不再存在：已经没有 `peer:` 行，也没有本地传输。
+  - 改为接受一条新的限制，而不向 rutis 提需求：会话插件目录的键是 `#[doc(hidden)]`，不过 rutis-bridge 的 catalog
+    模块文档把它写成宿主提供目录的位置。
+  - Dim 只用它来让 daemon 的目录对 leaf 隔离。
 
 ### M9. 较小的替换
 
@@ -352,7 +362,8 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   各自插件的部件。Session 运行期间测试加入、随后又删除的贡献者行，会先进入 Session 的工具，之后再离开。关闭 Agent
   后它的实例留给宿主处理，关闭最小宿主的 root 时实例被卸载。
 - **leaf（M8）：** 现有的 `ui_leaf` PTY 流程（启动、`/new`、`/web`、退出码、替换代次、被杀掉的 leaf、
-  `ui.close`、daemon 关闭）。新增三项检查：
+  `ui.close`、daemon 关闭）。新增四项检查：
+  - `ui.open` 的回复带上 token，leaf 的 `Tui` 用它完成 attach，token 错误时返回 `ui_token`；
   - leaf 试图在 daemon 上运行插件时，因为没有安装该插件而失败；
   - 对端用别的 id 问候时，两侧都会拒绝；
   - `hello` 提供 `ui.leaf.2`，找不到它的客户端改为直接运行 TUI。
@@ -366,7 +377,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 - [Dim 如何使用 rutis](rutis-usage.md)：§1 和 §2（插件在哪里运行、隔离标签，M6）、§3.4（M3）、§3.5（运行时的行与 `isolate`）、
   §5（"Dim 使用 rutis 0.17.1"）、附录 A（`LocalId`、运行时的绑定）和附录 B（Python 3.12）。
-- [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui`、`hello` feature 那段、Later）、§8、§9 和 §10（M8）。
+- [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui` 改为 leaf 自己的 `Tui`、Leaving、`ui.open` 的回复、`hello` feature 那段、Later）、§8、§9 和 §10（M8）。
 - [RuntimeManager](plugins/RuntimeManager.md)：示意图、Python 版本要求、运行时与解析器各节，以及服务名（M4）。
 - [PluginManager](plugins/PluginManager.md)：`waitingFor` 和重新加载（M9、M4），以及需求一节里对 rutis 0.17.1 的引用。
 - [Scheduler](plugins/Scheduler.md) 和 [ACP gateway 实现](../../design/acp-gateway-implementation.md)：其中对 rutis 0.17.1 的引用。
@@ -397,7 +408,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 ## 9. 向机制所有者提出的需求
 
-无。每项决策都按 rutis 0.19 的现状使用它。接受两条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
+无。每项决策都按 rutis 0.19 的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
 这正好符合 loader 按宿主划分（M6）。
 
 ## 10. 规则检查
@@ -416,8 +427,8 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 ## 11. 消融检查
 
-- 直接删除、不做替代：`NodeRows` 及其两行；解析器缓存和 `invalidate`；`share_registered_only`；`TuiRow` 对
-  `plugins` offer 的等待；leaf 和 daemon 各自的 `Transport` 实现、`StaticIdentity`，以及 `UiHostPlugin` 的传输和身份；
+- 直接删除、不做替代：`NodeRows` 及其两行；解析器缓存和 `invalidate`；`share_registered_only`；`TuiRow`、
+  daemon 在 leaf 上运行 `Tui`、leaf 的目录以及 daemon 为它设的卸载时限；leaf 和 daemon 各自的 `Transport` 实现、`StaticIdentity`，以及 `UiHostPlugin` 的传输和身份；
   会自建 loader 的 `build()`、`build_in`、`AgentHost::Private` 和 `Within`，以及 `own_placement` 按 Agent 的隔离及其
   标签计数器（M6）。
 - `own_placement` 的装配移到最小宿主里，供测试和 `xtask` 使用，它们是唯一需要最小宿主的调用方。它在那里是一个宿主，而不是
