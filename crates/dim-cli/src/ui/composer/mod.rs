@@ -524,9 +524,12 @@ impl Composer {
 
     fn submit(&mut self) -> Outcome {
         let expanded = self.expanded_text();
-        // An image submits no text of its own, so an image-only draft is not
-        // empty.
-        if expanded.trim().is_empty() && !self.tokens.iter().any(|token| self.is_image(token)) {
+        // An image submits no text of its own, so an image-only message draft
+        // is not empty. A shell command is text only, so there an image is
+        // not a command.
+        let image_only =
+            self.shell.is_none() && self.tokens.iter().any(|token| self.is_image(token));
+        if expanded.trim().is_empty() && !image_only {
             return Outcome::Handled;
         }
         if let Some(shell) = self.shell {
@@ -1742,6 +1745,29 @@ mod tests {
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Submit("look".into())
+        );
+    }
+
+    /// A shell command is text: Enter on a draft holding only an image runs
+    /// no command and records none, and the draft stays.
+    #[test]
+    fn a_shell_draft_holding_only_an_image_does_nothing() {
+        let mut c = Composer::new(vec!["!ls".into()]);
+        typed(&mut c, "!");
+        c.attach_image(bitmap()).unwrap();
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Handled,
+            "an empty shell command is neither run nor recorded"
+        );
+        assert_eq!(c.shell(), Some(Shell::Recorded));
+        assert_eq!(c.display_text(), "[Image #1]");
+        c.handle_key(key(KeyCode::Home));
+        c.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            c.text(),
+            "ls",
+            "the first Up recalls the previous command, not an empty one"
         );
     }
 
