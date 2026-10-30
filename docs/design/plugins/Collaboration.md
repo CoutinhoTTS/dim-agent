@@ -42,7 +42,7 @@ Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §3, §4
 
 | Rule | How this design complies |
 | --- | --- |
-| §4 rule 1 Commands for others' state | Not applicable: Collaboration changes no other module's state. It writes inputs through the branch's public `input` operation and its own `collaboration/*` facts; InputQueue, Loop and the receiving branch decide what those become |
+| §4 rule 1 Commands for others' state | Collaboration changes no state behind another owner's back. It writes inputs through the branch's public `input` operation and its own `collaboration/*` facts; InputQueue, Loop and the receiving branch decide what those become. Its delegation records (§6) go through Agents' and SessionStore's typed write operations, as Session creation already does |
 | §4 rule 2 No take-back after hand-off | Not applicable: this page adds no hand-off. A delivered request is settled by Collaboration's own facts, and a report is written once |
 | §4 rule 3 Before callbacks only | Not applicable: Collaboration registers no before callback and no entry check; its tool validates its own arguments at the tool boundary |
 | §4 rule 4 No business meaning in core | The texts are Collaboration's, and they travel on the declaration, the tool result and the markers; Timeline, Dispatcher and Loop gain no Collaboration branch |
@@ -82,7 +82,8 @@ A temporary Agent is an Agent that has an owner. There is no separate flag: one 
 
 The producer keeps these invariants:
 
-- An owned Agent's owner is the leader Session whose `request` created it, and it never changes.
+- An owned Agent's owner is the leader Session whose `request` created it, and it never changes. Re-homing an Agent to another owner or to the public directory is not a supported operation.
+- An owned Agent has at least one member Session. One with none is an incomplete delegation, not a reusable Agent.
 - A member Session's leader is the leader that created it, and it equals its Agent's owner whenever that Agent is owned.
 - A Team is one leader Session and the member Sessions whose leader it is. A member Session is itself a leader of the Team it creates.
 
@@ -90,17 +91,17 @@ The producer keeps these invariants:
 
 - The `agent` tool resolves a target Agent only when it is public, or its owner is the caller's own Session or the leader of the Team the caller belongs to. Every other id, and an id that does not exist, are `agent_not_found`.
 - A member of another Team is `team_member_not_found`; a member Session id addresses nothing outside its Team.
-- Visibility never follows from what the process happens to hold: a relation that is absent is a refusal, never a public record. A restart, a reload of Agents or Collaboration, and a fork all keep this rule.
-- `agent.list` and `inspect` report an Agent to the Teams above. Owner Session ids are Collaboration's records and stay out of the client protocol.
+- Visibility never follows from what the process happens to hold: a relation that is absent is a refusal, never a public record. A restart and a reload of Agents or Collaboration keep this rule.
+- The tool's `list` and `inspect` report an Agent to the Teams above. The RPC `agent.list` serves the public directory only, so an owned Agent appears in neither. Owner Session ids are Collaboration's records and stay out of the client protocol.
 
 ### 6.3 Lifetime
 
 - A restart restores Teams from the durable facts: owned Agents load owned, and member Sessions load with their leader. Nothing becomes public by being unloaded, unread or reloaded.
-- `close` settles the request and closes the member Session. The Session records, its leader and its Agent's record stay, so the leader addresses that member again after a restart; closed is process state and is not stored.
-- Deleting the owner Session deletes its owned Agents and their member Sessions, because an owned Agent has no meaning without its owner. This is the cascade ownership requires; [session deletion and fork](../appserver/session-deletion-and-fork.md) states it with the delete's other effects.
-- Deleting the last member Session of a loaded owned Agent closes the Agent and keeps its record: the leader may delegate to it again, and the record ends only with its owner.
-- A fork leads no member. It is a new leader Session, and the source's owned Agents and members stay with the source.
-- A delegation whose own creation fails removes the Agent record it created: an owned Agent with no member Session and no completed delegation is not left behind.
+- `close` settles the request and closes the member Session in this process. The Session records, its leader and its Agent's record stay, so a restart loads the member again as an ordinary Session that its leader may address; closed is process state and is not stored.
+- Deleting the owner Session deletes its owned Agents and their member Sessions, because an owned Agent has no meaning without its owner. This replaces the delete's former rule that members stay Sessions ([session deletion and fork](../appserver/session-deletion-and-fork.md) records the change).
+- Deleting the last member Session of an owned Agent deletes the Agent record in the same operation. A public Agent is never deleted with a member Session.
+- Forking a member Session is refused: a member conversation is read-only, and a fork has no leader to keep. A fork of a leader leads no member, and the source's owned Agents and members stay with the source.
+- A delegation whose creation fails removes the Agent record it created, so no owned Agent survives without the member Session it was created for.
 
 ### 6.4 Errors
 
@@ -110,10 +111,19 @@ The producer keeps these invariants:
 | A target Agent is owned by another Team, or absent | `agent_not_found`, with the existing text |
 | A member Session belongs to another Team, or is absent | `team_member_not_found` |
 | The owned Agent or its first member Session cannot be created | `member_create_failed: <reason>`; the record created for the request is removed |
-| A stored owned Agent whose owner row is absent at startup | The Agent and its member Sessions are removed as an unfinished delete; it is never served as public |
+| `session.fork` names a member Session | `invalid_input`: a member conversation is read-only |
+| A stored owned Agent has no member Session at startup | An incomplete delegation: the Agent is removed, and it is never served as public |
+| A stored owned Agent's owner row is absent at startup | An unfinished delete: the Agent and its member Sessions are removed; it is never served as public |
 
 ### 6.5 Requirements raised to other owners
 
-- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete an owner's owned Agents when that Session is deleted; expose ownership and the leader relation to Collaboration without adding either to the client protocol; remove an owned Agent whose owner row is absent at startup.
-- **SessionStore and native storage.** Store `agent_sessions.leader_session_id`; decide both columns' format version and upgrade, and delete a Session's owned Agents and member Sessions in the delete's own transaction.
-- **Session deletion and fork.** Record the ownership cascade among a delete's effects (§6.3), and keep a fork's Team separate from the source's.
+- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete a Session's owned Agents and the record of an owned Agent whose last member Session is deleted, in the delete's own transaction; expose ownership to Collaboration without adding it to the client protocol; remove an incomplete or orphaned owned Agent at startup.
+- **SessionStore and native storage.** Store `agent_sessions.leader_session_id`; decide both columns' format version, upgrade and indexes; delete a Session's owned Agents and member Sessions in the delete's own transaction.
+- **Session deletion and fork.** Record the ownership cascade and the last-member rule among a delete's effects (§6.3), replace the rule that a deleted leader keeps its members, and refuse `session.fork` on a member Session.
+
+### 6.6 What this removes
+
+- Collaboration's temporary-Agent records: the in-memory `temporary` map, `release_temporary`, the close watcher's temporary-Agent accounting, and the known race where two members end at once and leave an Agent behind ([idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)). An owned Agent with no open Session follows Agents' own load and unload rules.
+- Loading every stored Agent at startup as a public one: owned Agents load owned, and incomplete ones are removed.
+- "Unknown id is public": an absent relation is a refusal.
+- Process memory as the authority for Team relations: they are rebuilt from the stored leader when Collaboration loads.
