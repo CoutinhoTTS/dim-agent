@@ -2173,6 +2173,7 @@ impl App {
                 branch_id,
                 allow,
                 remember,
+                grant,
             } => {
                 self.answered.insert(request_id.clone());
                 self.host.send(Command::Approval {
@@ -2180,6 +2181,7 @@ impl App {
                     branch_id,
                     allow,
                     remember,
+                    grant,
                 });
                 self.prompt = None;
                 self.sync_prompt();
@@ -2265,6 +2267,7 @@ impl App {
                         branch_id,
                         allow: true,
                         remember: false,
+                        grant: None,
                     });
                 }
                 self.prompt = None;

@@ -23,6 +23,13 @@ pub enum DraftPart {
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantRequest {
+    pub path: String,
+    pub kind: String,
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionSnapshot {
     pub revision: String,
     pub sandbox: bool,
@@ -40,6 +47,7 @@ pub enum Command {
         branch_id: String,
         allow: bool,
         remember: bool,
+        grant: Option<GrantRequest>,
     },
     AskAnswers {
         session_id: String,
