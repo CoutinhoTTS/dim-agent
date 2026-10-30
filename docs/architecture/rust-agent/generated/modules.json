@@ -4650,9 +4650,7 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches",
-        "params",
-        "unreachable"
+        "params"
       ]
     },
     {
@@ -18727,6 +18725,7 @@
       "references": [
         "path BundledCatalog",
         "path BundledCatalog::load",
+        "path CatalogProvider",
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelMetadata",
@@ -18736,6 +18735,7 @@
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
         "use crate::model_catalog::BundledCatalog",
+        "use crate::model_catalog::CatalogProvider",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
         "use crate::model_catalog::ModelEntry",
@@ -18782,7 +18782,17 @@
       "to": "dim_app_server::provider::legacy",
       "references": [
         "mod legacy",
-        "use legacy::ImportResult"
+        "use legacy::ImportResult",
+        "use legacy::LEGACY_METADATA_FIELDS",
+        "use legacy::LEGACY_PROVIDER_FIELDS",
+        "use legacy::LegacyConversion",
+        "use legacy::LegacyRow",
+        "use legacy::LegacySelection",
+        "use legacy::LegacySnapshot",
+        "use legacy::convert_legacy_provider",
+        "use legacy::convert_legacy_selection",
+        "use legacy::legacy_omitted_fields",
+        "use legacy::read_legacy_source"
       ]
     },
     {
@@ -19085,6 +19095,7 @@
       "from": "dim_app_server::provider::legacy",
       "to": "dim_app_server::model_catalog",
       "references": [
+        "path BundledCatalog",
         "path ModelEntry"
       ]
     },
@@ -19099,12 +19110,13 @@
         "path StaticAuth::AwsBedrock",
         "path StaticAuth::Bearer",
         "path StaticProviderRecord",
+        "path StaticProviderRecord::is_pristine_builtin",
         "path StaticRecordKind::Builtin",
         "path StaticRecordKind::Custom",
+        "path bundled_seed_for",
         "path failure",
         "path managed_authority",
         "path parse_static",
-        "path read_static",
         "path selection_scope",
         "path static_catalog",
         "path storage",
@@ -31235,80 +31247,40 @@
     },
     {
       "from": "dim_migration::providers",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path AwsCredentials",
-        "path ModelNetwork",
-        "use dim_agent_capabilities::host::AwsCredentials",
-        "use dim_agent_capabilities::host::ModelNetwork"
-      ]
-    },
-    {
-      "from": "dim_migration::providers",
-      "to": "dim_agent_types",
-      "references": [
-        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
-      ]
-    },
-    {
-      "from": "dim_migration::providers",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path BundledCatalog::load",
-        "path MAX_MODEL_TOKENS",
-        "path ModelEntry",
-        "path ModelSource::Builtin",
-        "path ModelSource::Custom",
-        "path ModelStatus::Unavailable",
-        "path NewApiEndpoint",
-        "path NewApiEndpoint::Anthropic",
-        "path NewApiEndpoint::Gemini",
-        "path NewApiEndpoint::Openai",
-        "path NewApiEndpoint::OpenaiResponse",
-        "path ProviderProjection",
-        "use dim_app_server::model_catalog::BundledCatalog",
-        "use dim_app_server::model_catalog::MAX_MODEL_TOKENS",
-        "use dim_app_server::model_catalog::ModelEntry",
-        "use dim_app_server::model_catalog::ModelSource",
-        "use dim_app_server::model_catalog::ModelStatus",
-        "use dim_app_server::model_catalog::NewApiEndpoint",
-        "use dim_app_server::model_catalog::ProviderProjection"
+        "use dim_app_server::model_catalog::BundledCatalog"
       ]
     },
     {
       "from": "dim_migration::providers",
       "to": "dim_app_server::provider",
       "references": [
-        "path CredentialAuthority",
-        "path CredentialAuthority::Grok",
-        "path CredentialAuthority::OpenaiCodex",
-        "path CredentialAuthority::Static",
-        "path StaticAuth",
-        "path StaticAuth::Anonymous",
-        "path StaticAuth::ApiKey",
-        "path StaticAuth::AwsBedrock",
-        "path StaticAuth::Bearer",
-        "path StaticAuth::CustomHeader",
-        "use dim_app_server::provider::CredentialAuthority",
-        "use dim_app_server::provider::StaticAuth"
+        "path StaticProviderRecord",
+        "path parse_static",
+        "use dim_app_server::provider::StaticProviderRecord",
+        "use dim_app_server::provider::parse_static"
       ]
     },
     {
       "from": "dim_migration::providers",
-      "to": "dim_app_server::provider::preferences",
+      "to": "dim_app_server::provider::legacy",
       "references": [
-        "path ModelPreferences",
-        "use dim_app_server::provider::ModelPreferences"
-      ]
-    },
-    {
-      "from": "dim_migration::providers",
-      "to": "dim_app_server::provider::secrets",
-      "references": [
-        "path ProviderSecret",
-        "path ProviderSecret::Aws",
-        "path ProviderSecret::Token",
-        "use dim_app_server::provider::ProviderSecret"
+        "path LEGACY_METADATA_FIELDS",
+        "path LEGACY_PROVIDER_FIELDS",
+        "path LegacyRow",
+        "path convert_legacy_provider",
+        "path convert_legacy_selection",
+        "path legacy_omitted_fields",
+        "path read_legacy_source",
+        "use dim_app_server::provider::LEGACY_METADATA_FIELDS",
+        "use dim_app_server::provider::LEGACY_PROVIDER_FIELDS",
+        "use dim_app_server::provider::LegacyRow",
+        "use dim_app_server::provider::convert_legacy_provider",
+        "use dim_app_server::provider::convert_legacy_selection",
+        "use dim_app_server::provider::legacy_omitted_fields",
+        "use dim_app_server::provider::read_legacy_source"
       ]
     },
     {
@@ -32691,10 +32663,6 @@
     },
     {
       "module": "dim_migration::accounts",
-      "path": "char::is_control"
-    },
-    {
-      "module": "dim_migration::providers",
       "path": "char::is_control"
     },
     {

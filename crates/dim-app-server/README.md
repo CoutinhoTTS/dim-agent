@@ -93,6 +93,10 @@ the credential and sets `enabled:false` in one update. `provider.save` is absent
 User models survive refresh separately from defaults; descriptor resets and New API
 endpoint overrides have independent effects. Clients pass saved preferences with
 their exact model target when adopting it; the server never applies them implicitly.
+`provider.import_legacy` imports one legacy SQLite source explicitly and read-only;
+each imported provider item adds `omitted`, the source field names the frozen
+mapping dropped, and imported selections carry no such field. The field is
+additive and protocol v3 is unchanged.
 The [Provider contract](../../docs/design/appserver/provider-management.md) defines
 the methods, typed errors, account ownership and accepted old-v19 rewrite loss. v18 binaries reject the v19 database.
 
