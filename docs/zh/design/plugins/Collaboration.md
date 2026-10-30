@@ -112,6 +112,7 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 | 成员 Session 属于其他 Team，或不存在 | `team_member_not_found` |
 | 被拥有的 Agent 或它的第一个成员 Session 创建失败 | `member_create_failed: <原因>`；为这次请求创建的记录被删除 |
 | `session.fork` 指向一个成员 Session | `invalid_input`：成员会话不能被 fork |
+| RPC `agent.close` 指向一个被拥有的 Agent | `agent_owned`：被拥有的 Agent 随它的 Team 结束，因此经工具访问 |
 | 启动时某个被存储的被拥有 Agent 没有成员 Session | 未完成的委派：删除该 Agent，绝不作为公开服务 |
 | 启动时某个被存储的被拥有 Agent 的 owner 行不存在 | 在守护进程之外被破坏的库（外键与删除顺序本可避免）：连同其成员 Session 一起删除，绝不作为公开服务 |
 
@@ -123,7 +124,7 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 ### 6.6 这次删掉什么
 
-- Collaboration 的临时 Agent 记账：内存里的 `temporary` 表、`release_temporary`、关闭观察里的临时 Agent 统计，以及“两个成员同时结束会残留一个 Agent”的已知问题（[idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)）。没有打开 Session 的被拥有 Agent 交给 Agents 自己的装载与卸载规则。
+- Collaboration 的临时 Agent 记账：内存里的 `temporary` 表、`release_temporary`、关闭观察里的临时 Agent 统计，以及“两个成员同时结束会残留一个 Agent”的已知问题（[idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)）。没有打开 Session 的被拥有 Agent 在成员行存在期间保持装载；没有存储的进程在没有任何打开 Session 时关闭它。
 - 启动时把每个被存储的 Agent 都当公开 Agent 装载：被拥有的按被拥有装载，未完成的被清理。
 - “未知 id 就是公开”：缺失的关系是拒绝。
 - 关系表的进程内存权威：Collaboration 装载时从存储的 leader 重建。

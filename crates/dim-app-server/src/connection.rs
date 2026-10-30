@@ -992,6 +992,17 @@ impl Connection {
                         "The default Agent cannot be closed",
                     )));
                 }
+                if rpc
+                    .index
+                    .owner(&params.agent_id)
+                    .is_some_and(|owner| owner.is_some())
+                {
+                    return Some(Err(RpcError::app(
+                        -32000,
+                        "agent_owned",
+                        "An owned Agent ends with its Team",
+                    )));
+                }
                 match rpc.index.close(&params.agent_id).await {
                     Ok(()) => Ok(Reply::empty()),
                     Err(

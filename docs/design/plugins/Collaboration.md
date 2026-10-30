@@ -112,6 +112,7 @@ The producer keeps these invariants:
 | A member Session belongs to another Team, or is absent | `team_member_not_found` |
 | The owned Agent or its first member Session cannot be created | `member_create_failed: <reason>`; the record created for the request is removed |
 | `session.fork` names a member Session | `invalid_input`: a member conversation cannot be forked |
+| The RPC `agent.close` names an owned Agent | `agent_owned`: an owned Agent ends with its Team, so it is reached through the tool |
 | A stored owned Agent has no member Session at startup | An incomplete delegation: the Agent is removed, and it is never served as public |
 | A stored owned Agent's owner row is absent at startup | A store damaged outside the daemon, which foreign keys and the delete order prevent: the Agent and its member Sessions are removed, and it is never served as public |
 
@@ -123,7 +124,7 @@ The producer keeps these invariants:
 
 ### 6.6 What this removes
 
-- Collaboration's temporary-Agent records: the in-memory `temporary` map, `release_temporary`, the close watcher's temporary-Agent accounting, and the known race where two members end at once and leave an Agent behind ([idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)). An owned Agent with no open Session follows Agents' own load and unload rules.
+- Collaboration's temporary-Agent records: the in-memory `temporary` map, `release_temporary`, the close watcher's temporary-Agent accounting, and the known race where two members end at once and leave an Agent behind ([idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)). An owned Agent with no open Session stays loaded while its member rows do; a process without a store closes it when no Session is open.
 - Loading every stored Agent at startup as a public one: owned Agents load owned, and incomplete ones are removed.
 - "Unknown id is public": an absent relation is a refusal.
 - Process memory as the authority for Team relations: they are rebuilt from the stored leader when Collaboration loads.

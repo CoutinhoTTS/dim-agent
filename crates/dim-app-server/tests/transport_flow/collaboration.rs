@@ -4463,6 +4463,13 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
         .as_str()
         .unwrap()
         .to_owned();
+    let closed = client
+        .rpc("agent.close", json!({"agentId": temporary}))
+        .await;
+    assert_eq!(
+        closed["error"]["data"]["appError"], "agent_owned",
+        "{closed}"
+    );
     let forked = client
         .rpc("session.fork", json!({"sessionId": member, "at": 1}))
         .await;
