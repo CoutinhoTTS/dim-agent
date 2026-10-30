@@ -7,7 +7,6 @@ use dim_agent_capabilities::{
     history::{context_messages, read_context, summary_message},
 };
 use rutis::host::CtxHost;
-use rutis::host::ErrorKind;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -156,6 +155,7 @@ struct StrategyOwner {
     key: rutis::host::Key<CompactionStrategyHost>,
     strategy: Arc<Scripted>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
+    timeout: Option<std::time::Duration>,
 }
 impl Plugin for StrategyOwner {
     type Deps = ();
@@ -163,12 +163,12 @@ impl Plugin for StrategyOwner {
         "test.strategy-owner"
     }
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(StrategyProvider(self.key.clone(), self.strategy.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(ErrorKind::PluginFailed(
-                format!("Strategy provider failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            StrategyProvider(self.key.clone(), self.strategy.clone()),
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
@@ -221,6 +221,7 @@ fn builder_with_strategy(
                         key: names.key()?,
                         strategy: strategy.clone(),
                         views: views.clone(),
+                        timeout: names.startup_timeout(),
                     }))
                 },
             ));

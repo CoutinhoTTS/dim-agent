@@ -1605,6 +1605,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
 struct ContextHostOwner {
     host: rutis::host::Key<dim_agent_capabilities::host::PrepareContextHost>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
+    timeout: Option<std::time::Duration>,
 }
 impl Plugin for ContextHostOwner {
     type Deps = ();
@@ -1612,12 +1613,12 @@ impl Plugin for ContextHostOwner {
         "ContextHostOwner"
     }
     async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(ContextHostPlugin(self.host.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("Context host failed: {error}").into(),
-            ))
-        })?;
+        let view = dim_agent_runtime::mount_active(
+            ctx,
+            ContextHostPlugin(self.host.clone()),
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
@@ -1671,6 +1672,7 @@ async fn model_progress_follows_a_reloaded_provider() {
                 Ok(Box::new(ContextHostOwner {
                     host: names.key()?,
                     views: owners.clone(),
+                    timeout: names.startup_timeout(),
                 }))
             },
         ));

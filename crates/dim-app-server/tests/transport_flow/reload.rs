@@ -954,19 +954,20 @@ struct GuideProbeOwner {
     flag: Arc<std::sync::atomic::AtomicBool>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
     guide: rutis::host::Key<dim_agent_capabilities::prompt_guide::GuideEntries>,
+    timeout: Option<std::time::Duration>,
 }
 impl rutis::Plugin for GuideProbeOwner {
     type Deps = ();
     async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
-        let view = ctx.plugin(GuideProbe {
-            flag: self.flag.clone(),
-            guide: self.guide.clone(),
-        });
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("guide probe failed: {error}").into(),
-            ))
-        })?;
+        let view = dim_agent_runtime::mount_active(
+            ctx,
+            GuideProbe {
+                flag: self.flag.clone(),
+                guide: self.guide.clone(),
+            },
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
@@ -1026,6 +1027,7 @@ async fn an_entry_leaves_with_its_contributor() {
                         flag: install_flag.clone(),
                         views: install_views.clone(),
                         guide: names.key()?,
+                        timeout: names.startup_timeout(),
                     }))
                 },
             ));

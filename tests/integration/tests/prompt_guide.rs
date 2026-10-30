@@ -451,6 +451,7 @@ async fn an_entry_waits_for_the_next_adoption_that_renders_the_system() {
                 flag: flag_owner.clone(),
                 views: views_owner.clone(),
                 key: names.key()?,
+                timeout: names.startup_timeout(),
             }))
         },
     ));
@@ -633,19 +634,20 @@ struct GuideProbeOwner {
     flag: Arc<AtomicBool>,
     views: Arc<Mutex<Vec<FiberView>>>,
     key: Key<GuideEntries>,
+    timeout: Option<std::time::Duration>,
 }
 impl Plugin for GuideProbeOwner {
     type Deps = ();
     async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
-        let view = ctx.plugin(GuideProbe {
-            flag: self.flag.clone(),
-            key: self.key.clone(),
-        });
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("guide probe failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            GuideProbe {
+                flag: self.flag.clone(),
+                key: self.key.clone(),
+            },
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
@@ -835,20 +837,21 @@ struct GuideToolProbeOwner {
     views: Arc<Mutex<Vec<FiberView>>>,
     tools: Key<ToolRegistry>,
     guide: Key<GuideEntries>,
+    timeout: Option<std::time::Duration>,
 }
 impl Plugin for GuideToolProbeOwner {
     type Deps = ();
     async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
-        let view = ctx.plugin(GuideToolProbe {
-            flag: self.flag.clone(),
-            tools: self.tools.clone(),
-            guide: self.guide.clone(),
-        });
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("guide tool probe failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            GuideToolProbe {
+                flag: self.flag.clone(),
+                tools: self.tools.clone(),
+                guide: self.guide.clone(),
+            },
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
@@ -877,6 +880,7 @@ async fn a_tools_only_adoption_carries_the_entry_its_writer_registers() {
                 views: views_owner.clone(),
                 tools: names.key()?,
                 guide: names.key()?,
+                timeout: names.startup_timeout(),
             }))
         },
     ));

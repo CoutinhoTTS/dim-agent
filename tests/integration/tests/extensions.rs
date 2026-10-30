@@ -1,11 +1,19 @@
+use dim_agent_capabilities::host::{HostFuture, ToolExecutionContext};
+use dim_agent_capabilities::tool_registry::{
+    ToolContribution, ToolHandler, ToolProvider, ToolRegistry, ToolSourceSet, definition,
+};
 use dim_agent_runtime::*;
 use dim_agent_types::BranchSource;
+use dim_agent_types::EventKind;
 use dim_agent_types::InputMode;
+use dim_agent_types::{ToolCall, ToolResult};
 use rutis::Plugin;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, Key, TypeKey};
+use std::sync::Arc;
 use std::time::Duration;
 use test_extension_a::{Counter, Provider};
 use test_extension_b::{Consumer, Snapshot};
+use tokio_util::sync::CancellationToken;
 fn builder() -> AgentBuilder {
     let mut b = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut b);
@@ -280,6 +288,425 @@ async fn unawaited_children_are_reported() {
         session.close().await.unwrap();
         agent.close().await.unwrap();
     }
+}
+
+/// A tool source a mounted child registers from its own `apply`.
+struct SlowSource;
+impl ToolProvider for SlowSource {
+    fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
+        vec![Arc::new(ToolSourceSet {
+            key: "slow".into(),
+            version: "1".into(),
+            tools: vec![Arc::new(ToolContribution {
+                definition: definition(
+                    "slow",
+                    "A tool of a slow child",
+                    serde_json::json!({"type": "object"}),
+                ),
+                handler: Arc::new(SlowCall),
+            })],
+        })]
+    }
+}
+struct SlowCall;
+impl ToolHandler for SlowCall {
+    fn execute(
+        &self,
+        _: ToolCall,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async { Ok(ToolResult::text("slow")) })
+    }
+}
+
+/// The service the slow child waits for; the row below provides it late.
+struct SlowService;
+
+/// A required row that provides `SlowService` only after it takes its time,
+/// so the child mounted by another row cannot load before it.
+struct SlowProvider {
+    key: Key<SlowService>,
+}
+impl Plugin for SlowProvider {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ctx.provide_at(self.key.clone(), Arc::new(SlowService))?;
+        Ok(())
+    }
+}
+
+/// A child whose own `apply` takes a while before it registers its tool.
+struct SlowChild {
+    service: Key<SlowService>,
+    tools: Key<ToolRegistry>,
+}
+impl DynPlugin for SlowChild {
+    fn name(&self) -> &str {
+        "test.slow-child"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.service.erase(), self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let tools = ctx.require_at(&self.tools)?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tools.register_source(ctx, "slow", Arc::new(SlowSource))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The required row that mounts the slow child.
+struct SlowOwner {
+    service: Key<SlowService>,
+    tools: Key<ToolRegistry>,
+    timeout: Option<std::time::Duration>,
+}
+impl Plugin for SlowOwner {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        mount_active(
+            ctx,
+            SlowChild {
+                service: self.service.clone(),
+                tools: self.tools.clone(),
+            },
+            self.timeout,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// The tools of the last model call on `branch`, in the order it offered them.
+async fn last_request_tools(session: &Session, branch: &str) -> Vec<String> {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(
+                data.request
+                    .tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect())
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        })
+        .expect("a model call")
+}
+
+/// #680: a required row waits for the child it mounts, so creation hands back
+/// a Session whose child is `Active`, the check reports nothing, and the first
+/// request offers the tool the child registers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_required_row_waits_for_the_child_it_mounts() {
+    let mut b = builder();
+    names::register::<SlowService>(b.catalog_mut(), Some(SESSION_GROUP));
+    b.require_feature(
+        Feature::new("test.slow-owner").session("test.slow-owner", |names| {
+            Ok(Box::new(SlowOwner {
+                service: names.key()?,
+                tools: names.key()?,
+                timeout: names.startup_timeout(),
+            }))
+        }),
+    )
+    .require_feature(
+        Feature::new("test.slow-provider").session("test.slow-provider", |names| {
+            Ok(Box::new(SlowProvider { key: names.key()? }))
+        }),
+    );
+    let agent = b.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let findings = agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    session
+        .submit("hello".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let tools = last_request_tools(&session, "main").await;
+    assert!(tools.iter().any(|tool| tool == "slow"), "{tools:?}");
+    agent.close().await.unwrap();
+}
+
+/// A dependency nothing provides: the child below stays `Pending`.
+struct NeverProvided;
+struct MissingChild;
+impl DynPlugin for MissingChild {
+    fn name(&self) -> &str {
+        "test.missing-child"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![Key::<NeverProvided>::of().erase()]
+    }
+    fn apply<'a>(&'a self, _: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+struct MissingOwner {
+    timeout: Option<std::time::Duration>,
+}
+impl Plugin for MissingOwner {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        mount_active(ctx, MissingChild, self.timeout).await?;
+        Ok(())
+    }
+}
+
+/// #680: a child whose dependency never arrives fails the row at the window's
+/// bound, so creation fails and names the child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_that_never_loads_fails_the_row_at_the_deadline() {
+    let mut b = builder();
+    b.startup_timeout(Duration::from_millis(200));
+    b.require_feature(
+        Feature::new("test.missing-owner").session("test.missing-owner", |names| {
+            Ok(Box::new(MissingOwner {
+                timeout: names.startup_timeout(),
+            }))
+        }),
+    );
+    let agent = b.build();
+    let error = agent
+        .create_session(SessionConfig::default())
+        .await
+        .err()
+        .expect("creation fails");
+    assert!(error.to_string().contains("test.missing-child"), "{error}");
+    agent.close().await.unwrap();
+}
+
+/// A service a row below mounts its child under, replaced after creation.
+struct Republished;
+
+/// A child that takes a moment to load, so a wait already out of time cannot
+/// see it `Active`.
+struct RepublishedChild;
+impl DynPlugin for RepublishedChild {
+    fn name(&self) -> &str {
+        "test.republished-child"
+    }
+    fn apply<'a>(&'a self, _: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// A row that mounts its child and, when the service it depends on is
+/// replaced after creation, re-applies and mounts a new one.
+struct ReappliedOwner {
+    service: Key<Republished>,
+    timeout: Option<std::time::Duration>,
+}
+impl DynPlugin for ReappliedOwner {
+    fn name(&self) -> &str {
+        "test.reapplied-owner"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.service.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            mount_active(ctx, RepublishedChild, self.timeout).await?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Provides `Republished` until `withdraw` is set, then withdraws the binding
+/// and stays loaded.
+struct FirstProvider {
+    service: Key<Republished>,
+    withdraw: Arc<std::sync::atomic::AtomicBool>,
+}
+impl DynPlugin for FirstProvider {
+    fn name(&self) -> &str {
+        "test.first-provider"
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        let (service, withdraw) = (self.service.clone(), self.withdraw.clone());
+        Box::pin(async move {
+            let disposer = ctx.provide_at(service, Arc::new(Republished))?;
+            tokio::spawn(async move {
+                while !withdraw.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let _ = disposer.dispose().await;
+            });
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Provides `Republished` again once `republish` is set.
+struct SecondProvider {
+    service: Key<Republished>,
+    republish: Arc<std::sync::atomic::AtomicBool>,
+}
+impl DynPlugin for SecondProvider {
+    fn name(&self) -> &str {
+        "test.second-provider"
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        let (ctx, service, republish) = (ctx.clone(), self.service.clone(), self.republish.clone());
+        Box::pin(async move {
+            tokio::spawn(async move {
+                while !republish.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let _ = ctx.provide_at(service, Arc::new(Republished));
+            });
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The two rows that provide and replace `Republished`, armed by the test.
+struct RepublishedProviders {
+    withdraw: Arc<std::sync::atomic::AtomicBool>,
+    republish: Arc<std::sync::atomic::AtomicBool>,
+}
+impl RepublishedProviders {
+    fn new() -> Self {
+        Self {
+            withdraw: Arc::default(),
+            republish: Arc::default(),
+        }
+    }
+    fn install(&self, b: &mut AgentBuilder) {
+        names::register::<Republished>(b.catalog_mut(), Some(SESSION_GROUP));
+        let (withdraw, republish) = (self.withdraw.clone(), self.republish.clone());
+        b.require_feature(Feature::new("test.first-provider").session(
+            "test.first-provider",
+            move |names| {
+                Ok(Box::new(FirstProvider {
+                    service: names.key()?,
+                    withdraw: withdraw.clone(),
+                }))
+            },
+        ))
+        .require_feature(Feature::new("test.second-provider").session(
+            "test.second-provider",
+            move |names| {
+                Ok(Box::new(SecondProvider {
+                    service: names.key()?,
+                    republish: republish.clone(),
+                }))
+            },
+        ));
+    }
+}
+
+/// Waits until one live plugin named `name` is in `state`; fails with the
+/// states it saw.
+async fn wait_for_state(agent: &Agent, name: &str, state: FiberState) {
+    let mut seen: Vec<FiberState> = vec![];
+    for _ in 0..400 {
+        seen = agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .into_iter()
+            .filter(|plugin| plugin.name == name)
+            .map(|plugin| plugin.state)
+            .collect();
+        if seen.contains(&state) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no plugin {name} in {state:?}; saw {seen:?}");
+}
+
+/// #680: a row that re-applies after its scope's creation takes the wait's
+/// bound when the wait starts, so the child it mounts becomes `Active`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reapplied_row_waits_for_its_child_after_creation() {
+    let mut b = builder();
+    let providers = RepublishedProviders::new();
+    providers.install(&mut b);
+    b.startup_timeout(Duration::from_millis(200));
+    b.require_feature(Feature::new("test.reapplied-owner").session(
+        "test.reapplied-owner",
+        |names| {
+            Ok(Box::new(ReappliedOwner {
+                service: names.key()?,
+                timeout: names.startup_timeout(),
+            }))
+        },
+    ));
+    let agent = b.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    wait_for_state(&agent, "test.republished-child", FiberState::Active).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    providers
+        .withdraw
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_for_state(&agent, "test.reapplied-owner", FiberState::Pending).await;
+    providers
+        .republish
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_for_state(&agent, "test.republished-child", FiberState::Active).await;
+    let findings = agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    session.close().await.unwrap();
+    agent.close().await.unwrap();
+}
+
+/// #680: a Session extension row loaded after its session's creation takes
+/// the wait's bound the same way, so the child it mounts becomes `Active`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_extension_row_waits_for_its_child_after_its_session() {
+    let mut b = builder();
+    let providers = RepublishedProviders::new();
+    providers.install(&mut b);
+    b.startup_timeout(Duration::from_millis(200));
+    b.session_extension_part(
+        "test.reapplied-ext",
+        "test.reapplied-owner",
+        |names, _: &()| {
+            Ok(Box::new(ReappliedOwner {
+                service: names.key()?,
+                timeout: names.startup_timeout(),
+            }))
+        },
+    );
+    let agent = b.build();
+    let session = agent
+        .create_session_with_extension(SessionConfig::default(), "test.reapplied-ext", ())
+        .await
+        .unwrap();
+    wait_for_state(&agent, "test.reapplied-owner", FiberState::Active).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    providers
+        .withdraw
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_for_state(&agent, "test.reapplied-owner", FiberState::Pending).await;
+    providers
+        .republish
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_for_state(&agent, "test.republished-child", FiberState::Active).await;
+    let findings = agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    session.close().await.unwrap();
+    agent.close().await.unwrap();
 }
 
 /// Two branches of one Session carry the same faulty plugin: the findings are

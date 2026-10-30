@@ -1,6 +1,5 @@
 use super::*;
 use rutis::host::CtxHost;
-use rutis::host::ErrorKind;
 use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
@@ -58,6 +57,7 @@ impl ModelReload {
                     keys: (names.key()?, names.key()?, names.key()?),
                     model: model.clone(),
                     views: views.clone(),
+                    timeout: names.startup_timeout(),
                 }))
             },
         ));
@@ -79,6 +79,7 @@ struct ContextHostsOwner {
     keys: HostKeys,
     model: Arc<CancelThenEcho>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
+    timeout: Option<std::time::Duration>,
 }
 impl Plugin for ContextHostsOwner {
     type Deps = ();
@@ -87,12 +88,12 @@ impl Plugin for ContextHostsOwner {
     }
 
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(TestContextHosts(self.keys.clone(), self.model.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(ErrorKind::PluginFailed(
-                format!("context hosts failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            TestContextHosts(self.keys.clone(), self.model.clone()),
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

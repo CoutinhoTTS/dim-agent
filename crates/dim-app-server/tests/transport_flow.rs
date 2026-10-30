@@ -334,6 +334,7 @@ impl ToolReload {
                     tools: tools.clone(),
                     views: views.clone(),
                     hold: hold.clone(),
+                    timeout: names.startup_timeout(),
                 }))
             },
         ));
@@ -357,6 +358,7 @@ struct ToolHostOwner {
     tools: Arc<dyn ToolDriver>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
     hold: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+    timeout: Option<std::time::Duration>,
 }
 impl Plugin for ToolHostOwner {
     type Deps = ();
@@ -364,11 +366,16 @@ impl Plugin for ToolHostOwner {
         "ToolHostOwner"
     }
     async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(ToolHostPlugin(
-            self.tool_host.clone(),
-            self.tools.clone(),
-            self.hold.clone(),
-        ));
+        let view = dim_agent_runtime::mount_active(
+            ctx,
+            ToolHostPlugin(
+                self.tool_host.clone(),
+                self.tools.clone(),
+                self.hold.clone(),
+            ),
+            self.timeout,
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
