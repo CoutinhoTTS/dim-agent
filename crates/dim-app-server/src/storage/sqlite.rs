@@ -19,7 +19,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26))",
     ),
     (
         "settings_documents",
@@ -94,6 +94,14 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)",
     ),
     (
+        "session_grants",
+        "CREATE TABLE session_grants (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')), mode TEXT NOT NULL CHECK (mode IN ('read', 'write')), PRIMARY KEY (session_id, path))",
+    ),
+    (
+        "session_grants_by_path",
+        "CREATE INDEX session_grants_by_path ON session_grants(path)",
+    ),
+    (
         "session_metadata",
         "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
     ),
@@ -113,7 +121,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 11] = [
+const UPGRADES: [(u32, &[&str]); 12] = [
     (
         13,
         &[
@@ -150,6 +158,7 @@ const UPGRADES: [(u32, &[&str]); 11] = [
     // decode; the marker only.
     (23, &[]),
     (24, &[]),
+    (26, &["session_grants", "session_grants_by_path"]),
 ];
 
 fn format_table(version: u32) -> String {

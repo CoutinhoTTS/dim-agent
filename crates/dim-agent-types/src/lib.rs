@@ -3,6 +3,7 @@
 mod checkpoint;
 mod content;
 mod events;
+pub mod grant;
 pub mod isolation;
 mod model;
 mod permission;

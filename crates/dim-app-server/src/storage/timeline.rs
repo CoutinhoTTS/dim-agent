@@ -16,6 +16,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
     SessionForkedData,
+    grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rutis::Ctx;
@@ -26,6 +27,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
     sync::{Arc, Mutex, Weak, mpsc},
     thread,
     time::{Duration, Instant},
@@ -738,6 +740,7 @@ impl SqliteTimelineStore {
             "timeline_events",
             "timeline_branches",
             "timeline_content",
+            "session_grants",
             "session_metadata",
             "session_catalog",
             "session_owners",
@@ -843,6 +846,88 @@ impl SessionStore {
                     .map_err(error)?
                     .collect::<rusqlite::Result<_>>()
                     .map_err(error)
+            })
+            .await
+    }
+    /// Adds a canonical user grant for `session_id`. A write grant is not
+    /// downgraded by a later read grant; a read grant may become write.
+    pub async fn add_grant(
+        &self,
+        session_id: &str,
+        path: PathBuf,
+        kind: GrantKind,
+        mode: GrantMode,
+    ) -> Result<()> {
+        let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
+            AgentError::Storage(format!("grant path {}: {error}", path.display()))
+        })?;
+        let id = session_id.to_owned();
+        let path = canonical.to_string_lossy().into_owned();
+        let kind = match kind {
+            GrantKind::File => "file",
+            GrantKind::Dir => "dir",
+        };
+        let mode = match mode {
+            GrantMode::Read => "read",
+            GrantMode::Write => "write",
+        };
+        self.timeline
+            .db
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO session_grants (session_id, path, kind, mode) VALUES (?1, ?2, ?3, ?4) \
+                         ON CONFLICT(session_id, path) DO UPDATE SET kind=excluded.kind, \
+                         mode=CASE WHEN session_grants.mode='write' THEN 'write' ELSE excluded.mode END",
+                        params![id, path, kind, mode],
+                    )
+                    .map_err(error)?;
+                Ok(())
+            })
+            .await
+    }
+    pub async fn remove_grant(&self, session_id: &str, path: &str) -> Result<()> {
+        let id = session_id.to_owned();
+        let path = path.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "DELETE FROM session_grants WHERE session_id=?1 AND path=?2",
+                        params![id, path],
+                    )
+                    .map_err(error)?;
+                Ok(())
+            })
+            .await
+    }
+    pub async fn grants(&self, session_id: &str) -> Result<Vec<SessionGrant>> {
+        let id = session_id.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                let mut query = connection
+                    .prepare("SELECT path, kind, mode FROM session_grants WHERE session_id=?1 ORDER BY path")
+                    .map_err(error)?;
+                let rows = query
+                    .query_map([id], |row| {
+                        let path: String = row.get(0)?;
+                        let kind: String = row.get(1)?;
+                        let mode: String = row.get(2)?;
+                        Ok((path, kind, mode))
+                    })
+                    .map_err(error)?;
+                let mut grants = Vec::new();
+                for row in rows {
+                    let (path, kind, mode) = row.map_err(error)?;
+                    grants.push(SessionGrant {
+                        path: PathBuf::from(path),
+                        kind: if kind == "file" { GrantKind::File } else { GrantKind::Dir },
+                        mode: if mode == "write" { GrantMode::Write } else { GrantMode::Read },
+                    });
+                }
+                Ok(grants)
             })
             .await
     }
@@ -1237,6 +1322,11 @@ impl SessionStore {
                 }
                 super::catalog::initialize_session_catalog(&tx, &fork)?;
                 files::share(&tx, &source, &fork).map_err(error)?;
+                tx.execute(
+                    "INSERT INTO session_grants (session_id, path, kind, mode) SELECT ?2, path, kind, mode FROM session_grants WHERE session_id=?1",
+                    params![source, fork],
+                )
+                .map_err(error)?;
                 tx.commit().map_err(error)
             })
             .await
