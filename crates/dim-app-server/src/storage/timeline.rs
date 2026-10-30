@@ -949,24 +949,7 @@ impl SessionStore {
                     .map_err(error)?;
                 let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&session];
                 parameters.extend(wanted.iter().map(|id| id as &dyn rusqlite::ToSql));
-                let rows = query
-                    .query_map(rusqlite::params_from_iter(parameters), |row| {
-                        Ok((
-                            read_sequence(row, 0)?,
-                            read_sequence(row, 1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                        ))
-                    })
-                    .map_err(error)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(error)?;
-                rows.into_iter()
-                    .map(|(first, last, kind, body, event_id)| {
-                        Fetched::parse(first, last, kind, &body, event_id)
-                    })
-                    .collect()
+                query_fetched(&mut query, rusqlite::params_from_iter(parameters))
             })
             .await?;
         let mut events = HashMap::with_capacity(rows.len());
@@ -1011,24 +994,7 @@ impl SessionStore {
                     parameters.push(request_id);
                     parameters.push(call_id);
                 }
-                let rows = query
-                    .query_map(rusqlite::params_from_iter(parameters), |row| {
-                        Ok((
-                            read_sequence(row, 0)?,
-                            read_sequence(row, 1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                        ))
-                    })
-                    .map_err(error)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(error)?;
-                rows.into_iter()
-                    .map(|(first, last, kind, body, event_id)| {
-                        Fetched::parse(first, last, kind, &body, event_id)
-                    })
-                    .collect()
+                query_fetched(&mut query, rusqlite::params_from_iter(parameters))
             })
             .await?;
         let mut starts = HashMap::with_capacity(rows.len());
@@ -1654,6 +1620,29 @@ impl Fetched {
             records: vec![],
         })
     }
+}
+/// The rows a batch read selects, in the five-column form both of them use:
+/// sequence, last sequence, kind, body and the identity the index matched.
+fn query_fetched(
+    query: &mut rusqlite::Statement<'_>,
+    parameters: impl rusqlite::Params,
+) -> Result<Vec<Fetched>> {
+    query
+        .query_map(parameters, |row| {
+            Ok((
+                read_sequence(row, 0)?,
+                read_sequence(row, 1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(error)?
+        .map(|row| {
+            let (first, last, kind, body, event_id) = row.map_err(error)?;
+            Fetched::parse(first, last, kind, &body, event_id)
+        })
+        .collect()
 }
 /// The rows of one query, decoded in sequence order with one `Reader`.
 struct Rows {
