@@ -29,6 +29,11 @@ const LOCK_RETRY: Duration = Duration::from_millis(10);
 /// before the rename leaves `path` as it was and removes the temp file, and
 /// a file that cannot be read is left alone rather than treated as an
 /// absent one.
+///
+/// The `.lock` file stays after the write: removing it would let two
+/// writers lock two different files. The temp file is `<path>.<pid>.tmp`; a
+/// stale one is removed first and the new one is opened with `create_new`,
+/// so a planted symlink at the path is not followed.
 pub fn update(
     path: &Path,
     mode: Option<u32>,
@@ -80,6 +85,7 @@ fn update_within(
         return Ok(());
     };
     let temp = sibling(path, &format!(".{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
     let replaced = write_temp(&temp, path, mode, &bytes)
         .and_then(|()| std::fs::rename(&temp, path))
         .and_then(|()| sync_dir(path));
@@ -90,11 +96,7 @@ fn update_within(
 }
 
 fn write_temp(temp: &Path, path: &Path, mode: Option<u32>, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(temp)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(temp)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
