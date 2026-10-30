@@ -11,7 +11,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 26;
+const FORMAT: u32 = 27;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -19,7 +19,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 27))",
     ),
     (
         "settings_documents",
@@ -158,7 +158,7 @@ const UPGRADES: [(u32, &[&str]); 12] = [
     // decode; the marker only.
     (23, &[]),
     (24, &[]),
-    (25, &["session_grants", "session_grants_by_path"]),
+    (26, &["session_grants", "session_grants_by_path"]),
 ];
 
 fn format_table(version: u32) -> String {
