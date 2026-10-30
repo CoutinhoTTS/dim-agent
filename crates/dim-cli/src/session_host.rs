@@ -3365,9 +3365,10 @@ pub(crate) enum LimitTarget {
 }
 
 /// Declares a context window and maximum output for the target models
-/// through `provider.models.edit`, each write at the version the previous
-/// reply returned. A conflict stops the run and keeps the server's reread
-/// requirement.
+/// through `provider.models.edit`, sending each model only the limits its
+/// catalog entry reports missing, so a declared value is never overwritten.
+/// Each write uses the version the previous reply returned. A conflict stops
+/// the run and keeps the server's reread requirement.
 pub(crate) async fn declare_model_limits(
     client: &mut Client,
     provider_id: &str,
@@ -3386,7 +3387,7 @@ pub(crate) async fn declare_model_limits(
         .version
         .ok_or("Provider catalog must be refreshed before declaring model limits")?;
     let targets = match target {
-        LimitTarget::Model(model) => vec![model],
+        LimitTarget::Model(model) => vec![(model, vec!["contextWindow".into(), "maxOutputTokens".into()])],
         LimitTarget::Missing => {
             #[derive(Deserialize)]
             struct Snapshot {
@@ -3413,16 +3414,28 @@ pub(crate) async fn declare_model_limits(
                         .models
                         .into_iter()
                         .filter(|model| !model.missing_limits.is_empty())
-                        .map(|model| model.id)
+                        .map(|model| (model.id, model.missing_limits))
                         .collect()
                 })
                 .unwrap_or_default()
         }
     };
-    for model_id in targets {
+    for (model_id, missing) in targets {
         #[derive(Deserialize)]
         struct Edited {
             version: u32,
+        }
+        let mut edit = serde_json::Map::new();
+        for field in missing {
+            match field.as_str() {
+                "contextWindow" => {
+                    edit.insert("contextWindow".into(), json!(context_window));
+                }
+                "maxOutputTokens" => {
+                    edit.insert("maxOutputTokens".into(), json!(max_output_tokens));
+                }
+                _ => {}
+            }
         }
         let edited: Edited = client
             .typed(
@@ -3431,7 +3444,7 @@ pub(crate) async fn declare_model_limits(
                     "providerId": provider_id,
                     "expectedVersion": version,
                     "modelId": model_id,
-                    "edit": {"contextWindow": context_window, "maxOutputTokens": max_output_tokens},
+                    "edit": edit,
                 }),
             )
             .await

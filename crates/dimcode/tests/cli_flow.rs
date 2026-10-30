@@ -485,7 +485,7 @@ fn model_catalog_declares_missing_limits_for_every_model() {
         assert_eq!(
             second["params"],
             json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"maxOutputTokens":8000}})
         );
         wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
         let catalog = wire.read("provider.catalog");
