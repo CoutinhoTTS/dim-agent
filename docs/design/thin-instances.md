@@ -292,9 +292,10 @@ instances from its position in the tree, and a host marks its own scopes with `m
 - The Chinese mirrors: [How Dim uses rutis](../zh/design/rutis-usage.md) `:359` and
   [Plugin contract](../zh/design/plugin-contract.md) `:52`.
 - The generated graphs, through `xtask graph`.
-- #645 is closed. 0.19.1 has the `Loader::instance_rows` it pinned
-  ([rutis#941](https://github.com/arcships/rutis/issues/941)), but this design removes the instance
-  rows it reads. Its Git pin and its build.md paragraph do not land.
+- #645 does not land: this design supersedes it, and it stays open until this design lands. 0.19.1
+  has the `Loader::instance_rows` it pinned ([rutis#941](https://github.com/arcships/rutis/issues/941)),
+  but this design removes the instance rows it reads. Its Git pin and its build.md paragraph do not
+  land.
 
 ## Appendix A. Rust binding
 
