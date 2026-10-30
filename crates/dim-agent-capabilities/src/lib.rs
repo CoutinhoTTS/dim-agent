@@ -27,6 +27,7 @@ pub mod prompt_sources;
 pub mod prompt_state;
 pub mod recall;
 pub mod session_broadcast;
+pub mod session_grants;
 pub mod settings;
 pub mod shell_input;
 pub mod shell_session;
@@ -77,6 +78,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::PromptHost>(catalog, session);
     register::<host::ToolHost>(catalog, session);
     register::<permission::CommandRulesHost>(catalog, session);
+    register::<session_grants::SessionGrantsHost>(catalog, session);
     register::<methods::SessionMethods>(catalog, session);
     let branch = Some(BRANCH_GROUP);
     register::<input_queue::InputQueue>(catalog, branch);

@@ -5,6 +5,7 @@
 //! commands of process-starting calls.
 use crate::{
     host::{HostError, HostFuture},
+    session_grants::SessionGrantsHost,
     workspace_tools::files::canonical_prefix,
 };
 use dim_agent_runtime::{
@@ -13,6 +14,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
     CommandRuleDecision, EventKind, PermissionChangedData, PermissionPolicy, PermissionPreset,
+    grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
@@ -78,6 +80,7 @@ pub struct Permission {
     timeline: Arc<Timeline>,
     state: Arc<StateCell<PermissionState>>,
     rules: Arc<CommandRulesHost>,
+    grants: Arc<SessionGrantsHost>,
     config: Arc<SessionConfig>,
     inner: Mutex<Inner>,
 }
@@ -122,6 +125,17 @@ impl Permission {
             },
             None => None,
         };
+        let grant_target = matches!(Risk::of(risk), Risk::Read | Risk::Write)
+            .then(|| call.input.get("path").and_then(|path| path.as_str()))
+            .flatten()
+            .map(|path| {
+                let path = std::path::Path::new(path);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    PathBuf::from(&self.config.cwd).join(path)
+                }
+            });
         let policy = self.state.get().policy;
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
@@ -132,7 +146,7 @@ impl Permission {
         if policy.preset == PermissionPreset::WorkspaceWrite
             && matches!(Risk::of(risk), Risk::Write)
         {
-            return Ok(match write_target {
+            let decision = match write_target {
                 Some(Ok((workspace, target))) if target.starts_with(&workspace) => {
                     decide(&policy, name, risk)
                 }
@@ -147,7 +161,10 @@ impl Permission {
                     reason: "A file write without a verified workspace target requires approval"
                         .into(),
                 },
-            });
+            };
+            return Ok(self
+                .apply_grant(decision, Risk::Write, grant_target.as_deref(), cancel)
+                .await);
         }
         let (Some(command), Some(rules)) = (command, rules) else {
             return Ok(decide(&policy, name, risk));
@@ -177,7 +194,7 @@ impl Permission {
                 ),
             });
         }
-        Ok(match decide(&policy, name, risk) {
+        let decision = match decide(&policy, name, risk) {
             Decision::Ask { .. }
                 if !command.contains(COMMAND_SEPARATORS)
                     && rules.iter().any(|rule| {
@@ -187,7 +204,33 @@ impl Permission {
                 Decision::Allow
             }
             decision => decision,
-        })
+        };
+        Ok(self
+            .apply_grant(decision, Risk::of(risk), grant_target.as_deref(), cancel)
+            .await)
+    }
+
+    async fn apply_grant(
+        &self,
+        decision: Decision,
+        risk: Risk,
+        target: Option<&std::path::Path>,
+        cancel: &CancellationToken,
+    ) -> Decision {
+        let (Decision::Ask { .. }, Some(target)) = (&decision, target) else {
+            return decision;
+        };
+        let Ok(grants) = self.grants.0.grants(cancel.clone()).await else {
+            return decision;
+        };
+        if grants
+            .iter()
+            .any(|grant| grant_matches(grant, risk, target))
+        {
+            Decision::Allow
+        } else {
+            decision
+        }
     }
     /// Writes `permission/changed` when `expected` is the last written
     /// version; returns the new version once it is dispatched.
@@ -270,7 +313,7 @@ impl Permission {
 }
 
 /// Risk categories declared by tool owners in `ToolDefinition.risk`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Risk {
     Read,
     Write,
@@ -313,6 +356,16 @@ fn matches(rule: &CommandRule, command: &str) -> bool {
 }
 
 /// `allowedTools`, then the preset by risk; `disallowedTools` comes first.
+fn grant_matches(grant: &SessionGrant, risk: Risk, target: &std::path::Path) -> bool {
+    if risk == Risk::Write && grant.mode != GrantMode::Write {
+        return false;
+    }
+    match grant.kind {
+        GrantKind::File => target == grant.path,
+        GrantKind::Dir => target.starts_with(&grant.path),
+    }
+}
+
 fn decide(policy: &PermissionPolicy, name: &str, risk: Option<&str>) -> Decision {
     if policy.allowed_tools.iter().any(|item| item == name) {
         return Decision::Allow;
@@ -352,6 +405,7 @@ pub struct PermissionPlugin {
     permission: Key<Permission>,
     config: Key<SessionConfig>,
     rules: Key<CommandRulesHost>,
+    grants: Key<SessionGrantsHost>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
 }
@@ -362,6 +416,7 @@ impl PermissionPlugin {
             permission: names.key()?,
             config: names.key()?,
             rules: names.key()?,
+            grants: names.key()?,
             timeline: names.key()?,
             dispatcher: names.key()?,
         })
@@ -375,6 +430,7 @@ impl DynPlugin for PermissionPlugin {
         vec![
             self.config.erase(),
             self.rules.erase(),
+            self.grants.erase(),
             self.timeline.erase(),
             self.dispatcher.erase(),
         ]
@@ -383,6 +439,7 @@ impl DynPlugin for PermissionPlugin {
         Box::pin(async move {
             let config = ctx.require_at(&self.config)?;
             let rules = ctx.require_at(&self.rules)?;
+            let grants = ctx.require_at(&self.grants)?;
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let service = Arc::new(Permission {
@@ -392,6 +449,7 @@ impl DynPlugin for PermissionPlugin {
                     policy: config.permission_policy.clone(),
                 })),
                 rules,
+                grants,
                 config,
                 inner: Mutex::new(Inner::default()),
             });

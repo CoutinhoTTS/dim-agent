@@ -23,6 +23,7 @@ pub mod plugin_manager;
 pub mod protocol;
 pub mod provider;
 pub mod runtime_manager;
+mod session_grants;
 pub mod session_typescript;
 pub mod settings;
 pub mod settings_methods;
@@ -705,7 +706,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
-                            execution: Some(names.key()?),
+                            execution: names
+                                .registered::<dim_agent_capabilities::execution_settings::ExecutionSettingsHost>()
+                                .then(|| names.key())
+                                .transpose()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
                         },
                     )?,

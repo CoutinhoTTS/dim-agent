@@ -733,8 +733,9 @@ impl DynPlugin for HostPlatformPlugin {
                 .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             platform.shell_file = shell_file;
             if let Some(execution) = &self.execution {
-                let host = ctx.require_at(execution)?;
-                platform.execution = Some(host.0.clone());
+                if let Some(host) = ctx.get_at(execution) {
+                    platform.execution = Some(host.0.clone());
+                }
             }
             platform.shell.lock().await.config = config;
             ctx.provide_as::<HostPlatform>(Arc::new(platform))?;

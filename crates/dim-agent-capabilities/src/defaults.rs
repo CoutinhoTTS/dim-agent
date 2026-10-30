@@ -11,6 +11,7 @@ use crate::{
     permission::{CommandRulesHost, NoCommandRules, PermissionPlugin},
     prompt::{InitialPromptConfiguration, PromptPlugin},
     session_broadcast::{SessionBroadcastEndPlugin, SessionBroadcastPlugin},
+    session_grants::{NoSessionGrants, SessionGrantsHost},
     summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
     timeline_tree::{BranchToolConfig, TimelineTreePlugin, TreeTimelinePlugin},
     tool_binding::ToolBindingPlugin,
@@ -53,7 +54,8 @@ fn install_profile(
     builder
         .session_value(Arc::new(PromptHost(host)))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(initial)))
-        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
+        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+        .session_value(Arc::new(SessionGrantsHost(Arc::new(NoSessionGrants))));
     install_with_prompt_capability(builder, model);
 }
 
