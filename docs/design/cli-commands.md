@@ -12,6 +12,27 @@ local image sources and paste handling. The multiline/paste editor and headless 
 arguments, clipboard/file insertion, completion and dropped paths are implemented. The attachment
 contract records the native platform acceptance evidence and outstanding checks.
 
+The command menu follows the repository menu ordering convention in
+[AGENTS.md](../../AGENTS.md#working-conventions) in both TUI modes.
+The command menu lists `/approvals` as the permission entry. `/approval`
+remains available when typed directly. Interrupt and steer are reached through
+`Esc` and `Ctrl+S` and are omitted from the menu. The menu only lists slash
+commands: the view actions for picking an earlier message and scrolling to the
+top or bottom are also omitted; `Tab`, `Home` and `End` retain their bindings.
+
+```text
+Commands
+  app     /exit        exit
+  app     /keys        show the key bindings
+  model   /approvals   set the session's permission preset
+
+Esc     interrupt the run
+Ctrl+S  steer with the next queued message
+Tab     pick an earlier message to edit or quote
+Home    scroll to the top (fullscreen, empty draft)
+End     scroll to the bottom (fullscreen, empty draft)
+```
+
 ## Command isolation settings
 
 The existing `/settings` panel adds a separate `Command isolation` row under Permissions,

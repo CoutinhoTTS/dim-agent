@@ -1,7 +1,6 @@
 //! The command palette registry: the actions the native interface runs,
-//! grouped by category, in palette order. A slash command is also typed as
-//! `/name`; the other entries are actions a key reaches (named in `key`),
-//! listed so the palette teaches the key.
+//! sorted by category and name when listed. A slash command is also typed as
+//! `/name`; the other entries are actions reached only by their keys.
 
 #[derive(Debug)]
 pub struct Command {
@@ -58,13 +57,15 @@ impl Command {
         }
     }
 
-    /// Listed at all: fullscreen-only actions are left out elsewhere, and
-    /// `/fast` while the model has no service tiers to switch.
+    /// Whether the menu offers this command in the current context.
     pub fn listed(&self, context: Context) -> bool {
+        if !self.slash || self.name == "approval" {
+            return false;
+        }
         if self.name == "fast" {
             return context.service_tiers;
         }
-        self.needs != Needs::Fullscreen || context.fullscreen
+        true
     }
 
     pub fn available(&self, context: Context) -> bool {
