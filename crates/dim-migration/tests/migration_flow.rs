@@ -1223,10 +1223,15 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
         .await
         .unwrap();
     assert_eq!(report.task.status, TaskStatus::Partial, "{report:?}");
-    assert!(
-        report.objects.iter().any(|item| item.kind == "selection"
-            && item.id == "corrupt-target"
-            && item.outcome == Outcome::Unsupported),
+    let corrupt = report
+        .objects
+        .iter()
+        .find(|item| item.kind == "selection" && item.id == "corrupt-target")
+        .unwrap();
+    assert_eq!(corrupt.outcome, Outcome::Unsupported, "{report:?}");
+    assert_eq!(
+        corrupt.reason.as_deref(),
+        Some("Unreadable native provider is preserved"),
         "{report:?}"
     );
     assert_eq!(

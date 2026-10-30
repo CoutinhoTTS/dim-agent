@@ -57,10 +57,25 @@ fn read_target(
     .transpose()
 }
 
-/// `read_target` for a provider a previous run imported; a missing or
-/// unreadable record simply leaves it out of the selection mapping.
-fn imported_target(connection: &Connection, provider_id: &str) -> Option<StaticProviderRecord> {
-    read_target(connection, provider_id).ok().flatten()
+/// Keep a provider record a previous run imported for the selections that
+/// name it; an unreadable record keeps its read error for that row.
+fn remember_target(
+    connection: &Connection,
+    provider_id: &str,
+    imported: &mut HashMap<String, StaticProviderRecord>,
+    unreadable: &mut HashMap<String, String>,
+) -> MigrationResult<()> {
+    match read_target(connection, provider_id) {
+        Ok(Some(record)) => {
+            imported.insert(provider_id.to_owned(), record);
+        }
+        Ok(None) => {}
+        Err(Error::Object(reason)) => {
+            unreadable.insert(provider_id.to_owned(), reason);
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
 }
 
 pub(crate) async fn import(
@@ -76,6 +91,7 @@ pub(crate) async fn import(
         .map_err(|_| Error::Object("Legacy provider schema is unsupported".into()))?;
     let bundled = BundledCatalog::load().map_err(crate::native::failure)?;
     let mut imported: HashMap<String, StaticProviderRecord> = HashMap::new();
+    let mut unreadable: HashMap<String, String> = HashMap::new();
     for (kind, rows) in [
         ("provider", snapshot.providers),
         ("selection", snapshot.selections),
@@ -151,10 +167,9 @@ pub(crate) async fn import(
                                     })?;
                                 let previous =
                                     current.is_builtin().then(|| current.with_version(1));
-                                let converted = convert_legacy_provider(&row, previous, &bundled)
-                                    .map_err(Error::Object)?
-                                    .record
-                                    .with_version(version);
+                                let conversion = convert_legacy_provider(&row, previous, &bundled)
+                                    .map_err(Error::Object)?;
+                                let converted = conversion.record.with_version(version);
                                 let converted_value = serde_json::to_value(&converted)
                                     .map_err(crate::native::failure)?;
                                 tx.execute("UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1", params![row.id,version,converted_value.to_string()]).map_err(crate::native::failure)?;
@@ -167,17 +182,13 @@ pub(crate) async fn import(
                                 imported.insert(row.id.clone(), converted);
                                 return Ok(Outcome::Imported);
                             }
-                            if let Some(record) = imported_target(&tx, &row.id) {
-                                imported.insert(row.id.clone(), record);
-                            }
+                            remember_target(&tx, &row.id, &mut imported, &mut unreadable)?;
                             return Ok(Outcome::AlreadyImported);
                         }
                     }
                     if seen == row.digest {
-                        if kind == "provider"
-                            && let Some(record) = imported_target(&tx, &row.id)
-                        {
-                            imported.insert(row.id.clone(), record);
+                        if kind == "provider" {
+                            remember_target(&tx, &row.id, &mut imported, &mut unreadable)?;
                         }
                         return Ok(Outcome::AlreadyImported);
                     }
@@ -211,6 +222,14 @@ pub(crate) async fn import(
                     )?;
                     imported.insert(row.id.clone(), conversion.record);
                 } else {
+                    let blocked = row
+                        .fields
+                        .get("providerId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| unreadable.get(id));
+                    if let Some(reason) = blocked {
+                        return Err(Error::Object(reason.clone()));
+                    }
                     let selection = convert_legacy_selection(&row, &imported, &bundled)
                         .map_err(Error::Object)?;
                     let exists: bool = tx
