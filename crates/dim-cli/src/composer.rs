@@ -41,6 +41,15 @@ impl Part {
     }
 }
 
+/// One path a paste will attach, decided before its bytes are read.
+struct PlannedFile {
+    /// The token's name: the file name.
+    label: String,
+    path: PathBuf,
+    /// Whether the path names an image, so its bytes must be read.
+    image: bool,
+}
+
 #[derive(Default)]
 pub struct Draft {
     parts: Vec<Part>,
@@ -286,9 +295,8 @@ impl Draft {
         self.cursor = if end { base } else { start };
     }
 
-    fn files(&mut self, paths: &[PathBuf], replace: Range<usize>) -> Result<()> {
-        let mut count = self
-            .parts
+    fn image_parts(&self) -> usize {
+        self.parts
             .iter()
             .filter(|part| {
                 matches!(
@@ -299,8 +307,14 @@ impl Draft {
                     }
                 )
             })
-            .count();
-        let mut parts = Vec::new();
+            .count()
+    }
+
+    /// Decides what a group of pasted paths becomes without reading image
+    /// bytes: token labels and the 20-image count.
+    fn plan_files(&self, paths: &[PathBuf]) -> Result<Vec<PlannedFile>> {
+        let mut count = self.image_parts();
+        let mut plan = Vec::with_capacity(paths.len());
         for path in paths {
             let label = path
                 .file_name()
@@ -309,26 +323,69 @@ impl Draft {
                 .ok_or("File paths must be UTF-8")?
                 .to_owned();
             path.to_str().ok_or("File paths must be UTF-8")?;
-            let content = images::file(path)
-                .map_err(|error| format!("{}: {error}", truncate(&escaped(&label), 24)))?;
-            if matches!(content, ContentBlock::Image { .. }) {
+            let image = images::is_image(path);
+            if image {
                 count += 1;
                 if count > MAX_IMAGES {
                     return Err("A submission accepts at most 20 images".into());
                 }
             }
-            parts.push(Part::File { label, content });
+            plan.push(PlannedFile {
+                label,
+                path: path.clone(),
+                image,
+            });
         }
+        Ok(plan)
+    }
+
+    /// Reads a planned group: an image path is decoded and scaled here, so a
+    /// caller with a runtime runs this on a blocking task.
+    fn read_planned(plan: Vec<PlannedFile>) -> Result<Vec<Part>> {
+        let mut parts = Vec::with_capacity(plan.len());
+        for planned in plan {
+            let content = images::file(&planned.path)
+                .map_err(|error| format!("{}: {error}", truncate(&escaped(&planned.label), 24)))?;
+            let part = match content {
+                images::Item::Image(image) => Part::File {
+                    label: image_label(&planned.label, &image),
+                    content: image.block(),
+                },
+                images::Item::Text(text) => Part::File {
+                    label: planned.label,
+                    content: ContentBlock::Text { text },
+                },
+            };
+            parts.push(part);
+        }
+        Ok(parts)
+    }
+
+    fn insert_files(&mut self, parts: Vec<Part>, replace: Range<usize>) {
         self.erase(replace.start, replace.end);
         for part in parts {
             self.insert(part);
         }
+    }
+
+    /// Reads and inserts a pasted group; the image work runs on a blocking
+    /// task so a decode never holds the runtime.
+    async fn files(&mut self, paths: &[PathBuf], replace: Range<usize>) -> Result<()> {
+        let plan = self.plan_files(paths)?;
+        let parts = if plan.iter().any(|planned| planned.image) {
+            tokio::task::spawn_blocking(move || Self::read_planned(plan))
+                .await
+                .map_err(|error| error.to_string())??
+        } else {
+            Self::read_planned(plan)?
+        };
+        self.insert_files(parts, replace);
         Ok(())
     }
 
-    fn paste(&mut self, text: String, base: &Path) -> Result<()> {
+    async fn paste(&mut self, text: String, base: &Path) -> Result<()> {
         if let Some(paths) = pasted_paths(&text, base) {
-            self.files(&paths, self.cursor..self.cursor)
+            self.files(&paths, self.cursor..self.cursor).await
         } else {
             if text.len() > INLINE_PASTE || text.contains(['\r', '\n']) {
                 let lines = text.lines().count();
@@ -344,31 +401,18 @@ impl Draft {
         }
     }
 
-    fn clipboard(&mut self, source: Source, base: &Path) -> Result<()> {
+    async fn clipboard(&mut self, source: Source, base: &Path) -> Result<()> {
         match source {
-            Source::Text(text) => self.paste(text, base),
-            Source::Files(paths) => self.files(&paths, self.cursor..self.cursor),
-            Source::Image(source) => {
-                if self
-                    .parts
-                    .iter()
-                    .filter(|part| {
-                        matches!(
-                            part,
-                            Part::File {
-                                content: ContentBlock::Image { .. },
-                                ..
-                            }
-                        )
-                    })
-                    .count()
-                    >= MAX_IMAGES
-                {
+            Source::Text(text) => self.paste(text, base).await,
+            Source::Files(paths) => self.files(&paths, self.cursor..self.cursor).await,
+            Source::Image(image) => {
+                if self.image_parts() >= MAX_IMAGES {
                     return Err("A submission accepts at most 20 images".into());
                 }
+                let label = image_label("clipboard", &image);
                 self.insert(Part::File {
-                    label: "clipboard".into(),
-                    content: ContentBlock::Image { source },
+                    label,
+                    content: image.block(),
                 });
                 Ok(())
             }
@@ -689,6 +733,29 @@ impl Decoder {
     }
 }
 
+/// An image item's marker label: the name, both sizes when the sent size
+/// differs from the original, both media types when the encoding changed the
+/// type, the first-frame note of an animation, and a re-encode that kept both
+/// the size and the type.
+fn image_label(label: &str, image: &images::Attached) -> String {
+    let mut label = label.to_owned();
+    if image.resized() {
+        label.push_str(" · ");
+        label.push_str(&image.sizes());
+    }
+    if let Some(types) = image.media_types() {
+        label.push_str(" · ");
+        label.push_str(&types);
+    }
+    if image.animated {
+        label.push_str(" · first frame");
+    }
+    if image.reencoded() {
+        label.push_str(" · re-encoded");
+    }
+    label
+}
+
 fn truncate(text: &str, columns: usize) -> String {
     if text.width() <= columns {
         return text.into();
@@ -882,7 +949,14 @@ pub async fn edit(
             },
             source = async { clipboard_read.as_mut().expect("pending clipboard read").as_mut().await }, if clipboard_read.is_some() => {
                 clipboard_read = None;
-                notice = source.and_then(|source| draft.clipboard(source, base)).err().map(|error| format!("Clipboard: {error}"));
+                notice = match source {
+                    Ok(source) => draft
+                        .clipboard(source, base)
+                        .await
+                        .err()
+                        .map(|error| format!("Clipboard: {error}")),
+                    Err(error) => Some(format!("Clipboard: {error}")),
+                };
                 completion = None;
                 screen.draw(draft, size, notice.as_deref(), None)?;
                 continue;
@@ -939,7 +1013,9 @@ pub async fn edit(
                                     )));
                                 })
                         } else {
-                            draft.files(std::slice::from_ref(&entry.path), value.range.clone())
+                            draft
+                                .files(std::slice::from_ref(&entry.path), value.range.clone())
+                                .await
                         };
                         if let Err(error) = result {
                             notice = Some(error.to_string());
@@ -975,7 +1051,7 @@ pub async fn edit(
                 Key::Text(text) => draft.insert(Part::Text(text)),
                 Key::Newline => draft.insert(Part::Text("\n".into())),
                 Key::Paste(text) => {
-                    if let Err(error) = draft.paste(text, base) {
+                    if let Err(error) = draft.paste(text, base).await {
                         notice = Some(error.to_string());
                     }
                 }

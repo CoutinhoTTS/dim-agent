@@ -335,9 +335,47 @@ sequenceDiagram
 | 调用方 Session | `schedule` 声明 | 已采用配置中的工具声明（每个 Session；只在交互式 leader 中可用） | 配置；压缩后保留 |
 | 调用方 Session | `schedule` 结果 | `ToolResult.content` | 批次结果位置；压缩后仅存于摘要 |
 | 运行 Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`，随后是作为用户内容的提示词 | 一个 Queue 输入的 raw 标记块 + 用户文本 | 位于其 `input/consumed` 位置；无 key，因此压缩后只经由摘要；若在切点前已消费，子分支会继承 |
-| 保存方分支 | 运行结果、任务/运行 id、已知 Session id 和原因（A.6） | 经现有 sessions.input 写一个 Steer 输入 | 位于其消费位置；无 key；失败或丢失后不补发 |
+| 保存方分支 | `<dim-scheduler kind="report" job="..." run="...">`，随后是运行结局、已知 Session id 与历史读取路径（A.6） | 经现有 sessions.input 写的一个 Steer 输入的 raw 标记块 | 位于其消费位置；无 key；失败或丢失后不补发 |
 
 运行 Session 是非交互的：ask_user 与 schedule 仍声明，处理函数返回错误；reuse 的先前运行保留为普通输入历史。任务/运行记录经 ToolResult.content 或已消费的结果报告到达调用模型，不自动把存储、定时器或诊断注入上下文。
+
+### 5.1 面向模型的文本
+
+一段文本属于 protocol 还是 policy 由[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)判定。其中两段是混合的，按句标注。
+
+| 文本 | 类别与逐句标注 |
+| --- | --- |
+| `schedule` 声明的 inputSchema | Protocol：动作集合、`job_id`、`enabled`、`limit` 以及 `job` 对象及其字段 |
+| `schedule` 声明的 description | Protocol："Manage scheduled jobs across this host, including other workspaces." 说明工具的作用范围；"Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." 与 "An omitted policy keeps its stored value, whose default can change with the saving origin." 陈述运行时保证。Policy："Inspect the old-to-new authority transition in the result." 是工作方式指引 |
+| `schedule` 结果 | Protocol：首行 `schedule: <code>` 与其消息、`schedule is available only in interactive leader Sessions.`、`schedule: cancelled before handover`，以及两条卸载通知。代码为 `schedule_invalid`、`schedule_not_found`、`schedule_conflict`、`service_unavailable`、`service_reloading` 和 `invalid_data`；模型读取并按之行事 |
+| 运行标记 | Protocol：元素 `dim-scheduler`、其 kind `scheduled-run` 与 `report`、属性 `job` 与 `run`，以及各自开辟的输入。scheduled-run 的正文是任务名，其后的文本是为该任务保存的提示词；report 的正文陈述运行结局、已知时的 Session id，以及运行历史所在 |
+| 运行结果报告的正文 | Protocol：`Scheduled job …, run …: <state> (<detail>).`、已知时的 Session id 与运行可报告的结局词表。Policy：`Inspect schedule.history for this job.` 是工作方式指引，位于正文最后一行；它所写的方名属 protocol |
+
+报告的正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，因此带有标记文字的任务 id 或结局细节无法开启或关闭该标记；属性同样转义。
+
+policy 文本是出厂配置成员：`code.config.description` 替换声明的 description，`code.config.report_guidance` 替换结果报告的指引行；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在插件加载时被拒绝（`scheduler/index.ts`）。改动它的 profile 也保持它只有一行。
+
+两个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
+
+在报告标记出现之前的历史按原样保留：没有任何东西重写历史，所以恢复的分支回放的是旧的裸文本，通道规则的例外清单不因它而增加（[面向模型的提示词 §6.1](../model-prompts.md#61-覆盖什么)）。
+
+### 5.2 guide 条目
+
+一个条目覆盖两个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
+
+```
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.
+```
+
+每一句都是 protocol，各自说明模型定位这两个标记所需的一件事：
+
+- 「a scheduled job's saved prompt, delivered when the job runs, and … how that run ended」——两个标记各是什么。
+- 「job names the job, run names the run, in both.」——属性。
+- 「In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel.」——scheduled-run 输入的形状，以及其提示词到达的通道。
+- 「In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request.」——报告的正文形状，及其信任类别。
+- 「The report's last line is not part of that account: it is guidance on what to do next.」——结尾行的归类：它是对接下来做什么的指引，不属于它上面的记述。
+
+它在形式与长度上沿用 exec 通知的条目（`<dim-notification>`，序号 10，[WorkspaceTools](../../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)）：一个用属性携带一次运行标识的运行时通知。
 
 ## 6. 接口（摘要）
 
@@ -585,7 +623,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 | 工具 | `skipped`、`missed` | 只保留历史，不尝试报告 |
 | 管理 | 任意终态 | 只保留历史，不尝试报告；管理请求不增加目标字段 |
 
-**已确认投递策略：** 对选定需要报告的结果，既有运行任务先持久化终态，再向该 report_to 最多调用一次 sessions.input，mode:"steer"。已采用内容包含任务/运行 id、已知运行 Session id、终态/原因及 schedule.history 读取入口。Steer 可在当前工具批次之后处理，并唤醒空闲分支。等待实际 S2 回复，定时器、工具取消和卸载不放弃已准入原生调用；该调用与记录写入结算后才关闭存储。
+**已确认投递策略：** 对选定需要报告的结果，既有运行任务先持久化终态，再向该 report_to 最多调用一次 sessions.input，mode:"steer"。该输入以 `<dim-scheduler kind="report" job="…" run="…">` 标记开头；正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，其中包含已知运行 Session id、终态/原因及 schedule.history 读取入口；属性携带任务与运行的 id，同样转义。Steer 可在当前工具批次之后处理，并唤醒空闲分支。等待实际 S2 回复，定时器、工具取消和卸载不放弃已准入原生调用；该调用与记录写入结算后才关闭存储。
 
 失败或不确定回复，包括 reloading、publication_unknown、目标缺失/关闭或 bridge 异常，都在现有 Run.detail 追加固定诊断文本，经 history 暴露，保持运行终态 state 不变；通知失败不代表运行失败。诊断无法持久化时报告存储错误，保留既有字节。不重试、不借 lookup 重发，不改投 main、其他 Session 或外部渠道。成功发布的输入之后被撤回，也不补发。
 

@@ -356,6 +356,19 @@ format (§3.4), so a page of 20 entries stays under 13,000 characters. The turn 
 Characters are Unicode scalar values, so CJK text is never cut inside a character. A turn's lines
 only grow at its end, so an offset returned once keeps pointing at the same line.
 
+### 5.4 Model-facing texts
+
+The declaration's marks are [#549](https://github.com/arcships/dim/issues/549)'s. The tool's results are protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)):
+
+| Text | Class |
+| --- | --- |
+| A line's time and its event id, and the `[input <id>]` handle a shortened input ends with | Protocol: the handles the model opens or pages with (§4) |
+| The `before=<id>` and `offset` framing of a page | Protocol: the paging handles (§5.3) |
+| "No turn or line has id …", "Turn … has … lines." and "… has … characters." | Protocol: the result's shape; the model picks another handle from what a page showed |
+| The narrative text of a line | The conversation's own words and the runtime's, carried as material |
+
+Recall writes no marker and contributes no guide entry.
+
 ## 6. What the model sees
 
 The text is plain lines; it carries no wrapper tag. `structuredContent` is for UI and persistence

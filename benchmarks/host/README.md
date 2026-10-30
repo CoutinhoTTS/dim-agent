@@ -71,7 +71,9 @@ cron ─► nightly.sh ─► git fetch dim 与 dim-eval-data（SSH）─► cor
    DIM_EVAL_GIT_REMOTE=git@github-dim:arcships/dim.git
    DIM_EVAL_DATA_REMOTE=git@github-dim-data:arcships/dim-eval-data.git   # 任务树；ledger 默认也在这里
    DIM_EVAL_REDACT="models.example.internal proxy.example.internal"   # issue 正文里额外抹掉的字符串
-   DIM_EVAL_VERIFIER_PROXY=http://proxy.example.internal:port   # 只给判分阶段用的 HTTP 代理，见下
+   DIM_EVAL_VERIFIER_PROXY=http://proxy.example.internal:port   # 只给判分阶段用的 HTTP 代理，不许带凭据
+   # 可选：额外的 NO_PROXY 条目，逗号分隔（例如 compose service 名）
+   # DIM_EVAL_VERIFIER_NO_PROXY=main,my-verifier
    # 可选：DIM_EVAL_TOOLCHAIN、DIM_EVAL_LEDGER_REMOTE、
    #       DIM_EVAL_LEDGER_BRANCH（默认 eval-ledger）、DIM_EVAL_GITHUB_REPO（默认 arcships/dim）、
    #       CARGO_TARGET_DIR（跨天复用依赖的编译产物）
@@ -133,8 +135,15 @@ ledger 并推送到 `eval-ledger`。
 证书时 App Server 无法启动；adapter 用 `SSL_CERT_FILE` 指向这份证书。
 - 判分阶段可走 HTTP 代理（`DIM_EVAL_VERIFIER_PROXY`）。30 个 FrontierHarness 任务里有 18 个
   的判分脚本在打分时从 GitHub 下载 uv；评测机直连不上 GitHub 时它们什么都没测就记 0 分。代理
-  只经 harbor 的 `verifier.env` 进入判分阶段，`localhost` 不走代理；agent 阶段不受影响。是否
-  使用代理记入 baseline 的 `params.verifier_proxy`。
+  只经 harbor 的 `verifier.env` 进入判分阶段；agent 阶段不受影响。代理 URL 必须是裸的
+  `http://`/`https://` 地址，**不能带用户名或密码**：job config 会写进评测机磁盘，带凭据的 URL
+  会随 Harbor 的 trial 记录扩散；代理认证请用网络 ACL。job config 以 `0600` 写入。
+  `NO_PROXY` 默认包含 `localhost,127.0.0.1,::1,host.docker.internal`，需要额外绕过 compose
+  service 名时设 `DIM_EVAL_VERIFIER_NO_PROXY`。第一次启用时用会启动本地 server 的任务做一次
+  smoke test；若 verifier 通过 service 名访问，把该名字加进这个变量。每次运行都把
+  `verifier_proxy` 和 `verifier_no_proxy` 记入 `run.json`，baseline 同时记入 params；任一项
+  不一致，或旧 baseline 没有该字段（未知）时，comparison 判为不可比，需要在同一代理条件下
+  重采 baseline。
 - 命令沙箱设为 `host`（`host-isolation.json`）。dimcode 的沙箱依赖 bubblewrap，题目镜像里没有，
   默认配置下每个 trial 的第一条命令都以 `isolation_unavailable` 失败，agent 还会自己去改这个
   文件。容器本身就是隔离边界。

@@ -31,6 +31,16 @@ closes admission and drops pending waiters, which report Closed. Reload builds
 a new state cell from history. Policy is admission logic, not OS isolation;
 explicit disallow overrides allow.
 
+### Model-facing texts
+
+`Command denied by command rule …`: the refusal an admitted-and-denied call
+returns, and it is protocol
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)).
+The text names the rule and what it matched, which the model uses to change the
+command rather than retry it; `Command rules could not be read: <error>` is
+protocol too, because it says the rules were not applied and a retry may be
+decided differently.
+
 ### Workspace write targets
 
 Decision for [#294](https://github.com/arcships/dim/issues/294): under
@@ -144,6 +154,13 @@ requests. Recovery cancels unmatched historical requests because their execution
 did not survive. The service owns request state, not tool execution tasks.
 Responses are not unconditional authority: cancelled batches and changed policy
 can prevent execution. Approval does not sandbox an admitted tool.
+
+### Model-facing texts
+
+`Tool execution denied by user` is the result of a call the user denied, and it
+is protocol
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+the model recognises it as a denial and does not retry the call.
 
 ### Client notifications
 

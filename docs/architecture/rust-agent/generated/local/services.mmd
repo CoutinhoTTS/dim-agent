@@ -150,6 +150,7 @@ flowchart LR
   p31 -->|"dim_agent_runtime::config::SessionIdentity@session"| p48
   p31 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p48
   p40 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p47
+  p31 -->|"dim_agent_capabilities::skills::SkillsConfig@session"| p47
   p26 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p47
   p49 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p47
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p47
@@ -157,6 +158,7 @@ flowchart LR
   p31 -->|"dim_agent_runtime::scope::SessionLoader@session"| p47
   p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p46
   p45 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p46
+  p39 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p46
   p48 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p46
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p46
   p31 -->|"dim_agent_runtime::config::SessionIdentity@session"| p46

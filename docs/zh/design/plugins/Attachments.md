@@ -219,11 +219,13 @@ CLI 在提交前检查：
 
 | 图片 | 处理 |
 | --- | --- |
-| 文件、剪贴板或粘贴的路径 | 解码；按魔数嗅探格式（忽略声明的类型）；接受 PNG、JPEG、WebP、GIF（功能列表）；设置 `media_type`；执行限制（A2） |
+| 文件、剪贴板或粘贴的路径 | 解码；按魔数嗅探格式（忽略声明的类型）；接受 PNG、JPEG、WebP、GIF（功能列表）；按共享规则缩放（见下）；设置 `media_type` |
 | URL | 从不发送（A3） |
 | 被拒绝 | 不发送；保留草稿并显示原因 |
 
-限制（A2）：每次提交最多 20 张图片，每张解码后 5 MiB，每边 8000 px；违反即拒绝，从不缩放。块保持其顺序。
+图片是缩放，不是拒绝。规则与 `read` 相同，只在 [WorkspaceTools § read results and images](../../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images) 写一次：`images::scale_image` 把图片变成可发送的——最长边不超过 2048 px、base64 编码不超过 5,000,000 字节，应用 EXIF 方向使像素正立，PNG 在其缩放后的 PNG 放得下时保持 PNG，否则用 JPEG，动画只发送第一帧。唯一的大小拒绝是该函数的 1 亿像素护栏，消息给出尺寸；不是图片的字节、本构建无法解码的格式和无效数据与以前一样被拒绝。
+
+限制（A2）：每次提交最多 20 张图片，整个编码请求不超过 16 MiB 传输帧；仍然超出帧的提交被拒绝并保留草稿。块保持其顺序。
 
 ModelProvider 补充（已在 S11 实现，`model_provider/images.rs`；[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)），在构建模型请求时作用于每个图片块：
 
@@ -234,7 +236,7 @@ ModelProvider 补充（已在 S11 实现，`model_provider/images.rs`；[总体�
 | 能力未知 | 原样发送；由提供方决定（A4） |
 | URL 来源、缺失或无法解码的 base64 数据，或 PNG、JPEG、WebP、GIF 以外的格式 | 文本 `[Image omitted: the image cannot be sent to this model.]`（A10） |
 
-这里不检查大小：没有适配器公布按模型的图片大小上限，所以超大的图片照常发送，由提供方决定，与能力未知时相同（A4）。CLI 的限制（A2）在提交前仍然适用。
+这里不检查大小：没有适配器公布按模型的图片大小上限，所以超大的图片照常发送，由提供方决定，与能力未知时相同（A4）。CLI 的缩放规则和限制（A2）在提交前仍然适用。
 
 历史从不改变；每个请求按自己的模型重新决定。
 
@@ -373,7 +375,7 @@ A.2 映射的其余部分也有测试（Q11）。通过 RPC：存储失败（`<d
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
 | A1 | 文本附件是由 SessionStore 拥有的 Session 文件，存储在 Session 资源节点上的 `<db>.session-files/<fileId>/` 下；这个目录不属于任何单个 Session，因此路径在分叉和源 Session 删除后仍然有效。SessionStore 在控制节点上保存所有权行（[Session 文件](../appserver/session-files.md)） | 判断；`read` 在资源节点上运行 | 其他布局或内联文本内容 |
-| A2 | 限制：20 张图片、5 MiB、8000 px（CLI），10 MiB 文本（`attachment.put`）；拒绝而非缩放。10 MiB 文本在 16 MiB 帧下为普通文本的 JSON 转义留有余量 | 边界情况参考；判断 | 不同的限制或缩放 |
+| A2 | 限制：每次提交 20 张图片和整个编码请求的 16 MiB 传输帧（CLI），10 MiB 文本（`attachment.put`）；更大的图片缩放到最长边 2048 px、base64 编码 5,000,000 字节，而不是拒绝。视觉模型读取图片时约用长边两千像素，多出的像素只会增加字节。10 MiB 文本在 16 MiB 帧下为普通文本的 JSON 转义留有余量 | 边界情况参考；判断 | 不同的限制或不缩放 |
 | A3 | CLI 从不发送 URL 图片来源；ModelProvider 把它们换成占位 | 总体设计"最终内容"；判断 | 由提供方获取 URL |
 | A4 | 模型能力未知时 ModelProvider 发送图片 | 判断 | 未知即换成占位 |
 | A5 | CLI 选择粘贴阈值和引用格式，并自己统计行数 | [总体设计附录 D](../overview.md#附录-d-cli-层)（CLI）；判断 | 由服务端返回格式化的引用 |

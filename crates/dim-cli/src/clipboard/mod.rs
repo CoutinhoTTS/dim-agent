@@ -6,13 +6,20 @@ mod copy;
 pub mod terminal;
 pub use copy::{copy_local, osc52};
 
-use crate::{Result, attachments::file_url, images};
-use dim_agent_types::ImageSource;
+use crate::{
+    Result,
+    attachments::file_url,
+    images::{self, Attached},
+};
 use std::path::PathBuf;
+
+/// The most bytes one clipboard image read may make the CLI hold in memory:
+/// a read guard, not an image limit.
+pub const IMAGE_READ_LIMIT: usize = 64 * 1024 * 1024;
 
 pub enum Source {
     Files(Vec<PathBuf>),
-    Image(ImageSource),
+    Image(Attached),
     Text(String),
 }
 
@@ -76,17 +83,33 @@ fn read_board(board: &objc2_app_kit::NSPasteboard) -> Result<Source> {
             let image = if format == "public.tiff"
                 && image::guess_format(&bytes).ok() == Some(image::ImageFormat::Tiff)
             {
+                use dim_agent_capabilities::images::{
+                    ImageKind, ImageRefusal, ImageSize, decode_limits, decode_refusal,
+                };
+                use image::ImageDecoder;
                 let mut reader = image::ImageReader::with_format(
                     std::io::Cursor::new(bytes),
                     image::ImageFormat::Tiff,
                 );
-                let mut limits = image::Limits::default();
-                limits.max_image_width = Some(8000);
-                limits.max_image_height = Some(8000);
-                reader.limits(limits);
-                images::pixels(reader.decode()?)?
+                reader.limits(decode_limits());
+                let decoder = reader.into_decoder().map_err(|error| {
+                    images::refusal(ImageRefusal::Invalid {
+                        kind: ImageKind::Tiff,
+                        reason: error.to_string(),
+                    })
+                })?;
+                let dimensions = decoder.dimensions();
+                images::guard(dimensions)?;
+                let stored = ImageSize {
+                    width: dimensions.0,
+                    height: dimensions.1,
+                };
+                let image = image::DynamicImage::from_decoder(decoder).map_err(|error| {
+                    images::refusal(decode_refusal(ImageKind::Tiff, stored, error))
+                })?;
+                images::from_pixels(image)?
             } else {
-                images::encoded(bytes)?
+                images::from_bytes(bytes)?
             };
             return Ok(Source::Image(image));
         }
@@ -106,6 +129,7 @@ fn read_board(board: &objc2_app_kit::NSPasteboard) -> Result<Source> {
 mod native_flow {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use dim_agent_capabilities::images::MAX_EDGE;
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::{NSPasteboard, NSPasteboardItem};
     use objc2_foundation::{NSArray, NSData, NSString};
@@ -113,7 +137,7 @@ mod native_flow {
     #[test]
     fn copied_file_references_submit_images_and_real_file_paths() {
         use crate::model::session::DraftPart;
-        use crate::ui::composer::{Composer, Outcome};
+        use crate::ui::composer::{Composer, Outcome, read_planned};
         use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
         use objc2_foundation::NSURL;
         objc2::rc::autoreleasepool(|_| {
@@ -164,7 +188,9 @@ mod native_flow {
             };
             assert_eq!(files, paths);
             let mut composer = Composer::new(Vec::new());
-            composer.attach_files(&files).unwrap();
+            let plan = composer.plan_files(&files).unwrap();
+            let attached = read_planned(&plan).unwrap();
+            composer.insert_files(plan, attached);
             let Outcome::SubmitDraft { parts, .. } =
                 composer.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE))
             else {
@@ -199,8 +225,9 @@ mod native_flow {
             let Source::Image(source) = read_board(&board).unwrap() else {
                 panic!("Expected image before text")
             };
-            assert_eq!(source.media_type, "image/png");
-            assert_eq!(source.data, Some(STANDARD.encode(bytes)));
+            assert_eq!(source.source.media_type, "image/png");
+            assert!(!source.scaled);
+            assert_eq!(source.source.data, Some(STANDARD.encode(bytes)));
 
             board.clearContents();
             let first = NSPasteboardItem::new();
@@ -245,21 +272,40 @@ mod native_flow {
                     &NSString::from_str("public.tiff")
                 ));
                 let result = read_board(&board);
-                if width > 8000 {
-                    assert!(result.is_err());
-                    continue;
-                }
                 let Source::Image(source) = result.unwrap() else {
                     panic!("Expected pixel image")
                 };
-                assert_eq!(source.media_type, "image/png");
+                assert!(source.scaled);
+                assert_eq!(source.source.media_type, "image/png");
+                assert_eq!(source.sent.width, width.min(MAX_EDGE));
+                assert_eq!(source.sent.height, 1);
                 let decoded =
-                    image::load_from_memory(&STANDARD.decode(source.data.unwrap()).unwrap())
+                    image::load_from_memory(&STANDARD.decode(source.source.data.unwrap()).unwrap())
                         .unwrap()
                         .to_rgb8();
-                assert_eq!(decoded.dimensions(), (2, 1));
-                assert_eq!(decoded.get_pixel(0, 0), &image::Rgb([4, 5, 6]));
+                assert_eq!(decoded.dimensions(), (width.min(MAX_EDGE), 1));
+                if width == 2 {
+                    assert_eq!(decoded.get_pixel(0, 0), &image::Rgb([4, 5, 6]));
+                }
             }
+
+            // A TIFF the decoder cannot read is the image refusal, not a raw
+            // decode error: the header is recognized, the offset points past
+            // the bytes.
+            board.clearContents();
+            assert!(board.setData_forType(
+                Some(&NSData::with_bytes(b"II*\0\x08\0\0\0")),
+                &NSString::from_str("public.tiff")
+            ));
+            let Err(error) = read_board(&board) else {
+                panic!("Expected a refused TIFF")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Invalid or truncated TIFF image: "),
+                "{error}"
+            );
 
             board.clearContents();
             let broken = NSPasteboardItem::new();
@@ -361,10 +407,7 @@ pub async fn read() -> Result<Source> {
         }
         if unsafe { IsClipboardFormatAvailable(format) } != 0 {
             return data(format, |bytes| {
-                if bytes.len() > 5 * 1024 * 1024 {
-                    return Err("Image exceeds 5 MiB".into());
-                }
-                Ok(Source::Image(images::encoded(bytes.to_vec())?))
+                Ok(Source::Image(images::from_bytes(bytes.to_vec())?))
             });
         }
     }
@@ -372,14 +415,11 @@ pub async fn read() -> Result<Source> {
         if unsafe { IsClipboardFormatAvailable(format as u32) } != 0 {
             return data(format as u32, |bytes| {
                 use image::ImageDecoder;
-                let mut decoder = image::codecs::bmp::BmpDecoder::new_without_file_header(
+                let decoder = image::codecs::bmp::BmpDecoder::new_without_file_header(
                     std::io::Cursor::new(bytes),
                 )?;
-                let mut limits = image::Limits::default();
-                limits.max_image_width = Some(8000);
-                limits.max_image_height = Some(8000);
-                decoder.set_limits(limits)?;
-                Ok(Source::Image(images::pixels(
+                images::guard(decoder.dimensions())?;
+                Ok(Source::Image(images::from_pixels(
                     image::DynamicImage::from_decoder(decoder)?,
                 )?))
             });
@@ -502,8 +542,8 @@ pub async fn read() -> Result<Source> {
                 .find(|format| format.starts_with("image/"))
         });
     if let Some(format) = image {
-        return Ok(Source::Image(images::encoded(
-            read(format, 5 * 1024 * 1024).await?,
+        return Ok(Source::Image(images::from_bytes(
+            read(format, IMAGE_READ_LIMIT).await?,
         )?));
     }
     let format = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
@@ -520,6 +560,7 @@ pub async fn read() -> Result<Source> {
 mod windows_flow {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use dim_agent_capabilities::images::MAX_EDGE;
     use std::{
         mem::{size_of, size_of_val},
         ptr,
@@ -615,8 +656,8 @@ mod windows_flow {
         let Source::Image(source) = runtime.block_on(read()).unwrap() else {
             panic!("Expected image before text")
         };
-        assert_eq!(source.media_type, "image/png");
-        assert_eq!(source.data, Some(STANDARD.encode(&delivered[0])));
+        assert_eq!(source.source.media_type, "image/png");
+        assert_eq!(source.source.data, Some(STANDARD.encode(&delivered[0])));
 
         let paths = [r"C:\fixture\first image.png", r"C:\fixture\second.txt"];
         let header = DROPFILES {
@@ -639,11 +680,11 @@ mod windows_flow {
         };
         assert_eq!(files, paths.map(PathBuf::from));
 
-        for width in [2, 8001] {
+        for width in [2u32, 8001] {
             let row = (width as usize * 3).div_ceil(4) * 4;
             let header = BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
+                biWidth: width as i32,
                 biHeight: 1,
                 biPlanes: 1,
                 biBitCount: 24,
@@ -665,17 +706,18 @@ mod windows_flow {
             bitmap.resize(size_of::<BITMAPINFOHEADER>() + row, 0);
             install(window.0, &[(CF_DIB as u32, bitmap)]);
             let result = runtime.block_on(read());
-            if width > 8000 {
-                assert!(result.is_err());
-                continue;
-            }
             let Source::Image(source) = result.unwrap() else {
                 panic!("Expected bitmap pixels")
             };
-            let bytes = STANDARD.decode(source.data.unwrap()).unwrap();
+            assert!(source.scaled);
+            assert_eq!(source.sent.width, width.min(MAX_EDGE));
+            assert_eq!(source.sent.height, 1);
+            let bytes = STANDARD.decode(source.source.data.unwrap()).unwrap();
             let pixels = image::load_from_memory(&bytes).unwrap().to_rgb8();
-            assert_eq!(pixels.dimensions(), (2, 1));
-            assert_eq!(pixels.get_pixel(0, 0), &image::Rgb([4, 5, 6]));
+            assert_eq!(pixels.dimensions(), (width.min(MAX_EDGE), 1));
+            if width == 2 {
+                assert_eq!(pixels.get_pixel(0, 0), &image::Rgb([4, 5, 6]));
+            }
         }
         install(
             window.0,

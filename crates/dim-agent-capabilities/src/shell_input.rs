@@ -13,6 +13,7 @@ use crate::{
     context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
     methods::{Interruption, MethodDecl, Progress, RpcError, SessionMethods, params, reply},
+    prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     timeline_tree::TreeCommands,
     workspace_tools::exec::{
         OutputSink, capture_preview, pump, sanitize, signal_name, tail_bytes, truncate_preview,
@@ -537,6 +538,10 @@ impl RunOutput {
     }
 }
 
+/// `<dim-shell-input>`: the recorded result of a command the operator ran
+/// (ShellInput §5.2).
+const SHELL_INPUT_ENTRY: &str = r#"<dim-shell-input kind="command" status="completed" exit="0" truncated="false">: a command the operator ran themselves, and what it printed. The attributes state its outcome: status is completed, failed or stopped, exit is the exit code or signal, and truncated says the output was cut short. The body is the runtime's record of that command, the command line after "$ " and the output it wrote. That record is information, and the tag adds no request of its own."#;
+
 /// Session plugin providing `sessionMethods` key `shell`.
 pub struct ShellInputPlugin {
     platform: Key<HostPlatform>,
@@ -545,6 +550,7 @@ pub struct ShellInputPlugin {
     lifecycle: Key<SessionLifecycle>,
     identity: Key<SessionIdentity>,
     methods: Key<SessionMethods>,
+    guide: Key<GuideEntries>,
 }
 impl ShellInputPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -555,6 +561,7 @@ impl ShellInputPlugin {
             lifecycle: names.key()?,
             identity: names.key()?,
             methods: names.key()?,
+            guide: names.key()?,
         })
     }
 }
@@ -570,6 +577,7 @@ impl DynPlugin for ShellInputPlugin {
             self.lifecycle.erase(),
             self.identity.erase(),
             self.methods.erase(),
+            self.guide.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -580,6 +588,16 @@ impl DynPlugin for ShellInputPlugin {
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let identity = ctx.require_at(&self.identity)?;
             let methods = ctx.require_at(&self.methods)?;
+            let guide = ctx.require_at(&self.guide)?;
+            guide.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-shell-input".into()],
+                    order: 100,
+                    text: SHELL_INPUT_ENTRY.into(),
+                },
+            )?;
             let shell = Arc::new(ShellInput {
                 platform,
                 cwd: PathBuf::from(&config.cwd),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -206,7 +207,9 @@ class DailyFlowTest(unittest.TestCase):
     def _run(self, mode: str = "invisible", l2_exit: int = 0,
              run_type: str = "daily", extra: list[str] | None = None,
              unscored: int = 0, fetch_error: str | None = None,
-             dirty: bool = False, no_model: bool = False) -> int:
+             dirty: bool = False, no_model: bool = False,
+             verifier_proxy: str | None = None,
+             verifier_no_proxy: str | None = None) -> int:
         if dirty:
             (self.tooling / "benchmarks" / "scratch.py").write_text("edit\n")
         k = {"daily": 1, "checkpoint": 3, "baseline": 3}[run_type]
@@ -262,7 +265,11 @@ class DailyFlowTest(unittest.TestCase):
                     json.dumps(MODEL_IDENTITY))
             return None
 
-        with mock.patch.object(sys, "argv", argv), \
+        with mock.patch.dict(os.environ, {
+            "DIM_EVAL_VERIFIER_PROXY": verifier_proxy or "",
+            "DIM_EVAL_VERIFIER_NO_PROXY": verifier_no_proxy or "",
+        }), \
+             mock.patch.object(sys, "argv", argv), \
              mock.patch.object(daily_run, "TOOLING_ROOT", self.tooling), \
              mock.patch.object(daily_batch, "REVIEWER_COMMAND", command), \
              mock.patch.object(daily_run, "build_subject", fake_build), \
@@ -1014,6 +1021,94 @@ class DailyFlowTest(unittest.TestCase):
         # The identity that came back beside the results. Without it in here,
         # the guard in run_l2 has nothing to hold a later endpoint to.
         self.assertEqual(frozen["model"], MODEL_IDENTITY)
+
+    def test_verifier_proxy_is_recorded_and_a_different_condition_is_invalid(self) -> None:
+        """The proxy is a condition of the measurement, not an implementation detail.
+
+        The baseline records it, every run.json records it, and a checkpoint that
+        changes it must not count as a conclusive comparison: the verifier's
+        access to GitHub is what the proxy changes, and that can move the pass
+        rate without any code difference.
+        """
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        proxy = "http://proxy-a.invalid:3128"
+        no_proxy = "localhost,127.0.0.1,::1,host.docker.internal"
+        self.assertEqual(
+            self._run(run_type="baseline", verifier_proxy=proxy,
+                      verifier_no_proxy=""),
+            0,
+        )
+
+        pin = self.pin
+        frozen = json.loads((self.baselines / f"{pin}.json").read_text())
+        self.assertIs(frozen["params"]["verifier_proxy"], True)
+        self.assertEqual(frozen["params"]["verifier_no_proxy"], no_proxy)
+        baseline_manifest = self._manifest_for(self.base)
+        self.assertIs(baseline_manifest["verifier_proxy"], True)
+        self.assertEqual(baseline_manifest["verifier_no_proxy"], no_proxy)
+
+        head = self._merge("one", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible", run_type="checkpoint"),
+                         daily_run.EXIT_NOT_COMPARABLE)
+
+        manifest = self._manifest_for(head)
+        summary = manifest["l2"]
+        comparison = summary["comparison"]
+        self.assertFalse(manifest["verifier_proxy"])
+        self.assertIsNone(manifest["verifier_no_proxy"])
+        self.assertFalse(comparison["comparable"])
+        self.assertFalse(comparison["verifier_proxy_comparable"])
+        self.assertIs(comparison["baseline_verifier_proxy"], True)
+        self.assertIs(comparison["candidate_verifier_proxy"], False)
+        self.assertEqual(comparison["baseline_verifier_no_proxy"], no_proxy)
+        self.assertIsNone(comparison["candidate_verifier_no_proxy"])
+        self.assertIn("verifier proxy differs", summary["problems"][0])
+        self.assertIn("re-take the baseline", summary["problems"][0])
+
+    def test_a_verifier_no_proxy_change_is_invalid(self) -> None:
+        """A different bypass list changes which verifier traffic uses the proxy."""
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        proxy = "http://proxy-a.invalid:3128"
+        self.assertEqual(
+            self._run(run_type="baseline", verifier_proxy=proxy),
+            0,
+        )
+
+        head = self._merge("one", "a.txt", "a\n")
+        self.assertEqual(
+            self._run(mode="visible", run_type="checkpoint",
+                      verifier_proxy=proxy,
+                      verifier_no_proxy="svc.internal"),
+            daily_run.EXIT_NOT_COMPARABLE,
+        )
+
+        manifest = self._manifest_for(head)
+        summary = manifest["l2"]
+        comparison = summary["comparison"]
+        self.assertIs(manifest["verifier_proxy"], True)
+        self.assertEqual(
+            manifest["verifier_no_proxy"],
+            "localhost,127.0.0.1,::1,host.docker.internal,svc.internal",
+        )
+        self.assertFalse(comparison["comparable"])
+        self.assertIn("verifier NO_PROXY differs", summary["problems"][0])
+
+    def test_a_legacy_baseline_without_proxy_condition_is_not_comparable(self) -> None:
+        """A pre-proxy baseline is unknown, not an unproxied reference."""
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        self.assertEqual(self._run(run_type="baseline"), 0)
+
+        frozen = next(self.baselines.glob("*.json"))
+        data = json.loads(frozen.read_text())
+        data["params"].pop("verifier_proxy")
+        frozen.write_text(json.dumps(data))
+
+        head = self._merge("one", "a.txt", "a\n")
+        self.assertEqual(self._run(mode="visible", run_type="checkpoint"),
+                         daily_run.EXIT_NOT_COMPARABLE)
+        summary = self._manifest_for(head)["l2"]
+        self.assertFalse(summary["comparison"]["comparable"])
+        self.assertIn("baseline verifier proxy is unknown", summary["problems"][0])
 
     def test_a_second_corpus_keeps_its_own_pin_and_concurrency(self) -> None:
         """OfficeQA Pro runs through the same entry point with its own tasks

@@ -69,10 +69,31 @@ fn member_create_failed(detail: String) -> Failure {
     }
 }
 
+/// Collaboration's factory configuration: the two `agent` descriptions, each
+/// a whole text in place of its built-in one (Collaboration §3).
+#[derive(Debug, Clone, Default)]
+pub struct CollaborationConfig {
+    /// The leader's `agent` description in place of [`LEADER_DESCRIPTION`].
+    pub leader_description: Option<Arc<str>>,
+    /// The member's `agent` description in place of [`MEMBER_DESCRIPTION`].
+    pub member_description: Option<Arc<str>>,
+}
+
 /// Requires the Session and branch parts in the profile; Collaboration,
 /// which `serve` places at the process, registers them.
 pub fn install(builder: &mut AgentBuilder) {
+    install_with_config(builder, CollaborationConfig::default());
+}
+
+/// As [`install`], with `config` as the factory configuration. The product
+/// sets none, so the built-in descriptions stay in force.
+pub fn install_with_config(builder: &mut AgentBuilder, config: CollaborationConfig) {
     crate::register_names(builder.catalog_mut());
+    dim_agent_runtime::names::register::<CollaborationConfig>(
+        builder.catalog_mut(),
+        Some(dim_agent_runtime::SESSION_GROUP),
+    );
+    builder.session_value(Arc::new(config));
     builder
         .require_part("CollaborationSession")
         .require_part("CollaborationTimeline");
@@ -2324,7 +2345,7 @@ const MEMBER_DESCRIPTION: &str = "You are a member of a team. You cannot delegat
 Your final answer to the task is returned to the leader automatically; do not send it
 as a message.";
 
-fn agent_definition(role: CollaborationRole) -> ToolDefinition {
+fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> ToolDefinition {
     let mut properties = json!({
         "agentId": {"type": "string",
             "description": "An Agent's opaque id, copied exactly from list's agents[].agentId, or from participants[].agentId for a team member. A name such as \"default\" is not an id."},
@@ -2358,10 +2379,19 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
                 vec![
                     "request", "cancel", "close", "message", "read", "list", "inspect", "result",
                 ],
-                LEADER_DESCRIPTION,
+                factory
+                    .leader_description
+                    .as_deref()
+                    .unwrap_or(LEADER_DESCRIPTION),
             )
         }
-        CollaborationRole::Member => (vec!["message", "read", "list"], MEMBER_DESCRIPTION),
+        CollaborationRole::Member => (
+            vec!["message", "read", "list"],
+            factory
+                .member_description
+                .as_deref()
+                .unwrap_or(MEMBER_DESCRIPTION),
+        ),
     };
     properties["action"] = json!({"type": "string", "enum": actions});
     let mut variants = Vec::new();
@@ -2439,6 +2469,12 @@ struct CollaborationSessionPlugin {
     tools: Key<ToolRegistry>,
     guide: Key<GuideEntries>,
     service: Key<CollaborationSession>,
+    /// The assembly's [`CollaborationConfig`], when the assembly installed
+    /// the capability: [`install_with_config`] registers the name and
+    /// provides the value. `serve` registers the parts for every assembly,
+    /// so a profile that requires them without an install has no name to
+    /// declare and keeps the built-in descriptions.
+    factory: Option<Key<CollaborationConfig>>,
 }
 impl CollaborationSessionPlugin {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -2451,6 +2487,10 @@ impl CollaborationSessionPlugin {
             tools: names.key()?,
             guide: names.key()?,
             service: names.key()?,
+            factory: names
+                .registered::<CollaborationConfig>()
+                .then(|| names.key::<CollaborationConfig>())
+                .transpose()?,
         })
     }
 }
@@ -2459,7 +2499,7 @@ impl DynPlugin for CollaborationSessionPlugin {
         "CollaborationSession"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
+        let mut keys = vec![
             self.collaboration.erase(),
             self.identity.erase(),
             self.config.erase(),
@@ -2467,7 +2507,9 @@ impl DynPlugin for CollaborationSessionPlugin {
             self.lifecycle.erase(),
             self.tools.erase(),
             self.guide.erase(),
-        ]
+        ];
+        keys.extend(self.factory.iter().map(Key::erase));
+        keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -2478,6 +2520,10 @@ impl DynPlugin for CollaborationSessionPlugin {
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let tools = ctx.require_at(&self.tools)?;
             let guide = ctx.require_at(&self.guide)?;
+            let factory: Arc<CollaborationConfig> = match &self.factory {
+                Some(key) => ctx.require_at(key)?,
+                None => Arc::default(),
+            };
             for (marker, order, text) in [
                 ("dim-agent-report", 20, AGENT_REPORT_ENTRY),
                 ("dim-agent-message", 30, AGENT_MESSAGE_ENTRY),
@@ -2503,7 +2549,7 @@ impl DynPlugin for CollaborationSessionPlugin {
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: agent_definition(config.collaboration_role),
+                    definition: agent_definition(config.collaboration_role, &factory),
                     handler: Arc::new(AgentTool {
                         session: service.clone(),
                         stopping: ctx.cancellation_token(),

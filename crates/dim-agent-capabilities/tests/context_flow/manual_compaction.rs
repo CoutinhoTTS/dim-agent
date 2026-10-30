@@ -7,7 +7,6 @@ use dim_agent_capabilities::{
     history::{context_messages, read_context, summary_message},
 };
 use rutis::host::CtxHost;
-use rutis::host::ErrorKind;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -163,12 +162,11 @@ impl Plugin for StrategyOwner {
         "test.strategy-owner"
     }
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(StrategyProvider(self.key.clone(), self.strategy.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(ErrorKind::PluginFailed(
-                format!("Strategy provider failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            StrategyProvider(self.key.clone(), self.strategy.clone()),
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

@@ -179,6 +179,7 @@ pub async fn chat(
     client: &mut Client,
     options: &Options,
     images: Vec<ContentBlock>,
+    notes: Vec<String>,
 ) -> Result<i32> {
     #[cfg(unix)]
     let mut interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -191,6 +192,9 @@ pub async fn chat(
         None
     };
     let mut display = Display::new(interactive, options.json);
+    for note in &notes {
+        display.record(note)?;
+    }
     let session_id = if let Some(id) = &options.resume {
         id.clone()
     } else {

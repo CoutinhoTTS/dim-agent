@@ -25,6 +25,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
+| [Collaboration](Collaboration.md) | member relations and temporary agents | `agent` tool, reports and messages; the two markers' guide entries | the delegation's facts, wake inputs and settlement | #551 |
 | [ExternalAgent](ExternalAgent.md) | external conversations, Collaboration member kind `external-agent`; bridge row per node | — (delegation and decisions are Collaboration's) | — | P3 |
 | [AcpGateway](AcpGateway.md) | client-host plugin: ACP/RPC connections, requests and cleanup; outside the daemon | — | — | #436; PR #441; [acceptance](../acp-gateway-acceptance.md) |
 | [TemporaryMcp](TemporaryMcp.md) | registered by the existing MCP feature | temporary bindings, MCP server children and tools; no settings writes | — | #436 |

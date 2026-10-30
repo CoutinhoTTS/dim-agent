@@ -1610,12 +1610,8 @@ impl Plugin for ContextHostOwner {
         "ContextHostOwner"
     }
     async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(ContextHostPlugin(self.host.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("Context host failed: {error}").into(),
-            ))
-        })?;
+        let view =
+            dim_agent_runtime::mount_active(ctx, ContextHostPlugin(self.host.clone())).await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

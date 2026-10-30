@@ -1509,10 +1509,11 @@ pub(crate) struct Created {
 }
 
 /// Creates an instance of `group` from `ctx` and waits until its registered
-/// rows are Active, within `timeout`. On failure the instance, when one was
-/// created, comes back with the error for the caller to roll back; when a
-/// timeout or cancellation leaves the creation running before the instance
-/// can be found, a task disposes it once the creation ends.
+/// rows are Active, within the opening's inactivity window `timeout`. On
+/// failure the instance, when one was created, comes back with the error for
+/// the caller to roll back; when a timeout or cancellation leaves the creation
+/// running before the instance can be found, a task disposes it once the
+/// creation ends.
 ///
 /// `instance` reads its identity and the scope's registered row IDs; the
 /// identity locates an instance whose creation is still running.
@@ -1745,6 +1746,7 @@ pub(crate) async fn build_session(
             extension.group
         )));
     }
+    let startup_timeout = assembly.startup_timeout;
     let host = &placement.anchor;
     let owner = Arc::new(SessionAssembly {
         assembly,
@@ -1762,7 +1764,6 @@ pub(crate) async fn build_session(
         mounted: Arc::default(),
         copies: Arc::default(),
     });
-    let startup_timeout = owner.assembly.startup_timeout;
     let instance = |owner: &Arc<SessionAssembly>| {
         let owner = owner.clone();
         move || {
@@ -1877,6 +1878,25 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: Key<T>) -> Result
             key.erase().describe()
         ))
     })
+}
+/// Mounts `child` under `ctx` and waits until it is `Active` or `ctx`'s
+/// cancellation, then returns its view. A row or part that mounts a child in
+/// `apply` uses this rather than `(&view).await`: that is the settle fence,
+/// which returns while a child whose dependencies are not ready yet is still
+/// `Pending`, so the row would return before its child and creation would
+/// hand back a scope with a plugin below a required row not `Active`. That
+/// child would also miss the first request, until its own load finished.
+///
+/// The wait has no deadline of its own. During an opening, the opening's
+/// no-progress bound covers it, and on expiry it names the child and what it
+/// waits for. Outside an opening the row stays `Loading` until its child is
+/// `Active`, as any row with a missing dependency does, and the wait ends
+/// when the row's generation is cancelled. A child that fails or is disposed
+/// ends it with an error naming it.
+pub async fn mount_active(ctx: &Ctx, child: impl DynPlugin) -> Result<FiberView> {
+    let view = ctx.plugin(child);
+    active_rows(std::slice::from_ref(&view), &ctx.cancellation_token()).await?;
+    Ok(view)
 }
 /// Waits until every view is Active; a failure or disposal of any view,
 /// cancellation or an interval without progress ends the wait. First activation
@@ -2025,15 +2045,17 @@ impl std::fmt::Display for AssemblyFinding {
 }
 
 /// Checks one live scope of `snapshot`: its `required` rows, the parts its
-/// mounters mounted and everything else in the scope, as creation waited for
-/// them. `rows` is the loader's [index](scope_rows) of rows by instance,
-/// `view` the scope instance, `required` the loader row ids its profile
-/// requires, `parts` the required parts it mounted and `nested` the scopes
-/// nested inside it. `scope` names the Session the scope belongs to and, for
-/// a branch scope, the branch. Each plugin is checked once, by the innermost
-/// scope that contains it: a nested scope's subtree is left to that scope's
-/// own pass. A required row or part that has left the tree is reported too:
-/// nothing in the snapshot would otherwise remember it.
+/// mounters mounted and everything else in the scope, as creation waits for
+/// them: a required row or part returns from `apply` once its own mounted
+/// children are `Active` ([`mount_active`]), so a child it left behind is not
+/// `Active` and breaks the rule. `rows` is the loader's [index](scope_rows) of
+/// rows by instance, `view` the scope instance, `required` the loader row ids
+/// its profile requires, `parts` the required parts it mounted and `nested`
+/// the scopes nested inside it. `scope` names the Session the scope belongs to
+/// and, for a branch scope, the branch. Each plugin is checked once, by the
+/// innermost scope that contains it: a nested scope's subtree is left to that
+/// scope's own pass. A required row or part that has left the tree is reported
+/// too: nothing in the snapshot would otherwise remember it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,

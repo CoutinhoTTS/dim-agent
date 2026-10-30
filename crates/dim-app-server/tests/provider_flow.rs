@@ -16,10 +16,10 @@ use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
-    model_catalog::ModelEntry,
+    model_catalog::{BundledCatalog, ModelEntry},
     provider::{
-        ConnectionInput, CreateProvider, CredentialUpdate, ModelPreferences, ProviderError,
-        ProviderPlugin, ProviderService, StaticAuth,
+        ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
+        ProviderError, ProviderPlugin, ProviderService, StaticAuth, convert_legacy_provider,
     },
     storage::SqliteStoragePlugin,
 };
@@ -5195,14 +5195,33 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .iter()
             .filter(|item| item["status"] == "imported")
             .count(),
-        3
+        4
     );
     assert_eq!(
         items
             .iter()
             .filter(|item| item["status"] == "rejected")
             .count(),
-        3
+        2
+    );
+    let usage = items
+        .iter()
+        .find(|item| item["id"] == "unsupported-usage")
+        .unwrap();
+    assert_eq!(usage["status"], "imported");
+    assert_eq!(usage["omitted"], json!(["accountUsageSettings"]));
+    assert_eq!(
+        items
+            .iter()
+            .find(|item| item["id"] == "legacy-defaults")
+            .unwrap()["omitted"],
+        json!([])
+    );
+    assert!(
+        items
+            .iter()
+            .filter(|item| item["status"] == "rejected")
+            .all(|item| item.get("omitted").is_none())
     );
     assert!(!result.to_string().contains("legacy-secret"));
     assert!(!result.to_string().contains("must-not-be-echoed"));
@@ -5252,7 +5271,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .iter()
             .filter(|item| item["status"] == "already_imported")
             .count(),
-        3
+        4
     );
     let edited = provider
         .update(
@@ -5456,6 +5475,609 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
 /// Never answers, so a call stays in flight until it is cancelled.
 async fn hang() -> &'static str {
     std::future::pending().await
+}
+
+/// A listing entry that declares its own limits: `modelsSource: remote` takes
+/// the strict rule, which keeps an unmarked limit only when `metadata.raw`
+/// states it.
+fn legacy_model(id: &str) -> Value {
+    json!({"modelId":id,"displayName":id,"status":"active","capabilities":serde_json::to_value(dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)).unwrap(),"metadata":{"raw":{"inputTokenLimit":128_000,"outputTokenLimit":16_384}}})
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_legacy_provider(
+    db: &rusqlite::Connection,
+    id: &str,
+    source: &str,
+    display_name: &str,
+    driver: &str,
+    base_url: &str,
+    auth: &Value,
+    credential: Option<&Value>,
+    retry: Option<&Value>,
+    models: &Value,
+    metadata: &Value,
+    enabled: i64,
+) {
+    db.execute(
+        "INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,retryConfig,models,modelsSource,metadata,enabled,version) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'remote',?10,?11,1)",
+        rusqlite::params![
+            id,
+            source,
+            display_name,
+            driver,
+            base_url,
+            auth.to_string(),
+            credential.map(|value| value.to_string()),
+            retry.map(|value| value.to_string()),
+            models.to_string(),
+            metadata.to_string(),
+            enabled,
+        ],
+    )
+    .unwrap();
+}
+
+fn without_display_name(record: &Value) -> Value {
+    let mut record = record.clone();
+    record.as_object_mut().unwrap().remove("displayName");
+    record
+}
+
+#[tokio::test]
+async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_scopes() {
+    let home = std::env::temp_dir().join(format!("provider-rule-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let workspace = home.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let canonical_scope = format!("workspace:{}", workspace.canonicalize().unwrap().display());
+    let source = home.join("legacy.sqlite");
+    let models = json!([legacy_model("legacy-model")]);
+    let bearer = json!({"type":"bearer"});
+    let credential = json!({"type":"bearer","token":"legacy-token"});
+    {
+        let db = rusqlite::Connection::open(&source).unwrap();
+        db.execute_batch(
+            "CREATE TABLE providers (
+            providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT,
+            defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT,
+            accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER,
+            retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT,
+            activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT,
+            metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER);
+            CREATE TABLE provider_selections (
+            selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT,
+            createdAt TEXT, updatedAt TEXT, version INTEGER);",
+        )
+        .unwrap();
+        for (id, retry, metadata) in [
+            ("legacy-clean", None, json!({})),
+            (
+                "legacy-combined",
+                Some(json!({"maxRetries":3})),
+                json!({"preferenceWindow":"week"}),
+            ),
+            ("legacy-retry", Some(json!({"maxRetries":3})), json!({})),
+            ("legacy-metadata", None, json!({"preferenceWindow":"week"})),
+        ] {
+            insert_legacy_provider(
+                &db,
+                id,
+                "custom",
+                &format!("Legacy {id}"),
+                "openai-responses",
+                "https://model.example/v1",
+                &bearer,
+                Some(&credential),
+                retry.as_ref(),
+                &models,
+                &metadata,
+                1,
+            );
+        }
+        insert_legacy_provider(
+            &db,
+            "legacy-builtin",
+            "builtin",
+            "Legacy builtin",
+            "openai-responses",
+            "https://model.example/v1",
+            &bearer,
+            Some(&credential),
+            None,
+            &models,
+            &json!({}),
+            1,
+        );
+        insert_legacy_provider(
+            &db,
+            "openai",
+            "custom",
+            "Legacy openai",
+            "openai-responses",
+            "https://model.example/v1",
+            &bearer,
+            Some(&credential),
+            None,
+            &models,
+            &json!({}),
+            1,
+        );
+        insert_legacy_provider(
+            &db,
+            "anthropic",
+            "builtin",
+            "Anthropic",
+            "anthropic",
+            "https://api.anthropic.com",
+            &json!({"type":"api_key","headerName":"x-api-key","prefix":""}),
+            Some(&json!({"type":"apiKey","apiKey":"legacy-anthropic-key"})),
+            None,
+            &models,
+            &json!({}),
+            1,
+        );
+        insert_legacy_provider(
+            &db,
+            "deepseek",
+            "builtin",
+            "DeepSeek",
+            "openai-compatible",
+            "https://api.deepseek.com",
+            &bearer,
+            Some(&credential),
+            None,
+            &models,
+            &json!({}),
+            1,
+        );
+        let unknown = json!([{
+            "modelId":"legacy-model","displayName":"legacy-model","status":"active",
+            "capabilities":serde_json::to_value(dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)).unwrap(),
+            "futureField":true
+        }]);
+        insert_legacy_provider(
+            &db,
+            "legacy-unknown-descriptor",
+            "custom",
+            "Legacy unknown",
+            "openai-responses",
+            "https://model.example/v1",
+            &bearer,
+            Some(&credential),
+            None,
+            &unknown,
+            &json!({}),
+            1,
+        );
+        insert_legacy_provider(
+            &db,
+            "legacy-conflict",
+            "custom",
+            "Legacy conflict",
+            "openai-responses",
+            "https://model.example/v1",
+            &bearer,
+            Some(&credential),
+            None,
+            &models,
+            &json!({"enabledModelIds":["legacy-model"],"disabledModelIds":["legacy-model"]}),
+            1,
+        );
+        db.execute(
+            "INSERT INTO provider_selections(selectionId,scope,cwd,providerId,modelId,version) VALUES ('scope-non-canonical','workspace',?1,'legacy-clean','legacy-model',1)",
+            [format!("{}/./", workspace.display())],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO provider_selections(selectionId,scope,cwd,providerId,modelId,version) VALUES ('scope-missing','workspace',?1,'legacy-clean','legacy-model',1)",
+            [home.join("gone").display().to_string()],
+        )
+        .unwrap();
+    }
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let result = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let items = result["items"].as_array().unwrap();
+    let item = |id: &str| items.iter().find(|item| item["id"] == id).unwrap();
+    assert_eq!(item("legacy-clean")["status"], "imported");
+    assert_eq!(item("legacy-clean")["omitted"], json!([]));
+    assert_eq!(item("legacy-combined")["status"], "imported");
+    assert_eq!(
+        item("legacy-combined")["omitted"],
+        json!(["retryConfig", "metadata.preferenceWindow"])
+    );
+    assert_eq!(item("legacy-retry")["omitted"], json!(["retryConfig"]));
+    assert_eq!(
+        item("legacy-metadata")["omitted"],
+        json!(["metadata.preferenceWindow"])
+    );
+    assert_eq!(item("legacy-builtin")["status"], "rejected");
+    assert_eq!(
+        item("legacy-builtin")["reason"],
+        "Builtin identity has no bundled definition"
+    );
+    assert_eq!(item("anthropic")["status"], "imported");
+    assert_eq!(item("deepseek")["status"], "rejected");
+    assert_eq!(
+        item("deepseek")["reason"],
+        "Legacy builtin definition differs from the current definition"
+    );
+    assert_eq!(item("openai")["status"], "rejected");
+    // The bundled identity reports before the seeded target rule, so the
+    // reason is the same as Migration's fresh target (migration_flow.rs).
+    assert_eq!(
+        item("openai")["reason"],
+        "Builtin identity cannot be imported as custom"
+    );
+    assert_eq!(
+        item("legacy-unknown-descriptor")["reason"],
+        "Unsupported fields in models"
+    );
+    assert_eq!(
+        item("legacy-conflict")["reason"],
+        "Conflicting enabled and disabled model IDs"
+    );
+    assert_eq!(item("scope-non-canonical")["status"], "imported");
+    assert!(item("scope-non-canonical").get("omitted").is_none());
+    assert_eq!(item("scope-missing")["status"], "rejected");
+    assert_eq!(
+        item("scope-missing")["reason"],
+        "Workspace directory is unavailable"
+    );
+    assert!(
+        items
+            .iter()
+            .filter(|item| item["status"] == "rejected")
+            .all(|item| item.get("omitted").is_none())
+    );
+    let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let record = |id: &str| -> Value {
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let clean = record("legacy-clean");
+    assert_eq!(clean["kind"], "custom");
+    assert_eq!(clean["version"], 1);
+    assert_eq!(
+        without_display_name(&record("legacy-combined")),
+        without_display_name(&clean)
+    );
+    assert!(
+        !native
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM providers WHERE provider_id='legacy-builtin')",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    let converted = record("anthropic");
+    assert_eq!(converted["kind"], "builtin");
+    assert_eq!(converted["version"], 2);
+    assert_eq!(converted["displayName"], "Anthropic");
+    assert_eq!(converted["driverKind"], "anthropic");
+    assert_eq!(converted["enabled"], true);
+    assert_eq!(converted["credential"], "legacy-anthropic-key");
+    let seeded = record("openai");
+    assert_eq!(seeded["displayName"], "OpenAI");
+    assert_eq!(seeded["version"], 1);
+    let untouched = record("deepseek");
+    assert_eq!(untouched["version"], 1);
+    assert_eq!(untouched["displayName"], "DeepSeek");
+    assert_eq!(
+        native
+            .query_row("SELECT count(*) FROM provider_selections", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        native
+            .query_row("SELECT scope FROM provider_selections", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        canonical_scope
+    );
+    let repeated = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let repeated = repeated["items"].as_array().unwrap();
+    assert_eq!(
+        repeated
+            .iter()
+            .filter(|item| item["status"] == "already_imported")
+            .count(),
+        6
+    );
+    assert!(
+        repeated
+            .iter()
+            .filter(|item| item["status"] == "already_imported")
+            .all(|item| item.get("omitted").is_none())
+    );
+    let source_db = rusqlite::Connection::open(&source).unwrap();
+    source_db
+        .execute(
+            "INSERT INTO provider_selections(selectionId,scope,providerId,modelId,version) VALUES ('scope-later','global','legacy-clean','legacy-model',1)",
+            [],
+        )
+        .unwrap();
+    let later = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let later = later["items"].as_array().unwrap();
+    assert_eq!(
+        later
+            .iter()
+            .find(|item| item["id"] == "scope-later")
+            .unwrap()["status"],
+        "imported"
+    );
+    native
+        .execute(
+            "UPDATE providers SET record='{}' WHERE provider_id='legacy-clean'",
+            [],
+        )
+        .unwrap();
+    source_db
+        .execute(
+            "INSERT INTO provider_selections(selectionId,scope,providerId,modelId,version) VALUES ('scope-unreadable','global','legacy-clean','legacy-model',1)",
+            [],
+        )
+        .unwrap();
+    let guarded = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let guarded = guarded["items"].as_array().unwrap();
+    let scope_unreadable = guarded
+        .iter()
+        .find(|item| item["id"] == "scope-unreadable")
+        .unwrap();
+    assert_eq!(scope_unreadable["status"], "rejected");
+    assert_eq!(
+        scope_unreadable["reason"],
+        "Target provider is unreadable; preserved"
+    );
+    let imported_builtin = record("anthropic");
+    drop(native);
+    root.shutdown().await.unwrap();
+
+    let restarted = Ctx::root().unwrap();
+    restarted.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        restarted.plugin(ManagedProvidersPlugin),
+        restarted
+            .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(provider_part(ProviderPlugin::new)),
+        restarted.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let record = |id: &str| -> Value {
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(record("anthropic"), imported_builtin);
+    assert_eq!(record("deepseek")["version"], 1);
+    restarted.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn legacy_credentials_keep_their_native_shapes() {
+    let bundled = BundledCatalog::load().unwrap();
+    let legacy_model = json!([{
+        "modelId":"legacy-model","displayName":"legacy-model","status":"active",
+        "capabilities":serde_json::to_value(dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)).unwrap()
+    }]);
+    let row = |id: &str,
+               source: &str,
+               display_name: &str,
+               driver: &str,
+               base_url: &str,
+               auth: Value,
+               credential: Value| LegacyRow {
+        id: id.into(),
+        version: 1,
+        digest: "digest".into(),
+        fields: [
+            ("accountUsageSettings".to_string(), Value::Null),
+            ("activeModelId".into(), Value::Null),
+            ("auth".into(), Value::String(auth.to_string())),
+            ("baseUrl".into(), Value::String(base_url.into())),
+            ("capabilityDefaults".into(), Value::Null),
+            (
+                "credential".into(),
+                match credential {
+                    Value::Null => Value::Null,
+                    value => Value::String(value.to_string()),
+                },
+            ),
+            ("defaultBaseUrl".into(), Value::Null),
+            ("displayName".into(), Value::String(display_name.into())),
+            ("driverKind".into(), Value::String(driver.into())),
+            ("enabled".into(), Value::from(1)),
+            ("headers".into(), Value::Null),
+            ("metadata".into(), Value::String("{}".into())),
+            ("modelConfigOverrides".into(), Value::Null),
+            ("models".into(), Value::String(legacy_model.to_string())),
+            ("modelsSource".into(), Value::String("remote".into())),
+            ("proxy".into(), Value::Null),
+            ("retryConfig".into(), Value::Null),
+            ("source".into(), Value::String(source.into())),
+            ("timeoutMs".into(), Value::Null),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let cases = [
+        (
+            "api_key",
+            row(
+                "legacy-key",
+                "custom",
+                "Legacy key",
+                "openai-compatible",
+                "https://model.example/v1",
+                json!({"type":"api_key","headerName":"x-api-key","prefix":""}),
+                json!({"type":"apiKey","apiKey":"inline-key"}),
+            ),
+            json!("inline-key"),
+        ),
+        (
+            "secret_ref",
+            row(
+                "legacy-ref",
+                "custom",
+                "Legacy ref",
+                "openai-compatible",
+                "https://model.example/v1",
+                json!({"type":"bearer"}),
+                json!({"type":"secretRef","ref":"vault/bearer"}),
+            ),
+            json!({"secretRef":"vault/bearer"}),
+        ),
+        (
+            "aws_bedrock",
+            row(
+                "legacy-aws",
+                "custom",
+                "Legacy aws",
+                "amazon-bedrock",
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                json!({"type":"aws_bedrock"}),
+                json!({"type":"awsBedrockAccessKey","accessKeyId":"AKIALEGACY","secretAccessKey":"aws-secret","sessionToken":"aws-session"}),
+            ),
+            json!({"accessKeyId":"AKIALEGACY","secretAccessKey":"aws-secret","sessionToken":"aws-session"}),
+        ),
+        (
+            "custom_headers",
+            row(
+                "legacy-headers",
+                "custom",
+                "Legacy headers",
+                "openai-compatible",
+                "https://model.example/v1",
+                json!({"type":"custom"}),
+                json!({"type":"custom","customHeaders":{"X-Api-Key":"header-secret"}}),
+            ),
+            Value::Null,
+        ),
+    ];
+    for (name, row, expected_credential) in cases {
+        let conversion = convert_legacy_provider(&row, None, &bundled)
+            .unwrap_or_else(|reason| panic!("{name}: {reason}"));
+        let stored = serde_json::to_value(&conversion.record).unwrap();
+        assert_eq!(stored["credential"], expected_credential, "{name}");
+        if name == "custom_headers" {
+            assert_eq!(stored["headers"]["X-Api-Key"], "header-secret", "{name}");
+        }
+    }
+    let override_reason = match convert_legacy_provider(
+        &row(
+            "legacy-override",
+            "custom",
+            "Legacy override",
+            "openai-compatible",
+            "https://model.example/v1",
+            json!({"type":"api_key","headerName":"x-api-key","prefix":""}),
+            json!({"type":"apiKey","apiKey":"inline-key","headerName":"Authorization"}),
+        ),
+        None,
+        &bundled,
+    ) {
+        Ok(_) => panic!("credential header override was accepted"),
+        Err(reason) => reason,
+    };
+    assert_eq!(
+        override_reason,
+        "Credential auth overrides need explicit reconfiguration"
+    );
+    let mut dropped = row(
+        "legacy-dropped",
+        "custom",
+        "Legacy dropped",
+        "openai-compatible",
+        "https://model.example/v1",
+        json!({"type":"bearer"}),
+        json!({"type":"bearer","token":"kept-token"}),
+    );
+    dropped.fields.insert(
+        "retryConfig".into(),
+        Value::String(json!({"maxRetries":3,"apiKey":"dropped-secret"}).to_string()),
+    );
+    dropped.fields.insert(
+        "metadata".into(),
+        Value::String(json!({"preferenceWindow":"week"}).to_string()),
+    );
+    let conversion = convert_legacy_provider(&dropped, None, &bundled).unwrap();
+    assert_eq!(
+        conversion.omitted,
+        vec!["retryConfig", "metadata.preferenceWindow"]
+    );
+    let stored = serde_json::to_string(&conversion.record).unwrap();
+    assert!(!stored.contains("dropped-secret"));
 }
 
 #[tokio::test]
