@@ -10,8 +10,9 @@ use super::{
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PolicyFacts, PublishCallback, Result, SessionConfig,
-    StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
+    AgentError, BoxFuture, BranchRecord, PolicyFacts, PolicyWindow, PublishCallback, Result,
+    SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineTrace,
+    panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
@@ -1870,6 +1871,13 @@ fn indexed(row: Fetched) -> Result<StoredEvent> {
     Ok(record)
 }
 
+fn is_window_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::TurnStart(_) | EventKind::InputMessage(_) | EventKind::InputConsumed(_)
+    )
+}
+
 fn is_policy_event(event: &AgentEvent) -> bool {
     matches!(
         &event.kind,
@@ -1883,6 +1891,80 @@ fn is_policy_event(event: &AgentEvent) -> bool {
             | EventKind::InputConsumed(_)
     )
 }
+
+fn window_rows(
+    connection: &Connection,
+    key: &TimelineKey,
+    through: u64,
+    turn_id: &str,
+    cut: &str,
+) -> Result<Vec<(i64, i64)>> {
+    let mut rows = Vec::new();
+    let anchor: Option<(i64, i64)> = connection
+        .prepare(
+            "SELECT sequence, last_sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 AND sequence<=?4",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, cut, through as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(anchor) = anchor {
+        rows.push(anchor);
+    }
+    let turn: Option<(i64, i64)> = connection
+        .prepare(
+            "SELECT sequence, last_sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind='turn/start' \
+             AND json_extract(body, '$.record.event.data.turn_id')=?4 \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, through as i64, turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(turn) = turn {
+        rows.push(turn);
+        let previous_end: Option<i64> = connection
+            .prepare(
+                "SELECT MAX(sequence) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence<?3 AND kind='turn/end'",
+            )
+            .map_err(error)?
+            .query_row(params![key.session_id, key.branch_id, turn.0], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?
+            .flatten();
+        let start = previous_end.unwrap_or(0) + 1;
+        rows.extend(
+            connection
+                .prepare(
+                    "SELECT sequence, last_sequence FROM timeline_events \
+                     WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 AND sequence<=?4 \
+                     AND kind IN ('turn/start','input/message','input/consumed') \
+                     ORDER BY sequence",
+                )
+                .map_err(error)?
+                .query_map(
+                    params![key.session_id, key.branch_id, turn.0, through as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(error)?,
+        );
+    }
+    Ok(rows)
+}
+
 fn policy_rows(
     connection: &Connection,
     key: &TimelineKey,
@@ -2156,6 +2238,53 @@ impl TimelineStore for SqliteTimelineStore {
             Ok(events)
         })
     }
+
+    fn policy_window<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        turn_id: &'a str,
+        cut: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyWindow>> {
+        Box::pin(async move {
+            let rows = {
+                let guard = self.db.connection.lock().unwrap();
+                let connection = guard
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
+                window_rows(connection, key, through, turn_id, cut)?
+            };
+            let mut rows = rows;
+            rows.sort_unstable();
+            let mut ranges: Vec<(String, RangeInclusive<u64>)> = Vec::new();
+            for (sequence, last_sequence) in rows {
+                let sequence = sequence as u64;
+                let last_sequence = last_sequence as u64;
+                if let Some((_, range)) = ranges.last_mut() {
+                    if *range.end() + 1 >= sequence {
+                        *range = *range.start()..=last_sequence.max(*range.end());
+                        continue;
+                    }
+                }
+                ranges.push((key.branch_id.clone(), sequence..=last_sequence));
+            }
+            let events = self
+                .read_segments(&key.session_id, ranges)
+                .await?
+                .into_iter()
+                .flatten()
+                .map(|record| record.event)
+                .filter(|event| event.sequence <= through)
+                .filter(|event| event.id == cut || is_window_event(event))
+                .collect();
+            Ok(PolicyWindow {
+                through,
+                cut: cut.to_owned(),
+                events,
+            })
+        })
+    }
+
     fn policy_facts<'a>(
         &'a self,
         key: &'a TimelineKey,

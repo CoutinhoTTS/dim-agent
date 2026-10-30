@@ -16,6 +16,37 @@ pub struct PolicyFacts {
     pub events: Vec<Arc<AgentEvent>>,
 }
 
+impl PolicyFacts {
+    /// Builds facts from an already decoded context, for callers that have it.
+    pub fn from_context(context: &crate::ContextHistory, through: u64) -> Self {
+        Self {
+            through,
+            events: context
+                .events
+                .iter()
+                .filter(|event| policy_event(event))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// The events a compaction cut needs for pinning: its anchor plus the turn's
+/// input window. The caller supplies the cut, so no full history is decoded.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyWindow {
+    pub through: u64,
+    pub cut: String,
+    pub events: Vec<Arc<AgentEvent>>,
+}
+
+fn window_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::TurnStart(_) | EventKind::InputMessage(_) | EventKind::InputConsumed(_)
+    )
+}
+
 fn policy_event(event: &AgentEvent) -> bool {
     matches!(
         &event.kind,
@@ -169,6 +200,29 @@ pub trait TimelineStore: Send + Sync + 'static {
             })
         })
     }
+
+    /// The anchor and turn window for a known compaction cut.
+    fn policy_window<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        turn_id: &'a str,
+        cut: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyWindow>> {
+        Box::pin(async move {
+            let records = self.read(key, 1..=through).await?;
+            Ok(PolicyWindow {
+                through,
+                cut: cut.to_owned(),
+                events: records
+                    .into_iter()
+                    .map(|record| record.event)
+                    .filter(|event| event.id == cut || window_event(event))
+                    .collect(),
+            })
+        })
+    }
+
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,

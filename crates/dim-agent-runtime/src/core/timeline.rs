@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, Result, StoredEvent,
-    TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyWindow, Result,
+    StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -745,6 +745,20 @@ impl Timeline {
         self.0
             .store
             .policy_facts(&self.0.key, through, turn_id)
+            .await
+    }
+    /// The anchor and turn window for a known compaction cut.
+    #[service(skip)]
+    pub async fn policy_window(
+        &self,
+        through: u64,
+        turn_id: &str,
+        cut: &str,
+    ) -> Result<PolicyWindow> {
+        let through = self.through(Some(through))?;
+        self.0
+            .store
+            .policy_window(&self.0.key, through, turn_id, cut)
             .await
     }
     /// Select an interpreter-compatible cache before decoding or trimming facts.
