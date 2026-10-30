@@ -216,6 +216,7 @@ struct Worker {
     parked: String,
     projection: Projection,
     question_responses: Vec<(u64, String, crate::question::Call)>,
+    approval_details: std::collections::BTreeMap<u64, MemberDetailRead>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
     cursors: std::collections::HashMap<String, u64>,
     projection_id: u64,
@@ -270,6 +271,13 @@ struct Worker {
     /// The outstanding `provider.refresh` requests `models()` sent for those
     /// catalogs, with the provider each was sent for.
     refill_requests: Vec<(u64, String)>,
+}
+
+struct MemberDetailRead {
+    projection_id: u64,
+    branch_id: String,
+    request_id: String,
+    allow: bool,
 }
 
 struct OutputWatch {
@@ -333,6 +341,7 @@ async fn run(
         parked: String::new(),
         projection: Projection::default(),
         question_responses: Vec::new(),
+        approval_details: Default::default(),
         cursors: Default::default(),
         projection_id: 0,
         focus: "main".into(),
@@ -407,7 +416,7 @@ async fn run(
                         break;
                     }
                 };
-                if let Err(error) = worker.message(message) {
+                if let Err(error) = worker.message(message).await {
                     let _ = updates.send(Update::Failed(error.to_string()));
                     break;
                 }
@@ -566,6 +575,7 @@ struct ApprovalNotice {
 struct CancelNotice {
     session_id: String,
     request_id: String,
+    branch_id: String,
 }
 
 impl Worker {
@@ -982,18 +992,35 @@ impl Worker {
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
             }
+            Command::RetryApproval {
+                request_id,
+                branch_id,
+            } => {
+                self.read_member_approval(&branch_id, &request_id, false)
+                    .await?;
+            }
             Command::Approval {
                 request_id,
                 branch_id,
                 allow,
                 remember,
             } => {
+                let is_member = self.projection.approvals().iter().any(|approval| {
+                    approval.request_id == request_id
+                        && approval.branch_id == branch_id
+                        && approval.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+                });
+                if allow && is_member {
+                    self.read_member_approval(&branch_id, &request_id, true)
+                        .await?;
+                    return Ok(());
+                }
                 // "Always" saves the exact allow rule first (F2 §5.4); the
                 // call is allowed once either way, as the user asked.
                 if allow && remember {
                     let rule = self
                         .projection
-                        .approval_always(&request_id)
+                        .approval_always(&branch_id, &request_id)
                         .and_then(|command| permission::proposed(&command, ""));
                     let notice = match rule {
                         Some(rule) => {
@@ -1024,7 +1051,7 @@ impl Worker {
                 });
                 let result = self.client.rpc("approval.respond", params).await;
                 if self.report_failure(result) {
-                    self.projection.remove_approval(&request_id);
+                    self.projection.remove_approval(&branch_id, &request_id);
                     self.changed();
                 }
             }
@@ -1594,10 +1621,14 @@ impl Worker {
         scoped
     }
 
-    fn message(&mut self, message: Message) -> crate::Result<()> {
+    async fn message(&mut self, message: Message) -> crate::Result<()> {
         let (method, params) = match message {
             Message::Notice { method, params } => (method, params),
             Message::Response { id, result } => {
+                if let Some(read) = self.approval_details.remove(&id) {
+                    self.member_approval_reply(read, result).await?;
+                    return Ok(());
+                }
                 self.reply(id, result)?;
                 return Ok(());
             }
@@ -1669,6 +1700,9 @@ impl Worker {
                         .supports(&permission::RULE_METHODS)
                         .then(|| permission::always_command(&notice.call).map(str::to_owned))
                         .flatten();
+                    let member = notice.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW;
+                    let branch_id = notice.branch_id.clone();
+                    let request_id = notice.request_id.clone();
                     self.projection.add_approval(
                         notice.branch_id,
                         notice.request_id,
@@ -1678,14 +1712,49 @@ impl Worker {
                         always,
                     );
                     self.changed();
+                    if member {
+                        self.publish();
+                        self.read_member_approval(&branch_id, &request_id, false)
+                            .await?;
+                    }
                 }
             }
-            "approval.cancelled" => {
+            "approval.resolved" | "approval.cancelled" => {
                 let notice: CancelNotice = serde_json::from_value(params)?;
-                if notice.session_id == self.session_id {
-                    self.projection.remove_approval(&notice.request_id);
+                if notice.session_id == self.session_id
+                    && self.projection.approvals().iter().any(|approval| {
+                        approval.request_id == notice.request_id
+                            && approval.branch_id == notice.branch_id
+                    })
+                {
+                    self.projection
+                        .remove_approval(&notice.branch_id, &notice.request_id);
                     self.changed();
                 }
+            }
+            "session.notice"
+                if params["sessionId"] == self.session_id
+                    && params["source"] == "Collaboration"
+                    && params["kind"] == "memberApprovalEnded" =>
+            {
+                let ended: dim_agent_types::MemberApprovalEnded =
+                    serde_json::from_value(params["data"].clone())?;
+                let requests: Vec<_> = self
+                    .projection
+                    .approvals()
+                    .into_iter()
+                    .filter(|approval| {
+                        approval.branch_id == ended.branch_id
+                            && approval.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+                            && approval.tool_input["approvalId"] == ended.approval_id
+                    })
+                    .collect();
+                for approval in requests {
+                    self.projection
+                        .remove_approval(&approval.branch_id, &approval.request_id);
+                    let _ = self.client.rpc("approval.respond", json!({"sessionId":self.session_id,"branchId":ended.branch_id,"requestId":approval.request_id,"decision":"deny"})).await;
+                }
+                self.changed();
             }
             "session.mcp.state" => {
                 let state: mcp::State = serde_json::from_value(params)?;
@@ -1728,6 +1797,108 @@ impl Worker {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn read_member_approval(
+        &mut self,
+        branch_id: &str,
+        request_id: &str,
+        allow: bool,
+    ) -> crate::Result<()> {
+        if self.approval_details.values().any(|read| {
+            read.projection_id == self.projection_id
+                && read.branch_id == branch_id
+                && read.request_id == request_id
+        }) {
+            return Ok(());
+        }
+        let id = self
+            .client
+            .send(
+                dim_agent_types::MEMBER_APPROVAL_GET,
+                json!({"sessionId":self.session_id,"branchId":branch_id,"requestId":request_id}),
+            )
+            .await?;
+        self.approval_details.insert(
+            id,
+            MemberDetailRead {
+                projection_id: self.projection_id,
+                branch_id: branch_id.into(),
+                request_id: request_id.into(),
+                allow,
+            },
+        );
+        self.projection.member_approval(branch_id, request_id, None);
+        self.changed();
+        Ok(())
+    }
+
+    async fn member_approval_reply(
+        &mut self,
+        read: MemberDetailRead,
+        result: std::result::Result<serde_json::Value, client::RpcError>,
+    ) -> crate::Result<()> {
+        if read.projection_id != self.projection_id
+            || !self.projection.approvals().iter().any(|approval| {
+                approval.branch_id == read.branch_id
+                    && approval.request_id == read.request_id
+                    && approval.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+            })
+        {
+            return Ok(());
+        }
+        let detail = result
+            .map_err(|error| {
+                if error.code == -32601 {
+                    "The server cannot provide the original member action".into()
+                } else {
+                    error.to_string()
+                }
+            })
+            .and_then(|value| {
+                serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value)
+                    .map_err(|error| format!("Invalid member approval detail: {error}"))
+            });
+        match detail {
+            Ok(dim_agent_types::MemberApprovalDetail::Pending { descriptor, .. }) => {
+                self.projection.member_approval(
+                    &read.branch_id,
+                    &read.request_id,
+                    Some(Ok(*descriptor)),
+                );
+                if read.allow {
+                    let result = self.client.rpc("approval.respond", json!({"sessionId":self.session_id,"branchId":read.branch_id,"requestId":read.request_id,"decision":"allow"})).await;
+                    if self.report_failure(result) {
+                        self.projection
+                            .remove_approval(&read.branch_id, &read.request_id);
+                    } else {
+                        self.send(Update::ApprovalPending {
+                            branch_id: read.branch_id,
+                            request_id: read.request_id,
+                        });
+                    }
+                }
+            }
+            Ok(dim_agent_types::MemberApprovalDetail::Ended) => {
+                self.projection
+                    .remove_approval(&read.branch_id, &read.request_id);
+                let _ = self.client.rpc("approval.respond", json!({"sessionId":self.session_id,"branchId":read.branch_id,"requestId":read.request_id,"decision":"deny"})).await;
+                self.send(Update::Notice("Member request ended".into()));
+            }
+            Err(error) => {
+                self.projection.member_approval(
+                    &read.branch_id,
+                    &read.request_id,
+                    Some(Err(error)),
+                );
+                self.send(Update::ApprovalPending {
+                    branch_id: read.branch_id,
+                    request_id: read.request_id,
+                });
+            }
+        }
+        self.changed();
         Ok(())
     }
 

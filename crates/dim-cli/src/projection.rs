@@ -701,10 +701,18 @@ impl Projection {
         reason: String,
         always: Option<String>,
     ) {
+        if self
+            .approvals
+            .iter()
+            .any(|approval| approval.branch_id == branch_id && approval.request_id == request_id)
+        {
+            return;
+        }
         if let Some(index) = self.tool_rows.get(&request_id).copied() {
             self.row(index).parked = true;
         }
         self.approvals.push(ApprovalView {
+            member: None,
             request_id,
             branch_id,
             reason,
@@ -715,17 +723,33 @@ impl Projection {
     }
 
     /// The command an "always" answer to `request_id` saves a rule for.
-    pub fn approval_always(&self, request_id: &str) -> Option<String> {
+    pub fn approval_always(&self, branch_id: &str, request_id: &str) -> Option<String> {
         self.approvals
             .iter()
-            .find(|approval| approval.request_id == request_id)?
+            .find(|approval| approval.branch_id == branch_id && approval.request_id == request_id)?
             .always
             .clone()
     }
 
-    pub fn remove_approval(&mut self, request_id: &str) {
-        self.approvals
-            .retain(|approval| approval.request_id != request_id);
+    pub fn member_approval(
+        &mut self,
+        branch_id: &str,
+        request_id: &str,
+        detail: Option<Result<dim_agent_types::MemberApprovalDescriptor, String>>,
+    ) {
+        if let Some(approval) = self
+            .approvals
+            .iter_mut()
+            .find(|approval| approval.branch_id == branch_id && approval.request_id == request_id)
+        {
+            approval.member = detail;
+        }
+    }
+
+    pub fn remove_approval(&mut self, branch_id: &str, request_id: &str) {
+        self.approvals.retain(|approval| {
+            approval.branch_id != branch_id || approval.request_id != request_id
+        });
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {

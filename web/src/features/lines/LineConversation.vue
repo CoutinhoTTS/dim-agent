@@ -121,7 +121,7 @@ function noModel(): void {
         @quote="quote"
       />
       <div v-if="approval" class="line-approval">
-        <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
+        <ApprovalPrompt :key="JSON.stringify([approval.branchId, approval.requestId])" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
       </div>
       <ComposerPanel
         v-else-if="open"

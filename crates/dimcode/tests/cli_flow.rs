@@ -4943,7 +4943,7 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
         let stop=wire.read("session.stop");
         finish.recv_timeout(PATIENCE).unwrap();
-        wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
+        wire.notice("approval.cancelled",json!({"sessionId":"session","branchId":"main","requestId":"approval"}));
         wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
         let next = wire.read("session.submit");
         assert_eq!(next["params"]["text"], "after interrupts");
@@ -7751,4 +7751,67 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         ["blank".to_owned()],
         "only the empty catalog the daemon can list is refreshed"
     );
+}
+
+#[test]
+fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (checked, wait_checked) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers"); wire.reply(&providers, json!([]));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Leader permission"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            assert_eq!(detail["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer"}));
+            wire.send(json!({"jsonrpc":"2.0","id":detail["id"],"error":{"code":-32000,"message":"detail service reloading"}}));
+            wire.quiet(Duration::from_millis(200));
+            checked.send(()).unwrap();
+            let detail = wire.read("session.collaboration.approval.get");
+            let original = json!({"state":"pending","approvalId":"route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"cargo test trusted action"}},"reason":"Member process request"}});
+            wire.reply(&detail, original.clone());
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.reply(&detail, original);
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"allow"}));
+            wire.reply(&answer, json!({}));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer2","call":{"name":"member_approval_allow","input":{"approvalId":"route2"}},"reason":"Member cancellation"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.reply(&detail, json!({"state":"pending","approvalId":"route2","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original2","call":{"name":"exec","input":{"command":"cancel this member action"}},"reason":"Member process request"}}));
+            wire.notice("session.notice", json!({"sessionId":"session","source":"Collaboration","kind":"memberApprovalEnded","data":{"branchId":"review","approvalId":"route2"}}));
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"]["requestId"], "outer2");
+            assert_eq!(answer["params"]["decision"], "deny");
+            wire.reply(&answer, json!({}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"model","delta":"member approvals finished"}}}));
+            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Cannot review member action");
+        terminal.write(b"y");
+        wait_checked.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"r");
+        terminal.until("member-session");
+        terminal.until("cargo test trusted action");
+        assert!(terminal.transcript.contains("Leader branch: review"));
+        assert!(!terminal.transcript.contains("Full access"));
+        assert!(!terminal.transcript.contains("Allow always"));
+        terminal.write(b"y");
+        terminal.until("member approvals finished");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }

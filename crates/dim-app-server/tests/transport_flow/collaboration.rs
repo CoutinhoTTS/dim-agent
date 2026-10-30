@@ -4289,3 +4289,333 @@ fn agent_message(data: &InputMessageData) -> Option<&str> {
         .1
         .strip_suffix("\n</dim-agent-message>")
 }
+
+struct MemberApprovalModel;
+impl dim_agent_capabilities::host::ModelDriver for MemberApprovalModel {
+    fn invoke(
+        &self,
+        request: Arc<dim_agent_types::ModelRequest>,
+        connection: dim_agent_capabilities::host::ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+        use dim_agent_types::{Message, MessagePart, Role};
+        let text = request
+            .messages
+            .last()
+            .filter(|message| message.role == Role::User)
+            .map(|message| match &message.content {
+                MessageContent::Text(text) => text.clone(),
+                MessageContent::Parts(parts) => parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            })
+            .unwrap_or_default();
+        let mut changed = (*request).clone();
+        if let Some(body) = text
+            .strip_prefix("<dim-agent-approval>\n")
+            .and_then(|text| text.strip_suffix("\n</dim-agent-approval>"))
+        {
+            let value: Value =
+                serde_json::from_str(&html_escape::decode_html_entities(body)).unwrap();
+            *changed.messages.last_mut().unwrap() = Arc::new(Message::text(
+                Role::User,
+                format!(
+                    "tool:{} {}",
+                    if value["descriptor"]["call"]["input"]["reject"] == true {
+                        "member_approval_reject"
+                    } else {
+                        "member_approval_allow"
+                    },
+                    json!({"approvalId":value["approvalId"]})
+                ),
+            ));
+        }
+        dim_agent_capabilities::host::ModelDriver::invoke(
+            &dim_agent_capabilities::adapters::EchoModel,
+            Arc::new(changed),
+            connection,
+            cancel,
+        )
+    }
+}
+
+struct MemberApprovalTools(Arc<AtomicUsize>);
+impl ToolDriver for MemberApprovalTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = MockTools.definitions();
+        definitions.push(ToolDefinition {
+            risk: Some("execute_process".into()),
+            ..dim_agent_capabilities::tool_registry::definition(
+                "danger",
+                "Count an admitted action",
+                json!({"type":"object"}),
+            )
+        });
+        definitions
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        if call.name != "danger" {
+            return MockTools.execute(call, context, cancel);
+        }
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::text("Action executed"))
+        })
+    }
+}
+
+async fn approval_team(runs: Arc<AtomicUsize>) -> (RunningServer, Agent) {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts_with_model(
+        &mut builder,
+        dim_agent_capabilities::history::HistoryRenderer::default(),
+        Arc::new(MemberApprovalModel),
+    );
+    defaults::tool_host(&mut builder, Arc::new(MemberApprovalTools(runs)));
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            session_defaults: dim_agent_runtime::SessionConfig {
+                tools: Some(vec![
+                    "agent".into(),
+                    "danger".into(),
+                    "member_approval_allow".into(),
+                    "member_approval_reject".into(),
+                ]),
+                ..Default::default()
+            },
+            unix_path: Some(std::path::PathBuf::from(format!(
+                "/tmp/dim-member-approval-{}/s",
+                uuid::Uuid::new_v4()
+            ))),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_work() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (server, agent) = approval_team(runs.clone()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","danger","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
+        assert_ok(&created);
+        let lead = created["result"]["sessionId"].as_str().unwrap();
+        let leader = agent.get_session(lead).unwrap();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":lead})).await);
+        let mut reused = None;
+        for (index, decision) in ["allow", "deny", "cancel"].into_iter().enumerate() {
+            say(&mut client, lead, tool(json!({"action":"request","profile":{"name":"approval-worker","description":"approval fixture","systemPrompt":"work","tools":["agent","danger"]},"prompt":"tool:danger {\"command\":\"cargo test\",\"marker\":\"</dim-agent-approval>\"}"})), "queue").await;
+            let request = tokio::time::timeout(Duration::from_secs(5), client.notice("approval.request")).await;
+            let request = request.unwrap();
+            let request = &request["params"];
+            assert_eq!(request["sessionId"], lead);
+            assert_eq!(request["call"]["name"], "member_approval_allow");
+            let request_id = request["requestId"].as_str().unwrap();
+            let detail = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+            assert_ok(&detail);
+            assert_eq!(detail["result"]["state"], "pending");
+            let descriptor = &detail["result"]["descriptor"];
+            assert_eq!(descriptor["call"]["name"], "danger");
+            assert_eq!(descriptor["call"]["input"]["command"], "cargo test");
+            assert_eq!(descriptor["call"]["input"]["marker"], "</dim-agent-approval>");
+            assert_eq!(runs.load(Ordering::SeqCst), usize::from(index > 0));
+            let member = descriptor["member"]["sessionId"].as_str().unwrap();
+            if index == 0 { reused = Some((descriptor["member"]["agentId"].as_str().unwrap().to_owned(), member.to_owned())); }
+            if decision == "cancel" {
+                assert_ok(&client.rpc("session.stop", json!({"sessionId":member,"branchId":"main"})).await);
+                poll("member approval retired", async || {
+                    let current = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+                    (current["result"]["state"] == "ended").then_some(())
+                }).await;
+            }
+            let response = client.rpc("approval.respond", json!({"sessionId":lead,"branchId":"main","requestId":request_id,"decision":if decision == "cancel" { "allow" } else { decision }})).await;
+            if decision != "cancel" { assert_ok(&response); }
+            returned(&mut client, lead, &leader, index + 1).await;
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+        }
+        let (agent_id, member_id) = reused.unwrap();
+        let cut = events(&leader).await.last().unwrap().sequence;
+        let child = leader.branch("main".into(), cut, dim_agent_runtime::BranchOptions { prompt: "Review on a separate line".into(), source: dim_agent_types::BranchSource::Host { operation_id: "approval-child".into() } }).await.unwrap();
+        leader.idle(&child).await.unwrap();
+        leader.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(0, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
+        assert_ok(&client.rpc("session.submit", json!({"sessionId":lead,"branchId":child,"text":tool(json!({"action":"request","agentId":agent_id,"sessionId":member_id,"prompt":"tool:danger {\"command\":\"child action\"}"})),"mode":"queue"})).await);
+        let request = client.notice("approval.request").await;
+        let request_id = request["params"]["requestId"].as_str().unwrap();
+        assert_eq!(request["params"]["branchId"], child);
+        let wrong = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+        assert_eq!(wrong["result"]["state"], "ended");
+        let detail = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":child,"requestId":request_id})).await;
+        assert_eq!(detail["result"]["descriptor"]["call"]["input"]["command"], "child action");
+        assert_ok(&client.rpc("approval.respond", json!({"sessionId":lead,"branchId":child,"requestId":request_id,"decision":"allow"})).await);
+        poll("child approval report", async || {
+            leader.local(&child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+        }).await;
+        leader.idle(&child).await.unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        for (offset, (preset, prompt, expected)) in [
+            ("full-access", "tool:danger {\"command\":\"once under full access\"}", 3),
+            ("read-only", "tool:danger {\"command\":\"denied by leader policy\"}", 3),
+            ("read-only", "tool:danger {\"reject\":true}", 3),
+        ].into_iter().enumerate() {
+            let state = leader.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+            leader.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(state.version, serde_json::from_value(json!({"preset":preset,"allowedTools":["agent"]})).unwrap()).await.unwrap();
+            say(&mut client, lead, tool(json!({"action":"request","agentId":agent_id,"sessionId":member_id,"prompt":prompt})), "queue").await;
+            returned(&mut client, lead, &leader, offset + 4).await;
+            assert_eq!(runs.load(Ordering::SeqCst), expected);
+        }
+        let state = leader.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+        leader.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(state.version, serde_json::from_value(json!({"preset":"workspace-write","allowedTools":["agent"]})).unwrap()).await.unwrap();
+        say(&mut client, lead, tool(json!({"action":"request","agentId":agent_id,"sessionId":member_id,"prompt":"tool:danger {\"command\":\"must not run after reload\"}"})), "queue").await;
+        let pending = client.notice("approval.request").await;
+        let pending_id = pending["params"]["requestId"].as_str().unwrap();
+        server.restart("Agents").await.unwrap();
+        poll("reloaded member approval is ended", async || {
+            let ended = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":pending_id})).await;
+            (ended["result"]["state"] == "ended").then_some(())
+        }).await;
+        let _ = client.rpc("approval.respond", json!({"sessionId":lead,"branchId":"main","requestId":pending_id,"decision":"allow"})).await;
+        idle(&mut client, lead).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        let unattended = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"interactive":false,"tools":["agent","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
+        assert_ok(&unattended);
+        let unattended = unattended["result"]["sessionId"].as_str().unwrap();
+        let unattended_session = agent.get_session(unattended).unwrap();
+        say(&mut client, unattended, tool(json!({"action":"request","profile":{"name":"unattended-worker","description":"fixture","systemPrompt":"work","tools":["agent","danger"]},"prompt":"tool:danger {}"})), "queue").await;
+        returned(&mut client, unattended, &unattended_session, 1).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        server.shutdown(); server.join().await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_theirs() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (server, agent) = launch_team().await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let lead = leader(&mut client, allowed()).await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        let policy = json!({"preset":"workspace-write","allowedTools":["agent","echo","wait"],"disallowedTools":["forbidden"]});
+        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(0, serde_json::from_value(policy.clone()).unwrap()).await.unwrap();
+        let cut = events(&lead_session).await.last().unwrap().sequence;
+        let branch = lead_session.branch("main".into(), cut, dim_agent_runtime::BranchOptions { prompt: "Permission inheritance child".into(), source: dim_agent_types::BranchSource::Host { operation_id: "permission-inheritance".into() } }).await.unwrap();
+        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(cut, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
+        let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"].as_str().unwrap().to_owned();
+        lead_session.submit(tool(json!({"action":"request","agentId":agent_id,"prompt":"hello"})), dim_agent_types::InputMode::Queue, &branch).await.unwrap();
+        lead_session.idle(&branch).await.unwrap();
+        let member_id = poll("child member delivered", async || {
+            lead_session.history(&branch, None).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
+        }).await;
+        let member = agent.get_session(&member_id).unwrap();
+        poll("child delegation completed before member reuse", async || {
+            lead_session.local(&branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+        }).await;
+        lead_session.idle(&branch).await.unwrap();
+        assert_eq!(serde_json::to_value(&member.config().permission_policy).unwrap(), policy);
+        say(&mut client, &lead, tool(json!({"action":"request","agentId":agent_id,"sessionId":member_id,"prompt":"reused"})), "queue").await;
+        returned(&mut client, &lead, &lead_session, 1).await;
+        assert_eq!(serde_json::to_value(&member.config().permission_policy).unwrap(), policy);
+        say(&mut client, &lead, tool(json!({"action":"request","agentId":agent_id,"prompt":"new root member"})), "queue").await;
+        returned(&mut client, &lead, &lead_session, 2).await;
+        let root_member = next_member(&lead_session, 1).await;
+        assert_eq!(agent.get_session(&root_member).unwrap().config().permission_policy.preset, dim_agent_types::PermissionPreset::FullAccess);
+        server.shutdown(); server.join().await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late_allow() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (server, agent) = approval_team(runs.clone()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
+        assert_ok(&created);
+        let lead = created["result"]["sessionId"].as_str().unwrap();
+        let leader = agent.get_session(lead).unwrap();
+        let worker_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"].as_str().unwrap().to_owned();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":lead})).await);
+        let control = leader.branch("main".into(), 0, dim_agent_runtime::BranchOptions { prompt: "Control cancellation from another branch".into(), source: dim_agent_types::BranchSource::Host { operation_id: "approval-control".into() } }).await.unwrap();
+        leader.idle(&control).await.unwrap();
+        leader.service::<dim_agent_capabilities::permission::Permission>(&control).unwrap().update(0, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
+        for (index, action) in ["leader_stop", "cancel", "close", "leader_readonly", "member_readonly"].into_iter().enumerate() {
+            let permission = leader.service::<dim_agent_capabilities::permission::Permission>("main").unwrap();
+            let state = leader.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+            permission.update(state.version, serde_json::from_value(json!({"preset":"workspace-write","allowedTools":["agent"]})).unwrap()).await.unwrap();
+            say(&mut client, lead, tool(json!({"action":"request","agentId":worker_agent,"prompt":"tool:danger {\"command\":\"must not execute\"}"})), "queue").await;
+            let request = client.notice("approval.request").await;
+            let request_id = request["params"]["requestId"].as_str().unwrap();
+            let detail = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+            assert_eq!(detail["result"]["state"], "pending");
+            let target = &detail["result"]["descriptor"]["member"];
+            let member_id = target["sessionId"].as_str().unwrap();
+            let member = agent.get_session(member_id).unwrap();
+            let mut child = None;
+            match action {
+                "leader_stop" => {
+                    assert_ok(&client.rpc("session.stop", json!({"sessionId":lead,"branchId":"main"})).await);
+                }
+                "cancel" | "close" => {
+                    if action == "cancel" {
+                        leader.submit(format!("tool:member_approval_allow {}", json!({"approvalId":detail["result"]["approvalId"]})), dim_agent_types::InputMode::Queue, &control).await.unwrap();
+                        leader.idle(&control).await.unwrap();
+                        let calls = results(&leader.local(&control, ..).await.unwrap());
+                        let (_, result) = calls.last().unwrap();
+                        let result: Value = serde_json::from_str(result).unwrap();
+                        assert_eq!(result["code"], "not_pending");
+                        assert!(result.get("target").is_none());
+                        leader.submit(tool(json!({"action":"cancel","agentId":"foreign-agent","sessionId":member_id})), dim_agent_types::InputMode::Queue, &control).await.unwrap();
+                        leader.idle(&control).await.unwrap();
+                        let current = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+                        assert_eq!(current["result"]["state"], "pending", "foreign identity cannot retire another member's approval");
+                    }
+                    let branch = member.branch("main".into(), 0, dim_agent_runtime::BranchOptions { prompt: "tool:danger {\"command\":\"child must not execute\"}".into(), source: dim_agent_types::BranchSource::Host { operation_id: "member-child-approval".into() } }).await.unwrap();
+                    poll("member child awaits approval", async || {
+                        let approval = member.service::<dim_agent_capabilities::approval::Approval>(&branch).ok()?;
+                        let mut pending = false;
+                        approval.replay(|_| pending = true);
+                        pending.then_some(())
+                    }).await;
+                    child = Some(branch);
+                    leader.submit(tool(json!({"action":action,"agentId":target["agentId"],"sessionId":member_id})), dim_agent_types::InputMode::Queue, &control).await.unwrap();
+                    leader.idle(&control).await.unwrap();
+                }
+                "leader_readonly" => {
+                    let state = leader.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+                    permission.update(state.version, serde_json::from_value(json!({"preset":"read-only","allowedTools":["agent"]})).unwrap()).await.unwrap();
+                }
+                "member_readonly" => {
+                    let state = member.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+                    member.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(state.version, serde_json::from_value(json!({"preset":"read-only"})).unwrap()).await.unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let _ = client.rpc("approval.respond", json!({"sessionId":lead,"branchId":"main","requestId":request_id,"decision":"allow"})).await;
+            returned(&mut client, lead, &leader, index + 1).await;
+            if let Some(child) = child {
+                tokio::time::timeout(Duration::from_secs(5), member.idle(&child)).await.unwrap().unwrap();
+            }
+            let ended = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+            assert_eq!(ended["result"]["state"], "ended", "{action}");
+            assert_eq!(runs.load(Ordering::SeqCst), 0, "{action}");
+        }
+        server.shutdown(); server.join().await.unwrap();
+    }).await.unwrap();
+}

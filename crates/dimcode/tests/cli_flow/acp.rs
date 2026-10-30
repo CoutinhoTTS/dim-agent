@@ -2137,3 +2137,67 @@ fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
         assert!(!terminal.transcript.contains("private model detail"));
     }
 }
+
+#[test]
+fn acp_stdio_member_approval_shows_the_original_action_and_rechecks_before_allowing() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec(); methods.push("session.collaboration.approval.get"); wire.hello(&methods);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach, json!({}));
+        let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let submit = wire.read("session.submit");
+        let input = event(9,"input","input","message",json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}));
+        wire.reply(&submit,json!({"event":input}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":event(10,"start","turn","start",json!({"turn_id":"turn"}))}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":event(11,"consumed","input","consumed",json!({"input_id":"input"}))}));
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Leader admission"}));
+        let detail = wire.read("session.collaboration.approval.get");
+        assert_eq!(detail["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer"}));
+        wire.reply(&detail, json!({"state":"pending","approvalId":"route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"cargo test original action"}},"reason":"Member process request"}}));
+        let detail = wire.read("session.collaboration.approval.get");
+        wire.reply(&detail, json!({"state":"ended"}));
+        let response = wire.read("approval.respond");
+        assert_eq!(response["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"deny"}));
+        wire.reply(&response, json!({}));
+        wire.notice("approval.resolved", json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"deny"}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":event(12,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"}))}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"work"}]}),
+    );
+    loop {
+        let frame = peer.frame();
+        if frame["method"] != "session/request_permission" {
+            continue;
+        }
+        let _: acp::RequestPermissionRequest =
+            serde_json::from_value(frame["params"].clone()).unwrap();
+        assert_eq!(
+            frame["params"]["toolCall"]["rawInput"]["member"]["sessionId"],
+            "member"
+        );
+        assert!(
+            frame["params"]["toolCall"]["content"][0]["content"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("cargo test original action")
+        );
+        assert_eq!(frame["params"]["options"].as_array().unwrap().len(), 2);
+        peer.answer(
+            &frame,
+            json!({"outcome":{"outcome":"selected","optionId":"allow_once"}}),
+        );
+        break;
+    }
+    assert_eq!(peer.response(3)["result"]["stopReason"], "end_turn");
+    peer.close();
+    daemon.join().unwrap();
+}

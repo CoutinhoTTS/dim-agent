@@ -1,6 +1,8 @@
 use crate::projection::tool_id;
 use agent_client_protocol::{Client, ConnectionTo, UntypedMessage};
-use dim_agent_types::ApprovalCallData;
+use dim_agent_types::{
+    ApprovalCallData, MEMBER_APPROVAL_ALLOW, MEMBER_APPROVAL_GET, MemberApprovalDetail,
+};
 use dim_client::question::{self, Answer, Call};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -25,24 +27,51 @@ pub(crate) async fn approval(
     outbox: crate::outbox::Outbox,
     stop: CancellationToken,
     approval: Approval,
+    rpc: crate::rpc::Rpc,
 ) -> Option<Value> {
-    let message = UntypedMessage::new("session/request_permission",json!({"sessionId":approval.session_id,"toolCall":{"toolCallId":key("approval",&approval.session_id,&approval.branch_id,&approval.request_id,""),"title":approval.reason,"kind":"other","status":"pending","rawInput":approval.call.input},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject once","kind":"reject_once"}]})).ok()?;
-    let result: Value = tokio::select! {
-        () = stop.cancelled() => return None,
-        result = outbox.request(&cx,&message.method,message.params) => result.ok()?,
+    let args = |decision: &str| json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":decision});
+    let member = approval.call.name == MEMBER_APPROVAL_ALLOW;
+    let (title, input) = if member {
+        match rpc.typed::<MemberApprovalDetail>(MEMBER_APPROVAL_GET, json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id})).await {
+            Ok(MemberApprovalDetail::Pending { descriptor, .. }) => (format!("{} / {} / {}: {} — {}", approval.branch_id, descriptor.member.agent_id, descriptor.member.branch_id, descriptor.call.name, descriptor.reason), serde_json::to_value(descriptor).ok()?),
+            _ => return Some(args("deny")),
+        }
+    } else {
+        (
+            approval.reason.clone(),
+            Value::Object(approval.call.input.clone()),
+        )
     };
-    let option = result.get("outcome")?;
-    if option["outcome"] != "selected" {
-        return None;
+    let mut call = json!({"toolCallId":key("approval",&approval.session_id,&approval.branch_id,&approval.request_id,""),"title":title,"kind":"other","status":"pending","rawInput":input});
+    if member {
+        call["content"] = json!([{"type":"content","content":{"type":"text","text":serde_json::to_string_pretty(&input).ok()?}}]);
     }
-    let decision = match option["optionId"].as_str()? {
-        "allow_once" => "allow",
-        "reject_once" => "deny",
-        _ => return None,
+    let message = UntypedMessage::new("session/request_permission",json!({"sessionId":approval.session_id,"toolCall":call,"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject once","kind":"reject_once"}]})).ok()?;
+    let result = tokio::select! {
+        () = stop.cancelled() => return None,
+        result = outbox.request(&cx,&message.method,message.params) => match result {
+            Ok(result) => result,
+            Err(_) => return member.then(|| args("deny")),
+        },
     };
-    Some(
-        json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":decision}),
-    )
+    let decision = match result
+        .get("outcome")
+        .filter(|outcome| outcome["outcome"] == "selected")
+        .and_then(|outcome| outcome["optionId"].as_str())
+    {
+        Some("allow_once") => "allow",
+        Some("reject_once") => "deny",
+        _ => return member.then(|| args("deny")),
+    };
+    let decision = if member && decision == "allow" {
+        match rpc.typed::<MemberApprovalDetail>(MEMBER_APPROVAL_GET, json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id})).await {
+            Ok(MemberApprovalDetail::Pending { .. }) => "allow",
+            _ => "deny",
+        }
+    } else {
+        decision
+    };
+    Some(args(decision))
 }
 
 pub(crate) async fn question(

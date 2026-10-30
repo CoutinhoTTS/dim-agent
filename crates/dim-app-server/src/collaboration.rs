@@ -1,4 +1,5 @@
-//! Team collaboration, see `docs/design/appserver/collaboration.md`.
+//! Team collaboration; member admission is specified in
+//! `docs/design/subagent-tool-approval.md`.
 //!
 //! `CollaborationDirectoryPlugin` (process) owns member relations and temporary
 //! Agent records across reloads. `CollaborationSession` (Session) provides the `agent` tool and
@@ -7,6 +8,8 @@
 //! only reached through their public Session interface, on their main branch.
 //! An open request holds its leader (`SessionLifecycle::take_hold`) until its
 //! `result` is written, so an idle unload never ends it.
+mod approvals;
+
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
 use crate::collaboration_model_policy::ModelPolicy;
 use crate::settings::{SettingsScope, SettingsService};
@@ -163,6 +166,7 @@ impl Collaboration {
         leader_id: &str,
         target: NewMember,
         adopted: Option<ModelSelection>,
+        permission: PermissionPolicy,
     ) -> Result<Peer, Failure> {
         let (leader_host, leader) = self.index.session(leader_id).ok_or(Refusal::Closed)?;
         let policy = match &self.settings {
@@ -213,7 +217,7 @@ impl Collaboration {
         let mut config =
             crate::agents::session_config(&host.profile, self.index.session_defaults());
         config.cwd = leader.config().cwd.clone();
-        config.permission_policy = leader.config().permission_policy.clone();
+        config.permission_policy = permission;
         config.collaboration_role = CollaborationRole::Member;
         if let Some(model) = inherited {
             config.model = model;
@@ -693,6 +697,9 @@ struct Op {
     waiter: Option<Waiter>,
 }
 struct BranchRecord {
+    ctx: Ctx,
+    approvals: BTreeMap<String, Arc<approvals::Relay>>,
+    approval_calls: BTreeMap<(String, String), String>,
     timeline: Arc<Timeline>,
     tasks: TaskTracker,
     /// Cancels waiting for members on unload.
@@ -722,6 +729,7 @@ struct Request {
     agent_id: String,
     session: Session,
     input_event_id: Option<String>,
+    approvals_open: bool,
     /// Settlement decided by the leader side instead of the member's work.
     settle: Option<CollaborationOutcome>,
     done: watch::Sender<bool>,
@@ -743,6 +751,8 @@ pub struct CollaborationSession {
     /// Gives each request its hold on this Session.
     lifecycle: Arc<SessionLifecycle>,
     state: Mutex<State>,
+    interactive: bool,
+    approval_tools: bool,
 }
 
 fn op_turn(kind: &EventKind) -> Option<(&str, bool)> {
@@ -1235,6 +1245,7 @@ impl CollaborationSession {
         branch_id: &str,
         event: Arc<AgentEvent>,
     ) -> BoxFuture<'static, dim_agent_runtime::Result<()>> {
+        self.approval_event(branch_id, &event);
         match &event.kind {
             EventKind::TurnStart(data) => {
                 self.with_branch(branch_id, |branch| {
@@ -1350,6 +1361,29 @@ impl CollaborationSession {
             }) if self.collaboration.settings.is_some() => self.adopted_model(branch_id),
             _ => None,
         };
+        let permission = match &event.kind {
+            EventKind::CollaborationRequest(CollaborationRequestData {
+                target: CollaborationTarget::Agent { .. } | CollaborationTarget::Temporary { .. },
+                ..
+            }) => self
+                .collaboration
+                .index
+                .session(&self.session_id)
+                .ok_or_else(|| member_create_failed("leader Session is closed".into()))
+                .and_then(|(_, session)| {
+                    session
+                        .get::<dim_agent_capabilities::permission::PermissionState>(branch_id)
+                        .map_err(|error| member_create_failed(error.to_string()))?
+                        .map(|state| state.policy)
+                        .ok_or_else(|| {
+                            member_create_failed(
+                                "requesting branch permission is unavailable".into(),
+                            )
+                        })
+                })
+                .map(Some),
+            _ => Ok(None),
+        };
         let mut state = self.state.lock().unwrap();
         let Some(branch) = state.branches.get_mut(branch_id) else {
             return;
@@ -1409,7 +1443,13 @@ impl CollaborationSession {
             }
             let delivered = match refused {
                 Some(code) => Err(Failure::from(code)),
-                None => this.deliver(&branch_key, &event, cancel, adopted).await,
+                None => match permission {
+                    Ok(permission) => {
+                        this.deliver(&branch_key, &event, cancel, adopted, permission)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
             };
             let (delivery, detail) = match delivered {
                 Ok(delivery) => (delivery, None),
@@ -1510,6 +1550,7 @@ impl CollaborationSession {
         event: &AgentEvent,
         cancel: CollaborationCancelOutcome,
         adopted: Option<ModelSelection>,
+        permission: Option<PermissionPolicy>,
     ) -> Result<CollaborationDelivery, Failure> {
         let delivered = |peer: &Peer, input: Option<String>, outcome| CollaborationDelivery::Ok {
             agent_id: peer.agent_id.clone(),
@@ -1519,7 +1560,8 @@ impl CollaborationSession {
         };
         match &event.kind {
             EventKind::CollaborationRequest(data) => {
-                self.request(branch_id, event, data, adopted).await
+                self.request(branch_id, event, data, adopted, permission)
+                    .await
             }
             EventKind::CollaborationMessage(data) => {
                 let sender = self.sender()?;
@@ -1601,6 +1643,7 @@ impl CollaborationSession {
         event: &AgentEvent,
         data: &CollaborationRequestData,
         adopted: Option<ModelSelection>,
+        permission: Option<PermissionPolicy>,
     ) -> Result<CollaborationDelivery, Failure> {
         let sender = self.sender()?;
         let (peer, new) = match &data.target {
@@ -1610,6 +1653,9 @@ impl CollaborationSession {
                         &self.session_id,
                         NewMember::Agent(agent_id.clone()),
                         adopted,
+                        permission
+                            .clone()
+                            .expect("new member policy is sampled before dispatch"),
                     )
                     .await?,
                 true,
@@ -1620,6 +1666,9 @@ impl CollaborationSession {
                         &self.session_id,
                         NewMember::Temporary(profile.clone()),
                         adopted,
+                        permission
+                            .clone()
+                            .expect("new member policy is sampled before dispatch"),
                     )
                     .await?,
                 true,
@@ -1675,6 +1724,7 @@ impl CollaborationSession {
                     agent_id: peer.agent_id.clone(),
                     session: peer.session.clone(),
                     input_event_id: None,
+                    approvals_open: true,
                     settle: None,
                     done: watch::channel(false).0,
                 },
@@ -1780,12 +1830,17 @@ impl CollaborationSession {
         idle: Option<dim_agent_runtime::Result<u64>>,
     ) {
         let Some((request, timeline)) = ({
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            let timeline = state
+                .branches
+                .get(branch_id)
+                .map(|branch| branch.timeline.clone());
             state
                 .requests
-                .get(member)
+                .get_mut(member)
                 .filter(|request| request.branch == branch_id)
                 .map(|request| {
+                    request.approvals_open = false;
                     (
                         (
                             request.op.clone(),
@@ -1793,15 +1848,13 @@ impl CollaborationSession {
                             request.session.clone(),
                             request.input_event_id.clone(),
                         ),
-                        state
-                            .branches
-                            .get(branch_id)
-                            .map(|branch| branch.timeline.clone()),
+                        timeline,
                     )
                 })
         }) else {
             return;
         };
+        self.retire_member_approvals(branch_id, member).await;
         let (op, agent_id, session, input) = request;
         let through = match &idle {
             Some(Ok(cutoff)) => Some(*cutoff),
@@ -1949,6 +2002,7 @@ impl CollaborationSession {
             branch.abort.cancel();
             branch.tasks.clone()
         };
+        self.retire_branch_approvals(branch_id).await;
         tasks.close();
         tasks.wait().await;
         let closing = self
@@ -2438,6 +2492,7 @@ struct CollaborationSessionPlugin {
     lifecycle: Key<SessionLifecycle>,
     tools: Key<ToolRegistry>,
     guide: Key<GuideEntries>,
+    methods: Key<dim_agent_capabilities::methods::SessionMethods>,
     service: Key<CollaborationSession>,
 }
 impl CollaborationSessionPlugin {
@@ -2450,6 +2505,7 @@ impl CollaborationSessionPlugin {
             lifecycle: names.key()?,
             tools: names.key()?,
             guide: names.key()?,
+            methods: names.key()?,
             service: names.key()?,
         })
     }
@@ -2467,6 +2523,7 @@ impl DynPlugin for CollaborationSessionPlugin {
             self.lifecycle.erase(),
             self.tools.erase(),
             self.guide.erase(),
+            self.methods.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -2499,6 +2556,11 @@ impl DynPlugin for CollaborationSessionPlugin {
                 tree,
                 lifecycle,
                 state: Mutex::new(State::default()),
+                interactive: config.interactive,
+                approval_tools: config.tools.as_ref().is_none_or(|tools| {
+                    tools.iter().any(|name| name == MEMBER_APPROVAL_ALLOW)
+                        && tools.iter().any(|name| name == MEMBER_APPROVAL_REJECT)
+                }),
             });
             tools.register(
                 ctx,
@@ -2509,6 +2571,13 @@ impl DynPlugin for CollaborationSessionPlugin {
                         stopping: ctx.cancellation_token(),
                     }),
                 },
+            )?;
+            approvals::install(
+                ctx,
+                &service,
+                &tools,
+                &guide,
+                ctx.require_at(&self.methods)?.as_ref(),
             )?;
             ctx.provide_at(self.service.clone(), service)?;
             Ok(Effect::Done)
@@ -2580,6 +2649,11 @@ impl DynPlugin for CollaborationTimelinePlugin {
                     "collaboration/message",
                     "collaboration/delivered",
                     "collaboration/result",
+                    "input/message",
+                    "input/applied",
+                    "input/deleted",
+                    "step/tool-call",
+                    "step/tool-result",
                 ],
                 move |event| {
                     let gate = gate.clone();
@@ -2598,10 +2672,34 @@ impl DynPlugin for CollaborationTimelinePlugin {
             let events = timeline.local(..=through).await?;
             *rebuilding = events.last().map_or(0, |event| event.sequence);
             let tasks = TaskTracker::new();
+            let cleanup_tasks = tasks.clone();
+            let mut stale_inputs = BTreeSet::new();
+            for event in &events {
+                match &event.kind {
+                    EventKind::InputMessage(data)
+                        if data
+                            .submission_id
+                            .as_ref()
+                            .is_some_and(|id| id.starts_with("collaboration-approval:"))
+                            && data.user.is_none()
+                            && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
+                    {
+                        stale_inputs.insert(event.id.clone());
+                    }
+                    EventKind::InputApplied(InputAppliedData { input_id, .. })
+                    | EventKind::InputDeleted(InputDeletedData { input_id }) => {
+                        stale_inputs.remove(input_id);
+                    }
+                    _ => {}
+                }
+            }
             let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
             service.state.lock().unwrap().branches.insert(
-                branch_id,
+                branch_id.clone(),
                 BranchRecord {
+                    ctx: ctx.clone(),
+                    approvals: BTreeMap::new(),
+                    approval_calls: BTreeMap::new(),
                     timeline,
                     tasks,
                     abort: CancellationToken::new(),
@@ -2619,6 +2717,34 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 },
             );
             drop(rebuilding);
+            if !stale_inputs.is_empty() {
+                cleanup_tasks.spawn(async move {
+                    if !phase.activated().await {
+                        return;
+                    }
+                    let result = async {
+                        let branch = service.tree.get(&branch_id)?;
+                        let queue =
+                            branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
+                        for input_id in stale_inputs {
+                            queue
+                                .withdraw(
+                                    InputWithdrawData {
+                                        input_id,
+                                        reason: Some(RELOADING.into()),
+                                    },
+                                    None,
+                                )
+                                .await?;
+                        }
+                        Ok::<_, AgentError>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        dispatcher.fail(error);
+                    }
+                });
+            }
             Ok(Effect::Done)
         })
     }

@@ -354,9 +354,15 @@ At the idle prompt, `/approvals` (alias `/permissions`) shows the `main` preset 
 command rules. `/approvals PRESET` switches `main`; `full-access` asks `[y/N]` and only `y`/`yes`
 confirms. `/approvals allow|deny exact|prefix COMMAND` adds a rule and `/approvals remove N`
 removes rule N of the list printed last; both print the new numbered list. A preset or rule list
-that changed since it was shown is reported and nothing is written. Child branches created later inherit a switch; agent members keep the
-Session's starting preset. Rules are user scope and apply in every Session: a deny rule under
+that changed since it was shown is reported and nothing is written. Child branches and native members created later from the changed branch inherit its current policy;
+existing branches and members retain their own policies, including when a member is reused. Rules are user scope and apply in every Session: a deny rule under
 every preset, an allow rule only where the preset would ask.
+
+Member tool approvals are routed through the branch that delegated the work. When the leader's
+allow decision needs approval, the prompt shows the original member, Session/branch, tool,
+arguments and reason from the server. It offers only Allow once and Reject, and cannot allow
+until details load. Details can be retried; rejection remains available during loading. The
+member conversation panel stays read-only. See the [member approval contract](../../docs/design/subagent-tool-approval.md).
 
 For a simple `exec`/`execute` command (no `;` `&` `|` `` ` `` `(` `)` `<` `>` `$` or line
 break), the approval prompt also offers `a`:

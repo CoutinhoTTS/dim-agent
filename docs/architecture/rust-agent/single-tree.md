@@ -202,6 +202,11 @@ Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchSc
 
 `agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 不需要目标。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
 
+Collaboration 的成员工具审批在 `collaboration/approvals.rs` 内实现，沿用既有 Session 和分支部件。
+Session 部件注册决策工具与详情查询，并在成员发布后通过 Session 广播唤醒待审批集合的重读；
+每个分支记录持有自己的转交资源与任务。成员创建的权限采样发生在 `collaboration/request`
+的消费点，异步创建只传递已采样策略。公开行为与错误由[成员审批及权限继承设计](../../design/subagent-tool-approval.md)拥有。
+
 `SessionConfig.interactive: bool` 表示 Session 有可交互的对象，能回答它的提问和审批，在创建时由 `session.create` 的 `interactive` 参数确定（缺省 `true`），创建后不变。装配从不读取它；关心它的 Session 部件经 `Keyed<SessionConfig>` 或 `Session::config()` 读取（[Session 访问 A.3](../../design/contracts/session-access.md#a3-sessionconfig-fields)）。
 
 Session 能力向 `ToolRegistry` 贡献工具的方式见[工具贡献](tool-contributions.md)。
