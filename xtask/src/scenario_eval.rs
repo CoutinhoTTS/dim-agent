@@ -1699,10 +1699,19 @@ async fn ask_part(
             Ok(reply) => reply,
             // A call that fails during a re-ask ends the asking, and the
             // error names the call that failed.
-            Err(error) if asking.dropped || reasks > 0 => {
+            Err(error) if reasks > 0 => {
                 return Err((
                     JudgeOutcome::CallFailed,
                     format!("the judge failed on a re-ask: {error}"),
+                ));
+            }
+            // The part's first call, with the temperature an earlier part
+            // dropped: there is no retry to make, and the failure is the
+            // part's own first call.
+            Err(error) if asking.dropped => {
+                return Err((
+                    JudgeOutcome::CallFailed,
+                    format!("the judge failed: {error}"),
                 ));
             }
             Err(error) => {
