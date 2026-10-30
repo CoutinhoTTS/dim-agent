@@ -338,7 +338,8 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
         .await
         .unwrap();
     entered(&env).await;
-    let (env, session, cwd) = (&env, &session, &layout.cwd);
+    // The closure borrows the fixture; the host stays owned for its close.
+    let (shared, session, cwd) = (&env, &session, &layout.cwd);
     let change = |version: usize| {
         dirs.write(
             &body,
@@ -349,7 +350,7 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
             ),
         );
         async move {
-            refresh(env, session, cwd).await;
+            refresh(shared, session, cwd).await;
             for _ in 0..200 {
                 if lists(session).await.len() == version {
                     return;

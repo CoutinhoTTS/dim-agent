@@ -379,6 +379,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: 모델 {count}개 사용 불가 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 모델 1개에 윈도가 필요합니다 · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 모델 {count}개에 윈도가 필요합니다 · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: 모델 없음 · dimcode models {id} --refresh"
         }
@@ -390,6 +396,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: 카탈로그를 읽을 수 없음 · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "한도가 선언되지 않은 모델은 선택할 수 없습니다. dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N로 선언하세요."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N로 선언하세요."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "캐시된 카탈로그가 없습니다. 로그인한 뒤 models PROVIDER --refresh를 실행하세요."

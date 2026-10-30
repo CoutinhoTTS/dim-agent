@@ -344,6 +344,14 @@ mod tests {
                     "{provider}: {count} models disabled · dimcode models {id}",
                     &["{provider}", "{count}", "{id}"][..],
                 ),
+                (
+                    "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{id}"][..],
+                ),
+                (
+                    "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{count}", "{id}"][..],
+                ),
             ] {
                 let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
                 for placeholder in placeholders {
@@ -381,6 +389,20 @@ mod tests {
                 !text.contains('{'),
                 "{code} keeps a placeholder in {key:?}: {text:?}"
             );
+            let key = "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            assert!(
+                text.contains("{id}"),
+                "{code} drops {{id}} in {key:?}: {text:?}"
+            );
+            let key = "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            for placeholder in ["{provider}", "{model}"] {
+                assert!(
+                    text.contains(placeholder),
+                    "{code} drops {placeholder} in {key:?}: {text:?}"
+                );
+            }
             let key = "Saved model preferences cleared";
             let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
             assert!(

@@ -363,6 +363,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} 個模型無法使用 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：1 個模型需要視窗 · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：{count} 個模型需要視窗 · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}：沒有模型 · dimcode models {id} --refresh"
         }
@@ -374,6 +380,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}：無法讀取 catalog · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限未宣告的模型無法選擇；用 dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N 宣告。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "用 dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N 宣告。"
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "沒有快取的 catalog。請登入並執行 models PROVIDER --refresh。"

@@ -33,7 +33,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::session::{
-    EmptyProvider, EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, SubagentModelPolicy,
+    EmptyProvider, EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
+    SubagentModelPolicy,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
@@ -187,7 +188,19 @@ impl ModelsPanel {
                         show_effort.then_some(focus.as_deref()).flatten(),
                         show_effort.then_some(&self.chosen),
                     );
-                    items.extend(empty_rows(&list.empty));
+                    items.extend(limits_rows(&list.limits));
+                    let empty: Vec<EmptyProvider> = list
+                        .empty
+                        .iter()
+                        .filter(|provider| {
+                            !list
+                                .limits
+                                .iter()
+                                .any(|limits| limits.provider_id == provider.provider_id)
+                        })
+                        .cloned()
+                        .collect();
+                    items.extend(empty_rows(&empty));
                     if self.view == View::Models {
                         items.push(Item::new(EDIT_MODELS, t("Edit models"), ""));
                         if let Some(policy) = &self.policy {
@@ -534,6 +547,34 @@ fn empty_rows(providers: &[EmptyProvider]) -> Vec<Item> {
         .collect()
 }
 
+/// A provider whose catalog holds models no source declares a window for
+/// keeps one muted row, after the models, counting them and naming the
+/// command that declares both limits; it replaces the provider's empty row.
+fn limits_rows(providers: &[NeedsLimitsProvider]) -> Vec<Item> {
+    providers
+        .iter()
+        .map(|provider| {
+            let name = ("provider", provider.provider_name.as_str());
+            let id = ("id", provider.provider_id.as_str());
+            let text = if provider.count == 1 {
+                tf(
+                    "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
+                    &[name, id],
+                )
+            } else {
+                let count = provider.count.to_string();
+                tf(
+                    "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
+                    &[name, ("count", &count), id],
+                )
+            };
+            let mut row = Item::heading(text);
+            row.sticky = true;
+            row
+        })
+        .collect()
+}
+
 fn provider_name(model: &ModelItem) -> &str {
     if model.provider_name.is_empty() {
         model.provider_id.as_str()
@@ -595,6 +636,7 @@ mod tests {
             ],
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
+            limits: Vec::new(),
         }));
         panel
     }
@@ -621,6 +663,7 @@ mod tests {
             models: models.clone(),
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
+            limits: Vec::new(),
         }));
         let screen = drawn(&panel);
         assert!(screen.contains("ZDR  ‹ low ›"), "{screen}");
@@ -637,6 +680,7 @@ mod tests {
             models,
             current: None,
             empty: Vec::new(),
+            limits: Vec::new(),
         }));
         let screen = drawn(&panel);
         assert!(screen.contains("No matching models."), "{screen}");
@@ -712,6 +756,7 @@ mod tests {
             ],
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
+            limits: Vec::new(),
         }));
         assert!(drawn(&panel).contains("‹ high ›"), "{}", drawn(&panel));
         assert!(matches!(
@@ -734,6 +779,7 @@ mod tests {
             models: vec![item("flash", &["low"], Some("low"), Some("low"))],
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
+            limits: Vec::new(),
         }));
         assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
         assert!(matches!(
@@ -764,6 +810,7 @@ mod tests {
             ],
             current: Some(("dim".into(), "flash".into())),
             empty: Vec::new(),
+            limits: Vec::new(),
         }));
         assert!(matches!(
             panel.handle_key(key_of(KeyCode::Enter)),
@@ -772,5 +819,79 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Every provider with models whose limits no source declares keeps one
+    /// muted row after the model rows: it counts them and names the command
+    /// that declares both limits, in the singular too.
+    #[test]
+    fn a_provider_whose_models_need_a_window_keeps_one_counted_row() {
+        let mut panel = panel();
+        panel.set_models(Ok(ModelList {
+            models: vec![
+                item("flash", &[], None, None),
+                item("plain", &[], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: vec![NeedsLimitsProvider {
+                provider_id: "dim".into(),
+                provider_name: "Dim OAuth".into(),
+                count: 2,
+            }],
+        }));
+        let screen = drawn(&panel);
+        assert!(
+            screen.contains("Dim OAuth: 2 models need a window"),
+            "{screen}"
+        );
+        assert!(screen.contains("dimcode models dim"), "{screen}");
+        let models = screen.find("flash").unwrap();
+        let row = screen.find("2 models need a window").unwrap();
+        assert!(models < row, "{screen}");
+
+        panel.set_models(Ok(ModelList {
+            models: vec![item("flash", &[], None, None)],
+            current: None,
+            empty: Vec::new(),
+            limits: vec![NeedsLimitsProvider {
+                provider_id: "dim".into(),
+                provider_name: "Dim OAuth".into(),
+                count: 1,
+            }],
+        }));
+        assert!(
+            drawn(&panel).contains("Dim OAuth: 1 model needs a window"),
+            "{}",
+            drawn(&panel)
+        );
+    }
+
+    /// When the provider has nothing selectable, the limits row replaces
+    /// its empty-provider row instead of joining it.
+    #[test]
+    fn a_limits_row_replaces_the_providers_empty_row() {
+        let mut panel = panel();
+        panel.set_models(Ok(ModelList {
+            models: Vec::new(),
+            current: None,
+            empty: vec![EmptyProvider {
+                provider_id: "dim".into(),
+                provider_name: "Dim OAuth".into(),
+                reason: EmptyReason::Unavailable { count: 3 },
+            }],
+            limits: vec![NeedsLimitsProvider {
+                provider_id: "dim".into(),
+                provider_name: "Dim OAuth".into(),
+                count: 3,
+            }],
+        }));
+        let screen = drawn(&panel);
+        assert!(
+            screen.contains("Dim OAuth: 3 models need a window"),
+            "{screen}"
+        );
+        assert!(screen.contains("dimcode models dim"), "{screen}");
+        assert!(!screen.contains("models unavailable"), "{screen}");
     }
 }

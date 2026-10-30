@@ -644,11 +644,7 @@ impl Daemon {
     }
     async fn client(&self) -> Client {
         let mut client = self.connect().await;
-        let caps = dim_agent_types::ModelCapabilities {
-            context_window: 32000,
-            max_output_tokens: 2048,
-            ..Default::default()
-        };
+        let caps = dim_agent_types::CatalogCapabilities::with_limits(32000, 2048);
         client.ok("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000001","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true})).await;
         client
             .ok(

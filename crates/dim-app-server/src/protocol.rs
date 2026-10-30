@@ -186,8 +186,12 @@ pub const UI_HOST_METHODS: [&str; 6] = [
 
 /// Management reads served to web entry connections besides the Session
 /// methods; their replies carry no credentials.
-pub const WEB_READABLE_METHODS: [&str; 3] =
-    ["provider.list", "provider.catalog", "provider.selection"];
+pub const WEB_READABLE_METHODS: [&str; 4] = [
+    "provider.list",
+    "provider.catalog",
+    "provider.selection",
+    "account.providers",
+];
 
 pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.permission.get",

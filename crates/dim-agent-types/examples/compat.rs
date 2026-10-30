@@ -272,7 +272,7 @@ fn request_extension_event() -> AgentEvent {
             provider_id: request.provider_id.clone(),
             model_id: request.model_id.clone(),
         },
-        capabilities: ModelCapabilities::default(),
+        capabilities: ModelCapabilities::with_limits(128_000, 16_384),
         reasoning: Some(ModelReasoning {
             supported: true,
             effort_options: Some(vec!["low".into(), "high".into()]),
