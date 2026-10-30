@@ -899,6 +899,145 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A Scheduler enabled while a Session is open: its Session part registers
+/// the `dim-scheduler` entry mid-Session, on the adopted path, and the
+/// request that consumes the report carries it (Prompt §6.3, model-facing
+/// prompts §6.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_installed_mid_session_carries_its_entry() {
+    use dim_agent_capabilities::{
+        model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
+    };
+    let home = std::env::temp_dir().join(format!(
+        "ds-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let native = home.join("rust");
+    std::fs::create_dir_all(&native).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_local_execution(
+        &mut builder,
+        ModelProviderPlugin::new,
+        WorkspaceToolsConfig {
+            output_root: native.join("outputs"),
+        },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
+    );
+    dim_app_server::permission_rules::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    let mut parts = session_typescript::fixture();
+    parts.rows.clear();
+    let mut config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(native.clone()),
+        unix_path: Some(native.join("daemon.sock")),
+        session_typescript: Some(parts),
+        ..Default::default()
+    };
+    config.session_defaults.tools = Some(["echo", "schedule"].map(String::from).to_vec());
+    config.session_defaults.permission_policy = dim_agent_types::PermissionPolicy {
+        preset: dim_agent_types::PermissionPreset::FullAccess,
+        ..Default::default()
+    };
+    let server = serve(builder, config).await.unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    // The Session opens without the Scheduler and adopts a System without
+    // its entry.
+    let created = client.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&created);
+    let starter = agent
+        .get_session(created["result"]["sessionId"].as_str().unwrap())
+        .unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":starter.id(),"branchId":"main","text":"start"}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let system = super::reload::last_system(&starter, "main").await;
+    assert!(!system.contains(SCHEDULER_ENTRY), "{system}");
+    let package = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/plugins/scheduler")
+        .canonicalize()
+        .unwrap();
+    let installed = client
+        .rpc("plugin.install", json!({"source":{"path":package}}))
+        .await;
+    assert_ok(&installed);
+    assert_eq!(installed["result"]["status"], "running", "{installed}");
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let saved = tool(
+        &mut client,
+        &starter,
+        json!({"action":"create","job":{"name":"mid-session","cwd":home,
+            "prompt":"Mid-session entry","schedule":{"at":"2040-01-01T00:00:00Z"}}}),
+    )
+    .await;
+    assert_ne!(saved.is_error, Some(true), "{saved:?}");
+    let job = saved.structured_content.unwrap()["job"]["id"].clone();
+    let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+    assert_ok(&accepted);
+    let run = settled(&mut client, &job, &accepted["result"]["run_id"]).await;
+    assert_eq!(run["state"], "completed", "{run}");
+    let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = starter.local("main", ..).await.unwrap();
+            let report = history.iter().find(|event| {
+                matches!(&event.kind,
+                    EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(&submission))
+            });
+            if let Some(report) = report
+                && history.iter().any(|event| {
+                    matches!(&event.kind,
+                        EventKind::InputApplied(data) if data.input_id == report.id)
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the report is adopted in the Session opened before the enable");
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let system = super::reload::last_system(&starter, "main").await;
+    assert!(system.contains(SCHEDULER_ENTRY), "{system}");
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_scheduler_job_edits_cas_and_local_source_writes_preserve_accepted_snapshots() {
