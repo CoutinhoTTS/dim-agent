@@ -527,10 +527,7 @@ fn html_fragment_to_markdown(html: &str, base: &Url) -> String {
                 continue;
             }
         }
-        let next_tag = html[i + 1..]
-            .find('<')
-            .map(|rel| i + 1 + rel)
-            .unwrap_or(len);
+        let next_tag = html[i..].find('<').map(|rel| i + rel).unwrap_or(len);
         let text_slice = &html[i..next_tag];
         let decoded = html_escape::decode_html_entities(text_slice);
         if in_pre {

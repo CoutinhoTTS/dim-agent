@@ -256,7 +256,9 @@ async fn web_settings_permission_cancellation_and_restore() {
                             socket.write_all(&response).await.unwrap();
                             return;
                         }
-                        let (media, body) = if request.starts_with("GET /search?") {
+                        let (media, body) = if request.starts_with("GET /nonascii ") {
+                            ("text/html", "<p>§ 中文 ⎯</p><p>tail</p>")
+                        } else if request.starts_with("GET /search?") {
                             assert!(request.to_lowercase().contains("x-subscription-token: fixture-web-key\r\n"));
                             ("application/json", r#"{"type":"search","web":{"results":[{"title":"fixture","url":"https://example.com/","description":"fixture-web-key snippet"}]}}"#)
                         } else {
@@ -514,6 +516,18 @@ async fn web_settings_permission_cancellation_and_restore() {
             text(&truncated).contains("connect_failed"),
             "a gzip stream without its trailer is not a complete page: {truncated:?}"
         );
+        submit(
+            &mut client,
+            &id,
+            "web_fetch",
+            json!({"url":format!("{base}/nonascii")}),
+        )
+        .await;
+        idle(&mut client, &id).await;
+        let page = result(&session).await;
+        assert_eq!(page.is_error, None, "{page:?}");
+        assert!(text(&page).contains("§"), "{page:?}");
+        assert!(text(&page).contains("中文"), "{page:?}");
         for encoding in ["zlib", "raw"] {
             for ending in ["complete", "truncated", "limited"] {
                 submit(
