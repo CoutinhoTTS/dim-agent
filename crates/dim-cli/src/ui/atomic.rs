@@ -1,6 +1,8 @@
 //! Replacing a file whole, under a cross-process lock.
 
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -19,8 +21,6 @@ pub fn update(
     mode: Option<u32>,
     update: impl FnOnce(Option<&[u8]>) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<()> {
-    #[cfg(not(unix))]
-    let _ = mode;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -67,7 +67,7 @@ fn write_temp(temp: &Path, path: &Path, mode: Option<u32>, bytes: &[u8]) -> io::
         }
     }
     #[cfg(not(unix))]
-    let _ = path;
+    let _ = (path, mode);
     file.write_all(bytes)?;
     file.sync_all()
 }
