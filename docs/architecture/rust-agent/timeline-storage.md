@@ -113,7 +113,7 @@
 | `state` | 投影在 `resume` 之前的状态：`compacted_through` 游标、prompt 条目与 revision、已投递的上下文基线、已提交但未采用的输入、最新 `context/configured`、未闭合的输出与工具 |
 
 - 写入：ContextPolicy 在 completed 事实被采用后构建快照，`Timeline::save_snapshot` 等锚点发布后才写缓存；构建或保存失败只记录告警，不回滚事实、不重做模型工作。
-- 读取：`context_with_checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标与 `resume` 位于固定祖先链和 source through 之内；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。`history::read_context` 另在渲染失败时回退完整重放；读取必需事实的错误不被吞掉。
+- 读取：`context_with_checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标与 `resume` 位于固定祖先链和 source through 之内；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。默认解释器有两个读取入口：`HistoryRenderer::rendered_context` 返回上下文与其渲染，校验检查点的那次渲染就是调用方使用的渲染，没有检查点时也在这里渲染一次；`HistoryRenderer::context` 只返回上下文，有检查点时渲染一次用于校验并丢弃结果，没有检查点时不渲染。两者的检查点渲染失败都回退完整重放（`rendered_context` 渲染该重放，`context` 不渲染）；读取必需事实的错误不被吞掉，`history::read_context` 与 ContextPolicy 的预算校验走 `context`。
 - 投影从 `state` 开始重放 `resume` 起的事件，并丢弃游标及其之前的条目。编码与摘要规则见[存储格式](../../design/appserver/native-storage-format.md#可丢弃恢复快照)。
 
 ### 使用方
@@ -121,8 +121,9 @@
 | 使用方 | 读取 |
 | --- | --- |
 | Dispatcher | 热窗口；事件分发完即移出窗口 |
-| Loop 构建 `context/prepare` | `HistoryRenderer::context`（带快照加速）：配置、prompt revision 与历史投影 |
-| ContextPreparation / ContextPolicy | `HistoryRenderer::context(through)` 与 `local(through+1..)`；后者包含同一准备重试时已提交的压缩与预算事件；ContextPolicy 在压缩完成后写恢复快照 |
+| Loop 构建 `context/prepare` | `HistoryRenderer::rendered_context`（带快照加速）：配置、prompt revision 与历史投影，以及校验检查点的那次渲染 |
+| ContextPreparation | `HistoryRenderer::rendered_context(through)`：配置、prompt revision 与历史投影 |
+| ContextPolicy | `HistoryRenderer::context(committed())` 做预算校验，并读 `local(through+1..)`（同一准备重试时已提交的压缩与预算事件）；在压缩完成后写恢复快照 |
 | ModelProvider | 不读取；执行事件中的请求 |
 | Prompt 与配置发布 | `history::read_context` |
 | 能力重载重建 | `local(..=S)` |
