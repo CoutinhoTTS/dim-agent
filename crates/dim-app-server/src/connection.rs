@@ -773,6 +773,13 @@ impl Connection {
                     .await
                 {
                     Ok(Some(records)) => records,
+                    Err(AgentError::Cancelled(_)) => {
+                        return Some(Err(RpcError::app(
+                            -32000,
+                            "cancelled",
+                            "Session listing cancelled",
+                        )));
+                    }
                     Err(error) => return Some(Err(RpcError::from(error))),
                     Ok(None) => match rpc
                         .index
