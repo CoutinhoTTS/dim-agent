@@ -5,14 +5,17 @@
 //!
 //! ```text
 //! cargo run --locked -p xtask -- scenario-eval --scenarios DIR --text ID
-//!     --candidate FILE --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N
-//!     --home DIR --out DIR [--model-config FILE]
+//!     --candidate FILE [--text ID --candidate FILE]... --model PROVIDER/MODEL
+//!     --judge PROVIDER/MODEL --runs N --home DIR --out DIR
+//!     [--model-config FILE]
 //! ```
 //!
 //! Both arms run the shipped assembly: `current` with the product's own texts
-//! and `candidate` with the candidate file in place of the text `--text`
-//! names. Each arm runs every scenario `--runs` times, and one fixed judge
-//! reads a view of each run's exported Timeline.
+//! and `candidate` with each candidate file in place of the text its `--text`
+//! id names. Every `--text ID --candidate FILE` pair replaces one text, a
+//! text named twice is an error, and the report gives each candidate text's
+//! own token cost. Each arm runs every scenario `--runs` times, and one fixed
+//! judge reads a view of each run's exported Timeline.
 //!
 //! The report applies the rule of model-prompts §8.1. One comparison is the
 //! candidate arm's loss against the current arm on one rate: a regression
@@ -276,7 +279,7 @@ async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Res
             return Err("set DIM_TEST_JS_RUNTIME: the default plugins import it".into());
         }
     }
-    let overrides = overrides(&options.text, options.candidate.clone())?;
+    let overrides = overrides(&options.texts)?;
     let scenarios = read_scenarios(&options.scenarios)?;
     let home = isolated_home(&options.home)?;
     if let Some(path) = &options.model_config {
@@ -285,19 +288,7 @@ async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Res
     }
     let cancel = CancellationToken::new();
     let mut records = Vec::new();
-    let mut instrument = Instrument {
-        text: options.text.clone(),
-        model: options.model.clone(),
-        judge: options.judge.clone(),
-        runs: options.runs,
-        tokens: text_tokens(&options.model, &options.candidate),
-        model_configuration: None,
-        judge_configuration: None,
-        judge_window: None,
-        judge_temperature_dropped: 0,
-        judge_asked_runs: 0,
-        judge_reasks: 0,
-    };
+    let mut instrument = Instrument::new(options);
     for (arm, overrides) in [("current", Overrides::default()), ("candidate", overrides)] {
         for scenario in &scenarios {
             for run in 0..options.runs {
@@ -336,8 +327,8 @@ async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Res
 
 struct Options {
     scenarios: PathBuf,
-    text: String,
-    candidate: Arc<str>,
+    /// The `--text ID --candidate FILE` pairs, in the order given.
+    texts: Vec<(String, Arc<str>)>,
     model: ModelId,
     judge: ModelId,
     runs: usize,
@@ -360,25 +351,40 @@ impl Options {
     /// absolute, as `session.create` requires of the cwd.
     fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
-                     --text ID --candidate FILE --model PROVIDER/MODEL \
-                     --judge PROVIDER/MODEL --runs N --home DIR --out DIR \
-                     [--model-config FILE] [--defaults FILE]; a run whose \
-                     view does not fit the judge's own declared window is \
-                     unjudged, so a model configuration narrowed for the \
-                     scenarios declares the judge under its own provider \
+                     --text ID --candidate FILE [--text ID --candidate FILE]... \
+                     --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N \
+                     --home DIR --out DIR [--model-config FILE] \
+                     [--defaults FILE]; a text named twice is an error, and a \
+                     run whose view does not fit the judge's own declared \
+                     window is unjudged, so a model configuration narrowed for \
+                     the scenarios declares the judge under its own provider \
                      entry (see the module doc)";
         // Both arms serve the product's default plugins; `--defaults`
         // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut home, mut out) = (None, None, None);
-        let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
+        let (mut text, mut model, mut judge) = (None, None, None);
         let (mut runs, mut model_config, mut defaults) = (None, None, None);
+        let mut texts: Vec<(String, Arc<str>)> = Vec::new();
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
                 "--scenarios" => scenarios = Some(PathBuf::from(value)),
-                "--text" => text = Some(value),
-                "--candidate" => candidate = Some(candidate_prompt(Path::new(&value))?),
+                "--text" => {
+                    if let Some(text) = &text {
+                        return Err(format!("--text {text} has no --candidate").into());
+                    }
+                    if texts.iter().any(|(given, _)| *given == value) {
+                        return Err(format!("--text {value} is named twice").into());
+                    }
+                    text = Some(value);
+                }
+                "--candidate" => {
+                    let Some(id) = text.take() else {
+                        return Err("--candidate has no --text before it".into());
+                    };
+                    texts.push((id, candidate_prompt(Path::new(&value))?));
+                }
                 "--model" => model = Some(target(&value)?),
                 "--judge" => judge = Some(target(&value)?),
                 "--runs" => runs = Some(value.parse::<usize>()?),
@@ -389,13 +395,18 @@ impl Options {
                 _ => return Err(usage.into()),
             }
         }
+        if let Some(text) = &text {
+            return Err(format!("--text {text} has no --candidate").into());
+        }
+        if texts.is_empty() {
+            return Err(usage.into());
+        }
         let defaults = Some(defaults.unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/default-plugins.json")
         }));
         Ok(Self {
             scenarios: scenarios.ok_or(usage)?,
-            text: text.ok_or(usage)?,
-            candidate: candidate.ok_or(usage)?,
+            texts,
             model: model.ok_or(usage)?,
             judge: judge.ok_or(usage)?,
             runs: runs.filter(|runs| *runs > 0).ok_or(usage)?,
@@ -443,39 +454,58 @@ fn target(value: &str) -> Result<ModelId> {
     })
 }
 
-/// The overrides that put `candidate` in place of the text `text` names in
+/// The overrides that put every candidate in place of the text its id names in
 /// [`TEXTS`]; an unknown id fails before any run and lists the known ids.
-fn overrides(text: &str, candidate: Arc<str>) -> Result<Overrides> {
-    overrides_in(TEXTS, text, candidate)
+fn overrides(texts: &[(String, Arc<str>)]) -> Result<Overrides> {
+    overrides_in(TEXTS, texts)
 }
 
 /// [`overrides`] over `table`: a test reaches a member no shipped text
 /// exposes yet with its own entry, through the same injection.
-fn overrides_in(
-    table: &[(&str, TextMember)],
-    text: &str,
-    candidate: Arc<str>,
-) -> Result<Overrides> {
-    let Some((_, member)) = table.iter().find(|(id, _)| *id == text) else {
-        let known: Vec<_> = table.iter().map(|(id, _)| *id).collect();
-        return Err(format!(
-            "--text {text}: unknown text id; known ids: {}",
-            known.join(", ")
-        )
-        .into());
-    };
+fn overrides_in(table: &[(&str, TextMember)], texts: &[(String, Arc<str>)]) -> Result<Overrides> {
     let mut overrides = Overrides::default();
-    match member {
-        TextMember::Rust(apply) => apply(&mut overrides, candidate),
-        TextMember::Plugin { plugin, member } => {
-            let mut value = Value::String(candidate.to_string());
-            for key in member.split('.').rev() {
-                value = Value::Object([(key.to_owned(), value)].into_iter().collect());
+    for (text, candidate) in texts {
+        let Some((_, member)) = table.iter().find(|(id, _)| id == text) else {
+            let known: Vec<_> = table.iter().map(|(id, _)| *id).collect();
+            return Err(format!(
+                "--text {text}: unknown text id; known ids: {}",
+                known.join(", ")
+            )
+            .into());
+        };
+        match member {
+            TextMember::Rust(apply) => apply(&mut overrides, candidate.clone()),
+            TextMember::Plugin { plugin, member } => {
+                let value = Value::String(candidate.to_string());
+                set_member(&mut overrides.plugin_configs, plugin, member, value);
             }
-            overrides.plugin_configs.insert((*plugin).to_owned(), value);
         }
     }
     Ok(overrides)
+}
+
+/// Puts `value` at the dotted `member` of a plugin's factory configuration,
+/// keeping the members an earlier pair set: two texts of one plugin are two
+/// members of one configuration, not two configurations.
+fn set_member(configs: &mut BTreeMap<String, Value>, plugin: &str, member: &str, value: Value) {
+    let mut path: Vec<&str> = member.split('.').collect();
+    let leaf = path.pop().expect("a member has a path");
+    let object = || Value::Object(serde_json::Map::new());
+    let mut target = configs.entry(plugin.to_owned()).or_insert_with(object);
+    for key in path {
+        if !target.is_object() {
+            *target = object();
+        }
+        let map = target.as_object_mut().expect("an object was put in place");
+        target = map.entry(key.to_owned()).or_insert_with(object);
+    }
+    if !target.is_object() {
+        *target = object();
+    }
+    target
+        .as_object_mut()
+        .expect("an object was put in place")
+        .insert(leaf.to_owned(), value);
 }
 
 /// `--home` must be an isolated product home; it must never be the product
@@ -1890,19 +1920,20 @@ fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -
     comparisons
 }
 
-/// The instrument of an evaluation: the text under test, the model and the
-/// judge with the configuration they carry, the runs and the candidate text's
-/// cost (model-prompts §8.1). The configurations are read from the first run,
-/// which resolves them.
+/// The instrument of an evaluation: the texts under test with each
+/// candidate's own token cost, the model and the judge with the configuration
+/// they carry, and the runs (model-prompts §8.1). A run resolves the
+/// configurations and the judge's window, so every run measures its own copy;
+/// the report reads the first.
 struct Instrument {
-    text: String,
+    texts: Vec<String>,
     model: ModelId,
     judge: ModelId,
     runs: usize,
-    tokens: f64,
+    tokens: Vec<(String, f64)>,
     model_configuration: Option<Configuration>,
     judge_configuration: Option<Configuration>,
-    /// The judge's declared limits, read from the first run's selection.
+    /// The judge's declared limits, read from a run's selection.
     judge_window: Option<JudgeWindow>,
     judge_temperature_dropped: usize,
     /// Runs the judge was asked about: every outcome but `not_asked` and a
@@ -1910,6 +1941,30 @@ struct Instrument {
     judge_asked_runs: usize,
     /// How many re-asks the judge was asked for over every run.
     judge_reasks: usize,
+}
+impl Instrument {
+    /// The instrument before any run: the texts under test with each
+    /// candidate's own token cost, the model and the judge. A run adds the
+    /// configurations and the window it resolved.
+    fn new(options: &Options) -> Self {
+        Self {
+            texts: options.texts.iter().map(|(text, _)| text.clone()).collect(),
+            model: options.model.clone(),
+            judge: options.judge.clone(),
+            runs: options.runs,
+            tokens: options
+                .texts
+                .iter()
+                .map(|(text, candidate)| (text.clone(), text_tokens(&options.model, candidate)))
+                .collect(),
+            model_configuration: None,
+            judge_configuration: None,
+            judge_window: None,
+            judge_temperature_dropped: 0,
+            judge_asked_runs: 0,
+            judge_reasks: 0,
+        }
+    }
 }
 
 /// The reasoning effort and service tier a request carries (model-prompts
@@ -1958,9 +2013,19 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             window.window, window.max_output
         )
     });
+    let texts: Vec<String> = instrument
+        .texts
+        .iter()
+        .map(|text| format!("`{text}`"))
+        .collect();
+    let tokens: Vec<String> = instrument
+        .tokens
+        .iter()
+        .map(|(text, tokens)| format!("`{text}`: {tokens:.0}"))
+        .collect();
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-P Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} runs per arm and scenario |\n",
-        instrument.text,
+        "| | |\n| --- | --- |\n| text | {} |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-P Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} runs per arm and scenario |\n",
+        texts.join(", "),
         instrument.model.provider_id,
         instrument.model.model_id,
         carried(&instrument.model_configuration),
@@ -1968,7 +2033,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         instrument.judge.model_id,
         carried(&instrument.judge_configuration),
         instrument.runs,
-        instrument.tokens,
+        tokens.join("; "),
         delta = rule::DELTA,
         alpha = rule::ALPHA,
         floor = rule::FLOOR,
@@ -2212,11 +2277,11 @@ mod tests {
     /// One evaluation's instrument, reading `judge`'s verdicts.
     fn instrument(judge: ModelId) -> Instrument {
         Instrument {
-            text: "context-compaction/summary".into(),
+            texts: vec!["context-compaction/summary".into()],
             model: model(),
             judge,
             runs: 1,
-            tokens: 1.,
+            tokens: vec![("context-compaction/summary".into(), 1.)],
             model_configuration: None,
             judge_configuration: None,
             judge_window: None,
@@ -2226,10 +2291,18 @@ mod tests {
         }
     }
 
+    /// The `--text`/`--candidate` pairs a test hands the runner.
+    fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, Arc<str>)> {
+        pairs
+            .iter()
+            .map(|(text, candidate)| ((*text).to_owned(), Arc::from(*candidate)))
+            .collect()
+    }
+
     /// An unknown `--text` id fails before any run and lists the known ids.
     #[test]
     fn an_unknown_text_id_fails_before_any_run() {
-        let error = overrides("no-such-text", Arc::from("candidate"))
+        let error = overrides(&pairs(&[("no-such-text", "candidate")]))
             .unwrap_err()
             .to_string();
         assert!(error.contains("no-such-text"), "{error}");
@@ -2239,29 +2312,86 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("timeline-tree/roster-closing"), "{error}");
-        let known = overrides("context-compaction/summary", Arc::from("candidate")).unwrap();
+        let known = overrides(&pairs(&[("context-compaction/summary", "candidate")])).unwrap();
         assert_eq!(known.summary_prompt.as_deref(), Some("candidate"));
-        let branch = overrides("timeline-tree/branch-description", Arc::from("candidate")).unwrap();
+        let branch =
+            overrides(&pairs(&[("timeline-tree/branch-description", "candidate")])).unwrap();
         assert_eq!(branch.branch_description.as_deref(), Some("candidate"));
-        let roster = overrides("timeline-tree/roster-closing", Arc::from("candidate")).unwrap();
+        let roster = overrides(&pairs(&[("timeline-tree/roster-closing", "candidate")])).unwrap();
         assert_eq!(roster.roster_closing.as_deref(), Some("candidate"));
     }
 
     /// Goal's two texts are its manifest `config` members, patched into the
-    /// plugin's row by name (Goal A.5.1, model-prompts §8.1).
+    /// plugin's row by name; two pairs of one plugin are two members of one
+    /// configuration, not two configurations (Goal A.5.1, model-prompts §8.1).
     #[test]
     fn the_goal_texts_are_manifest_config_members() {
         for (id, member) in [
             ("goal/objective", "objective"),
             ("goal/continuation", "continuation"),
         ] {
-            let overrides = overrides(id, Arc::from("candidate")).unwrap();
+            let overrides = overrides(&pairs(&[(id, "candidate")])).unwrap();
             assert_eq!(
                 overrides.plugin_configs["goal"]["texts"][member],
                 json!("candidate"),
                 "{id}"
             );
         }
+        let both = overrides(&pairs(&[
+            ("goal/objective", "first"),
+            ("goal/continuation", "second"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            both.plugin_configs["goal"]["texts"]["objective"],
+            json!("first")
+        );
+        assert_eq!(
+            both.plugin_configs["goal"]["texts"]["continuation"],
+            json!("second")
+        );
+    }
+
+    /// `--text` repeats once per pair, and a text named twice is refused
+    /// before any run (model-prompts §8.1).
+    #[test]
+    fn a_text_named_twice_is_refused() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-parse-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("candidate.md");
+        std::fs::write(&candidate, "candidate").unwrap();
+        let parsed = Options::parse_from(
+            [
+                "--scenarios",
+                "scenarios",
+                "--text",
+                "goal/objective",
+                "--candidate",
+                candidate.to_str().unwrap(),
+                "--text",
+                "goal/objective",
+                "--candidate",
+                candidate.to_str().unwrap(),
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--runs",
+                "1",
+                "--home",
+                "home",
+                "--out",
+                directory.join("out").to_str().unwrap(),
+            ]
+            .map(str::to_owned),
+        );
+        let error = match parsed {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a text named twice is refused before any run"),
+        };
+        assert!(error.contains("goal/objective is named twice"), "{error}");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// One arm's runs with `passed` of them passing a single `must_show`
@@ -3500,8 +3630,7 @@ mod tests {
         fn options(&self, out: PathBuf) -> Options {
             Options {
                 scenarios: self.scenarios.clone(),
-                text: "context-compaction/summary".into(),
-                candidate: Arc::from(CANDIDATE),
+                texts: pairs(&[("context-compaction/summary", CANDIDATE)]),
                 model: self.target(),
                 judge: self.target(),
                 runs: 1,
@@ -3600,19 +3729,7 @@ mod tests {
     ) -> RunRecord {
         let mut scenarios = read_scenarios(&fixture.scenarios).unwrap();
         let scenario = scenarios.remove(0);
-        let mut instrument = Instrument {
-            text: options.text.clone(),
-            model: options.model.clone(),
-            judge: options.judge.clone(),
-            runs: options.runs,
-            tokens: 0.,
-            model_configuration: None,
-            judge_configuration: None,
-            judge_window: None,
-            judge_temperature_dropped: 0,
-            judge_asked_runs: 0,
-            judge_reasks: 0,
-        };
+        let mut instrument = Instrument::new(options);
         run_once(
             options,
             &fixture.home,
@@ -3780,7 +3897,14 @@ mod tests {
             window,
         )
         .await;
-        let options = fixture.judge_options(fixture.directory.join("out"));
+        // Two pairs, both in effect: the summary prompt and the branch
+        // tool's description.
+        const BRANCH: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        let mut options = fixture.judge_options(fixture.directory.join("out"));
+        options.texts = pairs(&[
+            ("context-compaction/summary", CANDIDATE),
+            ("timeline-tree/branch-description", BRANCH),
+        ]);
         let report = fixture.evaluate(&options).await.unwrap();
         assert!(
             report.contains("candidate is inconclusive: no comparison is a regression"),
@@ -3818,6 +3942,14 @@ mod tests {
                 .iter()
                 .all(|request| !request.contains("You summarize a coding session")),
             "the candidate arm never carries the product prompt"
+        );
+        assert!(
+            candidate.iter().any(|request| request.contains(BRANCH)),
+            "the second pair's text reaches the candidate arm"
+        );
+        assert!(
+            current.iter().all(|request| !request.contains(BRANCH)),
+            "the current arm never carries the second pair's text"
         );
         // The compaction changes this run's history: the request right after
         // the change carries the whole message list, not the messages added
@@ -4532,7 +4664,7 @@ mod tests {
         .unwrap();
         let options = fixture.plugin_options(fixture.directory.join("out"), defaults);
         let candidate =
-            overrides_in(FIXTURE_TEXTS, "fixture/prompt", Arc::from(CANDIDATE)).unwrap();
+            overrides_in(FIXTURE_TEXTS, &pairs(&[("fixture/prompt", CANDIDATE)])).unwrap();
         assert_eq!(
             candidate.plugin_configs["text-injector"]["texts"]["prompt"],
             json!(CANDIDATE),
