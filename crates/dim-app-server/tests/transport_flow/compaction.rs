@@ -746,7 +746,8 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
             .await;
         assert_ok(&usage);
         let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
-        assert_eq!(threshold, 2_160.0);
+        let budget = (capabilities.context_window - capabilities.max_output_tokens) as f64;
+        assert_eq!(threshold, budget - 0.2 * budget);
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(
             overhead > threshold,
@@ -754,18 +755,32 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
         );
 
         turn(&mut client, &sid, "first").await;
-        assert_eq!(provider.summaries(), 0);
         let events = history(&mut client, &sid).await;
+        let results: Vec<_> = events
+            .iter()
+            .filter(|event| is(event, "context/compaction"))
+            .collect();
+        // The threshold trigger records the first request's own estimate. It
+        // must leave room for the output the model asks for, or the turn would
+        // meet provider-output-budget recovery instead of this skip.
+        let request = results
+            .first()
+            .and_then(|event| event["data"]["diagnostics"]["estimatedInputTokens"].as_f64())
+            .expect("the threshold compaction records the request estimate");
+        assert!(
+            request + capabilities.max_output_tokens as f64
+                <= capabilities.context_window as f64,
+            "the request leaves no room for the requested output: {request} + {} > {}",
+            capabilities.max_output_tokens,
+            capabilities.context_window
+        );
+        assert_eq!(provider.summaries(), 0);
         let starts: Vec<_> = events
             .iter()
             .filter(|event| is(event, "context/compaction-start"))
             .collect();
         assert_eq!(starts.len(), 1, "{events:?}");
         assert_eq!(starts[0]["data"]["trigger"], "threshold");
-        let results: Vec<_> = events
-            .iter()
-            .filter(|event| is(event, "context/compaction"))
-            .collect();
         assert_eq!(results.len(), 1, "{events:?}");
         assert_eq!(results[0]["data"]["status"], "skipped");
         assert_eq!(results[0]["data"]["reason"], "nothing_to_compact");
