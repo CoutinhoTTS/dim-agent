@@ -257,6 +257,22 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 凭空造出窗口。只有一个转换把目录项变成 `ModelCapabilities`，任一上限缺失时它拒绝；这条转换
 就是采用路径，所以未声明的模型无法被采用。
 
+去掉默认值对工作区外的扩展 crate 是破坏性变更：用 `ModelCapabilities::default()` 或
+`..Default::default()` 构造的值不再编译。替代品是 `ModelCapabilities::with_limits`
+（`crates/dim-agent-types/src/model.rs`）；还需要设置其他字段的值保留结构体字面量，并以该
+构造函数为基础。
+
+线上形状：`provider.catalog` 的 `ProviderModel.capabilities` 与 `provider.management` 的
+`models[].model.capabilities` 把 `contextWindow`、`maxOutputTokens` 作为可选数字，缺键即
+未声明，`missingLimits` 指出缺的项。所有树内客户端都按可选取值：`dim-cli` 以
+`CatalogCapabilities` 解码目录项（`crates/dim-cli/src/configure.rs`、
+`crates/dim-cli/src/session_host.rs`），`dim-acp` 只按 ID、名称和不可用原因列出模型
+（`crates/dim-acp/src/config.rs`），Web 工作区读取同样三个字段（`web/src/rpc/read.ts`），
+`dim-client` 不解码该回复。`PROTOCOL_VERSION` 保持 3：客户端随守护进程一起发布，写入这种
+目录的构建就是读取它的构建，且 Web 入口拒绝为其他协议版本构建的资源
+（`crates/dim-app-server/src/web_entry.rs`、`web/src/rpc/client.ts`）。此变更之前构建、
+要求两个数字都在的协议 v3 客户端无法解码含未声明模型的目录；`hello.features` 不协商该形状。
+
 读取结果说明缺哪几项：`ProviderModel` 与 `ManagementModel` 带 `missingLimits`，若它是第一个
 适用原因，`unavailableReason` 为 `limits_undeclared`。缺任一项的模型永不可选：`select`、
 `configuration`（显式目标、默认解析和 Agents profile）、`apply_preferences`、
@@ -427,9 +443,12 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 
 旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected。明确映射连接、默认、
 用户覆盖/新增、禁用、偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。
-非空静态用量设置、retryConfig 与 capabilityDefaults 没有原生对应：条目仍导入，只是不带这些
-字段，并在 omitted 中报告。其他未映射字段（如未知 metadata 键或描述字段）拒绝该项并保留源，
-按以下冻结映射处理。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
+有两个导入器读取这些行，对没有原生对应的设置处理不同：App Server 的 `provider.import_legacy`
+（`crates/dim-app-server/src/provider/legacy.rs`）遇到非空的 `accountUsageSettings`、
+`retryConfig` 或 `capabilityDefaults` 时以 `Unsupported legacy field` 拒绝该项，空对象或空
+数组不携带配置、照常导入；`dim-migration` 导入该项，丢掉这些值并在 omitted 中逐个报告。
+其他未映射字段（如未知 metadata 键或描述字段）拒绝该项并保留源，按以下冻结映射处理。
+不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
 草稿、模板、用量回复、已解析凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、
 释放租约并结算已接受调用后移除服务。
 
@@ -445,8 +464,9 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
 | `provider_selections` | 沿既有目标校验和导入账本导入明确的 scoped 选择 |
 
-不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值被丢弃并在
-omitted 中报告。其他 metadata 键、未知描述字段拒绝该项，源文件字节不变。
+在 `dim-migration` 中，不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带
+配置，非空值被丢弃并在 omitted 中报告；`provider.import_legacy` 遇到带非空值的条目则拒绝。
+两者都拒绝其他 metadata 键与未知描述字段，源文件字节不变。
 
 ## 7. 验收与交付
 

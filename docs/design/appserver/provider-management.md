@@ -334,6 +334,30 @@ turns a catalog entry into `ModelCapabilities`, and it refuses while either limi
 is absent; that conversion is the adoption path, so an undeclared model cannot be
 adopted.
 
+Removing the default is a breaking change for an extension crate outside this
+workspace that built a value through `ModelCapabilities::default()` or
+`..Default::default()`: those no longer compile. The replacement is
+`ModelCapabilities::with_limits` (`crates/dim-agent-types/src/model.rs`); a value
+that also sets another field keeps the struct literal and takes that constructor
+as its base.
+
+On the wire, `ProviderModel.capabilities` in `provider.catalog` and
+`models[].model.capabilities` in `provider.management` carry `contextWindow` and
+`maxOutputTokens` as optional numbers: an absent key is the undeclared value, and
+`missingLimits` names it. Every in-tree client reads both as optional: `dim-cli`
+decodes catalog entries as `CatalogCapabilities`
+(`crates/dim-cli/src/configure.rs`, `crates/dim-cli/src/session_host.rs`),
+`dim-acp` lists models by ID, name and unavailable reason
+(`crates/dim-acp/src/config.rs`), the Web workspace reads the same three fields
+(`web/src/rpc/read.ts`), and `dim-client` carries the reply untyped.
+`PROTOCOL_VERSION` stays 3 because the clients ship with the daemon, so the build
+that writes such a catalog is the build that reads it, and the Web entry refuses
+assets built for another protocol version
+(`crates/dim-app-server/src/web_entry.rs`, `web/src/rpc/client.ts`). A protocol-v3
+client built before this change that requires both numbers cannot decode a
+catalog holding an undeclared model; no `hello.features` entry negotiates the
+shape.
+
 The reads report what is missing: `ProviderModel` and `ManagementModel` carry
 `missingLimits`, and `unavailableReason` is `limits_undeclared` when it is the
 first reason that applies. A model missing either limit is never selectable.
@@ -570,9 +594,13 @@ new core field, epoch or registry. Managed route/lease checks remain unchanged.
 Legacy TypeScript import stays explicit, read-only and per-entry:
 `imported`/`already_imported`/`rejected`. Map connections, defaults, user overrides,
 user models, disables, preferences and scoped selections explicitly. `activeModelId`
-is only a hint and cannot overwrite an existing scoped choice. Nonempty static
-usage settings, `retryConfig` and `capabilityDefaults` have no native counterpart:
-the entry still imports without them and reports them as omitted. Other unmapped
+is only a hint and cannot overwrite an existing scoped choice. Two importers read
+these rows, and they treat the settings with no native counterpart differently.
+The App Server's `provider.import_legacy` (`crates/dim-app-server/src/provider/legacy.rs`)
+rejects an entry whose nonempty `accountUsageSettings`, `retryConfig` or
+`capabilityDefaults` it meets with `Unsupported legacy field`; an empty object or
+array carries no configuration and imports. `dim-migration` imports such an entry,
+drops those values and reports each field as omitted. Other unmapped
 fields, such as unknown metadata keys or descriptor fields, reject the entry and
 preserve its source; use the frozen mapping below.
 Never overwrite an existing target, copy OAuth grants or resurrect deletion on
@@ -592,10 +620,11 @@ The frozen legacy schema uses `modelsSource` to distinguish model origins:
 | `activeModelId` | A per-Provider hint; no authority to create or overwrite a scoped selection |
 | `provider_selections` | Explicit scoped choices, subject to existing target and import-ledger checks |
 
-Null or empty objects/arrays in unsupported usage/retry/capability settings carry
-no configuration, and a nonempty value is dropped and reported as omitted. Other
-metadata keys and unknown descriptor fields reject the entry. Source bytes remain
-unchanged.
+In `dim-migration`, null or empty objects/arrays in unsupported usage, retry and
+capability settings carry no configuration, and a nonempty value is dropped and
+reported as omitted; `provider.import_legacy` rejects an entry that carries one.
+Other metadata keys and unknown descriptor fields reject the entry in both. Source
+bytes remain unchanged.
 
 ## 7. Acceptance and delivery
 

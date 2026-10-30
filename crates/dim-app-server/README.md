@@ -84,6 +84,16 @@ descriptors, available actions and saved preferences. Credentials, secret
 references, header values and proxy authentication are never returned.
 `provider.list`, `provider.catalog` and `provider.selection` retain their read shapes; `provider.list` additionally reports `remoteModelList` per provider, whether `provider.refresh` can list that provider's models; a catalog model gains `missingLimits`, naming the context window and maximum output no source declares, and omits those limits from its `capabilities`.
 
+An absent `contextWindow` or `maxOutputTokens` is the undeclared value, and
+`missingLimits` names it. Every in-tree client reads both as optional: the CLI
+decodes catalog entries as `CatalogCapabilities`, ACP lists models by ID, name and
+unavailable reason, and the Web workspace reads those and the disable list, so
+none fails on a model that declares no limit. `PROTOCOL_VERSION` stays 3 because
+the clients ship with the daemon and the build that writes such a catalog is the
+build that reads it; the Web entry refuses assets built for another protocol
+version rather than negotiating one. A protocol-v3 client built before this
+change that requires both numbers cannot decode such a catalog.
+
 `provider.create` takes a fresh canonical UUID; `provider.update` applies only the
 supplied fields with record CAS. `provider.probe` tests a complete new connection
 with that UUID or an existing connection patch, without writes. Disconnect clears
