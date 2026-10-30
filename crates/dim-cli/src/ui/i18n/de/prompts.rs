@@ -166,8 +166,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Edit" => "Bearbeiten",
         "Write" => "Schreiben",
         "Create" => "Erstellen",
-        "boundary: {sandbox}" => "Grenze: {sandbox}",
-        " (boundary: {sandbox})" => " (Grenze: {sandbox})",
         " (detached)" => " (im Hintergrund)",
         "Checked on background task" => "Hintergrundaufgabe geprüft",
         "Waiting…" => "Warte…",

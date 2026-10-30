@@ -3754,6 +3754,26 @@ struct SessionSummary {
     title: Option<String>,
 }
 
+fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
+    let revision = value
+        .get("revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "execution settings response has no revision".to_string())?
+        .to_owned();
+    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
+    Ok(ExecutionSnapshot {
+        revision,
+        sandbox: document
+            .get("sandbox")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        network: document
+            .get("network")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3777,24 +3797,4 @@ mod tests {
             "an unknown branch has no transcript"
         );
     }
-}
-
-fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
-    let revision = value
-        .get("revision")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "execution settings response has no revision".to_string())?
-        .to_owned();
-    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
-    Ok(ExecutionSnapshot {
-        revision,
-        sandbox: document
-            .get("sandbox")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        network: document
-            .get("network")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-    })
 }

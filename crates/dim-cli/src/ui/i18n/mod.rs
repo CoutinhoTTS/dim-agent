@@ -190,14 +190,11 @@ mod tests {
         }
     }
 
-    /// `/settings` names command isolation.
+    /// `/settings` names the execution row.
     #[test]
-    fn every_locale_translates_command_isolation() {
+    fn every_locale_translates_execution_settings() {
         for (code, lookup) in tables() {
-            assert!(
-                lookup("Command isolation").is_some(),
-                "{code} lacks Command isolation"
-            );
+            assert!(lookup("Execution").is_some(), "{code} lacks Execution");
         }
     }
 
@@ -232,22 +229,6 @@ mod tests {
                 "The image could not be read",
             ] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
-            }
-        }
-    }
-
-    /// The approval prompt and the transcript command row name the requested
-    /// boundary; a table that drops the placeholder would print the tier name
-    /// nowhere.
-    #[test]
-    fn every_locale_translates_the_sandbox_boundary_and_keeps_its_placeholder() {
-        for (code, lookup) in tables() {
-            for key in ["boundary: {sandbox}", " (boundary: {sandbox})"] {
-                let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
-                assert!(
-                    text.contains("{sandbox}"),
-                    "{code} drops the placeholder in {key:?}: {text:?}"
-                );
             }
         }
     }

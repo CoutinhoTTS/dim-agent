@@ -76,13 +76,14 @@ impl IsolationPanel {
                 "Sandbox",
                 if draft.sandbox { "on" } else { "off" },
             ));
+            let network = if draft.network { "on" } else { "off" };
             items.push(Item::new(
                 "network",
                 "Network",
                 if draft.sandbox {
-                    if draft.network { "on" } else { "off" }
+                    network.to_string()
                 } else {
-                    "ignored while the sandbox is off"
+                    format!("{network} (ignored while Sandbox is off)")
                 },
             ));
             items.push(Item::new("save", "Save", ""));

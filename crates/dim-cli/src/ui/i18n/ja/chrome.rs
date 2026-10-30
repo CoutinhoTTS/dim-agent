@@ -346,7 +346,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "マウス（全画面）",
         "Permissions" => "権限",
         "Tool approvals" => "ツール承認",
-        "Command isolation" => "コマンド分離",
+        "Execution" => "実行",
         "Models" => "モデル",
         "Model" => "モデル",
         "not set" => "未設定",

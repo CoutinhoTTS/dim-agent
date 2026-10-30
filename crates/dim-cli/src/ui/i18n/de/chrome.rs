@@ -370,7 +370,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Maus (Vollbild)",
         "Permissions" => "Berechtigungen",
         "Tool approvals" => "Tool-Freigaben",
-        "Command isolation" => "Befehlsisolation",
+        "Execution" => "Ausführung",
         "Models" => "Modelle",
         "Model" => "Modell",
         "not set" => "nicht gesetzt",
