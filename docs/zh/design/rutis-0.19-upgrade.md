@@ -126,18 +126,20 @@ Python 行都无法连接。
 §1 的所有固定版本放在一个提交里升级。握手会拒绝版本混搭，所以任何中间状态都构建不出能用的产品。
 `runtime/plugin-sdk.test.mjs` 会打包 `npm/` 并对作者指南做类型检查，因此作者文档里的类型和 SDK 版本一起变化。
 
-### M2. Timeline 的 `before` 链改用同步 `bail`
+### M2. Timeline 的 `before` 链：待定
 
-`Timeline::commit` 在追加守卫和提交锁之内运行，并在那里分配序号。所以这条链保持同步，不把提交路径改成
-异步的 `waterfall`：
+0.19 删掉了 `Ctx::waterfall_sync`，同步监听器也不能再调用链上的下一环。`Timeline::commit` 在追加守卫和提交锁之内
+运行 `before` 链，并在那里分配序号，所以这条链要保持同步。同步 waterfall 的方案正在请 rutis 提供，这项决策等它的答复。
 
-- 传出的 `BeforeCommit` 在一把锁里携带当前 draft。每个变形读取它；键匹配时调用自己的处理函数，把结果写回，
-  记录自己这一步，然后返回"无结果"，这样 `bail` 会依次调用每个监听器。
-- 变形用 `prepend` 注册，所以后注册的先执行。这与现在的顺序一致：先注册的中间件包住后注册的，后注册的先变形。
-- 某个变形失败会让 `bail` 失败。这时提交使用原始 draft，不记录任何步骤，与现在相同。
+无论答复是什么，下面几点都不变：
 
-私有名字 `dim/timeline/{instance}/before` 和 `Timeline::before` 保持原有契约
-（[0.16 U2](rutis-0.16-upgrade.md#u2-分支机制通道使用私有名字)）。
+- 私有名字 `dim/timeline/{instance}/before` 和 `Timeline::before` 保持原有契约
+  （[0.16 U2](rutis-0.16-upgrade.md#u2-分支机制通道使用私有名字)）。
+- 顺序不变：先注册的中间件包住后注册的，后注册的先变形。
+- 某个变形失败时，保留原始 draft，不记录任何步骤。
+
+目前没有任何产品代码注册 `before` 变形，只有测试在用。这项待定的决策不阻塞任何产品流程，但没有它，
+`dim-agent-runtime` 在 0.19 上无法编译，所以步骤 2（§5）要等它。
 
 ### M3. 服务目录共享所有未登记的名字
 
@@ -322,7 +324,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | --- | --- | --- |
 | 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供最小宿主，并把 41 个文件迁到它上面 | `cargo test --workspace --locked`；`xtask check` 和 `graph`，并对照 §6 中步骤 0 的图 diff；§6 中放置的检查 |
 | 1 | 固定版本和锁文件（M1）；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.0 |
-| 2 | 内核与服务目录：M2、M3 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 的检查 |
+| 2 | 内核与服务目录：M2（定下之后）、M3 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 的检查 |
 | 3 | 运行时：M4、M5、M9 | App Server 和 `tests/integration` 中由 Node、Python 驱动的流程测试 |
 | 4 | leaf：M7、M8 | `cargo test -p dimcode --test ui_leaf`；`transport_flow ui_host::` |
 | 5 | TypeScript 包与工具：M10、`xtask types` | `runtime/plugins/*` 的插件测试；`runtime/plugin-sdk.test.mjs`；`xtask check` |
@@ -398,6 +400,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | daemon 的服务变得可以从 leaf 访问 | M8：只用私有地址（Unix socket，或带一次性 token 的 loopback TCP）、隔离会话插件目录、核对 id；Tui §8 写明这一点，以及为什么 `isolate` 不适用 |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
+| 其余工作都已就绪时 M2 仍未定 | 步骤 2 等它；没有任何产品流程注册 `before` 变形 |
 | #645 先通过 Git 固定版本合入 | 它在 0.19 上无法编译（没有 `instance_rows`）；§3 让 #594 改走它的 Dim 侧方案 |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
@@ -408,7 +411,8 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 ## 9. 向机制所有者提出的需求
 
-无。每项决策都按 rutis 0.19 的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
+一项，且仍待定：为 Timeline 的 `before` 链提供同步 waterfall（M2），已经请 rutis 提供。其余决策都按 rutis 0.19
+的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
 这正好符合 loader 按宿主划分（M6）。
 
 ## 10. 规则检查
@@ -417,9 +421,9 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 | 规则 | 回答 |
 | --- | --- |
-| 原则 §4 规则 1–3、5–7、9 | 不变：命令、交接、`before` 契约、批次、上下文路径和事实都不变；M2 保留 `before` 的契约和顺序 |
+| 原则 §4 规则 1–3、5–7、9 | 不变：命令、交接、`before` 契约、批次、上下文路径和事实都不变；无论 M2 最终采用哪种形式，`before` 的契约和顺序都不变 |
 | §4 规则 4（状态归属） | 行仍归 PluginManager（M5）；运行时状态仍归 `RuntimeManager`，从 rutis 的句柄读取 |
-| §4 规则 8（基础设施默认不变） | 改动来自依赖升级，限定在 runtime crate、App Server 和 CLI 之内；不向 rutis 提需求 |
+| §4 规则 8（基础设施默认不变） | 改动来自依赖升级，限定在 runtime crate、App Server 和 CLI 之内；唯一向 rutis 提出的需求是 M2 的，仍待定（§9） |
 | §4 规则 11（受信插件，明确的边界） | M8 写明 leaf 链接暴露了什么，信任边界保持在本地用户；审批和权限都不变 |
 | AGENTS 规则 6（冻结的夹具） | 不动 `crates/dim-agent-types/tests/fixtures/` |
 | ADR 002 D1–D5 | 放置、接线、依赖和配置都不变；运行时仍是进程部件，leaf 仍属于 CLI 进程 |

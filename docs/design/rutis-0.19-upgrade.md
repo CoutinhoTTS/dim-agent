@@ -138,21 +138,23 @@ Bump every pin of §1 in one commit. The handshake refuses a mixed set, so no in
 a working product. `runtime/plugin-sdk.test.mjs` packs `npm/` and type-checks the authoring guide, so
 the authoring types and the SDK version move together.
 
-### M2. The Timeline's `before` chain runs on the synchronous `bail`
+### M2. The Timeline's `before` chain: open
 
-`Timeline::commit` runs under the append guard and the commit lock, and allocates sequences there. The
-chain stays synchronous rather than moving the commit path to the asynchronous `waterfall`:
+0.19 removes `Ctx::waterfall_sync`, and a synchronous listener can no longer call the rest of its
+chain. `Timeline::commit` runs the `before` chain under the append guard and the commit lock, where it
+allocates sequences, so the chain stays synchronous. A synchronous waterfall is being asked of rutis.
+This decision waits for its answer.
 
-- The offered `BeforeCommit` carries the current draft in a lock. Each transform reads it, applies its
-  handler when its keys match, writes the result back, records its step and returns no result, so
-  `bail` calls every listener.
-- Transforms register with `prepend`, so a later registration runs first. This keeps today's order:
-  middleware registered earlier wraps later ones, and later registrations transform first.
-- A failing transform fails the `bail`. The commit then uses the original draft and no steps, as it
-  does today.
+Whatever the answer, these hold:
 
-The private name `dim/timeline/{instance}/before` and `Timeline::before` keep their contracts
-([0.16 U2](rutis-0.16-upgrade.md#u2-branch-mechanism-channels-get-private-names)).
+- The private name `dim/timeline/{instance}/before` and `Timeline::before` keep their contracts
+  ([0.16 U2](rutis-0.16-upgrade.md#u2-branch-mechanism-channels-get-private-names)).
+- The order stays: middleware registered earlier wraps later ones, and later registrations transform
+  first.
+- A failing transform leaves the original draft and no steps.
+
+No product code registers a `before` transform today; only tests do. The open decision blocks no
+product flow, but `dim-agent-runtime` does not build on 0.19 without it, so step 2 (§5) waits for it.
 
 ### M3. The catalog shares every unregistered name
 
@@ -379,7 +381,7 @@ in one pull request. Each step is its own commit.
 | --- | --- | --- |
 | 0 (own pull request, on 0.17.1) | M6: one placement API, the minimal host, and the 41 files moved to it | `cargo test --workspace --locked`; `xtask check` and `graph` with the step 0 graph diff of §6; the placement checks of §6 |
 | 1 | Pins and lock files (M1); the authoring pin | `cargo metadata` resolves; the lock files name 0.19.0 |
-| 2 | Kernel and catalog: M2, M3 | The tests of the crates below `dim-app-server` and of `tests/integration` (`extensions.rs` follows in step 3); the Timeline `before` checks of §6 |
+| 2 | Kernel and catalog: M2 once decided, M3 | The tests of the crates below `dim-app-server` and of `tests/integration` (`extensions.rs` follows in step 3); the Timeline `before` checks of §6 |
 | 3 | Runtimes: M4, M5, M9 | Node- and Python-backed flow tests of the App Server and `tests/integration` |
 | 4 | Leaf: M7, M8 | `cargo test -p dimcode --test ui_leaf`; `transport_flow ui_host::` |
 | 5 | TypeScript packages and tooling: M10, `xtask types` | Plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs`; `xtask check` |
@@ -471,6 +473,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | The daemon's services become reachable from a leaf | M8: the private address only (a Unix socket, or loopback TCP with a one-time token), an isolated session catalog, id checks; Tui §8 states it, and why `isolate` does not fit |
 | A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each minimal host hold one |
 | Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 states its expected graph diff |
+| M2 is still open when the rest is ready | Step 2 waits for it; no product flow registers a `before` transform |
 | #645 lands on its Git pin first | It cannot build on 0.19 (no `instance_rows`); §3 routes #594 to its Dim-side proposal |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |
@@ -482,7 +485,8 @@ wire fixtures are untouched.
 
 ## 9. Requirements raised to mechanism owners
 
-None. Every decision uses rutis 0.19 as it is. One limit is accepted rather than raised (M8).
+One, and it is open: a synchronous waterfall for the Timeline's `before` chain (M2), asked of rutis.
+Every other decision uses rutis 0.19 as it is. One limit is accepted rather than raised (M8).
 `LoaderService`'s key cannot be isolated, which fits a loader being per host (M6).
 
 ## 10. Rule check
@@ -491,9 +495,9 @@ The upgrade adds no part, event or fact.
 
 | Rule | Answer |
 | --- | --- |
-| Principles §4 rules 1–3, 5–7, 9 | Unchanged: no command, handover, `before` contract, batch, context path or fact changes; M2 keeps the `before` contract and its order |
+| Principles §4 rules 1–3, 5–7, 9 | Unchanged: no command, handover, `before` contract, batch, context path or fact changes; whatever M2's form, the `before` contract and its order stay |
 | §4 rule 4 (state ownership) | Rows stay PluginManager's (M5); runtime state stays `RuntimeManager`'s, read from rutis's handle |
-| §4 rule 8 (infrastructure unchanged by default) | The changes come from the dependency upgrade and close inside the runtime crate, the App Server and the CLI; no requirement on rutis |
+| §4 rule 8 (infrastructure unchanged by default) | The changes come from the dependency upgrade and close inside the runtime crate, the App Server and the CLI; the one requirement on rutis is M2's, still open (§9) |
 | §4 rule 11 (trusted plugins, explicit boundaries) | M8 states what the leaf link exposes and keeps the boundary at the local user; no approval or permission changes |
 | AGENTS rule 6 (frozen fixtures) | `crates/dim-agent-types/tests/fixtures/` is not touched |
 | ADR 002 D1–D5 | No placement, wiring, dependency or configuration change; the runtimes stay process parts and the leaf stays the CLI process's |
