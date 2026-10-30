@@ -1063,16 +1063,17 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
 /// The #522 format step. Projection output is re-derived, so a stored limit
 /// that neither `capabilityOverrideFields` marks nor `metadata.raw` declares
 /// there was the old assumed default and the upgrade deletes it, whatever its
-/// value: that is the remote listing of a record with `remoteModels`, and the
-/// bundle-derived defaults a builtin record holds with `remoteModels == false`.
-/// A custom record's own models and its user models hold what a client
-/// supplied, which no format before this step marked; each field there is
-/// decided by `declare_supplied_limits`: a marked or raw-declared limit is a
-/// declaration, an unmarked limit equal to the assumed 128000/16384 may be
-/// the probe's
-/// fill and is deleted, and any other value was typed and gains the mark. The
-/// storage layer calls this inside its startup transaction; this module owns
-/// the record's field names.
+/// value: that is the remote listing of a record with `remoteModels`, a
+/// builtin record's bundle-derived `models`, and the managed record's
+/// `models[].entry`. A custom record's own models, its user models and its
+/// descriptor overrides hold what a client or the legacy importers supplied,
+/// which no format before this step marked; each field there is decided by
+/// `declare_supplied_limits`: a marked or raw-declared limit is a declaration,
+/// an unmarked limit equal to the assumed 128000/16384 may be the probe's fill
+/// and is deleted, and any other value was typed and gains the mark. A managed
+/// record's overrides are written only by `models.edit`, which marks every
+/// limit it edits, so they keep the strict rule. The storage layer calls this
+/// inside its startup transaction; this module owns the record's field names.
 pub(crate) fn rewrite_stored_limits(
     connection: &rusqlite::Connection,
 ) -> dim_agent_runtime::Result<()> {
@@ -1102,8 +1103,12 @@ pub(crate) fn rewrite_stored_limits(
                         declare_supplied_limits(model)
                     };
                 }
+                // A descriptor override holds what a client or the legacy
+                // importers supplied, and the importers copy the legacy row
+                // without a mark, so the override takes the same per-field
+                // rule as the user models.
                 for model in &mut record.model_config_overrides {
-                    changed |= drop_undeclared_limits(model);
+                    changed |= declare_supplied_limits(model);
                 }
                 for model in &mut record.user_models {
                     changed |= declare_supplied_limits(model);

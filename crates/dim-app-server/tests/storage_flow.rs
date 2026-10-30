@@ -5136,7 +5136,11 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
              "capabilities":caps(128_000,16_384),"metadata":{"raw":{}}},
             {"modelId":"override-marked","displayName":"Override","status":"active",
              "capabilities":caps(64_000,8_000),
-             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],"raw":{}}}
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],"raw":{}}},
+            // The importer copied this override from the legacy data, which
+            // stored the limits a user typed and wrote no mark.
+            {"modelId":"imported-override","displayName":"Imported","status":"active",
+             "capabilities":caps(200_000,32_000),"metadata":{"raw":{}}}
         ],
         "userModels":[
             {"modelId":"user-model","displayName":"User","status":"active",
@@ -5279,6 +5283,9 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
              "capabilities":kept(None,None),"metadata":{}},
             {"modelId":"override-marked","displayName":"Override","status":"active",
              "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}},
+            {"modelId":"imported-override","displayName":"Imported","status":"active",
+             "capabilities":kept(Some(200_000),Some(32_000)),
              "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
         ],
         "userModels":[
