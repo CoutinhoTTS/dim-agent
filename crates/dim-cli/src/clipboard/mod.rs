@@ -84,13 +84,17 @@ fn read_board(board: &objc2_app_kit::NSPasteboard) -> Result<Source> {
                 && image::guess_format(&bytes).ok() == Some(image::ImageFormat::Tiff)
             {
                 use image::ImageDecoder;
-                let decoder = image::ImageReader::with_format(
+                let mut reader = image::ImageReader::with_format(
                     std::io::Cursor::new(bytes),
                     image::ImageFormat::Tiff,
-                )
-                .into_decoder()?;
-                images::guard(decoder.dimensions())?;
-                images::from_pixels(image::DynamicImage::from_decoder(decoder)?)?
+                );
+                reader.limits(images::decode_limits());
+                let decoder = reader.into_decoder()?;
+                let dimensions = decoder.dimensions();
+                images::guard(dimensions)?;
+                let image = image::DynamicImage::from_decoder(decoder)
+                    .map_err(|error| images::decode_error(dimensions, error))?;
+                images::from_pixels(image)?
             } else {
                 images::from_bytes(bytes)?
             };

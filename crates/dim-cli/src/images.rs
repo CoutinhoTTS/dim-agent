@@ -162,6 +162,28 @@ pub fn guard((width, height): (u32, u32)) -> Result<()> {
     Ok(())
 }
 
+/// The allocation limit every platform decoder is given: [`MAX_DECODE_BYTES`],
+/// the bound the shared decoders use.
+pub fn decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(dim_agent_capabilities::images::MAX_DECODE_BYTES);
+    limits
+}
+
+/// A platform decoder's error, with an allocation refused for size reported
+/// as the pixel-guard refusal: at [`MAX_PIXELS`] in the largest decoded format
+/// the image is exactly what the guard is for, not a broken file.
+pub fn decode_error((width, height): (u32, u32), error: image::ImageError) -> crate::Error {
+    if matches!(
+        &error,
+        image::ImageError::Limits(limit)
+            if limit.kind() == image::error::LimitErrorKind::InsufficientMemory
+    ) {
+        return refusal(ImageRefusal::TooManyPixels(ImageSize { width, height }));
+    }
+    error.into()
+}
+
 /// Why an image was refused, as the CLI shows it.
 pub fn refusal(error: ImageRefusal) -> crate::Error {
     match error {
