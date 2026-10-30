@@ -110,7 +110,9 @@ Recognition comes before the extension refusal. The stat and directory checks
 run first, then `read` opens the file and reads its head: content that is an
 image takes the image path whatever the file is called, a PNG named
 `screenshot.bin` included, and only content that is not an image is refused by
-its extension, or by the text rules when it has none.
+its extension, or by the text rules when it has none. A binary-extension file
+is therefore opened before the refusal: a missing one reports `file_not_found`
+and an unreadable one `read_error`.
 
 One shared function, `images::scale_image`, makes the image acceptable to a
 model. It reads from a seekable source — the file, not its bytes — so the whole
@@ -123,7 +125,7 @@ pixels flattened onto white, and the long edge steps down until the encoding
 fits. An image within both limits with no orientation to apply is sent byte
 for byte. An animation is always re-encoded from its first frame, its EXIF
 orientation applied the same way, so the frame sent is upright as a still's
-pixels are. The line's pixel size is the source's size after its EXIF
+pixels are, its transparent pixels flattened onto white the same way. The line's pixel size is the source's size after its EXIF
 orientation, so it compares with the size sent. One guard keeps memory bounded:
 a header claiming more than 100 megapixels is refused from its dimensions
 before the pixels are decoded, and the refusal names the dimensions and asks
@@ -223,9 +225,14 @@ None (§4 rule 8). S7 uses the existing host and storage contracts.
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
-also drives `read` over images: a PNG and its line, a JPEG scaled within both
-limits, an EXIF-rotated photo made upright, a wide screenshot kept PNG, an
-animated GIF's first frame, the pixel guard before decoding, and the refusals.
+also drives `read` over images: a PNG and its line, an image recognized ahead of
+the binary-extension refusal, a JPEG scaled within both limits, an image
+re-encoded when its base64 exceeds the limit, the 3,750,000-byte exact fit sent
+byte for byte and one byte over it re-encoded, an EXIF-rotated photo and an
+animated WebP's first frame made upright, a wide screenshot kept PNG, an
+animated GIF's first frame, transparent pixels on white, a WebP EXIF chunk
+larger than its file refused, a missing file reported as `file_not_found`, the
+pixel guard before decoding, and the refusals.
 [read_image_flow.rs](../../../../crates/dim-app-server/tests/read_image_flow.rs)
 runs a model's `read` on a PNG: a vision model receives the image block, and a
 model without image input receives the placeholder.
