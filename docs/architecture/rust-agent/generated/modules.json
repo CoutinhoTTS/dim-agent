@@ -570,6 +570,7 @@
       "file": "crates/dim-agent-capabilities/src/model_provider.rs",
       "unexpandedMacros": [
         "matches",
+        "tracing::error",
         "tracing::info_span",
         "unreachable",
         "vec"
@@ -588,6 +589,7 @@
       "parent": "dim_agent_capabilities::model_provider",
       "file": "crates/dim-agent-capabilities/src/model_provider/recovery.rs",
       "unexpandedMacros": [
+        "matches",
         "tokio::select"
       ]
     },
@@ -4998,6 +5000,7 @@
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::ModelEnd",
         "path EventContent::PermissionChanged",
         "path EventContent::ToolCall",
         "path EventContent::ToolResult",
@@ -6963,6 +6966,7 @@
         "path CompactionDiagnosticsRecord",
         "path CompactionReason::Auto",
         "path CompactionReason::Manual",
+        "path CompactionStrategyRecord",
         "path CompactionTrigger",
         "path CompactionTrigger::Manual",
         "path CompactionTrigger::ProviderOutputBudgetExhausted",
@@ -8424,6 +8428,7 @@
         "path HostError::Cancelled",
         "path HostError::Failed",
         "path HostError::failed",
+        "path HostErrorKind::Other",
         "path ModelChunk",
         "path ModelChunk::Content",
         "path ModelChunk::MessageStart",
@@ -8509,6 +8514,7 @@
         "path ModelCallData",
         "path ModelContentData",
         "path ModelUsageData",
+        "path ProviderPresentation",
         "path TextData",
         "path ThinkingData",
         "path ToolCallResult",
@@ -11036,7 +11042,9 @@
       "references": [
         "mod exec",
         "path exec::definition_for",
-        "path exec::execute"
+        "path exec::execute",
+        "path exec::stop",
+        "path exec::stop_definition"
       ]
     },
     {
@@ -11255,6 +11263,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::exec",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path crate::context_policy::check_cancel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::exec",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -11299,6 +11314,7 @@
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path WorkspaceTools",
+        "path super::host_error",
         "use super::WorkspaceTools"
       ]
     },
@@ -11311,6 +11327,8 @@
         "path StartError::Termination",
         "path StartError::Timeline",
         "path StartRequest",
+        "path super::background::TaskError::Closed",
+        "path super::background::TaskError::Unknown",
         "use super::background::BackgroundExec",
         "use super::background::StartError",
         "use super::background::StartRequest"
@@ -11322,6 +11340,13 @@
       "references": [
         "path Branch",
         "use dim_agent_runtime::Branch"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::exec",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path dim_agent_runtime::CAPABILITY_RELOADING"
       ]
     },
     {
@@ -11370,7 +11395,8 @@
         "path ToolResult",
         "path ToolResult::default",
         "path ToolResult::error",
-        "path ToolResult::text"
+        "path ToolResult::text",
+        "path tool"
       ]
     },
     {

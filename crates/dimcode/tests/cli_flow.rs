@@ -3749,6 +3749,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     "branch",
                     "edit",
                     "exec",
+                    "exec_stop",
                     "glob",
                     "grep",
                     "plugin",

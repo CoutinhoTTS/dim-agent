@@ -374,7 +374,7 @@ impl Harness {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            tools: Some(vec!["exec".into(), "wait".into()]),
+            tools: Some(vec!["exec".into(), "exec_stop".into(), "wait".into()]),
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
                 ..Default::default()
@@ -2184,6 +2184,78 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_model_stops_its_detached_exec_and_keeps_an_already_ended_result() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let pid_file = harness.cwd.join("model-stop.pid");
+    harness.run(&session, &[("exec", json!({"command":format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display()),"runInBackground":true,"timeoutMs":-1}))]).await;
+    let events = until(&session, "detached task", |events| {
+        count(events, "turn/end") == 1
+    })
+    .await;
+    let task = task_of(&results(&events)[0]);
+    assert!(text(&results(&events)[0]).contains("exec_stop"));
+    let pid = pid_in(&pid_file).await;
+    harness
+        .run(&session, &[("exec_stop", json!({"taskId":task}))])
+        .await;
+    let events = until(&session, "model stop", |events| results(events).len() == 2).await;
+    let stopped = &results(&events)[1];
+    assert_ne!(stopped.is_error, Some(true));
+    let terminal: ExecEndedData = serde_json::from_str(text(stopped)).unwrap();
+    assert_eq!(terminal.task_id, task);
+    assert_eq!(terminal.status, ExecStatus::Cancelled);
+    assert!(gone(&pid).await);
+    assert_eq!(ended(&events).len(), 1);
+    session.idle("main").await.unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec_stop", json!({"taskId":"member-session"}))],
+        )
+        .await;
+    let events = until(&session, "invalid target", |events| {
+        results(events).len() == 3
+    })
+    .await;
+    assert_eq!(code(&results(&events)[2]), Some("exec_task_unknown"));
+    assert!(text(&results(&events)[2]).contains("No command was stopped"));
+    assert_eq!(ended(&events).len(), 1);
+    session.idle("main").await.unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command":"echo already-done","runInBackground":true}),
+            )],
+        )
+        .await;
+    let events = until(&session, "completed command", |events| {
+        ended(events).len() == 2
+    })
+    .await;
+    let completed = ended(&events)[1].1.clone();
+    assert_eq!(completed.status, ExecStatus::Completed);
+    session.idle("main").await.unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec_stop", json!({"taskId":completed.task_id}))],
+        )
+        .await;
+    let events = until(&session, "already ended stop", |events| {
+        results(events).len() == 5
+    })
+    .await;
+    let again: ExecEndedData = serde_json::from_str(text(&results(&events)[4])).unwrap();
+    assert_eq!(again, completed);
+    assert_eq!(ended(&events).len(), 2);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_and_completion_settle_once_in_dispatch_order() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
@@ -2745,6 +2817,77 @@ fn wait_texts(events: &[Arc<AgentEvent>]) -> Vec<String> {
         .map(|result| text(result).to_owned())
         .filter(|text| text.starts_with("wait"))
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_publishes_and_accepts_its_exact_timeout_boundaries() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[
+                ("wait", json!({"timeoutMs":0})),
+                ("wait", json!({"timeoutMs":1.5})),
+                ("wait", json!({"timeoutMs":300001})),
+            ],
+        )
+        .await;
+    let events = until(&session, "invalid wait timeouts", |events| {
+        results(events).len() == 3
+    })
+    .await;
+    assert!(
+        results(&events)
+            .iter()
+            .all(|result| result.is_error == Some(true))
+    );
+    assert!(text(&results(&events)[2]).contains("less than or equal to 300000"));
+    let tool = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(call) => call
+                .request
+                .tools
+                .as_ref()?
+                .iter()
+                .find(|tool| tool.name == "wait"),
+            _ => None,
+        })
+        .unwrap();
+    let timeout = &tool.input_schema.properties.as_ref().unwrap()["timeoutMs"];
+    assert_eq!(timeout.schema_type, Some(SchemaType::Integer));
+    assert_eq!(timeout.extensions["minimum"], 1);
+    assert_eq!(timeout.extensions["maximum"], 300000);
+    assert_eq!(timeout.extensions["default"], 300000);
+    session.idle("main").await.unwrap();
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs":1}))])
+        .await;
+    let events = until(&session, "minimum timeout", |events| {
+        results(events).len() == 4
+    })
+    .await;
+    assert_eq!(text(&results(&events)[3]), "wait ended: timeout");
+    session.idle("main").await.unwrap();
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs":300000}))])
+        .await;
+    until(&session, "maximum wait started", |events| {
+        count(events, "step/tool-call") == 3
+    })
+    .await;
+    session
+        .submit("continue now".into(), InputMode::Steer, "main")
+        .await
+        .unwrap();
+    let events = until(&session, "maximum wait steered", |events| {
+        results(events).len() == 5
+    })
+    .await;
+    assert_eq!(text(&results(&events)[4]), "wait ended: steer");
+    session.close().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -75,3 +75,6 @@ tokio-tungstenite.workspace = true
 
 [build-dependencies]
 flate2 = "1.1"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2.189"
