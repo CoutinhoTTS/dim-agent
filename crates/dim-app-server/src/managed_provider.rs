@@ -555,12 +555,9 @@ fn valid_catalog(catalog: &ManagedCatalog) -> bool {
                 && ids.insert(&m.entry.model_id)
                 && !m.entry.display_name.trim().is_empty()
                 && supported(m.protocol)
-                && [
-                    m.entry.capabilities.context_window,
-                    m.entry.capabilities.max_output_tokens,
-                ]
-                .iter()
-                .all(|n| (1..=MAX_MODEL_TOKENS).contains(n))
+                && crate::model_catalog::limits_valid(&m.entry.capabilities)
+                && (m.entry.capabilities.missing_limits().is_empty()
+                    || m.unavailable_reason.is_some())
         })
 }
 /// A lease that fails the checks is dropped, which releases it.

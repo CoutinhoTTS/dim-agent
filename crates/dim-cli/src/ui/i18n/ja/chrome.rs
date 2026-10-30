@@ -393,6 +393,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} モデル利用不可 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：1 モデルにウィンドウが必要です · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：{count} モデルにウィンドウが必要です · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}：モデルなし · dimcode models {id} --refresh"
         }
@@ -404,6 +410,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}：カタログを読み取れません · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限が未宣言のモデルは選択できません。dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N で宣言してください。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N で宣言してください。"
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "キャッシュされたカタログがありません。サインインして models PROVIDER --refresh を実行してください。"

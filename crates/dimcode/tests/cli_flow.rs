@@ -309,6 +309,321 @@ fn model_catalog_refresh_names_an_empty_listing() {
     );
 }
 
+/// A model no source declares limits for is marked `undeclared` and the
+/// list names the command that declares them, instead of hiding it among
+/// the unavailable models.
+#[test]
+fn model_catalog_marks_undeclared_limits_and_names_the_declaring_command() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tundeclared\nready\tReady\tavailable\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models fixture --set-missing-limits --context-window N --max-output-tokens N.\n"
+    );
+}
+
+/// A model refused for its undeclared limits names the command that
+/// declares them, with its provider and model, when the explicit start
+/// model cannot be adopted.
+#[test]
+fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let create = wire.read("session.create");
+        assert_eq!(
+            create["params"]["model"],
+            json!({"provider":"fixture","modelId":"narrow"})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Explicit model is unavailable","data":{"appError":"provider_invalid_config"}}}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "--provider",
+            "fixture",
+            "--model",
+            "narrow",
+            "--prompt",
+            "hello",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot create session: "), "{stderr}");
+    assert!(
+        stderr.contains("Declare them with dimcode models fixture --set-limits narrow --context-window N --max-output-tokens N."),
+        "{stderr}"
+    );
+}
+
+/// `--set-limits` declares both limits of the named model at the record
+/// version, then prints the catalog the way `models PROVIDER` does.
+#[test]
+fn model_catalog_declares_limits_for_one_model() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]}
+            ]}}),
+        );
+        let edit = wire.read("provider.models.edit");
+        assert_eq!(
+            edit["params"],
+            json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&edit, json!({"version":2,"disabledModelIds":[],"models":[
+            {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
+        ]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":2,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "models",
+            "fixture",
+            "--set-limits",
+            "narrow",
+            "--context-window",
+            "64000",
+            "--max-output-tokens",
+            "8000",
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tavailable\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+/// `--set-missing-limits` reads the catalog, declares the limits of every
+/// model the list marks `undeclared`, and chains each reply's version into
+/// the next write. A disabled model and one unavailable for another reason
+/// keep that state even when they report missing limits.
+#[test]
+fn model_catalog_declares_missing_limits_for_every_model() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":["gone"],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
+                {"id":"wide","name":"Wide","unavailableReason":"limits_undeclared","missingLimits":["maxOutputTokens"]},
+                {"id":"gone","name":"Gone","unavailableReason":null,"missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":["contextWindow"]}
+            ]}}),
+        );
+        let first = wire.read("provider.models.edit");
+        assert_eq!(
+            first["params"],
+            json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&first, json!({"version":2,"disabledModelIds":[],"models":[]}));
+        let second = wire.read("provider.models.edit");
+        assert_eq!(
+            second["params"],
+            json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
+                "edit":{"maxOutputTokens":8000}})
+        );
+        wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":3,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
+                {"id":"wide","name":"Wide","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "models",
+            "fixture",
+            "--set-missing-limits",
+            "--context-window",
+            "64000",
+            "--max-output-tokens",
+            "8000",
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tavailable\nready\tReady\tavailable\nwide\tWide\tavailable\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+/// The declaration flags require the models command, one form and both
+/// values, and fail before the CLI connects to a daemon.
+#[test]
+fn model_limit_declaration_flags_are_validated_before_connecting() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    for (args, reason) in [
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "64000",
+            ],
+            "--max-output-tokens",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "0",
+                "--max-output-tokens",
+                "8000",
+            ],
+            "positive integer",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--set-missing-limits",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "not both",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--refresh",
+                "--set-missing-limits",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "cannot be combined",
+        ),
+        (
+            vec!["models", "fixture", "--context-window", "1"],
+            "--set-limits or --set-missing-limits",
+        ),
+        (
+            vec![
+                "exec",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "models PROVIDER",
+        ),
+    ] {
+        let output = home
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!home.0.join("rust").exists(), "{args:?}");
+    }
+}
+
 #[test]
 fn daemon_stop_without_an_endpoint_never_creates_state_or_spawns_a_server() {
     let home = Home::new();
@@ -3092,8 +3407,10 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(
             &request,
@@ -3410,7 +3727,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&complete, json!({}));
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities = serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        let mut capabilities = serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(&request, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}));
@@ -6143,7 +6460,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     let created = rpc(
         &mut wire,
         "provider.create",
-        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true}),
+        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true}),
     );
     assert!(created.get("result").is_some(), "{created}");
     let mut terminal = Terminal::launch_tui(command());
@@ -7713,8 +8030,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
-                    {"id":"model","name":"Model","capabilities":dim_agent_types::ModelCapabilities::default()},
-                    {"id":"other","name":"Other","capabilities":dim_agent_types::ModelCapabilities::default()}]}}),
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
+                    {"id":"other","name":"Other","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
                 "collaboration.model_policy" => json!({"revision":revision.to_string(),"policy":policy}),
                 "collaboration.set_model_policy" => {
@@ -7803,7 +8120,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
         let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+            serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
             "id":"model","name":"Model","capabilities":capabilities,
@@ -7945,9 +8262,9 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
                             wait.recv_timeout(PATIENCE).unwrap();
                             let catalog = json!({"version":2,"disabledModelIds":[],"models":[
                                 {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                    "capabilities":dim_agent_types::ModelCapabilities::default()},
+                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
                                 {"id":"vendor/model-b","name":"Model B","unavailableReason":null,
-                                    "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
                             stored.lock().unwrap().insert(provider, catalog.clone());
                             let _guard = writes.lock().unwrap();
                             writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
@@ -8066,7 +8383,7 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
                         wait.recv_timeout(PATIENCE).unwrap();
                         let catalog = json!({"version":2,"disabledModelIds":[],"models":[
                             {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
                         *stored.lock().unwrap() = catalog.clone();
                         writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
                             .unwrap();
@@ -8112,10 +8429,13 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
 /// A provider that offers nothing selectable keeps a row naming it and the
 /// reason: no models with the refresh command when the daemon can list them,
 /// no models with the add method when it cannot, an unreadable catalog, or
-/// the unavailable and disabled counts together. The picker refills only the
-/// provider whose catalog is empty and can be listed: a provider whose models
-/// are its bundled catalog's, one the daemon cannot list and one whose
-/// catalog cannot be read are never refreshed.
+/// the unavailable and disabled counts together. Undeclared limits count as
+/// the reason only when declaring them would unblock the model: a model
+/// unavailable for another reason keeps that reason, and a disabled one is
+/// not counted. The picker refills only the provider whose catalog is empty
+/// and can be listed: a provider whose models are its bundled catalog's, one
+/// the daemon cannot list and one whose catalog cannot be read are never
+/// refreshed.
 #[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
@@ -8126,14 +8446,20 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
-            let model = |id: &str, unavailable: bool| {
-                let reason = if unavailable {
-                    json!("provider_unavailable")
+            let model = |id: &str, reason: Option<&str>, declared: bool| {
+                let reason = reason.map_or(Value::Null, |reason| json!(reason));
+                let capabilities = if declared {
+                    dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)
                 } else {
-                    Value::Null
+                    dim_agent_types::CatalogCapabilities::default()
+                };
+                let missing = if declared {
+                    json!([])
+                } else {
+                    json!(["contextWindow", "maxOutputTokens"])
                 };
                 json!({"id":id,"name":id,"unavailableReason":reason,
-                    "capabilities":dim_agent_types::ModelCapabilities::default()})
+                    "missingLimits":missing,"capabilities":capabilities})
             };
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
@@ -8159,19 +8485,24 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     }
                     let (models, disabled) = match provider {
                         "empty" => (
-                            json!([model("vendor/embed-a", true), model("vendor/embed-b", true)]),
+                            json!([
+                                model("vendor/embed-a", Some("provider_unavailable"), false),
+                                model("vendor/embed-b", Some("provider_unavailable"), false)]),
                             json!([]),
                         ),
                         "mixed" => (
-                            json!([model("vendor/embed-c", true), model("vendor/hidden-a", false)]),
-                            json!(["vendor/hidden-a"]),
+                            json!([
+                                model("vendor/embed-c", Some("provider_unavailable"), true),
+                                model("vendor/hidden-a", None, true),
+                                model("vendor/hidden-c", Some("limits_undeclared"), false)]),
+                            json!(["vendor/hidden-a", "vendor/hidden-c"]),
                         ),
                         "hidden" => (
-                            json!([model("vendor/hidden-b", false)]),
+                            json!([model("vendor/hidden-b", None, true)]),
                             json!(["vendor/hidden-b"]),
                         ),
                         "blank" | "manual" => (json!([]), json!([])),
-                        _ => (json!([model("vendor/model-a", false)]), json!([])),
+                        _ => (json!([model("vendor/model-a", None, true)]), json!([])),
                     };
                     json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
                 }
@@ -8192,7 +8523,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.write(b"/models\r");
     terminal.until("Ready / vendor/model-a");
     terminal.until("Empty: 2 models unavailable · dimcode models empty");
-    terminal.until("Mixed: 1 unavailable and 1 disabled · dimcode models mixed");
+    terminal.until("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
     terminal.until("All disabled: 1 model disabled · dimcode models hidden");
     terminal.until("Blank: no models · dimcode models blank --refresh");
     terminal.until("Manual: no models · add a model with provider.models.create");
@@ -8201,6 +8532,10 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
+    );
+    assert!(
+        !terminal.transcript.contains("need a window"),
+        "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
     terminal.signal(libc::SIGKILL);
     terminal.wait();

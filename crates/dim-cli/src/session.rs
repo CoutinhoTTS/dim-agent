@@ -208,6 +208,7 @@ pub async fn chat(
     } else {
         let mut params = json!({"cwd":options.cwd});
         let mut preferences = None;
+        let mut target = None;
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
             params["model"] = json!({"provider":provider,"modelId":model});
             preferences =
@@ -215,14 +216,24 @@ pub async fn chat(
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
+            target = Some((provider.clone(), model.clone()));
         }
         if let Some(preset) = options.permission {
             params["permissionPolicy"] = json!({"preset":preset});
         }
-        let created: Created = client.typed("session.create", params).await.map_err(|error| {
-            let error = crate::session_host::model_adoption_error(error, preferences.as_ref());
-            format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference")
-        })?;
+        let created: Created = match client.typed("session.create", params).await {
+            Ok(created) => created,
+            Err(error) => {
+                let error = crate::model_adoption_error(
+                    client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await;
+                return Err(format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference").into());
+            }
+        };
         if interactive {
             println!(
                 "dimcode · model: {}/{}",

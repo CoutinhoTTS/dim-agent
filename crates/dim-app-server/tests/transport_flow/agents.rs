@@ -682,7 +682,7 @@ async fn product_session_model_priority_is_request_then_profile_then_default() {
     )
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let capabilities = dim_agent_types::ModelCapabilities::default();
+    let capabilities = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
     let models = ["alpha", "beta"].map(
         |id| json!({"modelId":id,"displayName":id,"status":"active","capabilities":capabilities}),
     );
