@@ -7876,10 +7876,13 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
 /// A provider that offers nothing selectable keeps a row naming it and the
 /// reason: no models with the refresh command when the daemon can list them,
 /// no models with the add method when it cannot, an unreadable catalog, or
-/// the unavailable and disabled counts together. The picker refills only the
-/// provider whose catalog is empty and can be listed: a provider whose models
-/// are its bundled catalog's, one the daemon cannot list and one whose
-/// catalog cannot be read are never refreshed.
+/// the unavailable and disabled counts together. Undeclared limits count as
+/// the reason only when declaring them would unblock the model: a model
+/// unavailable for another reason keeps that reason, and a disabled one is
+/// not counted. The picker refills only the provider whose catalog is empty
+/// and can be listed: a provider whose models are its bundled catalog's, one
+/// the daemon cannot list and one whose catalog cannot be read are never
+/// refreshed.
 #[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
@@ -7890,14 +7893,20 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
-            let model = |id: &str, unavailable: bool| {
-                let reason = if unavailable {
-                    json!("provider_unavailable")
+            let model = |id: &str, reason: Option<&str>, declared: bool| {
+                let reason = reason.map_or(Value::Null, |reason| json!(reason));
+                let capabilities = if declared {
+                    dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)
                 } else {
-                    Value::Null
+                    dim_agent_types::CatalogCapabilities::default()
+                };
+                let missing = if declared {
+                    json!([])
+                } else {
+                    json!(["contextWindow", "maxOutputTokens"])
                 };
                 json!({"id":id,"name":id,"unavailableReason":reason,
-                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)})
+                    "missingLimits":missing,"capabilities":capabilities})
             };
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
@@ -7923,19 +7932,24 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     }
                     let (models, disabled) = match provider {
                         "empty" => (
-                            json!([model("vendor/embed-a", true), model("vendor/embed-b", true)]),
+                            json!([
+                                model("vendor/embed-a", Some("provider_unavailable"), false),
+                                model("vendor/embed-b", Some("provider_unavailable"), false)]),
                             json!([]),
                         ),
                         "mixed" => (
-                            json!([model("vendor/embed-c", true), model("vendor/hidden-a", false)]),
-                            json!(["vendor/hidden-a"]),
+                            json!([
+                                model("vendor/embed-c", Some("provider_unavailable"), true),
+                                model("vendor/hidden-a", None, true),
+                                model("vendor/hidden-c", Some("limits_undeclared"), false)]),
+                            json!(["vendor/hidden-a", "vendor/hidden-c"]),
                         ),
                         "hidden" => (
-                            json!([model("vendor/hidden-b", false)]),
+                            json!([model("vendor/hidden-b", None, true)]),
                             json!(["vendor/hidden-b"]),
                         ),
                         "blank" | "manual" => (json!([]), json!([])),
-                        _ => (json!([model("vendor/model-a", false)]), json!([])),
+                        _ => (json!([model("vendor/model-a", None, true)]), json!([])),
                     };
                     json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
                 }
@@ -7956,7 +7970,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.write(b"/models\r");
     terminal.until("Ready / vendor/model-a");
     terminal.until("Empty: 2 models unavailable · dimcode models empty");
-    terminal.until("Mixed: 1 unavailable and 1 disabled · dimcode models mixed");
+    terminal.until("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
     terminal.until("All disabled: 1 model disabled · dimcode models hidden");
     terminal.until("Blank: no models · dimcode models blank --refresh");
     terminal.until("Manual: no models · add a model with provider.models.create");
@@ -7965,6 +7979,10 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
+    );
+    assert!(
+        !terminal.transcript.contains("need a window"),
+        "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
     terminal.signal(libc::SIGKILL);
     terminal.wait();

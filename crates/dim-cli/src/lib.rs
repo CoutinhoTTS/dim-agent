@@ -418,6 +418,21 @@ async fn declaration_hint(
     })
 }
 
+/// A model this crate marks `undeclared`: it has no declared limit and no
+/// other reason to be unavailable, so declaring the limits is the one thing
+/// that unblocks it. A disabled model or one unavailable for another reason
+/// keeps that state. `dimcode models` and the `/models` picker share this
+/// predicate for both the mark and the count.
+pub(crate) fn limits_undeclared(
+    missing_limits: &[String],
+    unavailable_reason: Option<&str>,
+    disabled: bool,
+) -> bool {
+    !disabled
+        && !missing_limits.is_empty()
+        && unavailable_reason.is_none_or(|reason| reason == "limits_undeclared")
+}
+
 fn prepare() -> Result<Option<Options>> {
     let mut options = Options::parse(std::env::args().skip(1))?;
     if matches!(options.action, Action::Help) {
@@ -715,12 +730,12 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 let mut undeclared = 0;
                 for model in catalog.models {
                     let disabled = catalog.disabled_model_ids.contains(&model.id);
-                    let limits_only = !model.missing_limits.is_empty()
-                        && model
-                            .unavailable_reason
-                            .as_deref()
-                            .is_none_or(|reason| reason == "limits_undeclared");
-                    if !disabled && limits_only {
+                    let limits_only = limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        disabled,
+                    );
+                    if limits_only {
                         undeclared += 1;
                     }
                     let availability = if disabled {

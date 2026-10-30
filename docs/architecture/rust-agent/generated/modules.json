@@ -23357,6 +23357,7 @@
       "references": [
         "path crate::Error",
         "path crate::Result",
+        "path crate::limits_undeclared",
         "path crate::model_adoption_error"
       ]
     },

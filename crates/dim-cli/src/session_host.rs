@@ -2289,7 +2289,13 @@ impl Worker {
             let undeclared = catalog
                 .models
                 .iter()
-                .filter(|model| !model.missing_limits.is_empty())
+                .filter(|model| {
+                    crate::limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        catalog.disabled_model_ids.contains(&model.id),
+                    )
+                })
                 .count();
             let unavailable = catalog
                 .models
