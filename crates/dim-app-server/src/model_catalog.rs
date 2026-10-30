@@ -891,6 +891,89 @@ pub fn declare(entry: &mut ModelEntry, field: &str) {
     }
 }
 
+/// The context window that format v24's probe projection filled in, and that
+/// the legacy schema defaulted to, when no source declared one.
+const ASSUMED_CONTEXT_WINDOW: u64 = 128_000;
+/// The maximum output of the same assumed pair.
+const ASSUMED_MAX_OUTPUT_TOKENS: u64 = 16_384;
+
+/// Declares the limits a stored or imported entry supplied, unless a value may
+/// be the assumed pair above. Each field is decided on its own: a limit
+/// `capabilityOverrideFields` marks, or `metadata.raw` declares, is a
+/// declaration and gains the mark; an unmarked limit equal to the assumed
+/// default is removed, because the probe filled each missing field with it and
+/// the entry cannot tell the assumption from a typed value; any other value
+/// can only have been typed or listed, so it is kept and marked. Returns
+/// whether the entry changed.
+pub fn declare_supplied_limits(entry: &mut ModelEntry) -> bool {
+    let metadata = entry.metadata.as_ref();
+    let marked = metadata
+        .map(|metadata| metadata.capability_override_fields.clone())
+        .unwrap_or_default();
+    let (declared_context, declared_output) = metadata
+        .map(|metadata| declared_limits(&metadata.raw))
+        .unwrap_or((None, None));
+    let context = supplied_limit(
+        entry.capabilities.context_window,
+        marked.iter().any(|name| name == "contextWindow"),
+        declared_context.is_some(),
+        ASSUMED_CONTEXT_WINDOW,
+    );
+    let output = supplied_limit(
+        entry.capabilities.max_output_tokens,
+        marked.iter().any(|name| name == "maxOutputTokens"),
+        declared_output.is_some(),
+        ASSUMED_MAX_OUTPUT_TOKENS,
+    );
+    let mut changed = false;
+    match context {
+        None => {}
+        Some(SuppliedLimit::Remove) => {
+            entry.capabilities.context_window = None;
+            changed = true;
+        }
+        Some(SuppliedLimit::Mark) => {
+            declare(entry, "contextWindow");
+            changed = true;
+        }
+    }
+    match output {
+        None => {}
+        Some(SuppliedLimit::Remove) => {
+            entry.capabilities.max_output_tokens = None;
+            changed = true;
+        }
+        Some(SuppliedLimit::Mark) => {
+            declare(entry, "maxOutputTokens");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// One field's decision for a supplied limit; `None` leaves it alone.
+enum SuppliedLimit {
+    /// Keep the value and mark it as a declaration.
+    Mark,
+    /// Delete the value, because it may be the assumed default.
+    Remove,
+}
+
+fn supplied_limit(
+    value: Option<u64>,
+    marked: bool,
+    declared: bool,
+    assumed: u64,
+) -> Option<SuppliedLimit> {
+    match value {
+        None => None,
+        Some(_) if marked => None,
+        Some(_) if declared => Some(SuppliedLimit::Mark),
+        Some(value) if value == assumed => Some(SuppliedLimit::Remove),
+        Some(_) => Some(SuppliedLimit::Mark),
+    }
+}
+
 fn inherit_reasoning(current: &mut ModelReasoning, fallback: &ModelReasoning) {
     if !current.supported {
         return;

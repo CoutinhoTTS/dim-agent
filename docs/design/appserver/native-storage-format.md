@@ -495,18 +495,18 @@ ProjectionCheckpoint = {
 - **升级路径**：沿用 `IMMEDIATE` 启动准入事务，在改写标记的同一事务内改写 Provider 记录：
   - 空库直接建新版本。
   - 结构恰为 v24 且标记相符的库，在同一事务内处理；标记相符的更旧库先走既有各步，再走本步。
-  - 对每条 `providers.record`，删除两项上限中既未在 `metadata.capabilityOverrideFields` 中列出、也未被该条目的 `metadata.raw` 声明的值：静态记录（`kind` 为 `builtin` 或 `custom`）处理 `models`、`modelConfigOverrides` 与 `userModels` 的每个条目，托管记录（`kind` 为 `managed`）处理 `models[].entry`。`metadata.raw` 保留清单项目的原文，升级与投影用同一组键和同一函数读取它（`context_window`/`contextWindow`/`inputTokenLimit`、`max_output_tokens`/`maxOutputTokens`/`outputTokenLimit`，以及 `limit.context`/`limit.output` 与 `capabilities.contextWindow`/`capabilities.maxOutputTokens`），不另列清单。来源声明某个值就保留，只删除没有任何来源声明的上限；不比较数值，也不补齐替代值。
-  - 其余字节不变：`capabilityOverrideFields`、其他能力位、metadata、凭据、偏好、路由与选择都不改写；任何一步失败则回滚，原库保持不变。
+  - 对每条 `providers.record`，只有投影输出可能失去没有来源声明的上限：静态记录中 `remoteModels` 为真时的 `models`（远程清单）、`modelConfigOverrides` 与托管记录的 `models[].entry`（中继）删除既未在 `metadata.capabilityOverrideFields` 中列出、也未被该条目的 `metadata.raw` 声明的值，因为它们都从各自来源重新生成——描述覆盖只由 `models.edit` 写入，v24 的它已写标记，未标记的上限只可能来自仅改其他字段的覆盖所复制的投影值。静态记录中 `remoteModels` 为假时的 `models` 与每个 `userModels` 条目按每项上限分别判定，与两个旧版导入器共用同一个函数：已列入 `capabilityOverrideFields` 或由 `metadata.raw` 声明的上限是声明，保留并补上标记；未列为标记、未被 `metadata.raw` 声明、且数值恰为该字段旧假定值（`contextWindow` 128000、`maxOutputTokens` 16384）的上限可能来自探测投影的填充，删除该键使其未声明；其余数值只可能来自用户输入或清单声明，保留并补上标记。每项各自判定，所以存下的 `32000`/`16384` 保留窗口、删除输出上限。v24 的 `provider.create` 与 `provider.models.create` 要求客户端给出两个数值，却从不写标记，而探测为每个缺失字段分别补上假定值，因此恰好等于假定值的未标记数字无法与用户输入区分；本决定选择宁可再次询问，也不保留可能的假定值——用户若恰好输入 128000 或 16384，升级后该项显示为未声明，用 `--set-missing-limits` 或 `/models` 重新声明即可。`metadata.raw` 保留清单项目的原文，升级与投影用同一组键和同一函数读取它（`context_window`/`contextWindow`/`inputTokenLimit`、`max_output_tokens`/`maxOutputTokens`/`outputTokenLimit`，`limit.context`/`limit.output` 与 `capabilities.contextWindow`/`capabilities.maxOutputTokens`，以及 OpenRouter 的 `context_length` 与 `top_provider.max_completion_tokens`、vLLM 的 `max_model_len`、LM Studio 的 `max_context_length`），不另列清单。投影输出只删除没有任何来源声明的上限，不比较数值，也不补齐替代值。
+  - 其余取值不变：改写会按当前结构重新序列化每条记录，空的可选字段与字段顺序可能不同，但除上面删除与补上的上限及其标记外，`capabilityOverrideFields` 的其他项、其他能力位、metadata、凭据、偏好、路由与选择都不改；任何一步失败则回滚，原库保持不变。
   - 恰为新版本的库直接打开；其他库（标记不符、升级到一半、更旧格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **改写的位置**：`providers.record` 的 JSON 由 Provider 拥有的记录转换函数改写，存储层只负责在准入事务内对每条记录调用它，不解析 Provider 的字段。
-- **升级后从哪里取得值**：缺省键的上限由有效目录按来源补齐，不写回记录——默认项与用户模型走既有捆绑匹配，托管目录模型走同一 `BundledCatalog::fallback`，描述覆盖未自行声明的上限取自其基础项（[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)）。因此命中捆绑目录的模型升级前后取到同一个声明值；扫描不到的私有模型变为未声明，由管理面报告原因。
+- **升级后从哪里取得值**：缺省键的上限由有效目录按来源补齐，不写回记录——默认项与用户模型走既有捆绑匹配，托管目录模型走同一 `BundledCatalog::fallback`，描述覆盖未自行声明的上限取自其基础项（[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)）。补上的标记使保留的上限不会被捆绑匹配替换：与捆绑目录同 ID 的用户模型升级后仍取用户声明的窗口；远程清单里没有任何来源声明的私有模型变为未声明，由管理面报告原因。
 - **单向**：旧二进制按既有精确 SQL 结构检查拒绝整个新库，报现有的 "unsupported SQLite schema … preserved" 错误；不会到读取某个 Provider 时才失败。不做降级或备份。
 - **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v24 to v25; earlier dimcode versions cannot open it.`
 - **验证**：
-  - 在一次性 v24 库中写入 Provider 记录，覆盖命中捆绑目录的默认项、扫描不到的私有默认项、清单声明了上限的条目（两项、仅窗口、两项皆无）、命中与未命中捆绑目录的两类描述覆盖、用户模型和一条托管记录；升级后核对只删除没有任何来源声明的上限（未列入标记且 `metadata.raw` 未声明）、其余字节逐字节不变、标记与结构为新版本，再次打开不再升级。
-  - 有效目录中命中捆绑目录的模型取值与升级前相同；扫描不到的模型带 `missingLimits` 且不可选；两者都由 Provider 流程测试保护。
+  - 在一次性 v24 库中写入 Provider 记录，覆盖远程清单（`remoteModels` 为真）中声明了两项、仅窗口与两项皆无的条目，只改名的描述覆盖，带标记的覆盖，`remoteModels` 为假的自建模型的条目，带标记与不带标记的用户模型（不含标记的分别持有旧假定值对、`32000`/`16384` 的混合对与 `64000`/`8000` 的输入值），一个与捆绑目录同 ID 但窗口不同的用户模型，以及一条托管记录；升级后按写在测试里的固定 JSON 值逐条核对：清单与覆盖只删除没有任何来源声明的上限（未列入标记且 `metadata.raw` 未声明），自建模型与用户模型按每项上限判定（输入值保留并补标记，恰好等于假定值的字段删除为未声明），标记与结构为新版本，其余取值不变，再次打开不再升级。两个旧版导入器对同一规则的执行由 `provider_flow.rs` 的 `provider.import_legacy` 流程与 `dim-migration` 的迁移流程各自核对。
+  - 有效目录中与捆绑目录同 ID 的用户模型仍取用户声明的窗口，命中捆绑目录的模型取值与升级前相同；扫描不到的模型带 `missingLimits` 且不可选；前者由本步的存储测试经投影核对，其余由 Provider 流程测试保护。
   - 用本决定之前的基线构建的旧二进制打开升级后的库，在启动时以 "unsupported SQLite schema … preserved" 拒绝并保留，不读取任何 Provider。
-  - 对应 `storage_flow.rs` 的 `a_v24_provider_record_loses_only_undeclared_model_limits` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`，以及 `provider_flow.rs` 的目录流程。
+  - 对应 `storage_flow.rs` 的 `a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`，以及 `provider_flow.rs` 的目录流程。
 
 ## 索引与实际查询
 

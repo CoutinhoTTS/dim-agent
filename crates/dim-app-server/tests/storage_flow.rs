@@ -4995,14 +4995,16 @@ async fn a_v23_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 23).await;
 }
 
-/// #522: a v24 record's model limit that neither `capabilityOverrideFields`
-/// marks nor the record's `metadata.raw` declares was the old assumed default,
-/// not a declaration, so the upgrade deletes it. A listed model keeps a limit
-/// the item it came from declares even when the store does not mark it; a
-/// marked limit stays, a managed model that loses a limit gains the reason its
-/// record shape requires, and every other value is unchanged.
+/// #522: the upgrade deletes an unmarked stored limit only from projection
+/// output, the remote listing of a record with `remoteModels`, which is
+/// re-derived anyway. A record's own models and every user model hold what
+/// the client supplied, and v24 wrote no mark there, so each field is decided
+/// on its own: a value equal to the old assumed pair is deleted as a possible
+/// probe fill, any other value is kept and marked as the declaration it is. A
+/// user model that matches a bundled entry keeps its own window over the
+/// bundle's.
 #[tokio::test]
-async fn a_v24_provider_record_loses_only_undeclared_model_limits() {
+async fn a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
     use serde_json::json;
     let database = Database::new();
     let connection = v24_store(&database.0);
@@ -5011,29 +5013,91 @@ async fn a_v24_provider_record_loses_only_undeclared_model_limits() {
             "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
             "contextWindow":context,"maxOutputTokens":output})
     };
-    let static_record = json!({
-        "kind":"custom","displayName":"Legacy","driverKind":"openai-compatible",
+    let kept = |context: Option<u64>, output: Option<u64>| {
+        let mut capabilities = json!({"modalities":["text"],"toolCalling":true,
+            "streaming":true,"structuredOutput":true,"vision":false,"audio":false,
+            "reasoning":false});
+        if let Some(context) = context {
+            capabilities["contextWindow"] = json!(context);
+        }
+        if let Some(output) = output {
+            capabilities["maxOutputTokens"] = json!(output);
+        }
+        capabilities
+    };
+    // `provider.refresh` wrote these from the remote listing.
+    let listed_record = json!({
+        "kind":"custom","displayName":"Listed","driverKind":"openai-compatible",
         "auth":{"type":"anonymous"},"credentialAuthority":"static",
         "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
         "models":[
-            {"modelId":"gpt-5-nano","displayName":"GPT-5 Nano","status":"active","capabilities":caps(400_000,128_000)},
-            {"modelId":"private-model","displayName":"Private","status":"active","capabilities":caps(128_000,16_384)},
-            {"modelId":"listed-both","displayName":"Listed Both","status":"active","capabilities":caps(1_000_000,65_536),
-             "metadata":{"raw":{"id":"listed-both","inputTokenLimit":1_000_000,"outputTokenLimit":65_536}}},
-            {"modelId":"listed-window","displayName":"Listed Window","status":"active","capabilities":caps(32_000,4_000),
+            {"modelId":"listed-both","displayName":"Listed Both","status":"active",
+             "capabilities":caps(1_000_000,65_536),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"listed-both","inputTokenLimit":1_000_000,"outputTokenLimit":65_536}}},
+            {"modelId":"listed-window","displayName":"Listed Window","status":"active",
+             "capabilities":caps(32_000,4_000),
              "metadata":{"raw":{"id":"listed-window","inputTokenLimit":32_000}}},
-            {"modelId":"listed-none","displayName":"Listed None","status":"active","capabilities":caps(8_000,1_000),
-             "metadata":{"raw":{"id":"listed-none","type":"chat"}}}
+            {"modelId":"listed-none","displayName":"Listed None","status":"active",
+             "capabilities":caps(8_000,1_000),"metadata":{"raw":{"id":"listed-none","type":"chat"}}}
         ],
-        "remoteModels":false,
+        "remoteModels":true,
         "modelConfigOverrides":[
-            {"modelId":"private-model","displayName":"Private","status":"active","capabilities":caps(64_000,8_000),
-             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],"raw":{}}},
-            {"modelId":"gpt-5-nano","displayName":"Renamed","status":"active","capabilities":caps(400_000,128_000),"metadata":{"raw":{}}}
+            {"modelId":"renamed-listing","displayName":"Renamed","status":"active",
+             "capabilities":caps(128_000,16_384),"metadata":{"raw":{}}},
+            {"modelId":"override-marked","displayName":"Override","status":"active",
+             "capabilities":caps(64_000,8_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],"raw":{}}}
         ],
         "userModels":[
-            {"modelId":"user-model","displayName":"User","status":"active","capabilities":caps(32_000,4_000),
-             "metadata":{"capabilityOverrideFields":["contextWindow"],"raw":{}}}
+            {"modelId":"user-model","displayName":"User","status":"active",
+             "capabilities":caps(32_000,4_000)},
+            {"modelId":"user-assumed","displayName":"Assumed","status":"active",
+             "capabilities":caps(128_000,16_384)},
+            {"modelId":"user-mixed","displayName":"Mixed","status":"active",
+             "capabilities":caps(32_000,16_384)},
+            {"modelId":"user-typed","displayName":"Typed","status":"active",
+             "capabilities":caps(64_000,8_000)}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    // `provider.create` wrote these from its probe; the user model came from
+    // `provider.models.create`. Neither path marked the limits.
+    let custom_record = json!({
+        "kind":"custom","displayName":"Hand Entered","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"hand-entered","displayName":"Hand Entered","status":"active",
+             "capabilities":caps(32_000,4_000),
+             "metadata":{"raw":{"id":"hand-entered","providerId":"custom-provider"}}},
+            {"modelId":"declared-listing","displayName":"Declared","status":"active",
+             "capabilities":caps(64_000,8_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"declared-listing","inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    // A builtin whose listing does not hold the user's model ID: the bundled
+    // catalog declares 400000/128000 for it, the user's model 32000/4000.
+    let builtin_record = json!({
+        "kind":"builtin","displayName":"OpenAI","driverKind":"openai-responses",
+        "auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.openai.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"gpt-5.4-mini","displayName":"GPT-5.4 Mini","status":"active",
+             "capabilities":caps(400_000,128_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"gpt-5.4-mini","inputTokenLimit":400_000,"outputTokenLimit":128_000}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"gpt-5-nano","displayName":"GPT-5 Nano","status":"active",
+             "capabilities":caps(32_000,4_000)}
         ],
         "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
     });
@@ -5047,7 +5111,9 @@ async fn a_v24_provider_record_loses_only_undeclared_model_limits() {
         "modelConfigOverrides":[],"disabledModelIds":[],"modelPreferences":{},"version":1
     });
     for (id, record) in [
-        ("static-provider", &static_record),
+        ("listed-provider", &listed_record),
+        ("custom-provider", &custom_record),
+        ("openai", &builtin_record),
         ("managed-provider", &managed_record),
     ] {
         connection
@@ -5078,112 +5144,147 @@ async fn a_v24_provider_record_loses_only_undeclared_model_limits() {
     assert_eq!(marker(&connection), [25]);
     drop(connection);
 
-    // The documented rule: a limit stays when the mark names it or the item
-    // the entry came from declares it under the projection's keys.
-    fn rewrite(model: &mut serde_json::Value) {
-        let marked = model["metadata"]
-            .get("capabilityOverrideFields")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let raw = model["metadata"]
-            .get("raw")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let declared = |keys: [&str; 3], limit: &str, capability: &str| {
-            let positive = |value: Option<&serde_json::Value>| {
-                value
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some_and(|n| n > 0)
-            };
-            keys.iter().any(|key| positive(raw.get(*key)))
-                || positive(raw.get("limit").and_then(|value| value.get(limit)))
-                || positive(
-                    raw.get("capabilities")
-                        .and_then(|value| value.get(capability)),
-                )
-        };
-        let capabilities = model["capabilities"].as_object_mut().unwrap();
-        for (field, declared) in [
-            (
-                "contextWindow",
-                declared(
-                    ["contextWindow", "context_window", "inputTokenLimit"],
-                    "context",
-                    "contextWindow",
-                ),
-            ),
-            (
-                "maxOutputTokens",
-                declared(
-                    ["maxOutputTokens", "max_output_tokens", "outputTokenLimit"],
-                    "output",
-                    "maxOutputTokens",
-                ),
-            ),
-        ] {
-            if !declared && !marked.iter().any(|name| name == field) {
-                capabilities.remove(field);
-            }
-        }
-        // An empty `metadata.raw` is not serialized.
-        if let Some(metadata) = model.get_mut("metadata").and_then(|m| m.as_object_mut())
-            && metadata
-                .get("raw")
-                .is_some_and(|raw| raw.as_object().is_some_and(|raw| raw.is_empty()))
-        {
-            metadata.remove("raw");
-        }
+    let listed_expected = json!({
+        "kind":"custom","displayName":"Listed","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"listed-both","displayName":"Listed Both","status":"active",
+             "capabilities":kept(Some(1_000_000),Some(65_536)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"listed-both","inputTokenLimit":1_000_000,"outputTokenLimit":65_536}}},
+            {"modelId":"listed-window","displayName":"Listed Window","status":"active",
+             "capabilities":kept(Some(32_000),None),
+             "metadata":{"raw":{"id":"listed-window","inputTokenLimit":32_000}}},
+            {"modelId":"listed-none","displayName":"Listed None","status":"active",
+             "capabilities":kept(None,None),"metadata":{"raw":{"id":"listed-none","type":"chat"}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[
+            {"modelId":"renamed-listing","displayName":"Renamed","status":"active",
+             "capabilities":kept(None,None),"metadata":{}},
+            {"modelId":"override-marked","displayName":"Override","status":"active",
+             "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
+        ],
+        "userModels":[
+            {"modelId":"user-model","displayName":"User","status":"active",
+             "capabilities":kept(Some(32_000),Some(4_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}},
+            {"modelId":"user-assumed","displayName":"Assumed","status":"active",
+             "capabilities":kept(None,None)},
+            {"modelId":"user-mixed","displayName":"Mixed","status":"active",
+             "capabilities":kept(Some(32_000),None),
+             "metadata":{"capabilityOverrideFields":["contextWindow"]}},
+            {"modelId":"user-typed","displayName":"Typed","status":"active",
+             "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let custom_expected = json!({
+        "kind":"custom","displayName":"Hand Entered","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"hand-entered","displayName":"Hand Entered","status":"active",
+             "capabilities":kept(Some(32_000),Some(4_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"hand-entered","providerId":"custom-provider"}}},
+            {"modelId":"declared-listing","displayName":"Declared","status":"active",
+             "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"declared-listing","inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let builtin_expected = json!({
+        "kind":"builtin","displayName":"OpenAI","driverKind":"openai-responses",
+        "auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.openai.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"gpt-5.4-mini","displayName":"GPT-5.4 Mini","status":"active",
+             "capabilities":kept(Some(400_000),Some(128_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"gpt-5.4-mini","inputTokenLimit":400_000,"outputTokenLimit":128_000}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"gpt-5-nano","displayName":"GPT-5 Nano","status":"active",
+             "capabilities":kept(Some(32_000),Some(4_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let managed_expected = json!({
+        "kind":"managed",
+        "account":{"credentialEpoch":"epoch","generation":1,
+            "account":{"issuer":"issuer","subject":"subject","grantedScopes":[]}},
+        "models":[{"entry":{"modelId":"relay-model","displayName":"Relay","status":"active",
+            "capabilities":kept(None,None),"metadata":{}},
+            "protocol":"openai-compatible","zdr":false,"unavailableReason":"limits_undeclared"}],
+        "modelConfigOverrides":[],"disabledModelIds":[],"version":1
+    });
+    for (id, expected) in [
+        ("listed-provider", &listed_expected),
+        ("custom-provider", &custom_expected),
+        ("openai", &builtin_expected),
+        ("managed-provider", &managed_expected),
+    ] {
+        let stored: serde_json::Value = serde_json::from_str(&read(id)).unwrap();
+        assert_eq!(&stored, expected, "{id}");
     }
-    let mut expected = static_record.clone();
-    for key in ["models", "modelConfigOverrides", "userModels"] {
-        for model in expected[key].as_array_mut().unwrap() {
-            rewrite(model);
-        }
-    }
-    let stored: serde_json::Value = serde_json::from_str(&read("static-provider")).unwrap();
-    assert_eq!(stored, expected);
-    let override_declared = &stored["modelConfigOverrides"][0]["capabilities"];
-    assert_eq!(override_declared["contextWindow"], 64_000);
-    assert_eq!(override_declared["maxOutputTokens"], 8_000);
-    let user_declared = &stored["userModels"][0]["capabilities"];
-    assert_eq!(user_declared["contextWindow"], 32_000);
-    assert!(user_declared.get("maxOutputTokens").is_none());
-    let listed = |id: &str| {
-        stored["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["modelId"] == id)
-            .unwrap()
-            .clone()
-    };
-    // A listed model keeps what the listing declared, and only that.
-    let both = listed("listed-both")["capabilities"].clone();
-    assert_eq!(both["contextWindow"], 1_000_000);
-    assert_eq!(both["maxOutputTokens"], 65_536);
-    let window = listed("listed-window")["capabilities"].clone();
-    assert_eq!(window["contextWindow"], 32_000);
-    assert!(window.get("maxOutputTokens").is_none());
-    let none = listed("listed-none")["capabilities"].clone();
-    assert!(none.get("contextWindow").is_none());
-    assert!(none.get("maxOutputTokens").is_none());
 
-    let mut expected = managed_record.clone();
-    rewrite(&mut expected["models"][0]["entry"]);
-    expected["models"][0]["unavailableReason"] = json!("limits_undeclared");
-    expected.as_object_mut().unwrap().remove("modelPreferences");
-    let stored: serde_json::Value = serde_json::from_str(&read("managed-provider")).unwrap();
-    assert_eq!(stored, expected);
-    assert_eq!(
-        stored["models"][0]["unavailableReason"],
-        "limits_undeclared"
+    // The user's window is the one in force: the bundled catalog declares
+    // 400000/128000 for this ID, so only the mark the upgrade wrote keeps the
+    // user's 32000/4000 from being replaced on the next read.
+    let stored: serde_json::Value = serde_json::from_str(&read("openai")).unwrap();
+    let entries: Vec<dim_app_server::model_catalog::ModelEntry> = stored["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(stored["userModels"].as_array().unwrap())
+        .map(|entry| serde_json::from_value(entry.clone()).unwrap())
+        .collect();
+    let bundled = dim_app_server::model_catalog::BundledCatalog::load().unwrap();
+    let effective = bundled.effective_models(
+        &dim_app_server::model_catalog::ProviderProjection {
+            provider_id: "openai".into(),
+            source: Some(dim_app_server::model_catalog::ModelSource::Builtin),
+            models: entries.clone(),
+            ..Default::default()
+        },
+        &entries,
+        &[],
     );
+    let user = effective
+        .iter()
+        .find(|entry| entry.model_id == "gpt-5-nano")
+        .unwrap();
+    assert_eq!(user.capabilities.context_window, Some(32_000));
+    assert_eq!(user.capabilities.max_output_tokens, Some(4_000));
 
     // A second open neither upgrades nor rewrites the records again.
-    let before = (read("static-provider"), read("managed-provider"));
+    let before = (
+        read("listed-provider"),
+        read("custom-provider"),
+        read("openai"),
+        read("managed-provider"),
+    );
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
-    assert_eq!((read("static-provider"), read("managed-provider")), before);
+    assert_eq!(
+        (
+            read("listed-provider"),
+            read("custom-provider"),
+            read("openai"),
+            read("managed-provider")
+        ),
+        before
+    );
 }

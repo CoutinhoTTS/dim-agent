@@ -18536,6 +18536,7 @@
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
         "path declarations_hold",
+        "path declare",
         "path declared_limits",
         "path inherit_limits",
         "path limits_valid",

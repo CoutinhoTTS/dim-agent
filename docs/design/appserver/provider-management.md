@@ -350,6 +350,18 @@ declare the limit itself. Probe, refresh and creation store only declared values
 and `models.reset` returns a model to its discovery result; when that result
 declares nothing, the model is undeclared again.
 
+Format v24 stored what a client supplied without a mark, and its probe filled
+each missing field with the assumed pair (128000 context, 16384 output). The
+format upgrade and both legacy importers therefore decide each field of a user
+model or a custom provider's own model alone, through one function: a limit
+`capabilityOverrideFields` marks or `metadata.raw` declares is a declaration; an
+unmarked limit equal to the assumed default is removed, because it may be the
+probe's fill; any other value can only have been typed or listed, so it is kept
+and marked. The rule prefers asking again over keeping a possible assumption: a
+user who typed exactly 128000 or 16384 sees that field listed as undeclared
+after the upgrade and declares it again with `--set-missing-limits` or
+`/models`.
+
 A Session keeps its adopted capability snapshot. One whose model becomes
 undeclared resumes and stays readable; its next request fails in the resolver with
 the missing limits named, before credentials or network I/O. After both values are

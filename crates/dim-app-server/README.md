@@ -261,7 +261,7 @@ Startup opens a store with the exact v25 schema and a single marker of 25. A sto
 - v16 → v17, v17 → v18, v18 → v19, v19 → v20, v20 → v21 and v21 → v22 change only the marker.
 - v22 → v23 adds the Session catalog table and indexes and backfills it once from committed main history.
 - v23 → v24 changes only the marker.
-- v24 → v25 changes only the marker and drops each Provider model limit that neither `capabilityOverrideFields` marks nor the record's `metadata.raw` declares.
+- v24 → v25 changes only the marker and rewrites each Provider model limit: projection output (the remote listing, descriptor overrides and the managed catalog) drops each limit that neither `capabilityOverrideFields` marks nor the record's `metadata.raw` declares, while a custom provider's own models and its user models keep a typed value and drop only one equal to the old assumed 128000/16384 that no mark or raw declaration covers.
 
 Existing facts, v13 settings bytes and v16 request rows are preserved, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v25; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 

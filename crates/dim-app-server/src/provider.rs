@@ -27,7 +27,8 @@ use crate::{
     model_catalog::{
         BundledCatalog, CatalogCapabilities, MAX_MODEL_TOKENS, ModelEdit, ModelEntry,
         ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
-        declared_limit_values, declared_limits, inherit_limits, limits_valid,
+        declare_supplied_limits, declared_limit_values, declared_limits, inherit_limits,
+        limits_valid,
     },
     storage::SqliteStorage,
 };
@@ -1045,11 +1046,17 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
     }
     Ok(())
 }
-/// The #522 format step: a stored limit that neither
-/// `capabilityOverrideFields` marks nor the record's `metadata.raw` declares
-/// was the old assumed default, not a declaration, so the upgrade deletes it.
-/// The storage layer calls this inside its startup transaction; this module
-/// owns the record's field names.
+/// The #522 format step. Projection output, the remote listing of a record
+/// with `remoteModels`, is re-derived, so a stored limit that neither
+/// `capabilityOverrideFields` marks nor `metadata.raw` declares there was the
+/// old assumed default and the upgrade deletes it, whatever its value. A
+/// record's own models and its user models hold what a client supplied, which
+/// v24 never marked; each field there is decided by
+/// `declare_supplied_limits`: a marked or raw-declared limit is a declaration,
+/// an unmarked limit equal to the assumed 128000/16384 may be the probe's
+/// fill and is deleted, and any other value was typed and gains the mark. The
+/// storage layer calls this inside its startup transaction; this module owns
+/// the record's field names.
 pub(crate) fn rewrite_stored_limits(
     connection: &rusqlite::Connection,
 ) -> dim_agent_runtime::Result<()> {
@@ -1072,13 +1079,18 @@ pub(crate) fn rewrite_stored_limits(
         let (changed, body) = match record {
             PersistedProviderRecord::Static(mut record) => {
                 let mut changed = false;
-                for model in record
-                    .models
-                    .iter_mut()
-                    .chain(&mut record.model_config_overrides)
-                    .chain(&mut record.user_models)
-                {
+                for model in &mut record.models {
+                    changed |= if record.remote_models {
+                        drop_undeclared_limits(model)
+                    } else {
+                        declare_supplied_limits(model)
+                    };
+                }
+                for model in &mut record.model_config_overrides {
                     changed |= drop_undeclared_limits(model);
+                }
+                for model in &mut record.user_models {
+                    changed |= declare_supplied_limits(model);
                 }
                 (changed, serde_json::to_string(&*record).map_err(storage)?)
             }
