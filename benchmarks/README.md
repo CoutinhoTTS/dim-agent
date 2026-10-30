@@ -68,15 +68,19 @@ key 经 agent env 注入容器。**key 会进 agent 容器**，这是当前接�
 到 `DIM_EVAL_HOST`，并读取 `DIM_EVAL_SCRATCH`、`DIM_EVAL_REMOTE_PYTHON`（见
 [host/README.md](host/README.md)）。只有 `--dry-run` 不带 `--remote-judge` 时可以在别处运行。
 
+`--tasks-dir` 必填：任务树不在本仓库，指向 dim-eval-data 的 checkout。运行前 `daily_run.py`
+先核对该目录与它自己的 `MANIFEST.json` 逐个 digest 相同；nightly 另外核对这份 manifest 就是
+本仓库 pin 的那一份。
+
 ```bash
 # 每日粗筛：窗口内 L1 判定 + k=1 的 L2
-python3 benchmarks/daily_run.py --remote-judge
+python3 benchmarks/daily_run.py --remote-judge --tasks-dir <dim-eval-data>/frontier
 
 # 只做 L1 判定，不构建也不跑 L2
-python3 benchmarks/daily_run.py --dry-run
+python3 benchmarks/daily_run.py --dry-run --tasks-dir <dim-eval-data>/frontier
 
 # 基线采集：在某个 commit 上做 k=3 参照测量，不判窗口、不推进 state
-python3 benchmarks/daily_run.py --run-type baseline --head <commit>
+python3 benchmarks/daily_run.py --run-type baseline --head <commit> --tasks-dir <dim-eval-data>/frontier
 
 # OfficeQA Pro：同一入口，换语料、并发与 state
 python3 benchmarks/daily_run.py --remote-judge --tasks-dir <dim-eval-data>/officeqa-pro \
@@ -126,7 +130,7 @@ timeout / model_api / harness / unknown）、原因、证据和可疑 PR（只�
 一次测出了结果的运行里没有被跟踪的失败     ─► 关 issue；之后再出现就开新的
 ```
 
-「测出了结果」指退出码 0 或 7 且 ledger 已推送；打不出分的运行（退出码 6）没有分析任何失败，不能说明问题已消失，所以不关。k>1 时同一个任务只算一个失败，正文写明 k 次里失败了几次。基线里本来就过不了的题只在正文里折叠列出，不开也不撑着 issue。失败分析没跑完时不动跟踪
+「测出了结果」指退出码 0 或 7 且 ledger 已推送；打不出分的运行（退出码 6）没有分析任何失败，不能说明问题已消失，所以不关。k>1 时同一个任务只算一个失败，正文写明 k 次里失败了几次。没测出结果的那晚也不改正文，免得当晚没打分的任务从正文里消失。基线里本来就过不了的题只在正文里折叠列出，不开也不撑着 issue。失败分析没跑完时不动跟踪
 issue（全部通过的那晚除外），另开一个 `analysis-failed` issue。已知失败的记录在评测机上
 （`$DIM_EVAL_HOME/known-failures-<suite>.json`），丢了只是下一次全部当成新的。原因与可疑 PR
 是模型对单次运行的判断，不是判定：k=1 的单晚结论本来就不成立。
@@ -154,7 +158,7 @@ issue（全部通过的那晚除外），另开一个 `analysis-failed` issue。
 
 ```bash
 # 采集基线：k=3，跑完自动写 baselines/<corpus-pin>.json
-python3 benchmarks/daily_run.py --run-type baseline --head <commit>
+python3 benchmarks/daily_run.py --run-type baseline --head <commit> --tasks-dir <dim-eval-data>/frontier
 ```
 
 基线按**语料 pin**（`--tasks-dir` 下 `MANIFEST.json` 的 `tree_digest`）命名，两个语料因此各有各的 baseline，存每任务每次 trial 的
@@ -188,6 +192,7 @@ python3 benchmarks/daily_run.py --run-type baseline --head <commit>
 | 码 | 含义 | 窗口 | issue |
 |---|---|---|---|
 | `0` | 落定 | 推进 | 关闭该语料已消失的问题 |
+| `1` | 没跑起来：取代码或 ledger 失败，或任务树与 pin 的 manifest 不符（`corpus.py`） | 保持 | 开 `pipeline-error`，日志末尾写明原因 |
 | `3` | 有 PR 未被判定 | 保持 | 开（下次重判即可） |
 | `4` | L2 失败 | 保持 | 开 |
 | `5` | judge 一个都没判出来 | 保持 | 开 |
@@ -208,7 +213,7 @@ L2 失败不该被降格成一次推送失败。远端分支没有前移，所�
 
 `7` 与 `6` 的区别是**重跑有没有用**。`6` 重跑就好了，所以窗口保持、issue 催人重跑。
 `7` 重跑多少次都一样——缺的是参照，只有人能补：去冻一份 baseline（`--run-type baseline`，
-走 review，不从 schedule 触发）。所以窗口照常推进，issue 保持打开并每晚追加一条，而不是天天开新的让人
+走 review，不从 schedule 触发）。所以窗口照常推进，issue 开一次、之后保持打开但不再每晚评论，而不是天天开新的让人
 习惯忽略。全新部署、baseline 还没冻那段时间这个 issue 会一直开着，那正是当时的真实状态。
 
 **日常 k=1 对 k=3 baseline 不算这一类。** 那是设计本身：判据在不同 k 之间无定义，而 k=1

@@ -11,12 +11,16 @@ pin baselines are keyed on.
       --dataset <hf snapshot of databricks/officeqa> --dataset-revision <hf sha> \\
       --officeqa-repo <git checkout of databricks/officeqa> --reward-commit <sha> \\
       --corpus-image <registry>/officeqa-corpus@sha256:<digest> \\
-      --out benchmarks/officeqa/tasks
+      --out <checkout of arcships/dim-eval-data>/officeqa-pro
 
 Everything that changes what a task measures — question, answer, tolerance,
 reward.py, corpus image — lands in a task file, so it moves the task's digest and
 therefore the pin. The dataset and reward revisions are recorded as provenance;
 they are how to regenerate the tree, not part of what it is.
+
+Every task carries its answer, from a dataset that is only available after
+accepting its terms, so the tree goes to the private arcships/dim-eval-data and
+never into this repository; only its MANIFEST.json is copied here as the pin.
 
 The corpus itself is not here: it is ~460 MB and lives in the image that
 corpus-image/build.sh builds. See benchmarks/officeqa/README.md.
@@ -34,6 +38,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPOSITORY = HERE.parent.parent
 sys.path.insert(0, str(HERE.parent / "runner"))
 
 from assemble_tasks import REQUIRED_AFTER_ASSEMBLY, digest_dir  # noqa: E402
@@ -134,6 +139,11 @@ def write_task(row: dict[str, str], target: Path, *, reward: Path,
 def assemble(*, dataset: Path, dataset_revision: str, officeqa_repo: Path,
              reward_commit: str, corpus_image: str, tolerance: float,
              out: Path) -> dict:
+    if out.resolve().is_relative_to(REPOSITORY):
+        raise AssemblyError(
+            f"--out {out} is inside {REPOSITORY}: the tasks carry answer keys and go to "
+            "a checkout of arcships/dim-eval-data; copy only MANIFEST.json here"
+        )
     if not IMAGE_BY_DIGEST.match(corpus_image):
         raise AssemblyError(
             f"--corpus-image {corpus_image!r} is not pinned by digest "
@@ -201,7 +211,8 @@ def main() -> int:
     # Upstream's own default. Harbor's adapter uses 0.01; scores under the two
     # are not comparable, which is why the value lands in every task's config.
     parser.add_argument("--tolerance", type=float, default=0.0)
-    parser.add_argument("--out", type=Path, default=HERE / "tasks")
+    parser.add_argument("--out", type=Path, required=True,
+                        help="officeqa-pro/ in a checkout of arcships/dim-eval-data")
     args = parser.parse_args()
 
     try:

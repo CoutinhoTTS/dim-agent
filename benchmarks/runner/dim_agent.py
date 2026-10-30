@@ -3,10 +3,9 @@
 The dimcode under test is mounted read-only into the task environment as a
 prebuilt image (see ``benchmarks/README.md``: the subject under test and the
 harness are kept apart).
-``install()`` therefore never touches the network: every L2 task runs under a
-``no-network`` baseline, and only the model API host is opened for the agent
-phase through the trial-level ``extra_allowed_hosts``. The task definition is
-never modified.
+``install()`` therefore never touches the network. A no-network task opens
+only the model API host for the agent phase, through the trial-level
+``extra_allowed_hosts``; the task definition is never modified.
 
 Metrics come from the Timeline export (``dimcode export``), dimcode's read path
 for complete runs. Cost and turns are Primary gate metrics, so they are

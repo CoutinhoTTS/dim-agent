@@ -55,6 +55,12 @@ class CorpusPinFlowTest(unittest.TestCase):
         self.assertEqual(corpus.verify(self.pinned, self.checkout),
                          ["beta: missing", "gamma: not in the pinned manifest"])
 
+    def test_a_missing_checkout_is_refused_without_a_traceback(self) -> None:
+        missing = self.checkout.parent / "absent"
+        self.assertEqual(corpus.verify(self.pinned, missing), [f"{missing} is not a directory"])
+        self.assertIn("cannot read the pinned manifest",
+                      corpus.verify(missing / "MANIFEST.json", self.checkout)[0])
+
     def test_a_corpus_regenerated_without_updating_the_pin_is_refused(self) -> None:
         manifest = json.loads(self.pinned.read_text())
         manifest["tree_digest"] = "0" * 64

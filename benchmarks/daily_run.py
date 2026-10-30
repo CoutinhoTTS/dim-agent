@@ -61,6 +61,7 @@ sys.path.insert(0, str(HERE / "runner"))
 import baseline as baselines  # noqa: E402
 import build_image  # noqa: E402
 import ledger_tools  # noqa: E402
+import corpus  # noqa: E402
 import daily_batch  # noqa: E402
 import results  # noqa: E402
 
@@ -162,23 +163,28 @@ class Window:
         return f"{self.base[:9]}..{self.head[:9]}"
 
 
-DEFAULT_TASKS = HERE / "tasks"
-
-
 def corpus_pin(tasks_dir: Path) -> str:
     """The task corpus's content pin, which names its baseline file.
 
     Read from the corpus actually being run, not from the canonical one: a
     reduced corpus used to exercise the pipeline must not label its results with
     the full corpus's pin, where they would later be compared as if they were
-    the same measurement. A corpus with no manifest has no pin and is refused —
-    generate one with runner/assemble_tasks.py.
+    the same measurement. The tree must also be what its manifest says, digest
+    for digest, or a task edited without regenerating the manifest would be
+    measured, and frozen into a baseline, under a pin it does not have. A corpus
+    with no manifest has no pin and is refused — generate one with
+    runner/assemble_tasks.py.
     """
     manifest = tasks_dir / "MANIFEST.json"
     try:
-        return json.loads(manifest.read_text())["tree_digest"]
+        pin = json.loads(manifest.read_text())["tree_digest"]
     except (OSError, json.JSONDecodeError, KeyError) as error:
         raise SystemExit(f"cannot read the corpus pin from {manifest}: {error}")
+    problems = corpus.verify(manifest, tasks_dir)
+    if problems:
+        raise SystemExit(f"{tasks_dir} is not the corpus its manifest pins: "
+                         + "; ".join(problems[:5]))
+    return pin
 
 
 DEFAULT_BASELINES = HERE / "baselines"
@@ -265,11 +271,14 @@ def write_state(path: Path, head: str, run_id: str) -> None:
     """Replace the state file atomically: a truncated one stops every later run."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps({
-        "last_l2_head": head,
-        "run_id": run_id,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }, indent=2) + "\n")
+    with temporary.open("w") as stream:
+        stream.write(json.dumps({
+            "last_l2_head": head,
+            "run_id": run_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, indent=2) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(temporary, path)
     print(f"[daily] state -> {path} (last_l2_head {head[:9]})")
 
@@ -898,10 +907,10 @@ def main() -> int:
                         help="run with uncommitted changes in benchmarks/. For "
                              "deliberate experiments: the run record says the "
                              "harness was dirty, and a baseline is still refused")
-    parser.add_argument("--tasks-dir", type=Path, default=DEFAULT_TASKS,
-                        help="corpus to run (default: the pinned 30 tasks; "
-                             "OfficeQA Pro is benchmarks/officeqa/tasks). Any "
-                             "other corpus needs its own MANIFEST.json")
+    parser.add_argument("--tasks-dir", type=Path, required=True,
+                        help="corpus to run: frontier/ or officeqa-pro/ in a checkout "
+                             "of arcships/dim-eval-data, or any tree with its own "
+                             "MANIFEST.json")
     parser.add_argument("--policy", type=Path, default=daily_batch.DEFAULT_POLICY)
     parser.add_argument("--prompt", type=Path, default=daily_batch.DEFAULT_PROMPT)
     parser.add_argument("--cache-dir", type=Path,

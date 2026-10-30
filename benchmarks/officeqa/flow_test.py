@@ -146,6 +146,11 @@ class OfficeQAFlowTest(unittest.TestCase):
         with self.assertRaisesRegex(assemble.AssemblyError, "not pinned by digest"):
             self._assemble(corpus_image="registry.example/officeqa-corpus:latest")
 
+        pinned = assemble.HERE / "tasks"
+        with self.assertRaisesRegex(assemble.AssemblyError, "answer keys"):
+            self._assemble(out=pinned)
+        self.assertEqual([p.name for p in pinned.iterdir()], ["MANIFEST.json"])
+
         self.out.mkdir()
         (self.out / "keep.txt").write_text("not generated\n")
         with self.assertRaisesRegex(assemble.AssemblyError, "not an assembled"):

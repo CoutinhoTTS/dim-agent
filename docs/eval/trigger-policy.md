@@ -274,7 +274,7 @@ HF 数据集的 revision 与 `reward.py` 的上游 commit 记在 `MANIFEST.json`
 
 #### 禁网、资源与并发
 
-- 网络与 FrontierHarness 相同：`allow_internet = false`，模型主机经 trial 级 `extra_allowed_hosts` 仅在 agent 阶段放行，verifier 隔离。**不照搬 harbor adapter 的 `allow_internet = true`**——题目只需要容器内的语料，公网只会让 agent 去搜答案。
+- 网络与 FrontierHarness 的 9 个禁网任务相同：`allow_internet = false`，模型主机经 trial 级 `extra_allowed_hosts` 仅在 agent 阶段放行，verifier 隔离。**不照搬 harbor adapter 的 `allow_internet = true`**——题目只需要容器内的语料，公网只会让 agent 去搜答案。
 - 单任务 1 cpu / 8 GB / 10 GB 磁盘，agent 超时 1800 s，verifier 120 s；取自 harbor adapter 的 full-corpus 模板。
 - **并发 10**，不是 5。最坏情况的墙钟约为 133 × 1800 s ÷ 并发：并发 5 是 13.3 小时，超过单次 L2 的 9 小时 ssh 上限；并发 10 是 6.65 小时。代价是峰值 80 GB 内存——评测机放不下时降并发，同时必须放宽 CI 超时，**不能**两边都不动。并发记入 baseline 的 `params.n_concurrent_trials`，改它就要重冻 baseline。
 

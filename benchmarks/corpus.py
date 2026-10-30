@@ -27,7 +27,12 @@ from assemble_tasks import digest_dir  # noqa: E402
 
 def verify(manifest_path: Path, tasks_dir: Path) -> list[str]:
     """What differs between ``tasks_dir`` and the pinned manifest; empty if nothing."""
-    pinned = json.loads(manifest_path.read_text())
+    try:
+        pinned = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as error:
+        return [f"cannot read the pinned manifest {manifest_path}: {error}"]
+    if not tasks_dir.is_dir():
+        return [f"{tasks_dir} is not a directory"]
     tasks = pinned["tasks"]
     problems = []
     if hashlib.sha256(json.dumps(tasks, sort_keys=True).encode()).hexdigest() != pinned["tree_digest"]:

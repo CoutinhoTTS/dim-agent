@@ -1,6 +1,7 @@
 """Score /app/answer.txt with OfficeQA's official `score_answer`.
 
-`reward.py` beside this file is upstream's, byte for byte. `score_answer` only
+`reward.py` is upstream's, byte for byte; assemble.py copies it beside this
+file in every task. `score_answer` only
 ever returns 0.0 or 1.0, which is the pass/fail reward runner/results.py reads.
 
 A missing or empty answer is the agent's result and scores 0. Anything wrong on

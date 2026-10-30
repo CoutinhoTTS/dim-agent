@@ -31,6 +31,8 @@ from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
 BENCHMARKS = HERE.parent
+#: On the eval machine daily_run delivers the corpus beside runner/; this is
+#: that copy, not the manifest-only directory in this repository.
 TASKS_DIR = BENCHMARKS / "tasks"
 
 @dataclass(frozen=True)

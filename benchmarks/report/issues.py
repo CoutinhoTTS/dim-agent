@@ -370,12 +370,14 @@ def report(github: GitHub, suite: str, exit_code: int, run: dict | None,
                                     (LABEL, TRACKING_LABEL))
             done.append(f"opened #{created['number']} ({track.key})")
         elif track.tracked:
-            github.edit(issue["number"], track.title, f"{marker(track.key)}\n{track.body}")
+            # An unmeasured night's body would drop tracked tasks it never scored.
+            if measured:
+                github.edit(issue["number"], track.title, f"{marker(track.key)}\n{track.body}")
             if track.news:
                 github.comment(issue["number"], track.news)
                 done.append(f"commented on #{issue['number']} ({track.key})")
             else:
-                done.append(f"updated #{issue['number']} ({track.key})")
+                done.append(f"{'updated' if measured else 'kept'} #{issue['number']} ({track.key})")
         elif issue is not None and measured:
             run_id = (run or {}).get("run_id", "the latest run")
             github.comment(issue["number"], f"No tracked failure in `{run_id}`; closing.")

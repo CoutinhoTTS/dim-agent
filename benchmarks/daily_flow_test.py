@@ -15,6 +15,7 @@ Run: python3 -m unittest discover -s benchmarks -p 'daily_flow_test.py'
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import daily_run  # noqa: E402
+from assemble_tasks import digest_dir  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
 import daily_batch  # noqa: E402
@@ -119,6 +121,18 @@ def write_harbor_job(job: Path, k: int, unscored: int = 0) -> None:
         (directory / "result.json").write_text(json.dumps(record))
 
 
+def make_corpus(path: Path, *names: str) -> str:
+    """A corpus tree with a manifest that pins it; returns its tree digest."""
+    tasks = {}
+    for name in names:
+        (path / name).mkdir(parents=True)
+        (path / name / "task.toml").write_text(f'[task]\nname = "{name}"\n')
+        tasks[name] = {"digest": digest_dir(path / name), "upstream": "test", "overlaid": []}
+    pin = hashlib.sha256(json.dumps(tasks, sort_keys=True).encode()).hexdigest()
+    (path / "MANIFEST.json").write_text(json.dumps({"tree_digest": pin, "tasks": tasks}))
+    return pin
+
+
 class DailyFlowTest(unittest.TestCase):
     """End-to-end runs over a real git repository and a faked eval machine.
 
@@ -155,6 +169,8 @@ class DailyFlowTest(unittest.TestCase):
         # on whether the developer happened to have saved a file — green on CI,
         # red on a laptop mid-edit, for reasons having nothing to do with the
         # behaviour under test.
+        self.tasks = self.root / "tasks"
+        self.pin = make_corpus(self.tasks, "a")
         self.tooling = self.root / "tooling"
         (self.tooling / "benchmarks").mkdir(parents=True)
         git(self.tooling, "init", "-q", "-b", "main")
@@ -203,6 +219,7 @@ class DailyFlowTest(unittest.TestCase):
             "--out", str(self.out),
             "--baselines-dir", str(self.baselines),
             "--ledger-dir", str(self.ledger),
+            "--tasks-dir", str(self.tasks),
             "--host", "eval@host", "--scratch", "/scratch",
             "--remote-python", "/venv/bin/python",
             "--prompt", str(self.prompt),
@@ -305,6 +322,15 @@ class DailyFlowTest(unittest.TestCase):
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
         self._run(mode="invisible")
         self.assertEqual([m["sha"] for m in self._manifest()["merges"]], [landed, head])
+
+    def test_a_corpus_that_is_not_its_manifest_is_refused_before_the_build(self) -> None:
+        self._merge("one", "a.txt", "a\n")
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        (self.tasks / "a" / "task.toml").write_text("edited\n")
+        with self.assertRaises(SystemExit) as caught:
+            self._run(mode="visible")
+        self.assertIn("a: content differs from its pinned digest", str(caught.exception))
+        self.assertEqual(self.built, [])
 
     def test_invisible_batch_closes_the_window_without_running_l2(self) -> None:
         head = self._merge("docs", "notes.md", "notes\n")
@@ -955,11 +981,7 @@ class DailyFlowTest(unittest.TestCase):
         self.assertEqual(manifest["run_type"], "baseline")
         self.assertIsNone(manifest["window"]["base"])
         self.assertEqual(manifest["merges"], [])
-        self.assertEqual(
-            manifest["corpus_pin"],
-            json.loads((Path(daily_run.__file__).parent / "tasks" / "MANIFEST.json")
-                       .read_text())["tree_digest"],
-        )
+        self.assertEqual(manifest["corpus_pin"], self.pin)
 
     def test_baseline_at_k1_is_refused(self) -> None:
         """The one thing that must not happen quietly: a reference nothing in a
@@ -979,8 +1001,7 @@ class DailyFlowTest(unittest.TestCase):
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
         self.assertEqual(self._run(run_type="baseline"), 0)
 
-        pin = json.loads((Path(daily_run.__file__).parent / "tasks" /
-                          "MANIFEST.json").read_text())["tree_digest"]
+        pin = self.pin
         frozen = json.loads((self.baselines / f"{pin}.json").read_text())
         # The version the CLI reported inside the trials, which is what says
         # which build these numbers describe.
@@ -1000,17 +1021,15 @@ class DailyFlowTest(unittest.TestCase):
         top of the 30-task one — and the concurrency it was measured at must reach
         both the remote run and the reference it freezes."""
         tasks = self.root / "officeqa-tasks"
-        tasks.mkdir()
-        (tasks / "MANIFEST.json").write_text(json.dumps(
-            {"tree_digest": "f" * 64, "tasks": {}}))
+        pin = make_corpus(tasks, "UID0001")
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
         self.assertEqual(self._run(run_type="baseline", extra=[
             "--tasks-dir", str(tasks), "--concurrency", "10"]), 0)
 
         self.assertEqual(self.concurrency, [10])
-        self.assertEqual([p.name for p in self.baselines.iterdir()], [f"{'f' * 64}.json"])
-        frozen = json.loads((self.baselines / f"{'f' * 64}.json").read_text())
-        self.assertEqual(frozen["corpus_pin"], "f" * 64)
+        self.assertEqual([p.name for p in self.baselines.iterdir()], [f"{pin}.json"])
+        frozen = json.loads((self.baselines / f"{pin}.json").read_text())
+        self.assertEqual(frozen["corpus_pin"], pin)
         self.assertEqual(frozen["params"]["n_concurrent_trials"], 10)
 
     def test_a_baseline_is_not_frozen_when_the_model_identity_is_missing(self) -> None:

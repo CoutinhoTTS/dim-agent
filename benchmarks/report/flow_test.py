@@ -360,6 +360,17 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertEqual(done, [])
         self.assertEqual(self.github.issues[1]["state"], "open")
 
+    def test_an_unscoreable_night_leaves_the_body_as_last_measured(self) -> None:
+        """A tracked task left unscored tonight must not drop out of the body."""
+        reply = {"category": "agent", "cause": "Broke.", "evidence": "x",
+                 "same_as_known": True, "suspects": []}
+        replies = {"regex": dict(reply, same_as_known=False), "grep": dict(reply, same_as_known=False)}
+        _, known, _, _ = self.night({"regex": 0.0, "grep": 0.0}, replies, {})
+        body = self.github.issues[1]["body"]
+        *_, done = self.night({"regex": 0.0, "grep": -1.0}, {"regex": reply}, known, exit_code=6)
+        self.assertEqual(done, ["kept #1 (frontier/tracking)"])
+        self.assertEqual(self.github.issues[1]["body"], body)
+
     def test_a_task_that_failed_several_trials_is_one_failure(self) -> None:
         reply = {"category": "agent", "cause": "Broke.", "evidence": "x",
                  "same_as_known": False, "suspects": []}
