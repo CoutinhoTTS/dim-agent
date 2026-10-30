@@ -101,10 +101,10 @@ output rules, exposed without changing their behavior.
 `read` returns a PNG, JPEG, WebP or GIF file as an image block and one text
 line, recognized from the file's content rather than its extension
 ([images.rs](../../../../crates/dim-agent-capabilities/src/images.rs)). The line
-gives the path and the pixel size; an image that had to be re-encoded also gives
-the size sent, in pixels and bytes; an animation says only its first frame was
-sent; `offset` or `limit` on an image adds one sentence saying they do not
-apply.
+gives the path and the pixel size after any EXIF orientation; an image that had
+to be re-encoded also gives the size sent, in pixels and bytes; an animation
+says only its first frame was sent; `offset` or `limit` on an image adds one
+sentence saying they do not apply.
 
 Recognition comes before the extension refusal. The stat and directory checks
 run first, then `read` opens the file and reads its head: content that is an
@@ -121,11 +121,13 @@ sent pixels are upright, and re-encoded to fit: a PNG source stays PNG while
 its scaled PNG fits, everything else becomes JPEG at quality 85, transparent
 pixels flattened onto white, and the long edge steps down until the encoding
 fits. An image within both limits with no orientation to apply is sent byte
-for byte. An animation is always re-encoded from its first
-frame, its EXIF orientation applied the same way, so the frame sent is upright
-as a still's pixels are. One guard keeps memory bounded: a header claiming more
-than 100 megapixels is refused from its dimensions before the pixels are
-decoded, and the refusal names the dimensions and asks for a smaller copy.
+for byte. An animation is always re-encoded from its first frame, its EXIF
+orientation applied the same way, so the frame sent is upright as a still's
+pixels are. The line's pixel size is the source's size after its EXIF
+orientation, so it compares with the size sent. One guard keeps memory bounded:
+a header claiming more than 100 megapixels is refused from its dimensions
+before the pixels are decoded, and the refusal names the dimensions and asks
+for a smaller copy.
 Decoding is bounded by that guard too: a decoder that takes an allocation
 limit may allocate at most 800 MB, the guard at eight bytes per pixel — the
 largest format `read` decodes, 16-bit RGBA — and an allocation refused for size

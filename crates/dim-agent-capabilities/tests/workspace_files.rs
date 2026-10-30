@@ -1494,7 +1494,7 @@ async fn read_turns_an_exif_rotated_photo_upright() {
     let result = workspace.read(&reads, "portrait.jpg").await;
     assert_eq!(result.is_error, None);
     let (line, source) = image_blocks(&result);
-    assert!(line.contains("(40x20 px)"), "{line}");
+    assert!(line.contains("(20x40 px)"), "{line}");
     assert!(line.contains("Sent 20x40 px as image/jpeg"), "{line}");
     let image = decoded(source);
     assert_eq!(image.dimensions(), (20, 40), "the sent pixels are upright");
@@ -1504,6 +1504,9 @@ async fn read_turns_an_exif_rotated_photo_upright() {
     let bottom = image.get_pixel(0, 39);
     assert!(top[0] > 200 && top[2] < 60, "top {top:?}");
     assert!(bottom[2] > 200 && bottom[0] < 60, "bottom {bottom:?}");
+    let structured = structured(&result);
+    assert_eq!(structured["width"], 20);
+    assert_eq!(structured["height"], 40);
 }
 
 #[tokio::test]
@@ -1624,7 +1627,7 @@ async fn read_turns_an_animated_webp_first_frame_upright() {
     let result = workspace.read(&reads, "anim.webp").await;
     assert_eq!(result.is_error, None);
     let (line, source) = image_blocks(&result);
-    assert!(line.contains("(40x20 px)"), "{line}");
+    assert!(line.contains("(20x40 px)"), "{line}");
     assert!(
         line.contains("Animated WebP: only the first frame was sent."),
         "{line}"

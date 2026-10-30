@@ -126,10 +126,11 @@ pub struct ScaledImage {
     pub media_type: &'static str,
     /// The file's own format.
     pub kind: ImageKind,
-    /// The pixel size the file's header stores, before the EXIF orientation.
+    /// The pixel size of the source after its EXIF orientation, before any
+    /// scaling: the header's size with a 90° or 270° turn's axes swapped.
     pub original: ImageSize,
-    /// The pixel size of `bytes`: the header's size with the EXIF orientation
-    /// applied, scaled down when it exceeded a limit.
+    /// The pixel size of `bytes`: [`Self::original`] scaled down when it
+    /// exceeded a limit.
     pub sent: ImageSize,
     /// Whether `bytes` were re-encoded — scaled to fit, or turned upright.
     /// When false they are the file's own bytes, unchanged.
@@ -156,8 +157,8 @@ pub enum ImageRefusal {
 /// Makes an image acceptable to a model.
 ///
 /// In: a seekable byte source — a file, or a `Cursor` over bytes that are
-/// already in memory. Out: the bytes to send, their media type, the size
-/// stored in the source's header, the size actually sent, and whether the bytes
+/// already in memory. Out: the bytes to send, their media type, the size after
+/// the source's EXIF orientation, the size actually sent, and whether the bytes
 /// were re-encoded.
 ///
 /// The whole source is never buffered: the first bytes are read to recognize
@@ -430,11 +431,26 @@ fn reencoded(
         bytes,
         media_type,
         kind,
-        original: stored,
+        original: oriented(stored, orientation),
         sent,
         scaled: true,
         animated,
     })
+}
+
+/// The stored size after the EXIF orientation: a 90° or 270° turn swaps the
+/// axes, so the size sent compares against the size the line names.
+fn oriented(stored: ImageSize, orientation: Orientation) -> ImageSize {
+    match orientation {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => ImageSize {
+            width: stored.height,
+            height: stored.width,
+        },
+        _ => stored,
+    }
 }
 
 /// The length of `raw` bytes once base64-encoded, padding included.
