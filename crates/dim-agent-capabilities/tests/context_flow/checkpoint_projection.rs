@@ -97,7 +97,7 @@ async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() 
     assert_eq!(
         context_baseline
             .iter()
-            .map(|entry| (entry.key.as_str(), entry.message.clone()))
+            .map(|entry| (entry.key.as_str(), entry.message.as_ref().clone()))
             .collect::<Vec<_>>(),
         [("a", Message::text(Role::User, "<live>a</live>"))]
     );
@@ -554,7 +554,7 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
             vec![ContextBaselineEntry {
                 key: "rule".into(),
                 source_event: source.into(),
-                message: Message::text(Role::User, text),
+                message: Arc::new(Message::text(Role::User, text)),
             }],
         )
     };

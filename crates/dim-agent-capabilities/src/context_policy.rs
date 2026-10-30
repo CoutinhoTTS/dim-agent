@@ -1009,7 +1009,7 @@ fn project(
         .iter()
         .cloned()
         .map(Arc::new)
-        .chain(baseline.iter().map(|entry| Arc::new(entry.message.clone())))
+        .chain(baseline.iter().map(|entry| entry.message.clone()))
         .chain(kept.iter().map(|entry| entry.message.clone()))
         .chain(request.messages[prefix_len..].iter().cloned())
         .collect();
@@ -1584,7 +1584,7 @@ impl<'a> Retention<'a> {
             history[cut.entry - 1]
                 .baseline
                 .iter()
-                .map(|entry| entry.message.clone())
+                .map(|entry| entry.message.as_ref().clone())
                 .collect(),
         ) - self.empty;
         let pins =
@@ -1748,7 +1748,12 @@ fn resident_parts(
         ),
         (
             InsufficientSpacePartName::KeyedBaseline,
-            count(baseline.iter().map(|entry| entry.message.clone()).collect()) - base,
+            count(
+                baseline
+                    .iter()
+                    .map(|entry| entry.message.as_ref().clone())
+                    .collect(),
+            ) - base,
         ),
         (
             InsufficientSpacePartName::Summary,

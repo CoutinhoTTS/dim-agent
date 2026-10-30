@@ -605,7 +605,8 @@ impl DynPlugin for RewriteBaseline {
                 }) = &mut draft.kind
                 {
                     for entry in context_baseline {
-                        entry.message = Message::text(Role::User, "host-selected baseline");
+                        entry.message =
+                            Arc::new(Message::text(Role::User, "host-selected baseline"));
                     }
                 }
                 Ok(draft)
@@ -673,7 +674,7 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         request
             .messages
             .iter()
-            .any(|message| message.as_ref() == &baseline[0].message)
+            .any(|message| message.as_ref() == baseline[0].message.as_ref())
     }));
     let compacted = events
         .iter()

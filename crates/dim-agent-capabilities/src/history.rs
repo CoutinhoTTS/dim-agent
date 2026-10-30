@@ -203,7 +203,7 @@ fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionE
                         (!retire).then(|| ContextBaselineEntry {
                             key: key.clone(),
                             source_event: event.id.clone(),
-                            message: message.clone(),
+                            message: Arc::new(message.clone()),
                         }),
                     )
                 }),
@@ -565,11 +565,7 @@ pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> V
     }) = context_compaction(context)
     {
         messages.extend(replacement.iter().cloned().map(Arc::new));
-        messages.extend(
-            context_baseline
-                .iter()
-                .map(|entry| Arc::new(entry.message.clone())),
-        );
+        messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));
     }
     messages.extend(history.iter().map(|entry| entry.message.clone()));
     messages

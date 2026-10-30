@@ -117,7 +117,7 @@ fn the_baseline_keeps_each_live_key_at_its_first_delivery_with_its_latest_block(
             .unwrap()
             .baseline
             .iter()
-            .map(|entry| entry.message.clone())
+            .map(|entry| entry.message.as_ref().clone())
             .collect::<Vec<_>>(),
         [
             Message::text(Role::User, "<b-2/>"),

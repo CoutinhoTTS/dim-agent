@@ -3897,7 +3897,7 @@ fn baseline_message(events: &[Arc<AgentEvent>], key: &str) -> Option<Message> {
     baseline
         .into_iter()
         .find(|entry| entry.key == key)
-        .map(|entry| entry.message)
+        .map(|entry| std::sync::Arc::unwrap_or_clone(entry.message))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
