@@ -2342,7 +2342,10 @@ mod tests {
     /// whatever fields the request type carries: a request with a capability
     /// snapshot, request metadata and a field added after the renderer was
     /// written comes back whole, because the renderer starts from the request
-    /// itself and replaces only what it renders (issue #635).
+    /// itself and replaces only what it renders. The view also says each
+    /// request's message count, and a branch's first request is given in full
+    /// against its own line's previous request, never another line's (issue
+    /// #635).
     ///
     /// A dedicated test, because no flow produces these fields: both of the
     /// runner's flows serve a development model configuration, whose
@@ -2371,23 +2374,27 @@ mod tests {
                 "aFieldAddedLater": {"kept": true},
             })
         }
-        let line = |request: Value| {
+        let line = |branch: &str, request: Value| {
             json!({
                 "kind": "event",
-                "branch_id": "main",
+                "branch_id": branch,
                 "event": {"type": "model", "name": "call", "data": {"request": request}},
             })
             .to_string()
         };
         let export = [
             r#"{"kind":"header","export":1}"#.to_owned(),
-            line(request(&["one"])),
-            line(request(&["one", "two"])),
-            r#"{"kind":"end","branches":1,"events":2}"#.to_owned(),
+            line("main", request(&["one"])),
+            line("main", request(&["one", "two"])),
+            // The other line's first request is the one `main` made last, so
+            // only the line it belongs to says it was given in full.
+            line("other", request(&["one", "two"])),
+            r#"{"kind":"end","branches":2,"events":3}"#.to_owned(),
         ]
         .join("\n");
-        let rebuilt = rebuilt_requests(&judge_view(&export));
-        assert_eq!(rebuilt.len(), 2, "both requests are in the view");
+        let view = judge_view(&export);
+        let rebuilt = rebuilt_requests(&view);
+        assert_eq!(rebuilt.len(), 3, "every request is in the view");
         for (index, request) in rebuilt {
             let original: Value = serde_json::from_str(export.lines().nth(index).unwrap()).unwrap();
             assert_eq!(
@@ -2395,12 +2402,22 @@ mod tests {
                 "the request at line {index} is rebuilt from the view"
             );
         }
+        let other: Value = view
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|line| line["branch_id"] == "other")
+            .unwrap();
+        assert!(
+            other["event"]["data"]["request"]["messages"].is_array(),
+            "the other line's first request is given in full: {other}"
+        );
     }
 
     /// The requests [`judge_view`] rendered, rebuilt from the view alone: the
     /// line each came from, and the request its export carried. A field
     /// rendered as `{"unchanged": true}` takes the previous request's value on
-    /// its line, and `addedMessages` continues the previous request's list.
+    /// its line, `addedMessages` continues the previous request's list, and
+    /// the view's message count must be the rebuilt list's.
     fn rebuilt_requests(view: &str) -> Vec<(usize, Value)> {
         let mut previous: BTreeMap<String, Value> = BTreeMap::new();
         let mut rebuilt = Vec::new();
@@ -2415,12 +2432,13 @@ mod tests {
             let earlier = previous.get(&branch).cloned();
             let mut request = serde_json::Map::new();
             let mut messages = None;
+            let mut counted = None;
             for (field, value) in rendered {
                 let unchanged = value.as_object().is_some_and(|marker| {
                     marker.len() == 1 && marker.get("unchanged") == Some(&json!(true))
                 });
                 match field.as_str() {
-                    "messageCount" => {}
+                    "messageCount" => counted = value.as_u64(),
                     "addedMessages" => {
                         let mut all = earlier
                             .as_ref()
@@ -2448,6 +2466,14 @@ mod tests {
             if let Some(messages) = messages {
                 request.insert("messages".to_owned(), messages);
             }
+            assert_eq!(
+                request
+                    .get("messages")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len) as u64,
+                counted.expect("the view says each request's message count"),
+                "the message count is the rebuilt request's"
+            );
             let request = Value::Object(request);
             previous.insert(branch, request.clone());
             rebuilt.push((index, request));
