@@ -203,10 +203,13 @@ impl Collaboration {
             NewMember::Agent(id) if !self.visible(&id, leader_id) => {
                 return Err(Refusal::AgentNotFound.into());
             }
-            NewMember::Agent(id) => (
-                self.index.host(Some(&id)).ok_or(Refusal::AgentNotFound)?,
-                false,
-            ),
+            NewMember::Agent(id) => {
+                let host = self.index.host(Some(&id)).ok_or(Refusal::AgentNotFound)?;
+                if host.owner.is_some() && !self.index.has_members(&id).await {
+                    return Err(Refusal::AgentNotFound.into());
+                }
+                (host, false)
+            }
             NewMember::Temporary(profile) => {
                 let host = match self
                     .index

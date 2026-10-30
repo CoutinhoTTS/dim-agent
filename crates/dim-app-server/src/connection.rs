@@ -997,11 +997,7 @@ impl Connection {
                     .owner(&params.agent_id)
                     .is_some_and(|owner| owner.is_some())
                 {
-                    return Some(Err(RpcError::app(
-                        -32000,
-                        "agent_owned",
-                        "An owned Agent ends with its Team",
-                    )));
+                    return Some(Err(crate::protocol::agent_unknown()));
                 }
                 match rpc.index.close(&params.agent_id).await {
                     Ok(()) => Ok(Reply::empty()),

@@ -1183,6 +1183,25 @@ impl AgentIndex {
         self.directory.inner.lock().expect("agent index").sweep();
         Ok(())
     }
+    /// Whether an Agent has any member Session, loaded or stored. An owned
+    /// Agent with none is an incomplete delegation, which no request may
+    /// address.
+    pub(crate) async fn has_members(&self, agent_id: &str) -> bool {
+        if self
+            .host(Some(agent_id))
+            .is_some_and(|host| !host.agent.sessions().is_empty())
+        {
+            return true;
+        }
+        match &self.records {
+            Some(records) => records
+                .member_sessions(agent_id)
+                .await
+                .map(|members| !members.is_empty())
+                .unwrap_or(true),
+            None => false,
+        }
+    }
     /// An owned Agent with no open member Session closes; its record goes
     /// when no stored member Session keeps it. A public Agent stays loaded.
     pub(crate) async fn release_owned(&self, agent_id: &str) {

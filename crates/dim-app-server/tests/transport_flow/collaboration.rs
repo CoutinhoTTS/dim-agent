@@ -4467,7 +4467,7 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
         .rpc("agent.close", json!({"agentId": temporary}))
         .await;
     assert_eq!(
-        closed["error"]["data"]["appError"], "agent_owned",
+        closed["error"]["data"]["appError"], "agent_unknown",
         "{closed}"
     );
     let forked = client
