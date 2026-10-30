@@ -10,6 +10,8 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const SOURCE: &str = "model-log";
@@ -40,6 +42,9 @@ pub struct ModelLogPlugin {
     settings: Key<SettingsService>,
     files: Key<FileStorage>,
     home: usize,
+    /// Serializes the read and the recorder swap, so an older document
+    /// cannot be applied after a newer one.
+    order: Arc<Mutex<()>>,
 }
 
 impl ModelLogPlugin {
@@ -48,6 +53,7 @@ impl ModelLogPlugin {
             settings: names.key()?,
             files: names.key()?,
             home,
+            order: Arc::new(Mutex::new(())),
         })
     }
 }
@@ -66,7 +72,7 @@ impl DynPlugin for ModelLogPlugin {
             let settings = ctx.require_at(&self.settings)?;
             let files = ctx.require_at(&self.files)?;
             settings.register_declared(ctx, source_declaration())?;
-            if let Err(error) = apply(&settings, &files, self.home).await {
+            if let Err(error) = apply(&settings, &files, self.home, &self.order).await {
                 return Err(rutis::Error::from(ErrorKind::PluginFailed(error)));
             }
             if let Err(error) = ctx.effect(|| async {
@@ -78,14 +84,16 @@ impl DynPlugin for ModelLogPlugin {
             }
             let settings = settings.clone();
             let files = files.clone();
+            let order = self.order.clone();
             let home = self.home;
             ctx.listen::<SettingsChanged>()
                 .name(settings_changes(SOURCE))
                 .on(move |_, _| {
                     let settings = settings.clone();
                     let files = files.clone();
+                    let order = order.clone();
                     async move {
-                        if let Err(error) = apply(&settings, &files, home).await {
+                        if let Err(error) = apply(&settings, &files, home, &order).await {
                             tracing::warn!(%error, "model request recording was not updated");
                         }
                         Ok(None)
@@ -102,7 +110,9 @@ async fn apply(
     settings: &SettingsService,
     files: &FileStorage,
     home: usize,
+    order: &Mutex<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _order = order.lock().await;
     let root = files.root_path(home)?;
     let cancel = CancellationToken::new();
     let snapshot = settings
