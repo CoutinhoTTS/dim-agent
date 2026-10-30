@@ -130,16 +130,9 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 
 ### P3 按边界重放（核心，#710）
 
-每次 prepare 保留渲染器的投影状态，下一次只处理新增事件。保留值属于 branch：
-
-```rust
-struct ProjectionResume {
-    position: TimelinePosition,        // 已消费到的 (branch, sequence)
-    state: ProjectionCheckpointState,  // retain_from, prompts, delivered, inputs, configuration, output, open_tools, output_open
-    entries: Vec<HistoryEntry>,        // 前缀；P1 后 message 是 Arc<Message>
-    origins: Vec<usize>,               // entry 到事件下标的映射
-}
-```
+每次 prepare 保留渲染器已有的 `Projection`（`history`、`origins`、`state`，
+[history.rs:285](../../crates/dim-agent-capabilities/src/history.rs#L285)）和它覆盖的 `TimelinePosition`，
+下一次只处理新增事件。两者都是现有内部类型，不新增对外概念；`Projection` 从私有改为 `pub(crate)`。
 
 - **读取**：同一分支上用 `Timeline::local(position.sequence + 1..=through)`
   （[timeline.rs:718](../../crates/dim-agent-runtime/src/core/timeline.rs#L718)）。事件按序交给
@@ -147,21 +140,21 @@ struct ProjectionResume {
   `Option<&ProjectionCheckpointState>`（[history.rs:291](../../crates/dim-agent-capabilities/src/history.rs#L291)），
   新增 crate 内续接 API 返回新的 entries/origins/state。
 - **不复用 `ProjectionCheckpoint`**：`decode_checkpoint` 只接受锚定 completed `context/compaction`
-  的快照（[history.rs:77](../../crates/dim-agent-capabilities/src/history.rs#L77)），而这里的 resume 是
+  的快照（[history.rs:77](../../crates/dim-agent-capabilities/src/history.rs#L77)），而这里的续接点是
   上一次 prepare，可能没有压缩。持久快照和 `context_with_checkpoint` 保持原样。
 - **提交点**：把现有 `prepared: Mutex<Option<(String, u64, Arc<ModelRequest>)>>`
   （[context_preparation.rs:295](../../crates/dim-agent-capabilities/src/context_preparation.rs#L295)）
-  换成 `PreparedStep { turn_id, through, request, resume }`。当前写入点
+  换成 `PreparedStep { turn_id, through, request, projection, position }`。当前写入点
   [context_preparation.rs:534](../../crates/dim-agent-capabilities/src/context_preparation.rs#L534) 在渲染和前缀校验之前；
-  改为在前缀校验成功后与 request 一起写一次。取消、host prepare 失败或前缀校验失败都不推进 resume；
+  改为在前缀校验成功后与 request 一起写一次。取消、host prepare 失败或前缀校验失败都不推进投影；
   下一次仍从上一个成功边界继续。
-- **失效与回退**：没有 resume（首次/重载）、resume 不在当前分支、`through < position.sequence`、
+- **失效与回退**：没有保留投影（首次/重载）、position 不在当前分支、`through < position.sequence`、
   position 之后出现 `context/compaction`、续接返回错误，或与全量重建的前缀不一致时，用
   `rendered_context` 全量重建并替换。prompt/config/input/tool 事件在 position 之后按序应用；
   它们已经在 `ProjectionCheckpointState` 里（`inputs`、`delivered`、`prompts`、`configuration`、
   `open_tools`、`output`、`output_open`，[checkpoint.rs:40](../../crates/dim-agent-types/src/checkpoint.rs#L40)）。
 - **不保留原始历史**：保留的是前缀 entries 和状态，也就是模型请求本来就需要的内容；重载时全量重建一次。
-- **与快照的关系**：持久快照仍是跨进程/跨装载的加速；内存 resume 只服务同一装载内的连续 prepare。
+- **与快照的关系**：持久快照仍是跨进程/跨装载的加速；内存中的投影只服务同一装载内的连续 prepare。
 
 这一步把每步分配从 O(历史) 降到 O(新增事件)，是关键修复。
 
@@ -176,7 +169,7 @@ struct ProjectionResume {
 | --- | --- |
 | 现有流程 | `context_flow`、`context_policy`、`storage_flow` 不变通过 |
 | 增量/全量一致 | 在固定前缀上交替执行增量续接与全量重放，entries/state 必须一致（复用 checkpoint_projection 的测试模式） |
-| 失败路径 | 取消、host prepare 失败、前缀校验失败都不推进 resume；重试仍从上一个成功边界开始 |
+| 失败路径 | 取消、host prepare 失败、前缀校验失败都不推进投影；重试仍从上一个成功边界开始 |
 | 每步分配 | P0 example：改动前后的 live/peak 曲线 |
 | 堆高水位 | P0 验证最大会话的堆高水位是否随步数增长；不是断言，是测量 |
 | 产品验证 | 同一负载重启后观察 RSS 与 `malloc_info` 的 in-use/free 比例 |
@@ -196,7 +189,7 @@ struct ProjectionResume {
 
 | 项 | 说明 |
 | --- | --- |
-| P3 的一致性 | 投影必须与 Timeline 已发布事实一致；resume 只在前缀校验成功后提交，失效或续接错误回退全量重建；增量与全量在固定前缀上必须一致 |
+| P3 的一致性 | 投影必须与 Timeline 已发布事实一致；投影只在前缀校验成功后提交，失效或续接错误回退全量重建；增量与全量在固定前缀上必须一致 |
 | P3 的内存 | 保留前缀 entries + `ProjectionCheckpointState`，约为上下文大小；不是历史；重载重建 |
 | P3 的提交点 | 取消、host prepare 失败、前缀校验失败都不推进；下一次从上一个成功边界继续 |
 | P1 的分配 | `Arc` 从 request 移到 entry，替换当前 `map(Arc::new)`，净减少一次/消息；P0 验证 |
@@ -208,7 +201,7 @@ struct ProjectionResume {
 
 - **§4 rule 1**（改别的模块的状态要写指令事件）：不适用。投影是 branch 内由 Timeline 事实派生的状态，
   不改变其他模块的状态，不新增指令事件或结果事件。
-- **rule 2**（交接后不能撤回）：不适用，交接没有变化。P3 只复用已交接事件的重放结果；resume 只在
+- **rule 2**（交接后不能撤回）：不适用，交接没有变化。P3 只复用已交接事件的重放结果；投影只在
   请求前缀校验成功后提交，取消或失败不推进。
 - **rule 3**（before 只同步变换草稿）：不适用，没有 before 回调。
 - **rule 4**（核心机制不带业务含义）：不适用，Timeline、Dispatcher、批次不改；投影在 capability 内。
