@@ -10252,13 +10252,6 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::summary_strategy",
-      "to": "dim_agent_types::prompt",
-      "references": [
-        "path prompt"
-      ]
-    },
-    {
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::context_block",
       "references": [

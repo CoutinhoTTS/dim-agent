@@ -88,10 +88,10 @@ impl LengthSentence {
             Err(LengthSentenceError)
         }
     }
-    /// The sentence with `target` in its placeholder, counted as the
-    /// diagnostics count it.
-    fn render(&self, target: f64) -> String {
-        self.0.replace("{target}", &format!("{target:.0}"))
+    /// `template` with `target` in its one `{target}` placeholder, counted as
+    /// the diagnostics count it.
+    fn render(template: &str, target: f64) -> String {
+        template.replace("{target}", &format!("{target:.0}"))
     }
     /// The template as the configuration states it.
     pub fn as_str(&self) -> &str {
@@ -189,15 +189,15 @@ impl SummaryStrategy {
     /// [`SYSTEM`], and when a target applies, the factory's length sentence
     /// or [`LENGTH_SENTENCE`] with the target in its placeholder.
     fn system(&self, target: Option<f64>) -> String {
-        let prompt = self.system_prompt.as_deref().unwrap_or(SYSTEM);
+        let base = self.system_prompt.as_deref().unwrap_or(SYSTEM);
         let Some(target) = target else {
-            return prompt.to_owned();
+            return base.to_owned();
         };
-        let sentence = match &self.length_sentence {
-            Some(sentence) => sentence.render(target),
-            None => LENGTH_SENTENCE.replace("{target}", &format!("{target:.0}")),
-        };
-        format!("{prompt} {sentence}")
+        let template = self
+            .length_sentence
+            .as_ref()
+            .map_or(LENGTH_SENTENCE, LengthSentence::as_str);
+        format!("{base} {}", LengthSentence::render(template, target))
     }
     async fn compact_inner(
         &self,
@@ -757,9 +757,7 @@ mod tests {
     #[test]
     fn a_length_sentence_needs_one_target_placeholder() {
         assert_eq!(
-            LengthSentence::new("Keep it under about {target} tokens.")
-                .unwrap()
-                .render(1_200.),
+            LengthSentence::render("Keep it under about {target} tokens.", 1_200.),
             "Keep it under about 1200 tokens."
         );
         assert!(LengthSentence::new("Keep it short.").is_err());
