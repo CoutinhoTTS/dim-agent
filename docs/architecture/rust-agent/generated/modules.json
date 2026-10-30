@@ -2980,6 +2980,17 @@
       ]
     },
     {
+      "id": "dim_cli::recording",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/recording.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "println"
+      ]
+    },
+    {
       "id": "dim_cli::sanitize",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -21523,6 +21534,7 @@
         "path Action::Migration",
         "path Action::Models",
         "path Action::Plugin",
+        "path Action::Recording",
         "path Action::RuntimeInstall",
         "path Action::RuntimeList",
         "path Action::Timeline",
@@ -21719,6 +21731,14 @@
       "to": "dim_cli::question",
       "references": [
         "mod question"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::recording",
+      "references": [
+        "mod recording",
+        "path recording::run"
       ]
     },
     {
@@ -23428,6 +23448,30 @@
       ]
     },
     {
+      "from": "dim_cli::recording",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::recording",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::recording",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::session",
       "to": "dim_agent_types::content",
       "references": [
@@ -23732,6 +23776,7 @@
         "path Command::Provider",
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
+        "path Command::Recording",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::SaveIsolation",
@@ -23904,6 +23949,15 @@
         "path Projection::default",
         "path Projection::for_branch",
         "use crate::projection::Projection"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::recording",
+      "references": [
+        "path crate::recording::read",
+        "path crate::recording::report",
+        "path crate::recording::set"
       ]
     },
     {
@@ -29425,6 +29479,7 @@
         "path Command::Provider",
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
+        "path Command::Recording",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::SaveIsolation",
