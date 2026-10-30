@@ -3181,6 +3181,7 @@
         "format",
         "include_str",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -23140,6 +23141,13 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::images",
+      "references": [
+        "path crate::images::marker"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellRun::parse",
@@ -24660,10 +24668,12 @@
       "to": "dim_cli::images",
       "references": [
         "path crate::images::Attached",
+        "path crate::images::Attached::block",
         "path crate::images::Item::Image",
         "path crate::images::Item::Text",
         "path crate::images::file",
-        "path crate::images::is_image"
+        "path crate::images::is_image",
+        "path crate::images::marker"
       ]
     },
     {
@@ -25052,10 +25062,35 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::attachments",
+      "references": [
+        "path crate::attachments::pasted_entries"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::images",
       "references": [
+        "path crate::images::Attached",
         "path crate::images::from_bytes",
         "path crate::images::from_pixels"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path DraftPart",
+        "path DraftPart::Block",
+        "path DraftPart::Paste",
+        "path DraftPart::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::Projection::default"
       ]
     },
     {
@@ -25070,14 +25105,26 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn",
+        "path crate::ui::i18n::active",
+        "path crate::ui::i18n::set"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
         "path KeyCode::Backspace",
         "path KeyCode::Char",
+        "path KeyCode::Delete",
         "path KeyCode::Down",
+        "path KeyCode::End",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
+        "path KeyCode::Home",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",

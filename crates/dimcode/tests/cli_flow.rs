@@ -3585,7 +3585,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.until("test / model");
     terminal.write(b"look ");
     terminal.paste(image.to_str().unwrap());
-    terminal.until("[shot.png]");
+    terminal.until("[Image #1]");
     terminal.paste(&long);
     terminal.until("16385 chars");
     terminal.write(b"\r");
