@@ -98,7 +98,7 @@ The producer keeps these invariants:
 
 - A restart restores Teams from the durable facts: owned Agents load owned, and member Sessions load with their leader. Nothing becomes public by being unloaded, unread or reloaded.
 - `close` settles the request and closes the member Session in this process. The Session records, its leader and its Agent's record stay, so a restart loads the member again as an ordinary Session that its leader may address; closed is process state and is not stored.
-- Deleting a leader Session ends its Team, and Agents runs it: for each member the leader leads it runs that member's own delete, which closes it if it is loaded, settles its work, removes its command output and has SessionStore remove its rows in SessionStore's transaction; then it closes each Agent the leader owns and deletes its record; then it closes and removes the leader itself. There is no transaction across the Team: member rows reference the leader, so they go first, and a failure or crash midway leaves the leader present with part of its Team gone, which a retry finishes. A client attached to a member sees it close and then disappear, as that Session's own delete; in-flight member work is settled by that close.
+- Deleting a leader Session ends its Team, and Agents runs it: for each member the leader leads it runs that member's own delete, which closes it if it is loaded, settles its work, removes its command output and has SessionStore remove its rows in SessionStore's transaction; then it closes each Agent the leader owns and deletes its record; then it closes and removes the leader itself. There is no transaction across the Team: member rows reference the leader, so they go first, and a failure or crash midway leaves the leader present with part of its Team gone, which a retry finishes. Deleting an Agent record that is already gone succeeds, so the last member's own delete and this pass may both remove it. A client attached to a member sees it close and then disappear, as that Session's own delete; in-flight member work is settled by that close.
 - Deleting the last member Session of an owned Agent closes the Agent and removes its record after the member's rows are gone. A failure between the two leaves an owned Agent with no member, which startup removes. A public Agent is never deleted with a member Session.
 - Forking a member Session is refused: the fork would carry the member's role and Agent but no leader, so it would be neither a member nor an ordinary conversation. A fork of a leader leads no member, and the source's owned Agents and members stay with the source.
 - A delegation whose creation fails removes the Agent record it created, so no owned Agent survives without the member Session it was created for.
@@ -107,7 +107,8 @@ The producer keeps these invariants:
 
 | Situation | Result |
 | --- | --- |
-| A target Agent is public or owned by the caller's Team | The request proceeds |
+| A target Agent is public, or owned by the caller's Team and has a member Session | The request proceeds |
+| A target Agent is owned by the caller's Team and has no member Session | `agent_not_found`: an incomplete delegation is not a reusable Agent |
 | A target Agent is owned by another Team, or absent | `agent_not_found`, with the existing text |
 | A member Session belongs to another Team, or is absent | `team_member_not_found` |
 | The owned Agent or its first member Session cannot be created | `member_create_failed: <reason>`; the record created for the request is removed |
