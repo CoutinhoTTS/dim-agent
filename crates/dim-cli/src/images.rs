@@ -28,6 +28,9 @@ pub struct Attached {
     pub original: ImageSize,
     /// The size of the pixels `source` carries.
     pub sent: ImageSize,
+    /// The media type of the source's own encoded form; `None` for a platform
+    /// bitmap, which has no encoded source.
+    pub source_media_type: Option<&'static str>,
     /// Whether the bytes were re-encoded — scaled to fit, or turned upright.
     pub scaled: bool,
     /// Whether the source is an animation whose first frame was sent.
@@ -35,7 +38,10 @@ pub struct Attached {
 }
 
 impl Attached {
-    fn new(image: dim_agent_capabilities::images::ScaledImage) -> Self {
+    fn new(
+        image: dim_agent_capabilities::images::ScaledImage,
+        source_media_type: Option<&'static str>,
+    ) -> Self {
         Self {
             source: ImageSource {
                 source_type: ImageSourceType::Base64,
@@ -45,6 +51,7 @@ impl Attached {
             },
             original: image.original,
             sent: image.sent,
+            source_media_type,
             scaled: image.scaled,
             animated: image.animated,
         }
@@ -65,10 +72,28 @@ impl Attached {
         )
     }
 
+    /// Both media types, as a marker gives them: `image/png → image/jpeg`.
+    /// Only a retyped image has two.
+    pub fn media_types(&self) -> String {
+        format!(
+            "{} → {}",
+            self.source_media_type
+                .expect("only a retyped image has two media types"),
+            self.source.media_type
+        )
+    }
+
     /// Whether the sent pixels are a different size from the source's.
     /// `scaled` says the bytes were re-encoded; this says the size changed.
     pub fn resized(&self) -> bool {
         self.original != self.sent
+    }
+
+    /// Whether the sent media type differs from the source's own form: a
+    /// re-encode that did not change the size still changed what is sent.
+    pub fn retyped(&self) -> bool {
+        self.source_media_type
+            .is_some_and(|media_type| media_type != self.source.media_type)
     }
 }
 
@@ -147,9 +172,8 @@ pub fn from_bytes(bytes: Vec<u8>) -> Result<Attached> {
 
 /// An image from pixels a platform decoder produced: a clipboard bitmap.
 pub fn from_pixels(image: image::DynamicImage) -> Result<Attached> {
-    dim_agent_capabilities::images::scale_pixels(image)
-        .map_err(refusal)
-        .and_then(attach)
+    let image = dim_agent_capabilities::images::scale_pixels(image).map_err(refusal)?;
+    attach(image, None)
 }
 
 /// The shared pixel guard on a decoder's dimensions, run before the decoder
@@ -223,50 +247,64 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 /// The line exec writes for an image whose sent form differs from its file:
-/// both sizes when they differ, and the first-frame note of an animation.
+/// both sizes when they differ, both media types when the encoding changed
+/// the type, and the first-frame note of an animation.
 fn scaled_note(path: &Path, image: &Attached) -> Option<String> {
-    if !image.resized() && !image.animated {
-        return None;
-    }
     let name = path.file_name().unwrap_or(path.as_os_str());
-    if !image.resized() {
+    if image.resized() {
+        let mut note = format!(
+            "Scaled {} from {}×{} to {}×{} px ({})",
+            name.to_string_lossy(),
+            image.original.width,
+            image.original.height,
+            image.sent.width,
+            image.sent.height,
+            image.source.media_type
+        );
+        if image.animated {
+            note.push_str("; only the first frame is sent");
+        }
+        return Some(note);
+    }
+    if image.animated {
         return Some(format!(
             "Only the first frame of {} is sent ({})",
             name.to_string_lossy(),
             image.source.media_type
         ));
     }
-    let mut note = format!(
-        "Scaled {} from {}×{} to {}×{} px ({})",
-        name.to_string_lossy(),
-        image.original.width,
-        image.original.height,
-        image.sent.width,
-        image.sent.height,
-        image.source.media_type
-    );
-    if image.animated {
-        note.push_str("; only the first frame is sent");
+    if image.retyped() {
+        return Some(format!(
+            "Re-encoded {} as {} ({}×{} px)",
+            name.to_string_lossy(),
+            image.source.media_type,
+            image.sent.width,
+            image.sent.height
+        ));
     }
-    Some(note)
+    None
 }
 
 fn scale<R: BufRead + Seek>(source: R) -> Result<Attached> {
-    dim_agent_capabilities::images::scale_image(source)
-        .map_err(refusal)
-        .and_then(attach)
+    let image = dim_agent_capabilities::images::scale_image(source).map_err(refusal)?;
+    let source_media_type = image.kind.media_type();
+    attach(image, Some(source_media_type))
 }
 
 /// The CLI's item for a scaled image, refusing an image whose header claims
-/// a zero dimension: invalid data, not a limit.
-fn attach(image: dim_agent_capabilities::images::ScaledImage) -> Result<Attached> {
+/// a zero dimension: invalid data, not a limit. `source_media_type` is the
+/// source's own encoded form, absent for a platform bitmap.
+fn attach(
+    image: dim_agent_capabilities::images::ScaledImage,
+    source_media_type: Option<&'static str>,
+) -> Result<Attached> {
     if image.original.width == 0 || image.original.height == 0 {
         return Err(refusal(ImageRefusal::Invalid {
             kind: image.kind,
             reason: "the image dimensions are zero".into(),
         }));
     }
-    Ok(Attached::new(image))
+    Ok(Attached::new(image, source_media_type))
 }
 
 fn image_header(bytes: &[u8]) -> bool {

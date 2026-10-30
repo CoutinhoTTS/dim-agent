@@ -496,9 +496,8 @@ fn image_fixture(format: image::ImageFormat, width: u32, height: u32) -> Vec<u8>
     bytes.into_inner()
 }
 
-/// Deterministic noise: JPEG quality 100 keeps it over 5 MiB, and its long
-/// edge is over the shared edge limit, so an entry has to scale it.
-fn noise_jpeg(width: u32, height: u32) -> Vec<u8> {
+/// Deterministic RGB noise of `width`×`height` pixels.
+fn noise_rgb(width: u32, height: u32) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut step = || {
         state ^= state << 13;
@@ -511,11 +510,37 @@ fn noise_jpeg(width: u32, height: u32) -> Vec<u8> {
         let (red, green, blue) = (step(), step(), step());
         pixels.extend([(red >> 24) as u8, (green >> 24) as u8, (blue >> 24) as u8]);
     }
+    pixels
+}
+
+/// Deterministic noise: JPEG quality 100 keeps it over 5 MiB, and its long
+/// edge is over the shared edge limit, so an entry has to scale it.
+fn noise_jpeg(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
     encoder
-        .encode(&pixels, width, height, image::ExtendedColorType::Rgb8)
+        .encode(
+            &noise_rgb(width, height),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
         .unwrap();
+    bytes
+}
+
+/// Deterministic noise as PNG: within the shared edge limit while its base64
+/// is over the byte limit, so it is sent as a JPEG at the same size.
+fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut bytes),
+        &noise_rgb(width, height),
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )
+    .unwrap();
     bytes
 }
 
@@ -590,6 +615,63 @@ fn exec_scales_a_large_photo_and_reports_both_sizes() {
         "{stderr}"
     );
     assert!(stderr.contains("px (image/jpeg)"), "{stderr}");
+}
+
+/// A PNG within the edge limit whose base64 is over the byte limit is
+/// re-encoded as JPEG at the same size: the size alone would hide that the
+/// screenshot is now lossy, so exec says the type changed.
+#[test]
+fn exec_reports_a_reencode_that_keeps_the_size() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let bytes = noise_png(1500, 1500);
+    assert!(
+        base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let shot = home.0.join("shot.png");
+    fs::write(&shot, &bytes).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&sent[..3], b"\xff\xd8\xff");
+        let sent = image::load_from_memory(&sent).unwrap();
+        assert_eq!((sent.width(), sent.height()), (1500, 1500));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", shot.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded shot.png as image/jpeg (1500×1500 px)"),
+        "{stderr}"
+    );
 }
 
 #[test]

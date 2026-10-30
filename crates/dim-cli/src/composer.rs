@@ -734,12 +734,17 @@ impl Decoder {
 }
 
 /// An image item's marker label: the name, both sizes when the sent size
-/// differs from the original, and the first-frame note of an animation.
+/// differs from the original, both media types when the encoding changed the
+/// type, and the first-frame note of an animation.
 fn image_label(label: &str, image: &images::Attached) -> String {
     let mut label = label.to_owned();
     if image.resized() {
         label.push_str(" · ");
         label.push_str(&image.sizes());
+    }
+    if image.retyped() {
+        label.push_str(" · ");
+        label.push_str(&image.media_types());
     }
     if image.animated {
         label.push_str(" · first frame");

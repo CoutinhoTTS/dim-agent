@@ -61,8 +61,10 @@ the opened file. At most 20 images are accepted. The combined base64 size is
 checked before connecting; the final encoded request, including its JSON envelope
 and text, must still fit 16 MiB. An image whose sent form differs from its file
 adds one line to stderr before the run, as in
-`Scaled photo.jpg from 8064×6048 to 2048×1536 px (image/jpeg)`; an animation says
-only its first frame is sent. stdout carries only the reply or the JSON stream.
+`Scaled photo.jpg from 8064×6048 to 2048×1536 px (image/jpeg)` or, when only the
+encoding changed,
+`Re-encoded shot.png as image/jpeg (1500×1500 px)`; an animation says only its
+first frame is sent. stdout carries only the reply or the JSON stream.
 
 An error reply to `session.submit` can follow an already queued input. The CLI
 reports uncertainty for publication failures and unclassified errors and exits
@@ -130,10 +132,11 @@ image markers even with another filename extension. Other ordinary files produce
 references, which the model can read with its existing tool. Image data is captured at
 insertion; removing a marker never deletes the original file. A rejected file group
 leaves the draft unchanged. File references retain separate ordered text content blocks.
-An image whose sent size differs gives both sizes,
-`[Image 1: screen.png · 8064×6048 → 2048×1536]`; an animation adds ` · first frame`,
-also when its size did not change, and an image sent at its own size keeps the plain
-marker. A path attached while the model takes images is read and scaled at insertion,
+An image whose sent form differs gives both sizes when the size changed,
+`[Image 1: screen.png · 8064×6048 → 2048×1536]`, both media types when the re-encode
+changed the type, `[Image 1: screen.png · image/png → image/jpeg]`, and ` · first frame`
+for an animation; an image sent as it is keeps the plain marker.
+A path attached while the model takes images is read and scaled at insertion,
 and a model that takes no images still receives the link.
 
 Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.

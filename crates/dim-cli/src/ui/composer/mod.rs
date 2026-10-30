@@ -1011,12 +1011,17 @@ pub fn read_planned(plan: &[PlannedFile]) -> Result<Vec<Option<crate::images::At
 }
 
 /// What a marker adds to its plain form: both sizes when the sent size
-/// differs from the original, and the first-frame note of an animation.
+/// differs from the original, both media types when the encoding changed the
+/// type, and the first-frame note of an animation.
 fn image_details(image: &crate::images::Attached) -> String {
     let mut details = String::new();
     if image.resized() {
         details.push_str(" · ");
         details.push_str(&image.sizes());
+    }
+    if image.retyped() {
+        details.push_str(" · ");
+        details.push_str(&image.media_types());
     }
     if image.animated {
         details.push_str(" · ");
@@ -1228,6 +1233,33 @@ mod tests {
         std::fs::write(path, png.into_inner()).unwrap();
     }
 
+    /// Deterministic noise: a PNG within the edge limit whose base64 is over
+    /// the byte limit, so it is sent as a JPEG at the same size.
+    fn noise_png(width: u32, height: u32) -> Vec<u8> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut step = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+        for _ in 0..width as usize * height as usize {
+            let (red, green, blue) = (step(), step(), step());
+            pixels.extend([(red >> 24) as u8, (green >> 24) as u8, (blue >> 24) as u8]);
+        }
+        let mut bytes = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut bytes),
+            &pixels,
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+        bytes
+    }
+
     #[test]
     fn images_follow_what_the_model_accepts() {
         let dir = tempfile::tempdir().unwrap();
@@ -1286,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn an_animated_image_says_only_its_first_frame_is_sent() {
+    fn an_animated_image_says_its_first_frame_is_sent() {
         let mut gif = Vec::new();
         {
             let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
@@ -1309,7 +1341,21 @@ mod tests {
         assert!(image.animated && image.scaled && !image.resized());
         let mut c = Composer::new(Vec::new());
         c.attach_image(image).unwrap();
-        assert_eq!(c.text(), "[Image #1 · first frame]");
+        assert_eq!(
+            c.text(),
+            "[Image #1 · image/gif → image/jpeg · first frame]"
+        );
+    }
+
+    /// A PNG within the edge limit whose base64 is over the byte limit is
+    /// re-encoded as JPEG at the same size: the marker names both types.
+    #[test]
+    fn a_reencoded_image_shows_both_media_types_in_its_marker() {
+        let image = crate::images::from_bytes(noise_png(1500, 1500)).unwrap();
+        assert!(image.scaled && !image.resized());
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(c.text(), "[Image #1 · image/png → image/jpeg]");
     }
 
     #[test]

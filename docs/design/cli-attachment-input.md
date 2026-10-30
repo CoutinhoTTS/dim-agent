@@ -58,9 +58,10 @@ session: <session-id>
 The composer stays in terminal scrollback. It redraws its own input and suggestion rows and
 keeps the cursor in the draft. Image pixels are not rendered in the terminal. Markers show
 escaped file names or paste line counts; labels are presentation, not model content. An image
-whose sent size differs from its source's also gives both sizes, as in
-`[Image 1: photo.jpg · 8064×6048 → 2048×1536]`; an animation adds ` · first frame`, also when
-its size did not change, and an image sent at its own size keeps the plain marker.
+whose sent form differs from its source's says how: both sizes when the size changed, as in
+`[Image 1: photo.jpg · 8064×6048 → 2048×1536]`, both media types when the re-encode changed
+the type, as in `[Image 1: shot.png · image/png → image/jpeg]`, and ` · first frame` for an
+animation; an image sent as it is keeps the plain marker.
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
 or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.
 Typing path components narrows the search from the displayed base. Suggestions list UTF-8 names;
@@ -128,10 +129,11 @@ from the line client's above:
   inserts one atomic `[name]` marker per path; a repeated name reads `[name #2]`. A backslash
   escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a shell-mode draft the
   paste stays text.
-- **Clipboard images** read `[Image #N]`, counting the draft's images. An image whose sent size
-  differs gives both sizes, `[Image #1 · 8064×6048 → 2048×1536]`; an animation adds
-  ` · first frame`, also when its size did not change, and an image sent at its own size keeps
-  the plain marker.
+- **Clipboard images** read `[Image #N]`, counting the draft's images. An image whose sent form
+  differs from its source's says how: both sizes when the size changed,
+  `[Image #1 · 8064×6048 → 2048×1536]`, both media types when the re-encode changed the type,
+  `[Image #1 · image/png → image/jpeg]`, and ` · first frame` for an animation; an image sent as
+  it is keeps the plain marker.
 - **Pasted text.** A paste of fewer than 4 lines and 201 characters is typed into the draft. A
   longer one is one atomic `[... N lines]` marker (over 5,000 characters `[Text: preview (N
   chars)]`), and on submission it is stored with `attachment.put` and sent as
@@ -146,7 +148,7 @@ from the line client's above:
   (`[name](/abs/path)`, `[@src/a.rs](/abs/src/a.rs)`); its bytes are not uploaded, and the model
   reads it with its tools. An image path is read and scaled (A.1) when it is attached if the
   session's model takes image input — its `provider.catalog` entry has `vision`, or `image`
-  among its `modalities` — and the token shows both sizes, as in
+  among its `modalities` — and the token says what the sent form changed, as in
   `[photo.jpg · 8064×6048 → 2048×1536]`. On submission that model gets the image block and a
   model that does not gets the link; a path attached while the model took no images is read and
   scaled on submission. A clipboard image has no path, so with such a model the draft is kept
@@ -303,10 +305,13 @@ arguments and image-only requests. When text is supplied through `-p` or redirec
 text part comes first, followed by images in argument order. Relative image paths use the
 invoking process's cwd. Apply the same scaling rule and encoded-frame limit before submission;
 `--image` accepts local files, not URL sources. An image whose sent form differs from its file
-adds one line to stderr before the run starts: `Scaled photo.jpg from 8064×6048 to 2048×1536 px
-(image/jpeg)` when the size changed, with a resized animation appending `; only the first frame
-is sent`, and `Only the first frame of anim.gif is sent (image/jpeg)` when only the frame
-changed; stdout keeps carrying only the reply or the JSON stream.
+adds one line to stderr before the run starts, naming the sent form: `Scaled photo.jpg from
+8064×6048 to 2048×1536 px (image/jpeg)` when the size changed, with a resized animation
+appending `; only the first frame is sent`; `Re-encoded shot.png as image/jpeg (1500×1500 px)`
+when only the encoding's media type changed; and `Only the first frame of anim.gif is sent
+(image/jpeg)` when only the frame changed. The media type in parentheses is the one sent, so a
+size change that also changed the type is still one line. stdout keeps carrying only the reply
+or the JSON stream.
 Invalid input reports an error and a nonzero exit.
 Headless execution does not inspect the clipboard or infer images/file references from text.
 Its notification output and approval/stop semantics remain the existing exec contract.
