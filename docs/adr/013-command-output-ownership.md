@@ -60,22 +60,25 @@ A fork copies every current row in both tables at the fork's commit, including a
 by a command that was still running at the fork point. The fork owns those files; a file the
 source registers later is not owned.
 
-Delete removes every output directory named by the deleting session's rows in the pre-commit
-step, before it releases those rows. That includes its own `command-output/<S>/` and any
-inherited `command-output/<parent>/` or `.dim/exec/<parent>/<branch>/` paths copied by a fork. A
-directory is removed only if this database has rows for the deleting session and no row of
-another session in this database names a path under it. When S is deleted, F's rows keep S's
+Delete treats the deleting session's own `command-output/<S>/` as a candidate whenever this
+database has rows for the session, plus every directory named by its rows, including inherited
+`command-output/<parent>/` or `.dim/exec/<parent>/<branch>/` paths copied by a fork. A candidate
+is removed only if no row of another session in this database names a path under it. The own
+directory candidate covers output written before the upgrade and a file whose `register` failed;
+neither has a row. When S is deleted, F's rows keep S's
 directory; when F is deleted, F's copied rows name S's directory, so F's delete removes it. A
 directory shared with another database is that database's responsibility; this guard is scoped
 to this database and the cross-database case is accepted.
 
 The session-files owner supplies the paths and the last-owner answer; HostPlatform removes the
-`.dim/exec` directory it owns. HostPlatform does not read ownership rows. Keeping the removal
-before the row commit preserves the crash argument in `session-deletion-and-fork.md`: a leftover
-directory in a shared location cannot be found later.
+`.dim/exec` directory it owns and makes the removal durable (the parent is synced) before the row
+commit. HostPlatform does not read ownership rows. Keeping the removal before the row commit
+preserves the crash argument in `session-deletion-and-fork.md`: a leftover directory in a shared
+location cannot be found later.
 
-The new table is native format v27, after #671's v26; the implementation claims v27 in the next
-format decision. Its upgrade creates the table empty and rolls back on failure. There is no
+The new table is the native format step after #671, shared with or following ADR 012's step; the
+number is left to the format decision. Its upgrade creates the table empty and rolls back on
+failure. There is no
 backfill: output written before the upgrade is unowned, a resumed session may ask once, and a
 fork made after the upgrade inherits no output rows.
 
@@ -86,10 +89,11 @@ point-in-time copy is a separate concern.
 
 A process start asks the ownership owner for the session's artifact paths. Workspace and platform
 roots are ADR 010's mounts; grants are ADR 012's mounts. This decision owns the artifact mounts:
-an owned path outside the session's own writable output root is mounted read-only; a path inside
-that root is already writable and is not mounted again, so the sandbox overlap check is not
-triggered. Inherited output outside the current root is mounted read-only. A running persistent
-shell keeps the mounts it started with.
+an owned path inside any writable root of that start — the workspace, a write grant, or the
+persistent shell's own `.dim/exec/<S>/<branch>/` — is not mounted; `exec` passes no output root.
+Every remaining owned file is one read-only bind, so a long session has one bind per file.
+Inherited output outside the writable roots is mounted read-only. A running persistent shell
+keeps the mounts it started with.
 
 ## Consequences
 
