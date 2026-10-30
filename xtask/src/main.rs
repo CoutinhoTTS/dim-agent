@@ -12,7 +12,7 @@ use dim_agent_runtime::*;
 use rutis::host::CtxHost;
 use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, time::Instant};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -41,6 +41,13 @@ fn agent() -> Agent {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
+    builder.build()
+}
+fn agent_with_store(store: Arc<dyn TimelineStore>) -> Agent {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store);
     builder.build()
 }
 fn root() -> PathBuf {
@@ -422,7 +429,13 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let chunk = "x".repeat(CHARS_PER_TURN);
     let baseline = allocation::live();
     let rss_baseline = rss_kb();
-    let agent = agent();
+    let database = std::env::temp_dir().join(format!(
+        "dim-context-replay-{}.sqlite",
+        std::process::id()
+    ));
+    let db = dim_app_server::storage::SqliteStorage::open(database.clone())?;
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let agent = agent_with_store(store);
     let live_agent = allocation::live();
     let rss_agent = rss_kb();
     let session = agent.create_session(SessionConfig::default()).await?;
@@ -469,8 +482,11 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     agent.close().await?;
     let live_after_agent = allocation::live();
     let rss_after_agent = rss_kb();
+    drop(db);
+    let _ = std::fs::remove_file(&database);
     let report = json!({
         "modelHost": "mock",
+        "store": "sqlite",
         "turns": TURNS,
         "charsPerTurn": CHARS_PER_TURN,
         "approxInputTokens": TURNS * CHARS_PER_TURN * 2 / 4,
