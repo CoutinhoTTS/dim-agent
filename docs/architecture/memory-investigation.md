@@ -128,7 +128,7 @@ heaptrack -o "$CASE/data/heaptrack.server" \
 
 两种模式的客户端和服务器必须匹配。客户端的 home 是 `$CASE/home`；服务器的 native home 是其下的 `rust`，不要互换。若连接失败，先检查原终端的启动错误和版本，不让 CLI 静默另起一个未采样的 daemon 后继续实验。
 
-当前接口和 home 关系依据：[App Server 启动](../../crates/dim-app-server/README.md#L11)、[CLI 连接入口](../../crates/dim-cli/src/client.rs#L159)。安装版本的对应实现仍需核对。
+当前接口和 home 关系依据：[App Server 启动](../../crates/dim-app-server/README.md#L11)、[CLI 连接入口](../../crates/dim-cli/src/client.rs#L176)。安装版本的对应实现仍需核对。
 
 ### 4.4 不能复现时的处理
 
@@ -168,7 +168,7 @@ E: graceful daemon shutdown
 | D | 退出所有连接该实验 Session 的客户端，观察已安装版本的空闲卸载；断开不等于关闭或已卸载 |
 | E | 正常停止实验 daemon，让采样写完 |
 
-D 的等待要覆盖该版本的卸载宽限期和扫描周期。当前仓库默认宽限期为 60 秒且周期扫描；可先观察约 2–3 分钟，但不能仅凭时间断言卸载成功。界面、RPC 调用、脱离任务仍可能阻止卸载。以已有的已加载 Session 统计或卸载日志确认；缺少证据时标记“未确认卸载”，不把该点用于证明卸载后泄漏。语义见[生命周期](../../docs/architecture/rust-agent/lifecycle.md#L112)。
+D 的等待要覆盖该版本的卸载宽限期和扫描周期。当前仓库默认宽限期为 60 秒且周期扫描；可先观察约 2–3 分钟，但不能仅凭时间断言卸载成功。界面、RPC 调用、脱离任务仍可能阻止卸载。以已有的已加载 Session 统计或卸载日志确认；缺少证据时标记“未确认卸载”，不把该点用于证明卸载后泄漏。语义见[生命周期](../../docs/architecture/rust-agent/lifecycle.md#L152)。
 
 在第三个终端对已确认的实验服务器 PID，在每个观测点执行下面的快照。`CASE` 使用该轮实际目录，`POINT` 依次改为 A、B、C、D；时间用 UTC 方便对齐：
 
