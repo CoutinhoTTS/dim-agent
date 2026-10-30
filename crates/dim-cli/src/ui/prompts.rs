@@ -1408,11 +1408,6 @@ fn line_text(line: &Line, width: usize, p: &Palette) -> String {
     )
 }
 
-#[allow(dead_code)]
-fn used(text: &str) -> usize {
-    display_width(text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

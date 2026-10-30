@@ -1766,6 +1766,9 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Enter if key.mods.0 == 0 && self.clipboard.is_some() => {
+                if self.composer.mention_key(key).is_some() {
+                    return Outcome::Continue;
+                }
                 self.set_notice(t("Wait for clipboard insertion before sending"));
                 return Outcome::Continue;
             }
@@ -4803,6 +4806,67 @@ fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_clipboard_allows_file_selection_but_waits_before_submission() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("first.txt"), "").unwrap();
+        std::fs::write(home.path().join("second.txt"), "").unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            home.path().to_string_lossy().into_owned(),
+        );
+        typed(&mut app, "@first");
+        let started = Instant::now();
+        while !app
+            .frame((80, 24))
+            .live
+            .iter()
+            .any(|row| row.contains("@first.txt"))
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "file picker did not populate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer.text(), "@first.txt ");
+
+        let (send, receive) = std::sync::mpsc::channel();
+        app.clipboard = Some(ClipboardRead::Native(receive));
+        typed(&mut app, "compare with @second");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer.text(), "@first.txt compare with @second.txt ");
+        assert!(sent.borrow().is_empty(), "file selection must not submit");
+
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            sent.borrow().is_empty(),
+            "submission waits for clipboard data"
+        );
+        typed(&mut app, "@missing");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            sent.borrow().is_empty(),
+            "an empty picker must not bypass the clipboard wait"
+        );
+        for _ in 0.."@missing".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        send.send(Ok(crate::clipboard::Source::Text(" appended".into())))
+            .unwrap();
+        app.tick();
+        let expected = app.composer.expanded_text().trim().to_owned();
+        assert!(expected.ends_with(" appended"));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(sent.borrow().as_slice(), [Command::Submit(text)] if text == &expected));
+    }
 
     #[test]
     fn a_termux_keyboard_toggle_uses_the_frame_path() {
