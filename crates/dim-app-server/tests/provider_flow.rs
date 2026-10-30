@@ -4794,6 +4794,109 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// #522: a legacy limit that equals the assumed pair and carries no
+/// declaration imports as undeclared, while a typed or `metadata.raw`-declared
+/// value imports as a declaration.
+#[tokio::test]
+async fn legacy_import_declares_only_the_limits_the_source_does() {
+    let home =
+        std::env::temp_dir().join(format!("provider-import-limits-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let source = home.join("legacy.sqlite");
+    {
+        let db = rusqlite::Connection::open(&source).unwrap();
+        db.execute_batch(
+            "CREATE TABLE providers (
+            providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT,
+            defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT,
+            accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER,
+            retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT,
+            activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT,
+            metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER);
+            CREATE TABLE provider_selections (
+            selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT,
+            createdAt TEXT, updatedAt TEXT, version INTEGER);",
+        )
+        .unwrap();
+        let limits = |context: u64, output: u64| {
+            json!({"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
+                "contextWindow":context,"maxOutputTokens":output})
+        };
+        let models = json!([
+            {"modelId":"assumed","displayName":"Assumed","status":"active",
+             "capabilities":limits(128_000,16_384)},
+            {"modelId":"mixed","displayName":"Mixed","status":"active",
+             "capabilities":limits(32_000,16_384)},
+            {"modelId":"declared","displayName":"Declared","status":"active",
+             "capabilities":limits(64_000,8_000),
+             "metadata":{"raw":{"inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
+        ]);
+        db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES ('legacy-limits','custom','Legacy limits','openai-responses','https://model.example/v1',?1,?2,?3,'user',1,1)", rusqlite::params![json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), models.to_string()]).unwrap();
+    }
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let result = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["items"][0]["status"], "imported", "{result}");
+    let imported = provider
+        .management(Some("legacy-limits".into()), &cancel)
+        .await
+        .unwrap();
+    let models = imported.providers[0].models.as_ref().unwrap();
+    let entry = |id: &str| {
+        models
+            .iter()
+            .find(|model| model.model.model_id == id)
+            .unwrap()
+    };
+    let marks = |id: &str| {
+        entry(id)
+            .model
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.capability_override_fields.clone())
+            .unwrap_or_default()
+    };
+    let assumed = entry("assumed");
+    assert_eq!(assumed.model.capabilities.context_window, None);
+    assert_eq!(assumed.model.capabilities.max_output_tokens, None);
+    assert!(marks("assumed").is_empty());
+    let mixed = entry("mixed");
+    assert_eq!(mixed.model.capabilities.context_window, Some(32_000));
+    assert_eq!(mixed.model.capabilities.max_output_tokens, None);
+    assert_eq!(marks("mixed"), ["contextWindow"]);
+    let declared = entry("declared");
+    assert_eq!(declared.model.capabilities.context_window, Some(64_000));
+    assert_eq!(declared.model.capabilities.max_output_tokens, Some(8_000));
+    assert_eq!(marks("declared"), ["contextWindow", "maxOutputTokens"]);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Never answers, so a call stays in flight until it is cancelled.
 async fn hang() -> &'static str {
     std::future::pending().await

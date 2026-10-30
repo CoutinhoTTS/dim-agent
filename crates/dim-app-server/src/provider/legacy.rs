@@ -430,19 +430,14 @@ fn convert_provider(
             }
         });
     }
-    // A legacy descriptor that states a limit declared it, so the value is
-    // not captured as an inherited default.
+    // A legacy descriptor that states a limit declared it, unless the value
+    // may be the assumed pair the legacy schema and v24's probe filled in.
     for model in models
         .iter_mut()
         .chain(&mut user_models)
         .chain(&mut overrides)
     {
-        if model.capabilities.context_window.is_some() {
-            declare(model, "contextWindow");
-        }
-        if model.capabilities.max_output_tokens.is_some() {
-            declare(model, "maxOutputTokens");
-        }
+        declare_supplied_limits(model);
     }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
