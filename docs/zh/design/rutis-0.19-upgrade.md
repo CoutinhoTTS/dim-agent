@@ -67,7 +67,7 @@ Python 行都无法连接。
 | 0.17.1 | 0.19.1 |
 | --- | --- |
 | `rutis_bridge::runtime::LocalRuntime`（`node`、`python`、`named`、`interpreter`、`python_path`、stdio、`handle`） | 宿主自己的连接行：`rutis_bridge::runtime::Launcher`、`pipe::greeted`、`Session::new`、`pipe::Processes`。不使用迁移指南给的 `rutis_host::connect::SpawnPlugin`（M4） |
-| `RuntimePlugin`、服务 `runtime::Runtime` | 删除；运行时的状态就是它的连接行在 `Loader::status().rows` 里的状态（M4） |
+| `RuntimePlugin`、服务 `runtime::Runtime` | 删除；由连接插件记录自己运行时的 `RuntimeStatus`（M4） |
 | `Stdio::Lines` | `pipe::Stdio::Pipe(factory)`；Dim 的 factory 把逐行输出转给 `tracing` |
 | `rutis_loader::runtime::RuntimeResolver::node` / `::modules`、`with_catalog`、`invalidate` | 改为一个 `rutis_loader::runtime::SessionResolver`（`npm(&catalog, row)`、`attach(&loader)`、`follow_row(row)`）；没有需要失效的缓存；npm 名字由 Node 解析 |
 | `RuntimeRows`、`RowsSource`、`RuntimeRowsPlugin` | `SessionRows::key(row)`；`SessionResolver::follow_row` |
@@ -122,7 +122,7 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 | `dim-agent-types`、`dim-agent-capabilities`、`dim-agent-aimux`、`dim-agent-attachments`、`dim-agent-questions` 及其测试 | 修好上面两处后即可编译 |
 | `dim-app-server` | 16 个错误：`lib.rs`（运行时的行、`NodeRuntime`）、`session_typescript.rs`、`runtime_manager.rs`、`plugin_manager.rs`、`ui_leaf.rs` |
 | `tests/integration` | `extensions.rs`（一个 `LocalRuntime` 及其解析器）；其余测试都能编译 |
-| 没编到、靠搜索定位的 | `dim-cli/src/leaf.rs`；`xtask/src/types.rs`；`dim-app-server/tests/transport_flow/ui_host.rs` 和 `session_typescript.rs:1674`；`transport_flow/{scheduler,workflow,process_typescript}.rs` 里的 `set_overlay`（9 处调用）；`examples/session_typescript_spike.rs`；M8 要改名的两处 `ui.leaf` feature 字符串（`dim-app-server/src/transport.rs:724`、`dim-cli/src/lib.rs:148`） |
+| 没编到、靠搜索定位的 | `dim-cli/src/leaf.rs`；`xtask/src/types.rs`；`dim-app-server/tests/transport_flow/ui_host.rs` 和 `session_typescript.rs:1674`；`transport_flow/{scheduler,workflow,process_typescript}.rs` 里的 `set_overlay`（9 处调用）；`examples/session_typescript_spike.rs`；M8 要改名的两处 `ui.leaf` feature 字符串（`dim-app-server/src/transport.rs:725`、`dim-cli/src/lib.rs:148`） |
 | Agent 放置（M6，不是 rutis 的错误） | 41 个文件里的 120 处 `build()` 和 39 处 `build_in` 调用：测试、示例，以及 `xtask/src/main.rs`（`graph`、`measure`）和 `xtask/src/plugins.rs`（本地图） |
 
 **与本次升级相关的未完成工作。**
@@ -131,7 +131,7 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 - [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
   引入 rutis#920。rutis#920 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
   [#684](https://github.com/arcships/dim/pull/684)：Session 和分支变成用 0.19.1 公开的 `mark_scope` 标记自己的插件，
-  不再有实例行可查。#684 在本次升级之后合入。#645 不合入：#684 取代了它，它保持打开，直到 #684 合入。
+  不再有实例行可查。#684 的设计已经合入（79fbb1b3），它的实现在本次升级之后进行。#645 不合入：#684 取代了它。
 
 ## 4. 决策
 
@@ -180,26 +180,36 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 rutis-loader 用）。Dim 本身就是宿主，这两样都不需要。0.19 里，一个运行时，无论本地还是远端，都是一个连接行：
 自己的连接，就是一个把 `Channel` 交给 `Session::new` 的插件；由宿主启动的运行时，命令行是
 `<channel> --id <name> <project>`（[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.md)
-"一起升级"一节）。Dim 需要知道的关于运行时的一切，都是这一行的。Dim 不链接 `rutis-host`，也不照抄 `SpawnPlugin`。
+"一起升级"一节）。拉起进程的插件最清楚进程还在不在，所以由它自己记录这个状态。Dim 不链接 `rutis-host`，
+也不照抄 `SpawnPlugin`。
 
 - **运行时是一个连接行。** `session-node` 和 `py` 是进程行。它们的插件 `RuntimeConnection` 做的就是任何连接插件
   做的事，用的都是 rutis-bridge 的公开零件：
   - 用 `rutis_bridge::runtime::Launcher` 按运行时的启动命令启动进程，用它自己的 channel、带 `--id <name>`，把进程记进
     它自己的 `pipe::Processes`，并等它问候（`pipe::greeted`）；
   - 挂载 `Session::new(channel)`。loader 会标记这一行，所以会话的句柄在 `session_key(row)`；
-  - 会话自己结束时，插件带着进程是怎么结束的失败（`Processes::status()`，例如 `exited with exit status: 1`）。
-    卸载时，杀掉还没结束的进程并等它结束（`Processes::kill`、`Processes::ended`）；
+  - 记录运行时的状态（见下），并用自己的一个任务等待会话结束；
+  - 卸载时，杀掉还没结束的进程并等它结束（`Processes::kill`、`Processes::ended`）；
   - 通过 `pipe::Stdio::Pipe` 把标准错误逐行转给 `tracing`。标准输入和输出为空，与现在相同。
 - **对端的插件都是行。** 一个 TypeScript 或 Python 插件就是 `session-node:<plugin>` 或 `py:<plugin>` 这一行。
   `SessionResolver` 通过那个会话解析它，在会话就绪之前，它等 `SessionRows::key(row)`。会话结束后，这些行回到等待。
   它们都由 loader 管理，Dim 不另外记一份。
-- **运行时的状态就是它那一行的状态。** 运行时在不在跑，就是它的连接行在 `Loader::status().rows` 里的那一项。`runtime.list`
-  的取值保持不变：
-  - `off`、`acquiring`、`failed` 是 RuntimeManager 自己的，表示获取运行时的进度；
-  - 启动命令提供之后，其余取值来自这一行：加载中或等待中是 `starting`，Active 是 `ready`，Failed 是 `down`，
-    `reason` 是这一行的错误（进程是怎么结束的）。
+- **连接自己记录运行时的状态。** 一行自己的状态表达不了"运行时死了"：`apply` 返回后这一行就是 Active，没有任何
+  东西能把 Active 的行变成 Failed。rutis 自己的连接行也是让行保持 Active，把连接的状态另外记下来（`rutis-host/dial`
+  的链接状态、`SpawnPlugin` 的 `RuntimeStates`）。`RuntimeConnection` 也这样做，用一个 Dim 自己的小值
+  `RuntimeStatus`：`starting`、`ready`，或带原因的 `down`。
+  - 它从 `apply` 一开始就把这个值提供在一个仅限 Rust、以行名命名的进程级键上（`Key::<RuntimeStatus>::dynamic(row)`），
+    值为 `starting`。
+  - 会话变成 Active 后，它设为 `ready`。
+  - 启动或问候失败时，它设为 `down`，原因是那个错误；会话自己结束时，它设为 `down`，原因是进程是怎么结束的
+    （`Processes::status()`，例如 `exited with exit status: 1`）。后者由等待会话结束的那个任务设置。这一行保持
+    Active，与 rutis 的连接行一样，所以状态始终读得到；运行时的行回到等待。
+  - `RuntimeStatus` 不是 rutis 的 `RuntimeStates`：后者的 `ready` 要传入进程，而进程只有隐藏的
+    `SessionHandle::process()` 才拿得到。
 
-  只有 `RuntimeStates` 才会报的 `idle` 不再出现。Dim 里没有任何地方持有 `RuntimeStates` 或 `RuntimeHandle`。
+  `runtime.list` 的取值保持不变。`off`、`acquiring`、`failed` 是 RuntimeManager 自己的，表示获取运行时的进度。
+  启动命令提供之后，RuntimeManager 读取连接的 `RuntimeStatus`：`starting`、`ready`，或带原因的 `down`；这一行还没
+  启动、键还不存在时，为 `starting`。`idle` 不再出现。Dim 里没有任何地方持有 `RuntimeStates` 或 `RuntimeHandle`。
 - **启动命令。** Dim 保留 rutis-host 自己的启动器为这两个包用的两条命令（`languages/node.rs`、
   `languages/python.rs`），解释器和路径沿用 Dim 现在的配置：
   - Node：在 `@arcships/rutis-runtime` 包里执行 `node --import tsx src/runner.mjs`；
@@ -220,7 +230,7 @@ rutis-loader 用）。Dim 本身就是宿主，这两样都不需要。0.19 里�
   - 在 loader 挂载前调用 `attach(&loader)`；loader 运行后对每个运行时行调用 `follow_row`，这样会话一就绪，
     它的行就放行。
   - 不调用 `runtime(handle)`。它只是把一个 `RuntimeHandle` 列进 `Loader::status().runtimes`；RuntimeManager
-    读的是 `Loader::status().rows` 里运行时那一行。
+    读的是连接的 `RuntimeStatus`。
   - Dim 自己的包装改名为 `SnapshotResolver`。它继续检查每一行的 `provides` 快照、加上 `workflowFiles`，
     但不再分流 `py:` 名字。
   - 识别"运行时没在运行"的方式与 loader 相同：没有 schema，且 `meta.schema` 是一段文字。不匹配这段文字的内容。
@@ -462,6 +472,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   - `session-node` 和 `py` 两行在启动命令提供之前一直等待，RuntimeManager 获取到运行时之后才启动；
   - TypeScript 行和 Python 行都能启动，`runtime.list` 显示它们的运行时为 `ready`；
   - 运行时进程退出后显示 `down` 和退出原因，它的行回到等待；`runtime.install` 启动新进程，这些行重新运行；
+  - 启动命令起不来时显示 `down` 和启动错误；
   - 准入会等待运行时的行；
   - `plugin.reload` 能用上改动后的模块。
 - **快照行（M4）：** 运行时停着时解析的行，按它的 `provides` 快照被接受。
@@ -494,8 +505,8 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 - [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui` 改为 leaf 自己的 `Tui`、Leaving、`ui.open` 的回复、`hello` feature 那段、Later）、§8、§9 和 §10（M8）。
 - [RuntimeManager](plugins/RuntimeManager.md) 的 §1–§3 和 §5（M4）：
   - 它提供启动命令（`nodeRuntime`、`pythonRuntime`），不再挂载 `LocalRuntime`；`runtime.install` 会重新提供命令；
-  - 它从运行时那一行读取状态（`Loader::status().rows`），不持有句柄：§2.4 里"运行时是否在运行是 rutis 的状态
-    （`RuntimeHandle::state`）"和 §3.3 里"rutis 的运行时状态"都改为这一行的状态，§5 里 `runtime.list` 的取值去掉 `idle`；
+  - 它从连接的 `RuntimeStatus` 读取运行时的状态，不持有句柄：§2.4 里"运行时是否在运行是 rutis 的状态
+    （`RuntimeHandle::state`）"和 §3.3 里"rutis 的运行时状态"都改为连接的 `RuntimeStatus`，§5 里 `runtime.list` 的取值去掉 `idle`；
   - `session-node` 和 `py` 两行取代 `Runtime#…` 这些名字；
   - Python 版本要求；
   - 英文原文 [RuntimeManager](../../design/plugins/RuntimeManager.md) 和中文版一起改。
@@ -548,7 +559,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 规则 | 回答 |
 | --- | --- |
 | 原则 §4 规则 1–3、5–7、9 | 不变：命令、交接、`before` 契约、批次、上下文路径和事实都不变；M2 保留 `before` 的契约、顺序和失败规则 |
-| AGENTS 规则 4（状态归属） | 行仍只由 PluginManager 写入：没有可编辑层时，插件可以通过 `loader` 重新加载某一行，但不能增删行（M5）。运行时的状态就是它的连接行的状态，由 loader 持有；RuntimeManager 读取它，自己只保留获取运行时的状态（M4） |
+| AGENTS 规则 4（状态归属） | 行仍只由 PluginManager 写入：没有可编辑层时，插件可以通过 `loader` 重新加载某一行，但不能增删行（M5）。运行时的状态是连接插件的 `RuntimeStatus`，由这个插件写、RuntimeManager 读；RuntimeManager 自己只保留获取运行时的状态（M4） |
 | §4 规则 8（基础设施默认不变） | 改动来自依赖升级，限定在 runtime crate、App Server 和 CLI 之内；唯一向 rutis 提出的需求是 M2 的，已由 0.19.1 中的 rutis#947 答复（§9） |
 | AGENTS 规则 11（受信插件，明确的边界） | M8 写明 leaf 链接暴露了什么，信任边界保持在本地用户；审批和权限都不变 |
 | AGENTS 规则 6（冻结的夹具） | 不动 `crates/dim-agent-types/tests/fixtures/` |
@@ -566,7 +577,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 - 不在 CI 里加 `git diff --exit-code -- npm/branch-services.d.ts`：`xtask check` 已经会在这个文件过期时失败。
 - Dim 只为 rutis 不做的事保留自己的解析器包装：`provides` 快照检查和 `workflowFiles`。
 - 没有兼容层，也不引入宿主应用。运行时是一个连接行，这是 rutis 为"宿主自己的连接"写明的形式，用的是
-  rutis-bridge 的公开零件。Dim 不自己维护运行时状态：这一行的状态就是运行时的状态。不链接 `rutis-host` crate，
+  rutis-bridge 的公开零件。唯一的运行时状态是连接插件自己的 `RuntimeStatus`。不链接 `rutis-host` crate，
   也不照抄它的 `SpawnPlugin` 和 `RuntimeStates`。`RuntimeManager` 不再挂载子插件：它只提供启动命令，由 rutis 的
   门控启动这一行。
 - `ui.leaf.2` 复用现有的 feature 回退机制，不新增版本检查。
