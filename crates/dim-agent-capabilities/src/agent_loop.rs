@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, LoopPhase, LoopSnapshot, LoopState,
-    Names, Result, StateCell, Timeline, TimelineIdentity,
+    Names, PolicyFacts, Result, StateCell, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -359,8 +359,9 @@ impl AgentLoop {
         let Some(request) = configured_request(&context, &history) else {
             return failed("Context is not configured; adopt a model first".into());
         };
+        let facts = PolicyFacts::from_context(&context, through);
         let view = policy
-            .view(request, context, history, Vec::new())
+            .view(request, context, history, facts, Vec::new())
             .map_err(|error| AgentError::fault("Loop", error.to_string()))?;
         let model = match policy
             .resolver

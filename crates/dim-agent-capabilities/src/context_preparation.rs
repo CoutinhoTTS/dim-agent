@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
-    Timeline, TimelineIdentity,
+    PolicyFacts, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -551,8 +551,9 @@ impl ContextPreparation {
             .map_err(ContextOpError::Read)?;
         let request =
             configured_request(&context, &history).ok_or(ContextOpError::NotConfigured)?;
+        let facts = PolicyFacts::from_context(&context, through);
         let view = policy
-            .view(request, context, history, Vec::new())
+            .view(request, context, history, facts, Vec::new())
             .map_err(ContextOpError::Model)?;
         let model = policy
             .resolver
@@ -640,8 +641,15 @@ impl ContextPreparation {
         };
         match &self.policy {
             Some(policy) => {
+                let facts = self
+                    .timeline
+                    .policy_facts(source.through, &source.turn_id)
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
                 policy
-                    .prepare(request, &source, context, history, cancel, &cancelled)
+                    .prepare(
+                        request, &source, context, history, facts, cancel, &cancelled,
+                    )
                     .await
             }
             None => Ok(request),
