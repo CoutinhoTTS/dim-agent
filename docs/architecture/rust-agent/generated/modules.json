@@ -3045,6 +3045,16 @@
       ]
     },
     {
+      "id": "dim_cli::ui::atomic::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::atomic",
+      "file": "crates/dim-cli/src/ui/atomic.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::ui::commands",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -24328,6 +24338,21 @@
         "path crate::ui::theme::palette::terminal_palette",
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::atomic",
+      "to": "dim_cli::ui::atomic::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::atomic::tests",
+      "to": "dim_cli::ui::atomic",
+      "references": [
+        "path sibling",
+        "path update_within"
       ]
     },
     {
