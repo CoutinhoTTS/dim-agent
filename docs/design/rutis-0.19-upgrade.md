@@ -2,6 +2,8 @@
 
 Status: Draft.
 
+Issue: [#681](https://github.com/arcships/dim/issues/681).
+
 Rules: [design rules](../architecture/rust-agent/principles.md), [ADR 002](../adr/002-plugin-scope.md),
 [ADR 006](../adr/006-plugin-contract.md), [How Dim uses rutis](rutis-usage.md).
 [中文](../zh/design/rutis-0.19-upgrade.md)
@@ -41,7 +43,7 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 | --- | --- |
 | 0.17.2 | No API change. A bad value fails only its call; a runtime exit blames no other row; `StillWaiting` after 10 s |
 | 0.18 | Error texts carry codes (`session::Error::Binding`); the default error sink writes to standard error; configurations are validated against their schema and filled with defaults; `reconcile` no longer waits for a runtime still starting; objects with methods cross to every language |
-| 0.19 | A local runtime is the far end of a session; the link, peer, transport and identity layer is gone; the catalog shares every unregistered name; runtime rows honour `isolate`; every runtime emit goes through the host; `LoaderPlugin` provides the service `loader`; the SDK test tools run on a real `rutis-host`; Python 3.12 or later; `CordisError` is `Error` on the wire |
+| 0.19 | A local runtime is the far end of a session; the link, peer, transport and identity layer is gone; the catalog shares every unregistered name; runtime rows honour `isolate`; every runtime emit goes through the host; `LoaderPlugin` provides the service `loader`; one `rutis/row` listener per loader instead of one per row ([rutis#808](https://github.com/arcships/rutis/pull/808), the fix [#518](https://github.com/arcships/dim/issues/518) waits for); the SDK test tools run on a real `rutis-host`; Python 3.12 or later; `CordisError` is `Error` on the wire |
 
 ### 2.1 Kernel APIs Dim calls
 
@@ -104,7 +106,9 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 
 ## 3. Dim's current usage
 
-A trial build of every target at 70ad3835 against 0.19.0 gives:
+A trial build of every target at 70ad3835 against 0.19.0 gives the table below. `main` has moved
+since (35b3a067); the file and line findings still hold there, and the implementation re-runs the
+build on its own base before it starts.
 
 | Crate | Result |
 | --- | --- |
@@ -113,6 +117,18 @@ A trial build of every target at 70ad3835 against 0.19.0 gives:
 | `dim-app-server` | 16 errors: `lib.rs` (runtime rows, `NodeRuntime`), `session_typescript.rs`, `runtime_manager.rs`, `plugin_manager.rs`, `ui_leaf.rs` |
 | `tests/integration` | `extensions.rs` (a `LocalRuntime` and its resolver); every other test builds |
 | Not reached, located by search | `dim-cli/src/leaf.rs`; `xtask/src/types.rs`; `dim-app-server/tests/transport_flow/ui_host.rs` and `session_typescript.rs:1674`; `set_overlay` in `transport_flow/{scheduler,workflow,process_typescript}.rs` (9 calls); `examples/session_typescript_spike.rs` |
+| Agent placement (M6, not a rutis error) | 120 `build()` and 39 `build_in` calls in 41 files: tests, examples, and `xtask/src/main.rs` (`graph`, `measure`) and `xtask/src/plugins.rs` (the local graph) |
+
+**Open work that meets the upgrade.**
+
+- [#518](https://github.com/arcships/dim/issues/518) waits for rutis#808, which 0.19 ships. The
+  upgrade closes it on the measurement of §6.
+- [#645](https://github.com/arcships/dim/pull/645) serves [#594](https://github.com/arcships/dim/issues/594)
+  with `Loader::instance_rows`, through a Git pin of rutis#920. That pull request was closed unmerged,
+  and 0.19 has no such API (rutis#941 proposes one for a later release). #645 therefore lands neither
+  on 0.17.1 nor with this upgrade. #594 takes its own Dim-side proposal instead: the scope and mounter
+  plugins track the rows they mounted. That needs no rutis API and can land before or after the
+  upgrade.
 
 ## 4. Decisions
 
@@ -203,20 +219,24 @@ rutis-loader, so its key cannot be isolated, and a second loader in one host fai
     counter.
   - `Agent::close` closes the Agent's Sessions. The host unloads the Agent instance and shuts down its
     root.
-- **Tests are hosts.** No product code places an Agent any other way. The 156 calls of `build()` and
-  `build_in` are all in tests and examples (39 files).
-  - A test host under `dim-agent-runtime`'s existing `testing` feature assembles one root and its
+- **Tests and `xtask` are hosts.** No product code places an Agent any other way. The 159 calls of
+  `build()` and `build_in` (§3) are all in tests, examples and `xtask`.
+  - A minimal host under `dim-agent-runtime`'s existing `testing` feature assembles one root and its
     loader the way the App Server does: the builder's modules and plugin rows, `agent_row`, and one
     Agent instance. It builds the Agent in that loader with `build`, and it owns the root's lifetime.
     It takes over `own_placement`'s assembly as a host, not as a placement mode of the Agent.
-  - Host plugins that a test mounts before the Agent starts (`RecoveryHosts`, `AimuxPlugin`,
-    `ConfiguredModelsPlugin`, …) become rows through `AgentBuilder::plugin`, or values through
-    `process_value` and `session_value`.
+  - Host plugins mounted on the root before the Agent starts become rows through
+    `AgentBuilder::plugin`, or values through `process_value` and `session_value`. In tests these are
+    `RecoveryHosts`, `AimuxPlugin`, `ConfiguredModelsPlugin` and others. In `xtask` they are
+    `AimuxPlugin` and `ConfiguredModelsPlugin` for `--model-config`, and `FileStoragePlugin` and
+    `GraphPlatform` for the local graph.
+  - `xtask`'s graphs keep their scopes. The plugins that move become rows of the host's loader, so the
+    local graph's process subgraph lists them as such (§6).
   - Host plugins that a test mounts or unloads while the Agent runs (`EnableContributor` in
-    `tests/integration/tests/tool_binding.rs`) become rows it adds to and removes from the test host's
-    loader.
+    `tests/integration/tests/tool_binding.rs`) become rows it adds to and removes from the minimal
+    host's loader.
   - `agents_of_one_builder_mount_only_their_own_plugins_parts` (`tests/integration/tests/part_registry.rs`)
-    uses two test hosts, and still checks that each has its own part registry.
+    uses two minimal hosts, and still checks that each has its own part registry.
 - **Documentation.**
   - `AgentBuilder`'s documentation and single-tree name the one placement.
   - How Dim uses rutis §2 says that tests are hosts like the App Server ("Where plugins run"). It drops
@@ -259,14 +279,22 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
   plain function returning a `Channel`), and greets with `Session::handshake`. A far end whose id is not
   `dim-daemon` is dropped, which closes the channel. The leaf then mounts the session, whose end replaces
   `LinkState::Stopped`.
-- **Daemon.** `UiLeaf` dials the address, as `LeafDialer` does today (now a plain function). It greets
-  from a context isolated for `catalog_key()`, and drops a far end whose id is not the `peer` of
-  `ui.open`. It then mounts the session.
+- **Daemon.** `UiLeaf` dials the address, as `LeafDialer` does today (now a plain function). It dials
+  only the private address the leaf names:
+  - a `unix:` socket in the native home on Unix;
+  - on Windows, a loopback `tcp:` address whose one-time token it sends as the first line, before the
+    handshake, as today.
+
+  Ids in the handshake are self-declared, so on loopback TCP the token is what authenticates the leaf.
+  `UiLeaf` greets from a context isolated for `catalog_key()`, and drops a far end whose id is not the
+  `peer` of `ui.open`. It then mounts the session.
 - **`TuiRow`.** It calls `SessionHandle::run("Tui", config)` and settles `ui.open` on
   `RowHandle::loaded()`.
   - `run` fails at once while the leaf's session does not run plugins yet. `TuiRow` retries that
-    failure within `ui.open`'s startup deadline, the wait §3.6 already describes for the `plugins`
-    offer.
+    failure every 50 ms within `ui.open`'s startup deadline (`START`, 20 s), the wait §3.6 already
+    describes for the `plugins` offer.
+  - It does not await a state instead: a session offers none for this. The session key that announces
+    readiness is provided only for a session under a marked row, and marking a row is rutis-internal.
   - Its effect drops the row handle, which unloads `Tui` on the leaf (terminal restored), within the
     existing unload bound. On timeout it closes the channel (`Close::Done`), and the session closes
     after the row.
@@ -281,9 +309,21 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
     The leaf is reached only through a private address that a local `ui.open` caller names, and the
     hosted `Tui` keeps using protocol v3 only. The trust boundary stays the local user, but §8's
     sentence "The leaf link exposes no Session or management method" is replaced by this statement.
+  - These services are not isolated from the leaf, although rutis's guidance for a service a far end
+    should not see is `isolate` on the providing row. They are Dim's shared cross-language services,
+    and the repository's own TypeScript plugins inject them. Isolating them would hide them from those
+    plugins as well, for two reasons:
+    - SessionTitle's Session part injects `sessions`, `settings`, `sessionMetadata` and
+      `auxiliaryModel`. It is a definition copy and carries no row `isolate`
+      ([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)), so it could
+      not join an isolated label.
+    - A session exports to every far end alike, and the Node runtime is a session too. A label on
+      the providers cannot tell the leaf apart from the runtime.
+
+    So who may become a leaf bounds the exposure, not isolation.
   - The leaf can run nothing on the daemon: the session catalog is isolated away.
   - The daemon can run only `Tui` on the leaf: the leaf's catalog holds nothing else.
-  - `UiLeaf` dials only loopback `tcp:` addresses (the Windows form of the private address).
+  - `UiLeaf` dials only the leaf's private address, as above.
   - Daemon listener names are announced to each leaf. Nothing is emitted on the leaf, so no event
     crosses the link.
 - **Later UI events.** Tui §3.6 "Later" is rewritten: 0.19 has no `export`/`import` gate and no prefix
@@ -327,7 +367,7 @@ in one pull request. Each step is its own commit.
 
 | Step | Work | Gate |
 | --- | --- | --- |
-| 0 (own pull request, on 0.17.1) | M6: one placement API, the test host, the 39 test and example files moved to it | `cargo test --workspace --locked`; the placement checks of §6 |
+| 0 (own pull request, on 0.17.1) | M6: one placement API, the minimal host, and the 41 files moved to it | `cargo test --workspace --locked`; `xtask check` and `graph` with the step 0 graph diff of §6; the placement checks of §6 |
 | 1 | Pins and lock files (M1); the authoring pin | `cargo metadata` resolves; the lock files name 0.19.0 |
 | 2 | Kernel and catalog: M2, M3 | The tests of the crates below `dim-app-server` and of `tests/integration` (`extensions.rs` follows in step 3); the Timeline `before` checks of §6 |
 | 3 | Runtimes: M4, M5, M9 | Node- and Python-backed flow tests of the App Server and `tests/integration` |
@@ -342,11 +382,21 @@ The full CI sequence at the workspace root, in CI order:
 1. `./dev check`
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings`
 3. `cargo test --workspace --locked`
-4. `cargo run --locked -p xtask -- check`, then `graph`. Assembly changes only by M4's removed rows;
-   the `.json` snapshot diff must show only that
+4. `cargo run --locked -p xtask -- check`, then `graph`. `check` also fails on a stale
+   `npm/branch-services.d.ts`. The committed graphs come from the mock, local and App Server
+   assemblies. None of them starts a language runtime, so M4's removed rows never appear in them. The
+   expected diff of each pull request:
+   - Step 0 (M6):
+     - `generated/services.json` and `generated/app-server/` are expected not to move;
+     - in `generated/local/`, `FileStorage` and `HostPlatform` move from the root to rows of the
+       host's loader;
+     - the generated blocks of the plugin pages regenerate with it.
+   - The upgrade: only fibers that rutis 0.19 itself adds.
+
+   Each pull request records its measured diff and explains every change against this list.
 5. `node --test scripts/*.test.mjs`
-6. The Node bindings as CI runs them: `runtime/plugin-sdk.test.mjs`, the plugin tests, the `tsc`
-   checks and `git diff --exit-code -- npm/branch-services.d.ts`
+6. The Node bindings as CI runs them: `runtime/plugin-sdk.test.mjs`, the plugin tests and the `tsc`
+   checks
 7. The Node- and Python-backed Rust flows (`DIM_TEST_NODE`, `DIM_TEST_JS_RUNTIME`, `DIM_TEST_RUTIS_SDK`)
    and `cargo test -p dimcode --test cli_flow -- --ignored`
 
@@ -360,10 +410,10 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - **Snapshot rows (M4):** a row resolved while its runtime is down is accepted against its `provides`
   snapshot.
 - **`loader` (M5):** a TypeScript row that injects `loader` does not get rutis's row service.
-- **Placement (M6):** the tests moved to the test host keep their assertions. Two Agents built from one
-  builder in two test hosts mount only their own plugins' parts. A contributor row that the test adds
+- **Placement (M6):** the tests moved to the minimal host keep their assertions. Two Agents built from
+  one builder in two minimal hosts mount only their own plugins' parts. A contributor row that the test adds
   while a Session runs, and later removes, reaches the Session's tools and leaves them again. Closing an
-  Agent leaves its instance to the host, and shutting down the test host's root unloads it.
+  Agent leaves its instance to the host, and shutting down the minimal host's root unloads it.
 - **Leaf (M8):** the existing `ui_leaf` PTY flow (start, `/new`, `/web`, exit code, replacement
   generations, a killed leaf, `ui.close`, daemon shutdown). Three new checks:
   - a leaf's attempt to run a daemon plugin fails with no plugin installed;
@@ -371,16 +421,27 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   - `hello` offers `ui.leaf.2`, and a client that does not find it runs the direct TUI.
 - **Terminal (M7):** a leaf whose daemon disappears prints nothing to the terminal before the TUI
   restores it.
+- **Load (#518, #594):** `cargo run --release --locked -p xtask -- measure` on the upgrade's base and
+  on its branch.
+  - It records, at 1, 10, 100 and 1000 Sessions, the create and close times and the tasks and live
+    allocation after close.
+  - #518 closes on this evidence.
+  - #594's remaining growth in create time is attributed against the new numbers.
 
 ## 7. Documentation to update with the upgrade
 
 - [How Dim uses rutis](rutis-usage.md): §1 and §2 (where plugins run and isolation labels, M6), §3.4 (M3), §3.5 (runtime
   rows and `isolate`), §5 ("Dim is on rutis 0.17.1"), Appendix A (`LocalId`, the runtime binding) and
   Appendix B (Python 3.12).
-- [Tui](plugins/Tui.md): §3.1, §3.6 (diagram, Link, Hosted `Tui`, Later), §8, §9 and §10 (M8).
+- [Tui](plugins/Tui.md): §3.1, §3.6 (diagram, Link, Hosted `Tui`, the `hello` feature paragraph,
+  Later), §8, §9 and §10 (M8).
 - [RuntimeManager](plugins/RuntimeManager.md): the diagram, the Python requirement, the runtime and
   resolver sections, and the service names (M4).
-- [PluginManager](plugins/PluginManager.md): `waitingFor` and reload (M9, M4).
+- [PluginManager](plugins/PluginManager.md): `waitingFor` and reload (M9, M4), and its rutis 0.17.1
+  reference in the requirements section.
+- [Scheduler](plugins/Scheduler.md) and the [ACP gateway implementation](acp-gateway-implementation.md):
+  their rutis 0.17.1 references. The [ACP gateway acceptance](acp-gateway-acceptance.md) records a
+  run on 0.17.1 and stays as it is.
 - [Session](session-typescript.md), [branch](branch-typescript.md) and
   [process](process-typescript.md) TypeScript designs, the [authoring guide](../typescript-plugin-authoring.md),
   [single-tree](../architecture/rust-agent/single-tree.md) (also the Agent's placement, M6), [lifecycle](../architecture/rust-agent/lifecycle.md),
@@ -395,9 +456,10 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | Risk | Handling |
 | --- | --- |
 | Versions drift across the host, the runtimes and the leaf (the handshake refuses) | M1 bumps every pin in one commit; `ui.leaf.2` keeps a mismatched CLI and daemon on the direct TUI |
-| The daemon's services become reachable from a leaf | M8: private address, isolated session catalog, id checks, loopback only; Tui §8 states it |
-| A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each test host hold one |
-| Moving 156 test calls changes what a test checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change |
+| The daemon's services become reachable from a leaf | M8: the private address only (a Unix socket, or loopback TCP with a one-time token), an isolated session catalog, id checks; Tui §8 states it, and why `isolate` does not fit |
+| A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each minimal host hold one |
+| Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 states its expected graph diff |
+| #645 lands on its Git pin first | It cannot build on 0.19 (no `instance_rows`); §3 routes #594 to its Dim-side proposal |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |
 | Unknown npm names wait instead of failing | `RuntimeManager`'s status shows the wait; M9 adjusts the test that relied on the failure |
@@ -432,8 +494,10 @@ The upgrade adds no part, event or fact.
   `Transport` implementations, `StaticIdentity` and `UiHostPlugin`'s transport and identity;
   the loader-creating `build()`, `build_in`, `AgentHost::Private` and `Within`, and
   `own_placement`'s per-Agent isolation and its label counter (M6).
-- `own_placement`'s assembly moves to the test host, the only place that needs a minimal host. It is a
-  host there, not a placement mode of the Agent (M6).
+- `own_placement`'s assembly moves to the minimal host, for tests and `xtask`, the only callers that
+  need one. It is a host there, not a placement mode of the Agent (M6).
+- `git diff --exit-code -- npm/branch-services.d.ts` is not added to CI: `xtask check` already fails
+  on a stale file.
 - Dim keeps its own resolver wrapper only for what rutis does not do: the `provides` snapshot check
   and `workflowFiles`.
 - No compatibility shim: `SpawnPlugin` is used from `rutis-host` rather than copied. A copy would

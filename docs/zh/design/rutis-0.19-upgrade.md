@@ -4,6 +4,8 @@
 
 状态：草案。
 
+Issue：[#681](https://github.com/arcships/dim/issues/681)。
+
 规则：[设计规则](../../architecture/rust-agent/principles.md)、[ADR 002](../adr/002-plugin-scope.md)、
 [ADR 006](../adr/006-plugin-contract.md)、[Dim 如何使用 rutis](rutis-usage.md)。
 
@@ -38,7 +40,7 @@ Python 行都无法连接。
 | --- | --- |
 | 0.17.2 | 无 API 变化。坏值只让这一次调用失败；运行时退出不再连累其他行；10 秒后报告 `StillWaiting` |
 | 0.18 | 错误文案带错误码（`session::Error::Binding`）；默认错误 sink 写标准错误；配置按 schema 校验并填入默认值；`reconcile` 不再等待仍在启动的运行时；带方法的对象可以传给每种语言 |
-| 0.19 | 本地运行时是一个会话的对端；链接、peer、传输和身份这一层整个删除；服务目录共享所有未登记的名字；运行时的行遵守 `isolate`；运行时的每次 emit 都经过宿主；`LoaderPlugin` 提供服务 `loader`；SDK 测试工具运行在真实的 `rutis-host` 上；要求 Python 3.12 及以上；线上错误名 `CordisError` 改为 `Error` |
+| 0.19 | 本地运行时是一个会话的对端；链接、peer、传输和身份这一层整个删除；服务目录共享所有未登记的名字；运行时的行遵守 `isolate`；运行时的每次 emit 都经过宿主；`LoaderPlugin` 提供服务 `loader`；每个 loader 只用一个 `rutis/row` 监听器，而不是每行一个（[rutis#808](https://github.com/arcships/rutis/pull/808)，即 [#518](https://github.com/arcships/dim/issues/518) 在等的修复）；SDK 测试工具运行在真实的 `rutis-host` 上；要求 Python 3.12 及以上；线上错误名 `CordisError` 改为 `Error` |
 
 ### 2.1 Dim 调用的内核 API
 
@@ -97,7 +99,8 @@ Python 行都无法连接。
 
 ## 3. Dim 的当前用法
 
-在 70ad3835 上把所有 target 对 0.19.0 试编译一次，结果如下：
+在 70ad3835 上把所有 target 对 0.19.0 试编译一次，结果见下表。此后 `main` 已经前进到 35b3a067；这些文件和行号的发现
+在那里仍然成立，实施时会在自己的基线上重新跑一次。
 
 | Crate | 结果 |
 | --- | --- |
@@ -106,6 +109,15 @@ Python 行都无法连接。
 | `dim-app-server` | 16 个错误：`lib.rs`（运行时的行、`NodeRuntime`）、`session_typescript.rs`、`runtime_manager.rs`、`plugin_manager.rs`、`ui_leaf.rs` |
 | `tests/integration` | `extensions.rs`（一个 `LocalRuntime` 及其解析器）；其余测试都能编译 |
 | 没编到、靠搜索定位的 | `dim-cli/src/leaf.rs`；`xtask/src/types.rs`；`dim-app-server/tests/transport_flow/ui_host.rs` 和 `session_typescript.rs:1674`；`transport_flow/{scheduler,workflow,process_typescript}.rs` 里的 `set_overlay`（9 处调用）；`examples/session_typescript_spike.rs` |
+| Agent 放置（M6，不是 rutis 的错误） | 41 个文件里的 120 处 `build()` 和 39 处 `build_in` 调用：测试、示例，以及 `xtask/src/main.rs`（`graph`、`measure`）和 `xtask/src/plugins.rs`（本地图） |
+
+**与本次升级相关的未完成工作。**
+
+- [#518](https://github.com/arcships/dim/issues/518) 在等 rutis#808，0.19 带上了它。本次升级凭 §6 的测量结果关闭它。
+- [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
+  引入 rutis#920。那个 pull request 已经关闭、没有合并，0.19 里也没有这个 API（rutis#941 打算在之后的版本提供）。所以 #645
+  既不在 0.17.1 上合入，也不随本次升级合入。#594 改走它自己的 Dim 侧方案：由 scope 和 mounter 插件记住自己挂载的行。
+  这不需要任何 rutis API，可以在升级之前或之后合入。
 
 ## 4. 决策
 
@@ -184,16 +196,19 @@ PluginManager 写入（[PluginManager](plugins/PluginManager.md)）。`LoaderPlu
   - 会自建 loader 的 `build()`、`build_in`、`AgentHost::Private` 和 `AgentHost::Within`。
   - `own_placement` 按 Agent 对 `Loader`、`PartRegistry` 和 mounter 做的隔离，以及它的标签计数器。
   - `Agent::close` 只关闭 Agent 的 Session。Agent 实例由宿主卸载，root 由宿主关闭。
-- **测试就是宿主。** 产品代码里没有别的放置方式。`build()` 和 `build_in` 的 156 处调用全部在测试和示例里（39 个文件）。
-  - 在 `dim-agent-runtime` 现有的 `testing` feature 下提供一个测试宿主。它像 App Server 一样装配一个 root 和这个 root
+- **测试和 `xtask` 就是宿主。** 产品代码里没有别的放置方式。`build()` 和 `build_in` 的 159 处调用（§3）全部在测试、示例和
+  `xtask` 里。
+  - 在 `dim-agent-runtime` 现有的 `testing` feature 下提供一个最小宿主。它像 App Server 一样装配一个 root 和这个 root
     的 loader：builder 的模块和插件行、`agent_row`，以及一个 Agent 实例；再用 `build` 把 Agent 建在这个 loader 里，
     并负责 root 的生命周期。它以宿主的身份接手 `own_placement` 的装配，而不是 Agent 的一种放置方式。
-  - 测试在 Agent 启动前挂上的宿主插件（`RecoveryHosts`、`AimuxPlugin`、`ConfiguredModelsPlugin` 等）改为通过
-    `AgentBuilder::plugin` 成为行，或通过 `process_value`、`session_value` 作为值提供。
+  - 在 Agent 启动前挂到 root 上的宿主插件改为通过 `AgentBuilder::plugin` 成为行，或通过 `process_value`、`session_value`
+    作为值提供。测试里是 `RecoveryHosts`、`AimuxPlugin`、`ConfiguredModelsPlugin` 等；`xtask` 里是 `--model-config` 用的
+    `AimuxPlugin` 和 `ConfiguredModelsPlugin`，以及本地图用的 `FileStoragePlugin` 和 `GraphPlatform`。
+  - `xtask` 的图保留原有的作用域；移动的插件成为宿主 loader 里的行，本地图的进程子图会把它们列为行（§6）。
   - 测试在 Agent 运行期间挂上或卸下的宿主插件（`tests/integration/tests/tool_binding.rs` 里的 `EnableContributor`）
-    改为在测试宿主的 loader 里增删行。
+    改为在最小宿主的 loader 里增删行。
   - `agents_of_one_builder_mount_only_their_own_plugins_parts`（`tests/integration/tests/part_registry.rs`）改用两个
-    测试宿主，并且仍然检查每个宿主都有自己的部件登记表。
+    最小宿主，并且仍然检查每个宿主都有自己的部件登记表。
 - **文档。**
   - `AgentBuilder` 的文档和 single-tree 只写这一种放置方式。
   - Dim 如何使用 rutis §2 写明测试和 App Server 一样是宿主（"插件在哪里运行"），并删掉"两个共享宿主的 Agent 给各自
@@ -230,11 +245,17 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
   它像现在的 `Accept` 一样，在私有地址上只接受一次连接（现在是一个返回 `Channel` 的普通函数），然后用
   `Session::handshake` 问候。对端 id 不是 `dim-daemon` 时直接丢弃，channel 随之关闭。之后 leaf 挂载这个会话，
   会话结束代替原来的 `LinkState::Stopped`。
-- **daemon 侧。** `UiLeaf` 像现在的 `LeafDialer` 一样拨号到这个地址（现在是一个普通函数）。它从对
+- **daemon 侧。** `UiLeaf` 像现在的 `LeafDialer` 一样拨号到这个地址（现在是一个普通函数）。它只拨号 leaf 给出的私有地址：
+  - Unix 上是原生 home 里的 `unix:` socket；
+  - Windows 上是 loopback 的 `tcp:` 地址，并且和现在一样，在握手之前先把一次性 token 作为第一行发出。
+
+  握手里的 id 是双方自己声明的，所以在 loopback TCP 上，真正认证 leaf 的是这个 token。`UiLeaf` 从对
   `catalog_key()` 做了隔离的上下文发起问候；对端 id 不是 `ui.open` 给出的 `peer` 时直接丢弃。之后挂载会话。
 - **`TuiRow`。** 它调用 `SessionHandle::run("Tui", config)`，并在 `RowHandle::loaded()` 时让 `ui.open` 完成。
-  - leaf 的会话还不能运行插件时，`run` 会立即失败。`TuiRow` 在 `ui.open` 原有的启动期限内重试这种失败，
-    也就是 §3.6 已经描述过的、等待 `plugins` offer 的那段等待。
+  - leaf 的会话还不能运行插件时，`run` 会立即失败。`TuiRow` 在 `ui.open` 原有的启动期限（`START`，20 秒）内
+    每 50 毫秒重试一次，也就是 §3.6 已经描述过的、等待 `plugins` offer 的那段等待。
+  - 它不改为等待某个状态，因为会话没有提供这样的状态：宣告就绪的会话键只在会话位于一个被标记的行之下时才提供，
+    而标记行是 rutis 内部的操作。
   - 它的效果是丢弃这个行句柄，从而在现有的卸载时限内卸载 leaf 上的 `Tui`（终端恢复）。超时就关闭 channel
     （`Close::Done`）；会话在行之后关闭。
 - **停止。** 两侧都用会话 fiber 的结束代替 `LinkState::Stopped`：daemon 上调用 `UiHost::remove`，leaf 上
@@ -246,9 +267,16 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
     `sessionMetadata`、`managementMethods`）对 leaf 可见。leaf 只能经由本地 `ui.open` 调用方给出的私有地址
     连通，被托管的 `Tui` 仍然只使用协议 v3。信任边界仍是本地用户，但 §8 中"leaf 链接不暴露任何 Session 或
     管理方法"一句改为这里的说法。
+  - 这些服务没有对 leaf 做隔离，尽管 rutis 对"不应让对端看到的服务"的建议是在提供它的行上设置 `isolate`。它们是 Dim 共享的
+    跨语言服务，仓库自己的 TypeScript 插件就注入它们。隔离它们会把这些插件一起挡在外面，原因有两个：
+    - SessionTitle 的 Session 部件注入了 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`。它是插件定义的副本，
+      没有行级 `isolate`（[Dim 如何使用 rutis §3.5](rutis-usage.md#35-各运行时如何解析名字)），所以无法加入一个隔离标签。
+    - 会话会把服务一视同仁地导出给每个对端，而 Node 运行时也是一个会话。给提供方加标签，区分不了 leaf 和运行时。
+
+    所以限定暴露范围的是"谁能成为 leaf"，而不是隔离。
   - leaf 不能在 daemon 上运行任何插件：会话插件目录被隔离掉了。
   - daemon 只能在 leaf 上运行 `Tui`：leaf 的目录里没有别的。
-  - `UiLeaf` 只拨号 loopback 的 `tcp:` 地址（Windows 上私有地址的形式）。
+  - `UiLeaf` 只拨号 leaf 的私有地址，见上文。
   - daemon 的监听器名字会公布给每个 leaf。leaf 上不发出任何事件，所以没有事件跨过链接。
 - **将来的 UI 事件。** 重写 Tui §3.6 的"Later"一节：0.19 没有 `export`/`import` 闸门，也没有前缀订阅，
   所以 leaf 发出的 `ui/*` 事件会到达 daemon 上所有同名监听器。这些事件的契约（serde 载荷，带 `uiId` 和
@@ -282,7 +310,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 | 步骤 | 工作 | 门槛 |
 | --- | --- | --- |
-| 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供测试宿主，把 39 个测试和示例文件迁到它上面 | `cargo test --workspace --locked`；§6 中放置的检查 |
+| 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供最小宿主，并把 41 个文件迁到它上面 | `cargo test --workspace --locked`；`xtask check` 和 `graph`，并对照 §6 中步骤 0 的图 diff；§6 中放置的检查 |
 | 1 | 固定版本和锁文件（M1）；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.0 |
 | 2 | 内核与服务目录：M2、M3 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 的检查 |
 | 3 | 运行时：M4、M5、M9 | App Server 和 `tests/integration` 中由 Node、Python 驱动的流程测试 |
@@ -297,11 +325,18 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 1. `./dev check`
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings`
 3. `cargo test --workspace --locked`
-4. `cargo run --locked -p xtask -- check`，然后 `graph`。装配只因 M4 删除的行而变化；`.json` 快照的 diff
-   只能出现这一项
+4. `cargo run --locked -p xtask -- check`，然后 `graph`。`npm/branch-services.d.ts` 过期时 `check` 也会失败。提交的图
+   来自 mock、本地和 App Server 三个装配，它们都不启动语言运行时，所以 M4 删掉的行从不出现在图里。各个 pull request
+   预期的 diff：
+   - 步骤 0（M6）：
+     - `generated/services.json` 和 `generated/app-server/` 预期不变；
+     - `generated/local/` 里，`FileStorage` 和 `HostPlatform` 从 root 下移到宿主 loader 的行里；
+     - 插件页面里的生成块随之重新生成。
+   - 升级：只有 rutis 0.19 自己新增的 fiber。
+
+   每个 pull request 都记录实际测得的 diff，并对照这份清单解释每一处变化。
 5. `node --test scripts/*.test.mjs`
-6. 按 CI 的方式运行 Node 绑定：`runtime/plugin-sdk.test.mjs`、插件测试、`tsc` 检查和
-   `git diff --exit-code -- npm/branch-services.d.ts`
+6. 按 CI 的方式运行 Node 绑定：`runtime/plugin-sdk.test.mjs`、插件测试和 `tsc` 检查
 7. 由 Node 和 Python 驱动的 Rust 流程（`DIM_TEST_NODE`、`DIM_TEST_JS_RUNTIME`、`DIM_TEST_RUTIS_SDK`），以及
    `cargo test -p dimcode --test cli_flow -- --ignored`
 
@@ -313,23 +348,29 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   `runtime.install` 重启后仍在，准入会等待运行时的行；`plugin.reload` 能用上改动后的模块。
 - **快照行（M4）：** 运行时停着时解析的行，按它的 `provides` 快照被接受。
 - **`loader`（M5）：** 注入 `loader` 的 TypeScript 行拿不到 rutis 的行服务。
-- **放置（M6）：** 迁到测试宿主上的测试保留原有断言。同一个 builder 构建、放在两个测试宿主里的两个 Agent 只挂载
+- **放置（M6）：** 迁到最小宿主上的测试保留原有断言。同一个 builder 构建、放在两个最小宿主里的两个 Agent 只挂载
   各自插件的部件。Session 运行期间测试加入、随后又删除的贡献者行，会先进入 Session 的工具，之后再离开。关闭 Agent
-  后它的实例留给宿主处理，关闭测试宿主的 root 时实例被卸载。
+  后它的实例留给宿主处理，关闭最小宿主的 root 时实例被卸载。
 - **leaf（M8）：** 现有的 `ui_leaf` PTY 流程（启动、`/new`、`/web`、退出码、替换代次、被杀掉的 leaf、
   `ui.close`、daemon 关闭）。新增三项检查：
   - leaf 试图在 daemon 上运行插件时，因为没有安装该插件而失败；
   - 对端用别的 id 问候时，两侧都会拒绝；
   - `hello` 提供 `ui.leaf.2`，找不到它的客户端改为直接运行 TUI。
 - **终端（M7）：** daemon 消失时，leaf 在 TUI 恢复终端之前不往终端打印任何内容。
+- **负载（#518、#594）：** 分别在升级的基线和升级分支上运行 `cargo run --release --locked -p xtask -- measure`。
+  - 在 1、10、100、1000 个 Session 下，记录创建和关闭耗时，以及关闭后的任务数和存活内存。
+  - #518 凭这份结果关闭。
+  - #594 剩余的创建耗时增长按新的数字重新归因。
 
 ## 7. 随升级一并更新的文档
 
 - [Dim 如何使用 rutis](rutis-usage.md)：§1 和 §2（插件在哪里运行、隔离标签，M6）、§3.4（M3）、§3.5（运行时的行与 `isolate`）、
   §5（"Dim 使用 rutis 0.17.1"）、附录 A（`LocalId`、运行时的绑定）和附录 B（Python 3.12）。
-- [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui`、Later）、§8、§9 和 §10（M8）。
+- [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui`、`hello` feature 那段、Later）、§8、§9 和 §10（M8）。
 - [RuntimeManager](plugins/RuntimeManager.md)：示意图、Python 版本要求、运行时与解析器各节，以及服务名（M4）。
-- [PluginManager](plugins/PluginManager.md)：`waitingFor` 和重新加载（M9、M4）。
+- [PluginManager](plugins/PluginManager.md)：`waitingFor` 和重新加载（M9、M4），以及需求一节里对 rutis 0.17.1 的引用。
+- [Scheduler](plugins/Scheduler.md) 和 [ACP gateway 实现](../../design/acp-gateway-implementation.md)：其中对 rutis 0.17.1 的引用。
+  [ACP gateway 验收](../../design/acp-gateway-acceptance.md)记录的是一次基于 0.17.1 的运行，保持原样。
 - [Session](../../design/session-typescript.md)、[分支](../../design/branch-typescript.md)和
   [进程](../../design/process-typescript.md)的 TypeScript 设计，[作者指南](../../typescript-plugin-authoring.md)，
   [single-tree](../../architecture/rust-agent/single-tree.md)（也包括 Agent 的放置方式，M6），[lifecycle](../../architecture/rust-agent/lifecycle.md)，
@@ -343,9 +384,10 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 风险 | 处理 |
 | --- | --- |
 | 宿主、运行时和 leaf 之间版本不一致（握手会拒绝） | M1 在一个提交里升级所有固定版本；`ui.leaf.2` 让版本不一致的 CLI 和 daemon 改走直接 TUI |
-| daemon 的服务变得可以从 leaf 访问 | M8：私有地址、隔离会话插件目录、核对 id、只拨 loopback；Tui §8 写明这一点 |
-| 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个测试宿主各持有一个 |
-| 迁移 156 处测试调用改变了测试所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动 |
+| daemon 的服务变得可以从 leaf 访问 | M8：只用私有地址（Unix socket，或带一次性 token 的 loopback TCP）、隔离会话插件目录、核对 id；Tui §8 写明这一点，以及为什么 `isolate` 不适用 |
+| 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
+| 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
+| #645 先通过 Git 固定版本合入 | 它在 0.19 上无法编译（没有 `instance_rows`）；§3 让 #594 改走它的 Dim 侧方案 |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
@@ -378,7 +420,9 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   `plugins` offer 的等待；leaf 和 daemon 各自的 `Transport` 实现、`StaticIdentity`，以及 `UiHostPlugin` 的传输和身份；
   会自建 loader 的 `build()`、`build_in`、`AgentHost::Private` 和 `Within`，以及 `own_placement` 按 Agent 的隔离及其
   标签计数器（M6）。
-- `own_placement` 的装配移到测试宿主里，那是唯一需要最小宿主的地方。它在那里是一个宿主，而不是 Agent 的一种放置方式（M6）。
+- `own_placement` 的装配移到最小宿主里，供测试和 `xtask` 使用，它们是唯一需要最小宿主的调用方。它在那里是一个宿主，而不是
+  Agent 的一种放置方式（M6）。
+- 不在 CI 里加 `git diff --exit-code -- npm/branch-services.d.ts`：`xtask check` 已经会在这个文件过期时失败。
 - Dim 只为 rutis 不做的事保留自己的解析器包装：`provides` 快照检查和 `workflowFiles`。
 - 没有兼容层：直接使用 `rutis-host` 的 `SpawnPlugin`，而不是复制一份。复制等于在 Dim 里重建被删的 `LocalRuntime`。
 - `ui.leaf.2` 复用现有的 feature 回退机制，不新增版本检查。
