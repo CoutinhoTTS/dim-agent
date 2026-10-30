@@ -20,6 +20,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
         Some("context-replay") => context_replay().await?,
+        Some("restore-replay") => restore_replay().await?,
         Some("summary-eval") => summary_eval::run().await?,
         Some("scenario-eval") => scenario_eval::run().await?,
         Some("check") => {
@@ -30,7 +31,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|context-replay|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|context-replay|restore-replay DB SESSION|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
                     .into(),
             );
         }
@@ -429,10 +430,8 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let chunk = "x".repeat(CHARS_PER_TURN);
     let baseline = allocation::live();
     let rss_baseline = rss_kb();
-    let database = std::env::temp_dir().join(format!(
-        "dim-context-replay-{}.sqlite",
-        std::process::id()
-    ));
+    let database =
+        std::env::temp_dir().join(format!("dim-context-replay-{}.sqlite", std::process::id()));
     let db = dim_app_server::storage::SqliteStorage::open(database.clone())?;
     let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
     let agent = agent_with_store(store);
@@ -512,6 +511,85 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
             "settled": tasks_settled,
         },
         "steps": steps,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Restores one stored Session from a prepared SQLite copy and runs one mock
+/// turn, so the real event/tool shape is replayed without the provider.
+/// Run with `cargo run --release -p xtask -- restore-replay DB SESSION`.
+async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let (database, session_id) = match args.as_slice() {
+        [database, session] => (PathBuf::from(database), session.clone()),
+        _ => return Err("restore-replay needs DB and SESSION".into()),
+    };
+    let baseline = allocation::live();
+    let rss_baseline = rss_kb();
+    let db = dim_app_server::storage::SqliteStorage::open(database)?;
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let agent = agent_with_store(store);
+    let live_agent = allocation::live();
+    let rss_agent = rss_kb();
+    let start = Instant::now();
+    let session = agent.restore_session(session_id.clone()).await?;
+    let restore_ms = start.elapsed().as_secs_f64() * 1000.;
+    let live_restored = allocation::live();
+    let peak_restored = allocation::peak();
+    let rss_restored = rss_kb();
+    session
+        .submit(
+            "measure restored context".into(),
+            dim_agent_types::InputMode::Queue,
+            "main",
+        )
+        .await?;
+    session.idle("main").await?;
+    let live_active = allocation::live();
+    let peak = allocation::peak();
+    let rss_active = rss_kb();
+    let tasks_active = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    session.close().await?;
+    let live_close_immediate = allocation::live();
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let live_settled = allocation::live();
+    let tasks_settled = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let rss_settled = rss_kb();
+    agent.close().await?;
+    let live_after_agent = allocation::live();
+    let rss_after_agent = rss_kb();
+    drop(db);
+    let report = json!({
+        "modelHost": "mock",
+        "store": "sqlite",
+        "sessionId": session_id,
+        "restoreMs": restore_ms,
+        "liveBaseline": baseline,
+        "liveAfterAgent": live_agent,
+        "liveRestored": live_restored,
+        "peakRestored": peak_restored,
+        "liveActive": live_active,
+        "peak": peak,
+        "liveCloseImmediate": live_close_immediate,
+        "liveSettled": live_settled,
+        "liveAfterAgentClose": live_after_agent,
+        "rssKb": {
+            "baseline": rss_baseline,
+            "agent": rss_agent,
+            "restored": rss_restored,
+            "active": rss_active,
+            "settled": rss_settled,
+            "afterAgentClose": rss_after_agent,
+        },
+        "tasks": {
+            "active": tasks_active,
+            "settled": tasks_settled,
+        },
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
