@@ -9,7 +9,7 @@ L2 的第二个语料：Databricks OfficeQA Pro 的 133 道 hard 题。设计与
 | `assemble.py` | 从 `officeqa_pro.csv` 生成任务树与 `MANIFEST.json` |
 | `template/` | 每个任务的模板；`tests/evaluate.py` 调上游 `score_answer` |
 | `corpus-image/` | 自建语料镜像的 Dockerfile 与 `build.sh`（备用，见下文） |
-| `tasks/` | 生成的 133 个任务，**提交进仓库**，语料 pin 即它的 `tree_digest` |
+| `tasks/MANIFEST.json` | 生成的 133 个任务的 manifest，语料 pin 即它的 `tree_digest`；任务本身含标准答案，放在私有仓库 [arcships/dim-eval-data](https://github.com/arcships/dim-eval-data) 的 `officeqa-pro/` |
 | `flow_test.py` | 生成 → pin → verifier 的流程测试（数据集为合成） |
 
 ## 当前 pin
@@ -57,8 +57,11 @@ python3 benchmarks/officeqa/assemble.py \
   --dataset officeqa-data --dataset-revision <第 1 步的 rev> \
   --officeqa-repo officeqa-src --reward-commit "$(git -C officeqa-src rev-parse HEAD)" \
   --corpus-image <第 2 步的 digest 引用> \
-  --out benchmarks/officeqa/tasks
+  --out <dim-eval-data>/officeqa-pro
+cp <dim-eval-data>/officeqa-pro/MANIFEST.json benchmarks/officeqa/tasks/MANIFEST.json
 ```
+
+任务树提交到 dim-eval-data，`MANIFEST.json` 提交到本仓库，两边一起 review。
 
 `assemble.py` 会拒绝：行数不是 133、出现非 hard 题（即拿错成 `officeqa_full.csv`）、
 语料镜像不是 digest 引用、`--out` 是一个不由它生成的目录。
@@ -68,14 +71,14 @@ python3 benchmarks/officeqa/assemble.py \
 ```bash
 docker pull <MANIFEST.json 里 source.corpus_image 的值>
 # oracle 自检：133 题的标准答案应当全部得 1；不是就说明 verifier 或镜像有问题，不要冻 baseline
-harbor run -p benchmarks/officeqa/tasks -a oracle
+harbor run -p <dim-eval-data>/officeqa-pro -a oracle
 ```
 
 最后冻 baseline（k=3，手工，不走 CI）并提交：
 
 ```bash
 python3 benchmarks/daily_run.py --run-type baseline --head <commit> \
-  --tasks-dir benchmarks/officeqa/tasks --concurrency 10
+  --tasks-dir <dim-eval-data>/officeqa-pro --concurrency 10
 ```
 
 任务树、`MANIFEST.json` 与新 baseline 放在同一个 MR 里。换语料镜像、换 tolerance、

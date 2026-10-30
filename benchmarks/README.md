@@ -13,12 +13,13 @@ dim-agent 的能力评测 pipeline。回答的问题是：**这次改动会不�
 | `policy/always-eval.toml` | 直接判 visible 的路径规则，绕过 L1 agent | 人工维护 |
 | `l1/` | L1 判定：canonical diff、路径规则、review agent、verdict cache | 实现代码 |
 | `build/` | 批次识别（`daily_batch.py`）与被测镜像构建投递（`build_image.py`） | 实现代码 |
-| `tasks/` | vendored 的 30 个 L2 任务定义 + [上游 pin](tasks/UPSTREAM.md) | 升级 pin 的 MR |
-| `officeqa/` | OfficeQA Pro：任务生成器、模板、语料镜像；生成的 133 个任务在 `officeqa/tasks/`，见 [officeqa/README.md](officeqa/README.md) | 升级 pin 的 MR |
+| `tasks/` | 30 个 L2 任务的 `MANIFEST.json` + [上游 pin](tasks/UPSTREAM.md)；任务树在私有仓库 [arcships/dim-eval-data](https://github.com/arcships/dim-eval-data) | 升级 pin 的 PR |
+| `officeqa/` | OfficeQA Pro：任务生成器、模板、语料镜像；生成的 133 个任务在 dim-eval-data，本仓库只留 `officeqa/tasks/MANIFEST.json`，见 [officeqa/README.md](officeqa/README.md) | 升级 pin 的 MR |
 | `runner/` | 运行器：任务编排、dim adapter、结果解析（`results.py`）、baseline 与配对比较（`baseline.py`） | 实现代码 |
 | `ledger_tools/` | ledger 的 schema、append-only store、审计与健康指标 | 实现代码 |
 | `baselines/<pin-sha>.json` | 每任务 k 次的通过分数与成本，按任务 pin 分文件 | baseline 采集 |
-| `ledger/` | 每个 PR 一条判定记录，长期保留；定时运行写在 `eval-ledger` 分支 | 评测机写入 |
+| `corpus.py` | 核对任务树与本仓库 pin 的 `MANIFEST.json` 逐个 digest 相同 | 实现代码 |
+| `ledger/` | 每个 PR 一条判定记录，长期保留；定时运行写在 dim-eval-data 的 `eval-ledger` 分支 | 评测机写入 |
 | `host/` | 评测机部署：cron 入口、工具链安装，见 [host/README.md](host/README.md) | 实现代码 |
 | `report/` | 失败分析（`analyze.py`）与 GitHub issue（`issues.py`） | 实现代码 |
 
@@ -27,7 +28,7 @@ dim-agent 的能力评测 pipeline。回答的问题是：**这次改动会不�
 | 层 | 触发 | 内容 | 是否阻断 |
 |---|---|---|---|
 | L1 | 每个 merge | review agent 判定 diff 是否触及模型可见面 | 否，只决定是否跑 L2 |
-| L2 | 窗口内任一 merge 判 visible 时 | 本目录 `tasks/` 的 30 任务 × k（日常 1，定论 3）；另有 OfficeQA Pro 133 题，独立语料、独立 schedule | 日常只记 `screen` 或 `invalid`；阈值重标前不阻断 |
+| L2 | 窗口内任一 merge 判 visible 时 | FrontierHarness 的 30 任务 × k（日常 1，定论 3）；另有 OfficeQA Pro 133 题，独立语料、独立 schedule | 日常只记 `screen` 或 `invalid`；阈值重标前不阻断 |
 | L3 | 每周五 + release 前 | Terminal-Bench 2.1 全量 + DeepSWE 全量 | 否，趋势与兜底 |
 
 ## 运行环境
@@ -78,7 +79,7 @@ python3 benchmarks/daily_run.py --dry-run
 python3 benchmarks/daily_run.py --run-type baseline --head <commit>
 
 # OfficeQA Pro：同一入口，换语料、并发与 state
-python3 benchmarks/daily_run.py --remote-judge --tasks-dir benchmarks/officeqa/tasks \
+python3 benchmarks/daily_run.py --remote-judge --tasks-dir <dim-eval-data>/officeqa-pro \
     --concurrency 10 --state benchmarks/ledger/officeqa-pro-state.json
 ```
 
@@ -96,7 +97,8 @@ k 由 run type 决定，`--k` 可覆盖；但 `checkpoint` / `baseline` 低于 k
 
 由评测机上的 cron 调用 [host/nightly.sh](host/nightly.sh)，每个语料一条：`frontier` 跑 30 个
 FrontierHarness 任务，`officeqa-pro` 跑 OfficeQA Pro（只允许 daily）。它跑的就是上面那条命令，
-区别只在三处：ledger 与 state 存在 `eval-ledger` 分支；`baseline` 被显式拒绝——换参照是要
+区别只在三处：任务树取自 dim-eval-data 并先用 `corpus.py` 核对；ledger 与 state 存在
+dim-eval-data 的 `eval-ledger` 分支；`baseline` 被显式拒绝——换参照是要
 review 的改动，不是 cron 的副产品；跑完后先分析失败、再提 issue。部署与前提见
 [host/README.md](host/README.md)。
 

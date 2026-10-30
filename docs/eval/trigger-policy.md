@@ -243,7 +243,7 @@ per-mr 的成本是实打实的，收益却依赖一个尚不存在的可靠门�
 | 语料 | 697 期美国财政部公报（1939–2025）的 parsed text，`treasury_bulletins_parsed/transformed/*.txt` |
 | verifier | 上游 [`reward.py`](https://github.com/databricks/officeqa/blob/main/reward.py) 的 `score_answer`，逐字 vendor 进每个任务；只返回 0/1，直接落在现有 pass/fail 读取上 |
 | tolerance | **0**（`score_answer` 的默认值）。harbor 官方 adapter 用 0.01；两者的分数不可比，所以取值写进每个任务的 `tests/config.json`，改它会改变语料 pin |
-| 目录 | `benchmarks/officeqa/tasks/`，由 `benchmarks/officeqa/assemble.py` 生成后提交 |
+| 目录 | 由 `benchmarks/officeqa/assemble.py` 生成，提交到私有仓库 arcships/dim-eval-data 的 `officeqa-pro/`（含标准答案）；本仓库只留 `benchmarks/officeqa/tasks/MANIFEST.json` |
 
 #### 任务定义的实际构成
 
@@ -280,7 +280,7 @@ HF 数据集的 revision 与 `reward.py` 的上游 commit 记在 `MANIFEST.json`
 
 #### 运行方式
 
-入口不变：`daily_run.py --tasks-dir benchmarks/officeqa/tasks --concurrency 10`。窗口、k、baseline、ledger 的规则与 FrontierHarness 完全相同，只是 state 单独一份（`officeqa-pro-state.json`），两个语料各自推进窗口——一个语料 L2 失败 hold 住的窗口，不该被另一个语料的成功推进掉。
+入口不变：`daily_run.py --tasks-dir <dim-eval-data>/officeqa-pro --concurrency 10`。窗口、k、baseline、ledger 的规则与 FrontierHarness 完全相同，只是 state 单独一份（`officeqa-pro-state.json`），两个语料各自推进窗口——一个语料 L2 失败 hold 住的窗口，不该被另一个语料的成功推进掉。
 
 定时运行由 `nightly.sh officeqa-pro daily` 选择，且**只允许 `daily`**。k=3 的 checkpoint 是 399 个 trial，最坏 20 小时，放不进一个 job；要做 checkpoint 或 baseline 就手工跑。
 
@@ -307,7 +307,7 @@ n=89 时两次运行差值标准误仍约 6.6 个任务，因此 **L3 同样不�
 
 | 项 | 规则 |
 |---|---|
-| Vendor | 任务定义拷入 `benchmarks/tasks/`，不做运行时拉取 |
+| Vendor | 任务树装配后提交到私有仓库 arcships/dim-eval-data（部分上游没有可再分发的授权），本仓库只 pin 它的 `MANIFEST.json`；运行前由 `benchmarks/corpus.py` 逐个 digest 核对，不做运行时向上游拉取 |
 | Pin | **三重 pin**，全部记录在 `benchmarks/tasks/UPSTREAM.md`：① frontier-harness-eval 的 commit SHA（任务选择列表）② 每个任务镜像的 **digest**（非 tag——tag 可被上游重推）③ harbor 版本 |
 | 镜像 | 30 个任务镜像镜像到自有 registry，不依赖 Docker Hub / ECR 长期可用 |
 | 升级 | 升级 pin 属独立 MR，必须同时重跑 baseline 并更新基线文件；不得与功能改动同 MR |
@@ -902,7 +902,7 @@ invisible merge 的代码，只要同窗口里有任何一个 merge 触发了运
 | `baseline` 运行写的 ledger 记录 outcome 为 `pass`，而它没有做过任何比较（今天无害：`covers` 为空）。与刚修掉的 k 不匹配记 `pass` 是同一形状，需决定是改记录方式还是不记 | 未开始 |
 | `harbor_version` 只进 `params`，而 `params` 仅用于冻结 baseline——`run.json` 里没有这个字段，`freeze` CLI 产出的 baseline 里也没有。[三重 pin](#实现约束) 的第③项从未落盘 | 未开始 |
 | 单次运行成本预算上限（batch 模式下按批计，不按 MR） | 待定 |
-| [OfficeQA Pro](#l2--officeqa-pro)：生成 `benchmarks/officeqa/tasks/`、推送语料镜像、oracle 自检、冻 k=3 baseline、加 `nightly.sh officeqa-pro daily` 的 cron | 任务已生成并通过容器内 oracle 自检（133/133）；待在评测机上跑 harbor oracle、冻 baseline、加 cron，见 [officeqa/README.md](../../benchmarks/officeqa/README.md) |
+| [OfficeQA Pro](#l2--officeqa-pro)：生成任务树、推送语料镜像、oracle 自检、冻 k=3 baseline、加 `nightly.sh officeqa-pro daily` 的 cron | 任务已生成并通过容器内 oracle 自检（133/133）；待在评测机上跑 harbor oracle、冻 baseline、加 cron，见 [officeqa/README.md](../../benchmarks/officeqa/README.md) |
 | `expr-try-catch-errors` 之外，另两个仍指向无后缀镜像代次的 DeepSWE 任务是否对齐 | 已决定不动，见 [UPSTREAM.md](../../benchmarks/tasks/UPSTREAM.md) |
 
 ## References

@@ -44,11 +44,14 @@ infra 失败率 5.6% → 1.1%。
 | datacurve-ai/deep-swe | Apache-2.0；各任务所依赖的上游项目另有 MIT / BSD-3-Clause / Apache-2.0，逐条列在其 `PROVENANCE.md`，均为宽松许可 |
 | frontier-harness-eval/eval | **无 LICENSE 文件，`package.json` 无 `license` 字段，README 无授权表述** |
 
-frontier 那 30 个 `task.toml` 与 9 个 `instruction.md` 已按上表装配并 vendor 进本目录。
-决定是**仅限内部自用**：本仓库不对外分发这部分内容。
+frontier 那 30 个 `task.toml` 与 9 个 `instruction.md` 没有可再分发的授权，因此装配好的任务树
+**不在本仓库**：它放在私有仓库 [arcships/dim-eval-data](https://github.com/arcships/dim-eval-data)
+的 `frontier/`，仅限内部自用，那里的 `NOTICE` 列出全部上游与改动。本目录只留 `MANIFEST.json`
+（每个任务的 digest 与 `tree_digest`）和这份说明；评测运行前用 `benchmarks/corpus.py` 核对
+私有仓库里的任务树与这份 manifest 逐个 digest 相同，不同就拒绝运行。
 
-对外开源本仓库、或把 `benchmarks/tasks/` 单独发布之前，必须重新处理 frontier 这一层的授权——
-另外两个上游是 Apache-2.0，届时只需补 attribution。
+换语料的流程：在 dim-eval-data 更新任务树，在本仓库更新 `MANIFEST.json`（与新的 baseline），
+两边一起 review。
 
 ## DeepSWE 镜像的两代 tag
 

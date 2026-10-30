@@ -5,8 +5,9 @@
 #
 # Extra options go to daily_run.py, e.g. `--dry-run` to judge the window and
 # build nothing when trying out a new setup; issues are then printed, not filed.
-# It evaluates whatever origin/main points at, writes the judgement records to
-# the ledger branch, has each failed trial analyzed, and files the night's
+# It evaluates whatever origin/main points at on the corpus pinned by this
+# repository (checked out from arcships/dim-eval-data and verified against the
+# pinned MANIFEST.json), writes the judgement records to the ledger branch, has each failed trial analyzed, and files the night's
 # failures and any pipeline problem as GitHub issues. Settings live
 # in $DIM_EVAL_HOME/config.env; benchmarks/host/README.md lists them and the
 # one-time setup. Exit codes are daily_run.py's, plus 8 when the ledger push
@@ -26,7 +27,8 @@ main() {
   . "$home/config.env"
   set +a
   local remote="${DIM_EVAL_GIT_REMOTE:-git@github.com:arcships/dim.git}"
-  local ledger_remote="${DIM_EVAL_LEDGER_REMOTE:-$remote}"
+  local data_remote="${DIM_EVAL_DATA_REMOTE:-git@github.com:arcships/dim-eval-data.git}"
+  local ledger_remote="${DIM_EVAL_LEDGER_REMOTE:-$data_remote}"
   local ledger_branch="${DIM_EVAL_LEDGER_BRANCH:-eval-ledger}"
   local github_repo="${DIM_EVAL_GITHUB_REPO:-arcships/dim}"
 
@@ -37,14 +39,16 @@ main() {
     *) echo "run type $run_type is not scheduled; take a baseline by hand" >&2; exit 1 ;;
   esac
   # Each suite advances its own window, so each has its own state file.
-  local tasks state concurrency
+  local corpus manifest state concurrency
   case "$suite" in
     frontier)
-      tasks=benchmarks/tasks state=daily-state.json concurrency=5 ;;
+      corpus=frontier manifest=benchmarks/tasks/MANIFEST.json
+      state=daily-state.json concurrency=5 ;;
     officeqa-pro)
       # k=3 is 399 trials, about 20 hours at worst: run that by hand.
       [ "$run_type" = daily ] || { echo "officeqa-pro runs daily only" >&2; exit 1; }
-      tasks=benchmarks/officeqa/tasks state=officeqa-pro-state.json concurrency=10 ;;
+      corpus=officeqa-pro manifest=benchmarks/officeqa/tasks/MANIFEST.json
+      state=officeqa-pro-state.json concurrency=10 ;;
     *) echo "unknown suite $suite (frontier or officeqa-pro)" >&2; exit 1 ;;
   esac
 
@@ -58,11 +62,13 @@ main() {
   exec > >(tee -a "$log") 2>&1
   echo "[nightly] $suite $run_type, log $log"
 
-  local repo="$home/repo" ledger="$home/ledger" started="$home/.started-$suite"
+  local repo="$home/repo" data="$home/data" ledger="$home/ledger" started="$home/.started-$suite"
   touch "$started"
   local status=0 pushed=1 dry=()
   case " $* " in *" --dry-run "*) dry=(--dry-run) ;; esac
-  prepare "$repo" "$remote" "$ledger" "$ledger_remote" "$ledger_branch" "$state" || status=$?
+  prepare "$repo" "$remote" "$data" "$data_remote" "$ledger" "$ledger_remote" "$ledger_branch" "$state" \
+    && python3 "$repo/benchmarks/corpus.py" --manifest "$repo/$manifest" --tasks-dir "$data/$corpus" \
+    || status=$?
 
   if [ "$status" -eq 0 ]; then
     local head
@@ -77,7 +83,7 @@ main() {
       --l2-timeout-hours 9 \
       --remote-judge \
       --ledger-dir "$ledger" \
-      --tasks-dir "$repo/$tasks" \
+      --tasks-dir "$data/$corpus" \
       --concurrency "$concurrency" \
       --state "$ledger/$state" \
       --cache-dir "$home/l1-cache" \
@@ -146,11 +152,15 @@ main() {
 # Called as `prepare ... || status=$?`, where bash ignores `set -e`; every
 # step therefore returns on failure itself.
 prepare() {
-  local repo="$1" remote="$2" ledger="$3" ledger_remote="$4" branch="$5" state="$6"
-  if [ ! -d "$repo/.git" ]; then git clone --quiet "$remote" "$repo" || return 1; fi
-  git -C "$repo" fetch --quiet origin main || return 1
-  git -C "$repo" checkout --quiet --force --detach origin/main || return 1
-  git -C "$repo" clean -fdq || return 1
+  local repo="$1" remote="$2" data="$3" data_remote="$4" ledger="$5" ledger_remote="$6"
+  local branch="$7" state="$8" checkout
+  for checkout in "$repo|$remote" "$data|$data_remote"; do
+    local dir="${checkout%%|*}" url="${checkout#*|}"
+    if [ ! -d "$dir/.git" ]; then git clone --quiet "$url" "$dir" || return 1; fi
+    git -C "$dir" fetch --quiet origin main || return 1
+    git -C "$dir" checkout --quiet --force --detach origin/main || return 1
+    git -C "$dir" clean -fdq || return 1
+  done
 
   # The ledger clone persists across runs, so a commit whose push failed is
   # rebased and pushed with the next run's records.

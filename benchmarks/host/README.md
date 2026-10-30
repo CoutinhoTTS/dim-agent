@@ -4,7 +4,7 @@
 的 HTTPS，但能用 SSH 拉推代码、能访问 `api.github.com`。整条流水线因此是：
 
 ```
-cron ─► nightly.sh ─► git fetch（SSH）─► daily_run.py ─► 推 eval-ledger（SSH）
+cron ─► nightly.sh ─► git fetch dim 与 dim-eval-data（SSH）─► corpus.py 核对 ─► daily_run.py ─► 推 eval-ledger（SSH）
         ─► report/analyze.py（DeepSeek）─► report/issues.py（API）
 ```
 
@@ -25,21 +25,27 @@ cron ─► nightly.sh ─► git fetch（SSH）─► daily_run.py ─► 推 e
 2. **harbor。** 装在一个 venv 里，路径填到下面的 `DIM_EVAL_REMOTE_PYTHON`。
 3. **SSH 回环。** `daily_run.py` 通过 ssh 在评测机上跑 L2 与 L1 judge，评测机要能 ssh 到自己
    （`DIM_EVAL_HOST`）。不为本机执行开特例：手工复现的 run 与定时跑的是同一个 run。
-4. **GitHub 部署密钥。** 生成一把专用 key，在仓库 Settings → Deploy keys 添加，勾选
-   *Allow write access*（推 `eval-ledger` 用）。用一个专用的主机别名，不影响这台机器上别的
-   GitHub 访问：
+4. **GitHub 部署密钥，两把。** GitHub 不允许一把部署密钥用在两个仓库上：
+   - `arcships/dim`：**只读**，拉被测代码与 harness；
+   - `arcships/dim-eval-data`（私有，任务树与 `eval-ledger` 分支）：勾选 *Allow write access*，
+     推 ledger 用。
+
+   每把用一个专用主机别名，不影响这台机器上别的 GitHub 访问：
 
    ```
    # ~/.ssh/config
-   Host github-dim-eval
+   Host github-dim
      HostName github.com
-     IdentityFile ~/.ssh/dim-eval-deploy
+     IdentityFile ~/.ssh/dim-eval-dim
+     IdentitiesOnly yes
+   Host github-dim-data
+     HostName github.com
+     IdentityFile ~/.ssh/dim-eval-data
      IdentitiesOnly yes
    ```
 
-   并在 `config.env` 里设 `DIM_EVAL_GIT_REMOTE=git@github-dim-eval:arcships/dim.git`。
-   部署密钥对整个仓库有写权限，上线前用 ruleset 收窄它能做的事：`main` 要求 PR；`v*` tag
-   （`release.yml` 由它触发）限制创建；`eval-ledger` 禁止 force push 与删除（ledger 只追加）。
+   可写的那把只能动 dim-eval-data；在那里给 `eval-ledger` 设 ruleset，禁止 force push 与删除
+   （ledger 只追加）。
 5. **issue token。** fine-grained personal access token，只授权本仓库，权限只给
    *Issues: Read and write*。写入 `~/dim-eval/github-token`，`chmod 600`，只由 `issues.py`
    读取。token 有过期时间，过期后提 issue 失败，`nightly.sh` 以退出码 `10` 结束，日志里有警告。
@@ -62,7 +68,8 @@ cron ─► nightly.sh ─► git fetch（SSH）─► daily_run.py ─► 推 e
    DIM_EVAL_HOST=user@eval-host          # ssh 回环的目标
    DIM_EVAL_SCRATCH=/home/user/dim-eval-scratch
    DIM_EVAL_REMOTE_PYTHON=/path/to/harbor-venv/bin/python
-   DIM_EVAL_GIT_REMOTE=git@github-dim-eval:arcships/dim.git
+   DIM_EVAL_GIT_REMOTE=git@github-dim:arcships/dim.git
+   DIM_EVAL_DATA_REMOTE=git@github-dim-data:arcships/dim-eval-data.git   # 任务树；ledger 默认也在这里
    DIM_EVAL_REDACT="models.example.internal proxy.example.internal"   # issue 正文里额外抹掉的字符串
    DIM_EVAL_VERIFIER_PROXY=http://proxy.example.internal:port   # 只给判分阶段用的 HTTP 代理，见下
    # 可选：DIM_EVAL_TOOLCHAIN、DIM_EVAL_LEDGER_REMOTE、
@@ -70,10 +77,10 @@ cron ─► nightly.sh ─► git fetch（SSH）─► daily_run.py ─► 推 e
    #       CARGO_TARGET_DIR（跨天复用依赖的编译产物）
    ```
 
-8. **ledger 分支。** 建一个只装 ledger 的 orphan 分支 `eval-ledger`，根目录放
+8. **ledger 分支。** 在 dim-eval-data 建一个只装 ledger 的 orphan 分支 `eval-ledger`，根目录放
    `daily-state.json` 与 `officeqa-pro-state.json`，内容都是
    `{"last_l2_head": "<从哪个 commit 之后开始评测>"}`。窗口起点不允许猜，缺了它运行直接失败。
-9. **cron。** 先 `git clone git@github-dim-eval:arcships/dim.git ~/dim-eval/repo`，再：
+9. **cron。** 先 `git clone git@github-dim:arcships/dim.git ~/dim-eval/repo`，再：
 
    ```
    0 18 * * * /home/user/dim-eval/repo/benchmarks/host/nightly.sh frontier daily
@@ -98,8 +105,8 @@ ledger 并推送到 `eval-ledger`。
 （`build.rs`、过程宏；npm 依赖以 `--ignore-scripts` 安装）。凭据不进入构建的环境变量，但
 **这个用户能读到的文件，构建也能读到**：部署密钥、issue token、`~/.dim-eval-env` 里的模型
 凭据。这与旧的 GitLab runner 是同一个前提——信任的是「进了 main 的代码」，靠的是 PR review，
-不是隔离。要收紧它，需要在容器里或以另一个用户身份构建；在那之前，上面的 ruleset 决定了
-泄露的部署密钥最多能做什么。
+不是隔离。要收紧它，需要在容器里或以另一个用户身份构建；在那之前，泄露的密钥最多能读 dim、
+写 dim-eval-data，而 `eval-ledger` 的 ruleset 挡住改写与删除。
 
 失败分析把 agent 的输出和判分日志交给模型，这些文本可能含有诱导模型的内容。提示词声明它们
 只是数据；模型的输出只进 issue 正文（先脱敏），不驱动任何动作，可疑 PR 也只能从窗口内的 PR
