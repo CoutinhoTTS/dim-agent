@@ -22,6 +22,12 @@
 
 Aimux 无目录或 Session 依赖，独占可释放的 HTTP client。卸载关闭准入、释放未读取或停止读取的原生流、排空已受理调用，再释放池；旧宿主和流返回 `OwnerClosed`。HTTP 失败保留类型化 status/code，恢复由调用方决定，adapter 不重试。产品 Provider/OAuth 另行实施。
 
+## 请求录制
+
+`recording::set_request_recording` 开关 aimux 的 RFC-0023 录制，写入 `<目录>/recordings.jsonl`；App Server 的 `model-log` Settings 源调用它（[设计](../../docs/design/appserver/model-log.md)）。
+
+Dim 直接调用 provider 的 `do_stream`，不经过 aimux 层 A，所以录制由本 crate 收尾：`request::convert` 在录制开启时把请求绑定到 `RecordingContext` 并返回 `Capture`；driver 记录输入侧，并用 `RecordingOutcomeStream` 包住 provider 流，在 Finish、错误或丢弃时写 outcome 与传输封闭。关闭时这些路径不产生调用。
+
 ## 启动
 
 在仓库根目录运行，先在当前环境设置配置引用的密钥变量：

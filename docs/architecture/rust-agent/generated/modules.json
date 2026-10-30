@@ -192,6 +192,13 @@
       ]
     },
     {
+      "id": "dim_agent_aimux::recording",
+      "crate": "dim_agent_aimux",
+      "parent": "dim_agent_aimux",
+      "file": "crates/dim-agent-aimux/src/recording.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_aimux::request",
       "crate": "dim_agent_aimux",
       "parent": "dim_agent_aimux",
@@ -1928,6 +1935,17 @@
         "macro_rules",
         "matches",
         "serde_json::json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::model_log",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/model_log.rs",
+      "unexpandedMacros": [
+        "json",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -5265,6 +5283,13 @@
     },
     {
       "from": "dim_agent_aimux",
+      "to": "dim_agent_aimux::recording",
+      "references": [
+        "mod recording"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux",
       "to": "dim_agent_aimux::request",
       "references": [
         "mod request"
@@ -5537,6 +5562,21 @@
       "references": [
         "path ToolDefinition",
         "use dim_agent_types::ToolDefinition"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::request",
+      "to": "dim_agent_aimux::plugin",
+      "references": [
+        "path crate::plugin::REQUEST_ID_EXTENSION"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::request",
+      "to": "dim_agent_aimux::recording",
+      "references": [
+        "path crate::recording::Capture",
+        "path crate::recording::capture"
       ]
     },
     {
@@ -14021,6 +14061,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::model_log",
+      "references": [
+        "mod model_log",
+        "path model_log::ModelLogPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::outbound",
       "references": [
         "mod outbound"
@@ -18002,6 +18050,57 @@
         "use dim_agent_types::ModelServiceTier",
         "use dim_agent_types::ReasoningBudget",
         "use dim_agent_types::ReasoningOff"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_aimux::recording",
+      "references": [
+        "path dim_agent_aimux::recording::set_request_recording"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsChanged",
+        "path SettingsScope::User",
+        "path settings_changes",
+        "use crate::settings::SettingsChanged",
+        "use crate::settings::SettingsScope",
+        "use crate::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
       ]
     },
     {

@@ -491,5 +491,66 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
     }).await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_requests_write_their_wire_exchange() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let server = TestServer::start().await;
+        let directory = std::env::temp_dir().join(format!(
+            "dim-recording-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        dim_agent_aimux::recording::set_request_recording(Some(&directory)).unwrap();
+        let agent = model_agent(server.models(), None);
+        let session = agent.create_session(session_config()).await.unwrap();
+        session
+            .submit("text".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        agent.close().await.unwrap();
+        dim_agent_aimux::recording::set_request_recording(None).unwrap();
+
+        let url = format!("{}/chat/completions", server.url);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let recorded = loop {
+            if let Ok(text) = std::fs::read_to_string(directory.join("recordings.jsonl"))
+                && let Some(recording) = text
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .find(|recording| {
+                        recording["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+                    })
+            {
+                break recording;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the request's recording was not written"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let exchange = &recorded["exchanges"][0];
+        assert_eq!(exchange["response"]["status"].as_u64(), Some(200));
+        assert!(
+            exchange["request"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("\"messages\"")
+        );
+        assert!(exchange["timing"]["latency_ms"].is_number());
+        assert_eq!(recorded["provider"]["provider"], "openai");
+        assert_eq!(recorded["provider"]["model_id"], "test-model");
+        assert_eq!(recorded["outcome"]["status"], "success");
+        assert!(recorded["complete"].as_bool().unwrap());
+        assert!(recorded["input"]["prompt"].is_array());
+        server.close().await;
+    })
+    .await
+    .unwrap();
+}
+
 #[path = "model_flow/native.rs"]
 mod native;

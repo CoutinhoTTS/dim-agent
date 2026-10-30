@@ -26,6 +26,7 @@ use std::collections::HashMap;
 pub(crate) struct PreparedRequest {
     pub options: CallOptions,
     pub tool_names: ToolNames,
+    pub recording: Option<crate::recording::Capture>,
 }
 
 /// The tool result's text where an image moved to the following user message.
@@ -271,9 +272,18 @@ pub(crate) fn convert(
             "Anthropic thinking continuation requires enabled or adaptive thinking",
         ));
     }
+    let call_id = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.extensions.get(crate::plugin::REQUEST_ID_EXTENSION))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let recording = crate::recording::capture(call_id, &mut options);
     Ok(PreparedRequest {
         options,
         tool_names,
+        recording,
     })
 }
 

@@ -1142,3 +1142,52 @@ async fn invalid_or_conflicting_registrations_fail_the_owner() {
     }
     fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test]
+async fn model_log_switch_starts_the_recorder() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let views = vec![
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(settings_part(0, vec![])),
+        root.plugin(
+            dim_app_server::model_log::ModelLogPlugin::new(
+                &Names::copy(&dim_app_server::catalog(), &Build::default()),
+                0,
+            )
+            .unwrap(),
+        ),
+    ];
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let settings = root.get::<SettingsService>().unwrap();
+    let current = settings
+        .read_declared("model-log", SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(current.document, json!({"enabled": false}));
+    settings
+        .update_declared(
+            "model-log",
+            SettingsScope::User,
+            &current.revision,
+            json!({"enabled": true}),
+            Writer::Client,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let recording = home.join("model-log").join("recordings.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !recording.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the switch did not start the recorder"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
