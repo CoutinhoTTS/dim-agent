@@ -5110,11 +5110,36 @@ async fn a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             "protocol":"openai-compatible","zdr":false}],
         "modelConfigOverrides":[],"disabledModelIds":[],"modelPreferences":{},"version":1
     });
+    // A builtin record that never refreshed: its models are bundle-derived
+    // with `remoteModels` false. The bundle states the limits in `raw.limit`,
+    // so the strict rule keeps what the bundle declares and drops an unmarked
+    // limit no raw item declares.
+    let seeded_record = json!({
+        "kind":"builtin","displayName":"Anthropic","driverKind":"anthropic",
+        "auth":{"type":"api_key","headerName":"x-api-key","prefix":""},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.anthropic.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"claude-bundled","displayName":"Claude Bundled","status":"active",
+             "capabilities":caps(200_000,64_000),
+             "metadata":{"raw":{"id":"claude-bundled","limit":{"context":200_000,"output":64_000}}}},
+            {"modelId":"claude-unlisted","displayName":"Claude Unlisted","status":"active",
+             "capabilities":caps(200_000,8_000),"metadata":{"raw":{"id":"claude-unlisted"}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"claude-user","displayName":"Claude User","status":"active",
+             "capabilities":caps(32_000,16_384)}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
     for (id, record) in [
         ("listed-provider", &listed_record),
         ("custom-provider", &custom_record),
         ("openai", &builtin_record),
         ("managed-provider", &managed_record),
+        ("anthropic", &seeded_record),
     ] {
         connection
             .execute(
@@ -5220,6 +5245,27 @@ async fn a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
         ],
         "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
     });
+    let seeded_expected = json!({
+        "kind":"builtin","displayName":"Anthropic","driverKind":"anthropic",
+        "auth":{"type":"api_key","headerName":"x-api-key","prefix":""},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.anthropic.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"claude-bundled","displayName":"Claude Bundled","status":"active",
+             "capabilities":kept(Some(200_000),Some(64_000)),
+             "metadata":{"raw":{"id":"claude-bundled","limit":{"context":200_000,"output":64_000}}}},
+            {"modelId":"claude-unlisted","displayName":"Claude Unlisted","status":"active",
+             "capabilities":kept(None,None),"metadata":{"raw":{"id":"claude-unlisted"}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"claude-user","displayName":"Claude User","status":"active",
+             "capabilities":kept(Some(32_000),None),
+             "metadata":{"capabilityOverrideFields":["contextWindow"]}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
     let managed_expected = json!({
         "kind":"managed",
         "account":{"credentialEpoch":"epoch","generation":1,
@@ -5234,6 +5280,7 @@ async fn a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
         ("custom-provider", &custom_expected),
         ("openai", &builtin_expected),
         ("managed-provider", &managed_expected),
+        ("anthropic", &seeded_expected),
     ] {
         let stored: serde_json::Value = serde_json::from_str(&read(id)).unwrap();
         assert_eq!(&stored, expected, "{id}");
@@ -5274,6 +5321,7 @@ async fn a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
         read("custom-provider"),
         read("openai"),
         read("managed-provider"),
+        read("anthropic"),
     );
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
@@ -5283,7 +5331,8 @@ async fn a_v24_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             read("listed-provider"),
             read("custom-provider"),
             read("openai"),
-            read("managed-provider")
+            read("managed-provider"),
+            read("anthropic")
         ),
         before
     );

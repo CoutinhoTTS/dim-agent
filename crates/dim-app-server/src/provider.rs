@@ -1060,12 +1060,13 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
     }
     Ok(())
 }
-/// The #522 format step. Projection output, the remote listing of a record
-/// with `remoteModels`, is re-derived, so a stored limit that neither
-/// `capabilityOverrideFields` marks nor `metadata.raw` declares there was the
-/// old assumed default and the upgrade deletes it, whatever its value. A
-/// record's own models and its user models hold what a client supplied, which
-/// v24 never marked; each field there is decided by
+/// The #522 format step. Projection output is re-derived, so a stored limit
+/// that neither `capabilityOverrideFields` marks nor `metadata.raw` declares
+/// there was the old assumed default and the upgrade deletes it, whatever its
+/// value: that is the remote listing of a record with `remoteModels`, and the
+/// bundle-derived defaults a builtin record holds with `remoteModels == false`.
+/// A custom record's own models and its user models hold what a client
+/// supplied, which v24 never marked; each field there is decided by
 /// `declare_supplied_limits`: a marked or raw-declared limit is a declaration,
 /// an unmarked limit equal to the assumed 128000/16384 may be the probe's
 /// fill and is deleted, and any other value was typed and gains the mark. The
@@ -1094,7 +1095,7 @@ pub(crate) fn rewrite_stored_limits(
             PersistedProviderRecord::Static(mut record) => {
                 let mut changed = false;
                 for model in &mut record.models {
-                    changed |= if record.remote_models {
+                    changed |= if record.remote_models || record.kind == StaticRecordKind::Builtin {
                         drop_undeclared_limits(model)
                     } else {
                         declare_supplied_limits(model)
