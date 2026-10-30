@@ -205,6 +205,22 @@ mod tests {
         assert!(!linked.join("config.json.lock").exists());
     }
 
+    /// A write keeps an existing file's mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_keeps_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(path(home), "{}\n").unwrap();
+        std::fs::set_permissions(path(home), std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(write(home, "kept", true.into()), None);
+        assert_eq!(
+            std::fs::metadata(path(home)).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
     /// A file that cannot be read is not replaced by one holding a single
     /// key; the error comes back and the path stays as it was.
     #[cfg(unix)]
