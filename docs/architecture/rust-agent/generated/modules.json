@@ -570,8 +570,8 @@
       "file": "crates/dim-agent-capabilities/src/model_provider.rs",
       "unexpandedMacros": [
         "matches",
+        "tracing::error",
         "tracing::info_span",
-        "tracing::warn",
         "unreachable",
         "vec"
       ]
