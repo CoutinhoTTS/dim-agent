@@ -5,7 +5,7 @@ use crate::{
     },
     host::*,
 };
-use dim_agent_runtime::{ContextHistory, PolicyFacts, PolicyWindow, Timeline};
+use dim_agent_runtime::{ContextHistory, PolicyFacts, PolicyOrder, PolicyWindow, Timeline};
 use dim_agent_types::*;
 use std::{
     collections::HashMap,
@@ -460,7 +460,12 @@ impl ContextPolicy {
         let turn = turn_id.map(|turn| (turn, carried.as_ref()));
         let manual = step.trigger == CompactionTrigger::Manual;
         let rule = Retention::new(view, model.as_ref(), turn, manual);
-        let mut cuts = legal_cuts(&view.context, &view.history);
+        let policy_order = self
+            .timeline
+            .policy_order(view.facts.through)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let mut cuts = legal_cuts(&policy_order, &view.history);
         let limit = rule.limit(
             &view.history,
             &cuts,
@@ -620,7 +625,9 @@ impl ContextPolicy {
                 // replacement's actual size, and a later cut re-runs the
                 // strategy once as a rolling continuation of this one.
                 let redo = (composed.tokens > BOUND_SHARE * input_budget(model.as_ref()))
-                    .then(|| replanned(view, model.as_ref(), turn, manual, &composed))
+                    .then(|| {
+                        replanned(view, model.as_ref(), turn, manual, &composed, &policy_order)
+                    })
                     .flatten();
                 match redo {
                     None => completed(composed, diagnostics, limit_from),
@@ -1704,6 +1711,7 @@ fn replanned(
     turn: Option<(&str, Option<&CarriedPins>)>,
     manual: bool,
     first: &Composed,
+    policy_order: &PolicyOrder,
 ) -> Option<Replan> {
     let carried = CarriedPins::new(
         view,
@@ -1719,13 +1727,13 @@ fn replanned(
         manual,
     );
     let history = &view.history[first.kept..];
-    let mut cuts = legal_cuts(&view.context, history);
+    let mut cuts = legal_cuts(policy_order, history);
     let strategy = first
         .parts
         .map_or(first.replacement.len(), |parts| parts.strategy as usize)
         .min(first.replacement.len());
     let limit = rule.limit(history, &cuts, rule.tokens(&first.replacement[..strategy]))?;
-    let order = |id: &str| view.context.events.iter().position(|event| event.id == id);
+    let order = |id: &str| policy_order.events.iter().position(|event| event.id == id);
     let later = match (order(&cuts[limit].retain_from), order(&first.retain_from)) {
         (Some(later), Some(first)) => later > first,
         _ => false,
@@ -1901,28 +1909,28 @@ fn recovery_overflow(
 /// a tool call from its results or context: turn starts, the events that
 /// place entries and the boundary's own last event (replacing everything),
 /// in order. None is marked within the retention limit yet.
-fn legal_cuts(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<CompactionCut> {
+fn legal_cuts(order: &PolicyOrder, history: &[HistoryEntry]) -> Vec<CompactionCut> {
     let sources: HashMap<&str, ()> = history
         .iter()
         .map(|entry| (entry.source.as_str(), ()))
         .collect();
     let mut kept = 0;
-    let order: HashMap<&str, usize> = context
+    let positions: HashMap<&str, usize> = order
         .events
         .iter()
         .enumerate()
         .map(|(index, event)| (event.id.as_str(), index))
         .collect();
     let mut cuts = Vec::new();
-    for (index, event) in context.events.iter().enumerate() {
-        if !matches!(event.kind, EventKind::TurnStart(_))
+    for (index, event) in order.events.iter().enumerate() {
+        if !event.turn_start
             && !sources.contains_key(event.id.as_str())
-            && index + 1 != context.events.len()
+            && index + 1 != order.events.len()
         {
             continue;
         }
         while kept < history.len()
-            && order
+            && positions
                 .get(history[kept].source.as_str())
                 .is_some_and(|source| *source < index)
         {
