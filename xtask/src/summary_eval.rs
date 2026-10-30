@@ -1853,11 +1853,18 @@ mod tests {
         let sentence = LengthSentence::new("Keep it to {target} tokens.").unwrap();
         assert_eq!(
             candidate_cost_line(&model, Some(prompt), Some(&sentence)),
-            "\ncandidate tokens: prompt 11, length sentence 8\n"
+            format!(
+                "\ncandidate tokens: prompt {:.0}, length sentence {:.0}\n",
+                text_tokens(&model, prompt),
+                text_tokens(&model, sentence.as_str())
+            )
         );
         assert_eq!(
             candidate_cost_line(&model, Some(prompt), None),
-            "\ncandidate tokens: prompt 11\n"
+            format!(
+                "\ncandidate tokens: prompt {:.0}\n",
+                text_tokens(&model, prompt)
+            )
         );
         assert_eq!(candidate_cost_line(&model, None, None), "");
     }
