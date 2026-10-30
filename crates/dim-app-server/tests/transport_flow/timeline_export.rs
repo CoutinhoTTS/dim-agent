@@ -261,7 +261,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":25,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":26,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -320,14 +320,15 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(exported(&readonly, &session).await, stopped);
 
-        for (version, dropped) in [
-            (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;"),
-            (17, ""),
-            (19, ""),
-            (21, ""),
-            (22, ""),
-            (23, ""),
-            (24, ""),
+        for (version, dropped, end_index) in [
+            (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;", true),
+            (17, "", true),
+            (19, "", true),
+            (21, "", true),
+            (22, "", true),
+            (23, "", true),
+            (24, "", true),
+            (25, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -335,7 +336,13 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {dropped} CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE agent_store_format;
+            // v25 dropped the end-sequence index; every earlier version has it.
+            let end_index = if end_index {
+                "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence);"
+            } else {
+                ""
+            };
+            changed(&database, &older, &format!("{catalog} {dropped} {end_index} DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
             let bytes = std::fs::read(&older).unwrap();
@@ -348,8 +355,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26));
-                INSERT INTO agent_store_format VALUES (26);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 27));
+                INSERT INTO agent_store_format VALUES (27);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

@@ -714,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        25
+        i64::from(dim_app_server::storage::STORE_FORMAT)
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -1401,7 +1401,7 @@ async fn migration_preserves_removed_client_settings_and_refuses_unsupported_tar
     let preview = directory.path().join("preview");
     std::fs::create_dir_all(preview.join("rust")).unwrap();
     let native = Connection::open(preview.join("rust/dimcode.sqlite")).unwrap();
-    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=25));INSERT INTO agent_store_format VALUES(25);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
+    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=27));INSERT INTO agent_store_format VALUES(27);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
     drop(native);
     let before = std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap();
     let root = rutis::Ctx::root().unwrap();

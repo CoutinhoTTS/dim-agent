@@ -909,8 +909,8 @@ pub fn declare(entry: &mut ModelEntry, field: &str) {
     }
 }
 
-/// The context window that format v24's probe projection filled in, and that
-/// the legacy schema defaulted to, when no source declared one.
+/// The context window that the earlier formats' probe projection filled in,
+/// and that the legacy schema defaulted to, when no source declared one.
 const ASSUMED_CONTEXT_WINDOW: u64 = 128_000;
 /// The maximum output of the same assumed pair.
 const ASSUMED_MAX_OUTPUT_TOKENS: u64 = 16_384;

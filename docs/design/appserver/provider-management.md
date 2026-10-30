@@ -410,7 +410,7 @@ unchanged: it already refuses a model entry that lacks either value, naming the
 entry ([#517](https://github.com/arcships/dim/issues/517)).
 
 A stored record carries the absence as an absent key. The
-[#522 storage decision](native-storage-format.md#522-格式决定) is the format
+[#522 storage decision](native-storage-format.md#522-v26-格式决定) is the format
 decision that introduced it, and §6 states what the upgrade does to records
 written before it: a listed model keeps the item it came from in
 `metadata.raw`, so a limit that item declares stays a declaration even when the
@@ -534,7 +534,7 @@ carry user configuration; missing maps/lists mean no corresponding user data:
 | `StaticProviderRecord.endpoint_overrides` / `endpointOverrides` | Map of model ID to the existing `NewApiEndpoint`; only `openai`, `openai-response`, `anthropic` and `gemini` are executable overrides here; separate from discovered `endpointTypes` |
 
 The two model limits carry their own, later format decision: the
-[#522 storage decision](native-storage-format.md#522-格式决定) makes an
+[#522 storage decision](native-storage-format.md#522-v26-格式决定) makes an
 undeclared limit an absent key, which a reader of the earlier format cannot
 parse either way, and upgrades stored records in place instead of reusing a
 version. The decision states the format version this change introduces, the

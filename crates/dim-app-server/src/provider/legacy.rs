@@ -433,7 +433,7 @@ fn convert_provider(
     // User-supplied entries declare what they state, unless the value may be
     // the assumed pair the legacy schema and v24's probe filled in. The
     // `models` of a `bundled` or `remote` row are listing output, so they keep
-    // the v25 rewrite's stricter rule: an unmarked limit that `metadata.raw`
+    // the v26 rewrite's stricter rule: an unmarked limit that `metadata.raw`
     // does not declare is dropped whatever its value.
     for model in &mut models {
         if models_source == "user" {

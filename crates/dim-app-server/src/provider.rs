@@ -1066,9 +1066,10 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
 /// value: that is the remote listing of a record with `remoteModels`, and the
 /// bundle-derived defaults a builtin record holds with `remoteModels == false`.
 /// A custom record's own models and its user models hold what a client
-/// supplied, which v24 never marked; each field there is decided by
-/// `declare_supplied_limits`: a marked or raw-declared limit is a declaration,
-/// an unmarked limit equal to the assumed 128000/16384 may be the probe's
+/// supplied, which no format before this step marked; each field there is
+/// decided by `declare_supplied_limits`: a marked or raw-declared limit is a
+/// declaration, an unmarked limit equal to the assumed 128000/16384 may be
+/// the probe's
 /// fill and is deleted, and any other value was typed and gains the mark. The
 /// storage layer calls this inside its startup transaction; this module owns
 /// the record's field names.

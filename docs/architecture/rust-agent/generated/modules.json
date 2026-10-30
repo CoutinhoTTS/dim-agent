@@ -20557,6 +20557,13 @@
     },
     {
       "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path crate::provider::rewrite_stored_limits"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path super::catalog::backfill"
