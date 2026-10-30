@@ -697,6 +697,14 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
 
+Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening the Session preserves that order.
+
+```text
+answer text (including its retained streaming tail)
+· User interrupted the run.
+· stopped
+```
+
 The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
 The context reading is the estimate the next request sends against its window, and a compaction threshold the server returned with it. It is read when a session is entered, after a model switch, when a run on `main` ends, and when a compaction result arrives on `main`, so a compaction outside a run does not leave it stale. At or above 90% of that threshold — the interface's `CONTEXT_WARNING_PERCENT`, applied to the returned `thresholdTokens` — the reading is drawn as a warning and says `near the compaction threshold`. The client never computes the threshold itself; the formula belongs to compaction.
