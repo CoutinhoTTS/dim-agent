@@ -594,6 +594,66 @@ async fn a_checkpointed_read_decodes_one_anchor_event() {
     );
 }
 
+/// A live branch serves the anchor from its hot window: the anchor check makes
+/// no store read, and the checkpoint is used.
+#[tokio::test]
+async fn a_checkpoint_anchored_in_the_hot_window_is_used() {
+    let store = Arc::new(Reads::default());
+    store
+        .memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    writer
+        .append_batch_registered(
+            (1..=50)
+                .map(|index| input(&format!("prefix {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let branch = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let anchor = branch.append(input("anchor")).unwrap();
+    branch
+        .save_snapshot(RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: "test/anchor".into(),
+            state: "40".into(),
+        })
+        .await
+        .unwrap();
+    branch
+        .append_batch_registered(
+            (1..=1000)
+                .map(|index| input(&format!("tail {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let through = branch.committed();
+    assert_eq!(through, 1051);
+    store.segments.lock().unwrap().clear();
+    let context = branch
+        .context_with_checkpoint(through, "test/anchor", checkpoint_resume)
+        .await
+        .unwrap();
+    assert!(context.checkpoint.is_some(), "the checkpoint is used");
+    assert_eq!(context.events.len(), (through - 39) as usize);
+    assert_eq!(
+        *store.segments.lock().unwrap(),
+        [("main".to_string(), 40..=through)],
+        "the anchor comes from the hot window; only the context read reaches the store"
+    );
+}
+
 /// An anchor row inside an atomic batch keeps its checkpoint: the point read
 /// cannot end there, so the segment read finds the same anchor as before.
 #[tokio::test]
