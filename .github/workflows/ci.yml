@@ -116,9 +116,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --test 'web/**/*.test.mjs'
           # The frontend is a separate artifact; building it here type-checks web/.
           node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
+          node --test 'web/**/*.test.mjs'
       - name: Verify actual CLI profiles and terminal launcher
         if: needs.changes.outputs.rust == 'true'
         shell: bash

@@ -23,6 +23,9 @@ const selectedProvider = ref<string>()
 const activeIndex = ref(0)
 
 const providers = computed(() => models.providers ?? [])
+const currentProvider = computed(() => providers.value.find((provider) => provider.providerId === selectedProvider.value)?.providerId
+  ?? providers.value.find((provider) => provider.providerId === props.model?.providerId)?.providerId
+  ?? providers.value[0]?.providerId)
 const allOptions = computed<Option[]>(() => providers.value.flatMap((provider) => provider.models.map((model) => ({
   providerId: provider.providerId,
   providerName: provider.name,
@@ -31,7 +34,7 @@ const allOptions = computed<Option[]>(() => providers.value.flatMap((provider) =
 }))))
 const searching = computed(() => query.value.trim() !== "")
 const paneOptions = computed(() => {
-  if (!searching.value) return allOptions.value.filter((option) => option.providerId === selectedProvider.value)
+  if (!searching.value) return allOptions.value.filter((option) => option.providerId === currentProvider.value)
   const needle = query.value.trim().toLocaleLowerCase()
   return allOptions.value.filter((option) => [option.name, option.modelId, option.providerName].some((value) => value.toLocaleLowerCase().includes(needle)))
 })
@@ -66,6 +69,13 @@ function select(option: Option): void {
 }
 
 function onSearchKey(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === "Escape") {
+    event.preventDefault()
+    if (details.value) details.value.open = false
+    details.value?.querySelector("summary")?.focus()
+    return
+  }
   if (event.key === "ArrowDown") {
     event.preventDefault()
     activeIndex.value = Math.min(paneOptions.value.length - 1, activeIndex.value + 1)
@@ -78,6 +88,10 @@ function onSearchKey(event: KeyboardEvent): void {
     if (option !== undefined) select(option)
   }
 }
+
+defineExpose({ open: () => {
+  if (props.selectable && models.available && !props.disabled && details.value) details.value.open = true
+} })
 </script>
 
 <template>
@@ -98,9 +112,9 @@ function onSearchKey(event: KeyboardEvent): void {
       <p v-else-if="models.error" class="menu-empty">
         <button type="button" class="ui-button" data-variant="danger-ghost" data-size="sm" @click="models.load()">{{ t("composer.modelLoadRetry") }}</button>
       </p>
-      <div v-else class="model-panes">
+      <div v-if="models.providers !== undefined && (!models.error || providers.length > 0)" class="model-panes">
         <div v-if="!searching" class="provider-pane">
-          <button v-for="provider in providers" :key="provider.providerId" type="button" class="ui-menu-item" :aria-current="selectedProvider === provider.providerId" @click="selectedProvider = provider.providerId; activeIndex = 0">
+          <button v-for="provider in providers" :key="provider.providerId" type="button" class="ui-menu-item" :aria-current="currentProvider === provider.providerId" @click="selectedProvider = provider.providerId; activeIndex = 0">
             <span class="provider-badge" aria-hidden="true">{{ initial(provider.name) }}</span><span>{{ provider.name }}</span>
           </button>
         </div>

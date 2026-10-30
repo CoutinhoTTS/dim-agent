@@ -398,12 +398,15 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         "session.create",
         "session.permission.update",
         "provider.catalog",
+        "account.providers",
     ] {
         assert!(features.contains(&json!(method)), "{method}");
     }
     for method in [
         "web.open",
         "provider.create",
+        "account.status",
+        "account.login.begin",
         "mcp.catalog",
         "skills.catalog",
     ] {
@@ -421,6 +424,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     );
     for (method, params) in [
         ("provider.list", json!({})),
+        ("account.providers", json!({})),
         (
             "provider.catalog",
             json!({"providerId":"018ec73f-0000-7000-8000-000000000011"}),
@@ -437,6 +441,8 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
             "provider.delete",
             json!({"providerId":"x","expectedVersion":1}),
         ),
+        ("account.status", json!({"providerId":"x"})),
+        ("account.login.begin", json!({"providerId":"x"})),
         ("account.logout", json!({"providerId":"x"})),
         ("skills.catalog", json!({})),
     ] {
