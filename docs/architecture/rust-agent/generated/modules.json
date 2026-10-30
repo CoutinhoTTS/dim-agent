@@ -1616,6 +1616,7 @@
         "json",
         "matches",
         "tokio::select",
+        "tracing::warn",
         "unreachable",
         "vec"
       ]
@@ -14356,7 +14357,9 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path CollaborationRole::Member",
         "path SessionConfig",
+        "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig"
       ]
     },
@@ -16164,6 +16167,7 @@
         "path SessionSummary",
         "path WEB_READABLE_METHODS",
         "path agent_unknown",
+        "path crate::protocol::agent_unknown",
         "path session_cwd"
       ]
     },
