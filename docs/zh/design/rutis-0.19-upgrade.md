@@ -67,7 +67,7 @@ Python 行都无法连接。
 | 0.17.1 | 0.19.1 |
 | --- | --- |
 | `rutis_bridge::runtime::LocalRuntime`（`node`、`python`、`named`、`interpreter`、`python_path`、stdio、`handle`） | 宿主自己的连接行：`rutis_bridge::runtime::Launcher`、`pipe::greeted`、`Session::new`、`pipe::Processes`。不使用迁移指南给的 `rutis_host::connect::SpawnPlugin`（M4） |
-| `RuntimePlugin`、服务 `runtime::Runtime` | 删除；运行时的状态就是它的连接行在 `Loader::status()` 里的状态（M4） |
+| `RuntimePlugin`、服务 `runtime::Runtime` | 删除；运行时的状态就是它的连接行在 `Loader::status().rows` 里的状态（M4） |
 | `Stdio::Lines` | `pipe::Stdio::Pipe(factory)`；Dim 的 factory 把逐行输出转给 `tracing` |
 | `rutis_loader::runtime::RuntimeResolver::node` / `::modules`、`with_catalog`、`invalidate` | 改为一个 `rutis_loader::runtime::SessionResolver`（`npm(&catalog, row)`、`attach(&loader)`、`follow_row(row)`）；没有需要失效的缓存；npm 名字由 Node 解析 |
 | `RuntimeRows`、`RowsSource`、`RuntimeRowsPlugin` | `SessionRows::key(row)`；`SessionResolver::follow_row` |
@@ -129,7 +129,7 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 
 - [#518](https://github.com/arcships/dim/issues/518) 在等 rutis#808，0.19 带上了它。本次升级凭 §6 的测量结果关闭它。
 - [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
-  引入 rutis#920。那个 pull request 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
+  引入 rutis#920。rutis#920 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
   [#684](https://github.com/arcships/dim/pull/684)：Session 和分支变成用 0.19.1 公开的 `mark_scope` 标记自己的插件，
   不再有实例行可查。#684 在本次升级之后合入。#645 不合入：#684 取代了它，它保持打开，直到 #684 合入。
 
@@ -193,7 +193,7 @@ rutis-loader 用）。Dim 本身就是宿主，这两样都不需要。0.19 里�
 - **对端的插件都是行。** 一个 TypeScript 或 Python 插件就是 `session-node:<plugin>` 或 `py:<plugin>` 这一行。
   `SessionResolver` 通过那个会话解析它，在会话就绪之前，它等 `SessionRows::key(row)`。会话结束后，这些行回到等待。
   它们都由 loader 管理，Dim 不另外记一份。
-- **运行时的状态就是它那一行的状态。** 运行时在不在跑，就是它的连接行在 `Loader::status()` 里的状态。`runtime.list`
+- **运行时的状态就是它那一行的状态。** 运行时在不在跑，就是它的连接行在 `Loader::status().rows` 里的那一项。`runtime.list`
   的取值保持不变：
   - `off`、`acquiring`、`failed` 是 RuntimeManager 自己的，表示获取运行时的进度；
   - 启动命令提供之后，其余取值来自这一行：加载中或等待中是 `starting`，Active 是 `ready`，Failed 是 `down`，
@@ -219,8 +219,8 @@ rutis-loader 用）。Dim 本身就是宿主，这两样都不需要。0.19 里�
 - **解析。** 一个 `SessionResolver::npm(catalog, "session-node")` 服务两个运行时，放在解析链最后。
   - 在 loader 挂载前调用 `attach(&loader)`；loader 运行后对每个运行时行调用 `follow_row`，这样会话一就绪，
     它的行就放行。
-  - 不调用 `runtime(handle)`。它只是把一个 `RuntimeHandle` 的状态加进 `Loader::status`，而这一行自己的状态已经
-    给出了这些。
+  - 不调用 `runtime(handle)`。它只是把一个 `RuntimeHandle` 列进 `Loader::status().runtimes`；RuntimeManager
+    读的是 `Loader::status().rows` 里运行时那一行。
   - Dim 自己的包装改名为 `SnapshotResolver`。它继续检查每一行的 `provides` 快照、加上 `workflowFiles`，
     但不再分流 `py:` 名字。
   - 识别"运行时没在运行"的方式与 loader 相同：没有 schema，且 `meta.schema` 是一段文字。不匹配这段文字的内容。
@@ -388,7 +388,8 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
 
 - `plugin_manager.rs`：`waitingFor` 列出 `Loader::waits(entry)` 里的服务。等待运行时会话的行会写出运行时那一行
   （`session-node` 或 `py`），这是 `Loader::waits` 的报法（`WaitReason::OwnRuntime`）。运行时行本身不是插件行，
-  所以它们等启动命令这件事不出现在 `plugin.list` 里。
+  所以它们等启动命令这件事不出现在 `plugin.list` 里，而是由 `runtime.list` 显示：RuntimeManager 下载运行时时是
+  `acquiring`，下载失败是 `failed`，命令提供之后、这一行加载时是 `starting`。下载卡住时在那里仍然看得到。
 - 9 处 `set_overlay` 测试调用改为把夹具行写进一层自己的配置，再用它做 reconcile。
 - `tests/integration/tests/extensions.rs` 用一个不走 npm 解析的名字保留"模块无法解析"的用例。裸的 npm 名字
   现在会等待运行时，而不是失败。
@@ -493,10 +494,14 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 - [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui` 改为 leaf 自己的 `Tui`、Leaving、`ui.open` 的回复、`hello` feature 那段、Later）、§8、§9 和 §10（M8）。
 - [RuntimeManager](plugins/RuntimeManager.md) 的 §1–§3 和 §5（M4）：
   - 它提供启动命令（`nodeRuntime`、`pythonRuntime`），不再挂载 `LocalRuntime`；`runtime.install` 会重新提供命令；
-  - 它从运行时那一行读取状态（`Loader::status()`），不持有句柄：§2.4 里"运行时是否在运行是 rutis 的状态
+  - 它从运行时那一行读取状态（`Loader::status().rows`），不持有句柄：§2.4 里"运行时是否在运行是 rutis 的状态
     （`RuntimeHandle::state`）"和 §3.3 里"rutis 的运行时状态"都改为这一行的状态，§5 里 `runtime.list` 的取值去掉 `idle`；
   - `session-node` 和 `py` 两行取代 `Runtime#…` 这些名字；
-  - Python 版本要求。
+  - Python 版本要求；
+  - 英文原文 [RuntimeManager](../../design/plugins/RuntimeManager.md) 和中文版一起改。
+
+  没有客户端单独显示 `idle`：`dimcode runtime list` 原样打印每个取值（`dim-cli/src/lib.rs:690-698`），TUI 也没有
+  运行时视图。
 - [PluginManager](plugins/PluginManager.md)：`waitingFor` 和重新加载（M9、M4），以及需求一节里对 rutis 0.17.1 的引用。
 - [设计总览](overview.md)：
   - 其中"只有进程插件登记管理方法"的管理平面表述：对端也能拿到 `managementMethods`（M8）；

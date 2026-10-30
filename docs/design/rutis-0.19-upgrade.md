@@ -73,7 +73,7 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 | 0.17.1 | 0.19.1 |
 | --- | --- |
 | `rutis_bridge::runtime::LocalRuntime` (`node`, `python`, `named`, `interpreter`, `python_path`, stdio, `handle`) | A connection row of the host's own: `rutis_bridge::runtime::Launcher`, `pipe::greeted`, `Session::new`, `pipe::Processes`. The guide's `rutis_host::connect::SpawnPlugin` is not used (M4) |
-| `RuntimePlugin`, the service `runtime::Runtime` | Removed; a runtime's state is its connection row's, in `Loader::status()` (M4) |
+| `RuntimePlugin`, the service `runtime::Runtime` | Removed; a runtime's state is its connection row's, in `Loader::status().rows` (M4) |
 | `Stdio::Lines` | `pipe::Stdio::Pipe(factory)`; Dim's factory forwards lines to `tracing` |
 | `rutis_loader::runtime::RuntimeResolver::node` / `::modules`, `with_catalog`, `invalidate` | One `rutis_loader::runtime::SessionResolver` (`npm(&catalog, row)`, `attach(&loader)`, `follow_row(row)`); no cache to invalidate; Node resolves npm names |
 | `RuntimeRows`, `RowsSource`, `RuntimeRowsPlugin` | `SessionRows::key(row)`; `SessionResolver::follow_row` |
@@ -144,7 +144,7 @@ the build on its own base before it starts.
 - [#518](https://github.com/arcships/dim/issues/518) waits for rutis#808, which 0.19 ships. The
   upgrade closes it on the measurement of §6.
 - [#645](https://github.com/arcships/dim/pull/645) serves [#594](https://github.com/arcships/dim/issues/594)
-  with `Loader::instance_rows`, through a Git pin of rutis#920. That pull request was closed unmerged,
+  with `Loader::instance_rows`, through a Git pin of rutis#920. rutis#920 was closed unmerged,
   and 0.19.1 adds `Loader::instance_rows` (rutis#941). #594 takes
   [#684](https://github.com/arcships/dim/pull/684) instead: Sessions and branches become plugins that
   mark their scope with 0.19.1's public `mark_scope`, so there are no instance rows left to query.
@@ -222,8 +222,8 @@ copies none of `SpawnPlugin`.
   `session-node:<plugin>` or `py:<plugin>`. `SessionResolver` resolves it through that session, and
   it waits for `SessionRows::key(row)` until the session is there. When the session ends, its rows wait
   again. The loader holds all of them; Dim keeps no list of its own.
-- **A runtime's state is its row's.** Whether a runtime runs is its connection row's state in
-  `Loader::status()`. `runtime.list` keeps its statuses:
+- **A runtime's state is its row's.** Whether a runtime runs is its connection row's entry in
+  `Loader::status().rows`. `runtime.list` keeps its statuses:
   - `off`, `acquiring` and `failed` are RuntimeManager's own, for acquiring the runtime;
   - once the launch command is provided, the row gives the rest: loading or waiting is `starting`,
     Active is `ready`, and Failed is `down`, with the row's error (how the process ended) as `reason`.
@@ -252,8 +252,9 @@ copies none of `SpawnPlugin`.
   the chain.
   - `attach(&loader)` is called before the loader mounts, and `follow_row` for each runtime row once
     the loader runs, so a runtime's rows are released as soon as its session is there.
-  - `runtime(handle)` is not called. It only adds a `RuntimeHandle`'s state to `Loader::status`,
-    which the row's own state already gives.
+  - `runtime(handle)` is not called. It only lists a `RuntimeHandle` under
+    `Loader::status().runtimes`; RuntimeManager reads the runtime's row in `Loader::status().rows`
+    instead.
   - Dim's own wrapper is renamed (`SnapshotResolver`). It keeps checking each row's `provides`
     snapshot and adding `workflowFiles`, and it no longer routes `py:` names.
   - A runtime that is not running is recognised the way the loader recognises it: no schema, and a
@@ -466,7 +467,9 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
 - `plugin_manager.rs`: `waitingFor` lists the services of `Loader::waits(entry)`. A row waiting for
   its runtime's session names the runtime's row (`session-node` or `py`), which is how `Loader::waits`
   reports it (`WaitReason::OwnRuntime`). The runtime rows themselves are not plugin rows, so their own
-  wait for a launch command is not in `plugin.list`.
+  wait for a launch command is not in `plugin.list`; `runtime.list` shows it instead: `acquiring`
+  while RuntimeManager downloads the runtime, `failed` if that failed, and `starting` once the command
+  is provided and the row loads. A stuck download stays visible there.
 - The nine `set_overlay` test calls write their fixture rows in a layer of their own and reconcile with
   it.
 - `tests/integration/tests/extensions.rs` keeps its unresolved-module case with a name that does not
@@ -592,11 +595,15 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - [RuntimeManager](plugins/RuntimeManager.md), §1–§3 and §5 (M4):
   - it provides the launch commands (`nodeRuntime`, `pythonRuntime`) instead of mounting
     `LocalRuntime`, and `runtime.install` provides them again;
-  - it reads a runtime's state from its row (`Loader::status()`) and holds no handle: §2.4's "whether
+  - it reads a runtime's state from its row (`Loader::status().rows`) and holds no handle: §2.4's "whether
     a runtime is running is rutis' state (`RuntimeHandle::state`)" and §3.3's "rutis' runtime state"
     become the row's state, and §5's `runtime.list` statuses lose `idle`;
   - the `session-node` and `py` rows replace the `Runtime#…` names;
-  - the Python requirement.
+  - the Python requirement;
+  - its zh mirror, [RuntimeManager](../zh/design/plugins/RuntimeManager.md), the same.
+
+  No client renders `idle` on its own: `dimcode runtime list` prints each status as it comes
+  (`dim-cli/src/lib.rs:690-698`), and the TUI has no runtime view.
 - [PluginManager](plugins/PluginManager.md): `waitingFor` and reload (M9, M4), and its rutis 0.17.1
   reference in the requirements section.
 - The [design overview](overview.md):
