@@ -11,12 +11,22 @@
 //!
 //! Both arms run the shipped assembly: `current` with the product's own texts
 //! and `candidate` with the candidate file in place of the text `--text`
-//! names. Each arm runs every scenario `--runs` times, one fixed judge reads
-//! a view of each run's exported Timeline, and the report applies the
-//! relative rule of model-prompts §8.1: every probe's pass rate is at least
-//! the current arm's minus 0.05, the candidate's violations, failed runs and
-//! unjudged runs are no higher, and every probe has at least one judged run
-//! in each arm. There is no absolute pass line.
+//! names. Each arm runs every scenario `--runs` times, and one fixed judge
+//! reads a view of each run's exported Timeline.
+//!
+//! The report applies the rule of model-prompts §8.1. One comparison is the
+//! candidate arm's loss against the current arm on one rate: a regression
+//! when the loss exceeds `δ = 0.05` and a one-sided mid-p Fisher exact test on
+//! both arms' counts rejects "no loss". The family is fixed before any data:
+//! every (scenario, probe) — a pass rate for a `must_show` probe and a
+//! violation rate for a `must_not_show` one —, the pooled `must_show` pass
+//! rate, the pooled `must_not_show` violation rate, the failed-run rate and
+//! the unjudged-run rate, adjusted with Holm at a family-wise `α = 0.10`. A
+//! probe's rate counts judged, non-failed runs only, and a failed run is
+//! compared once, as the failed-run rate. The verdict is `fail` when any
+//! comparison is a regression, `pass` when none is and every arm ran every
+//! scenario at least 20 times, and `inconclusive` otherwise. There is no
+//! absolute pass line.
 //!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
@@ -30,9 +40,10 @@
 //! A run the judge answered but still gave no usable verdicts for after the
 //! re-asks is unjudged, and so is a run whose view does not fit the judge's
 //! budget, which is never asked: either adds nothing to its arm's probe
-//! rates, violations or failed runs, and the report counts it and lists it
-//! with its reason. A run that failed on its own is a failed run, scored as
-//! before, whatever its judge did.
+//! rates, and the report counts it and lists it with its reason. A run that
+//! failed on its own is a failed run whatever its judge did: it leaves the
+//! probe rates with every other failed run, and the failed-run rate compares
+//! it.
 //!
 //! The judge's window is read from the judge's selection snapshot or from the
 //! `--model-config` file, and an evaluation whose judge declares no window
@@ -151,6 +162,7 @@
 //! owns its endpoint directory and removes it when the run ends, on success
 //! and on error, without affecting other runs.
 use crate::app_server::{self, Overrides, RunSettings};
+use crate::rule::{self, Comparison, Counts, Worse};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
 use dim_agent_capabilities::{
     context_model::window_facts,
@@ -173,14 +185,6 @@ use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// The rule's δ (model-prompts §8.1): relative, with no absolute pass line.
-/// Held as a fraction so the boundary is compared in integers; as `f64` rates
-/// some run counts fail a candidate that is exactly at `current − δ`.
-const DELTA: (u64, u64) = (1, 20);
-/// δ as the report prints it.
-fn delta() -> f64 {
-    DELTA.0 as f64 / DELTA.1 as f64
-}
 /// How long the driver waits after the last event before it asks whether
 /// every line is idle. The quiet period follows the last notice the driver
 /// reads, including the notices it reads while it waited on `session.idle`.
@@ -709,19 +713,14 @@ impl RunRecord {
     /// Whether the run is unjudged (model-prompts §8.1): the judge was not
     /// asked because the view of the run's export does not fit its budget, or
     /// it answered without usable verdicts after the re-asks, and nothing
-    /// else failed the run. Such a run enters none of its arm's metrics.
+    /// else failed the run. Such a run enters none of its arm's probe rates;
+    /// the unjudged-run rate compares it.
     fn unjudged(&self) -> bool {
         !self.failed
             && matches!(
                 self.judge_outcome,
                 JudgeOutcome::Unreadable | JudgeOutcome::Unfit
             )
-    }
-    /// Whether the run is judged (model-prompts §8.1): it raised no error and
-    /// the judge answered every call with usable verdicts. Only such a run
-    /// counts toward its arm's and each of its probes' judged runs.
-    fn judged(&self) -> bool {
-        self.error.is_none() && self.judge_outcome == JudgeOutcome::Judged
     }
 }
 #[derive(Clone, serde::Serialize)]
@@ -1758,38 +1757,44 @@ fn verdicts(scenario: &Scenario, reply: &str) -> std::result::Result<Vec<ProbeRe
         .collect())
 }
 
-/// One probe's runs in one arm: every run that counts toward its pass rate,
-/// and how many of them are judged.
+/// One probe's counted runs in one arm, and the passes among them: a probe's
+/// rate counts judged, non-failed runs only (model-prompts §8.1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct ProbeCounts {
     passed: u32,
     runs: u32,
-    judged: u32,
 }
 
 /// The arm's metrics over its scenarios and runs (model-prompts §8.1). An
-/// unjudged run adds nothing to them; the arm counts it apart.
+/// unjudged or failed run adds nothing to the probe rates; the arm counts it
+/// in its own rate.
 #[derive(Default)]
 struct Metrics {
-    /// `(scenario, probe)` → its counted and judged runs.
+    /// `(scenario, probe)` → its counted runs and the passes among them.
     probes: BTreeMap<(String, String), ProbeCounts>,
-    violations: u32,
+    /// Every `must_show` probe's counted runs and the passes among them.
+    must_show: Counts,
+    /// Every `must_not_show` probe's counted runs and the violations among
+    /// them.
+    must_not_show: Counts,
     failed: u32,
-    /// Runs whose probes a judge answered.
-    judged: u32,
     /// Runs the judge gave no answer to, that did not fail on their own,
     /// left out of every other count.
     unjudged: u32,
+    /// Every run of the arm, failed and unjudged included.
+    runs: u32,
 }
 impl Metrics {
     fn add(&mut self, scenario: &Scenario, record: &RunRecord) {
+        self.runs += 1;
         if record.unjudged() {
             self.unjudged += 1;
             return;
         }
-        self.failed += u32::from(record.failed);
-        let judged = record.judged();
-        self.judged += u32::from(judged);
+        if record.failed {
+            self.failed += 1;
+            return;
+        }
         for probe in &scenario.probes {
             let verdict = record
                 .probes
@@ -1805,103 +1810,84 @@ impl Metrics {
                     )
                 }
             };
-            if probe.kind == ProbeKind::MustNotShow && verdict == Some(ProbeVerdict::Present) {
-                self.violations += 1;
-            }
             let counts = self
                 .probes
                 .entry((scenario.id.clone(), probe.id.clone()))
                 .or_default();
             counts.runs += 1;
             counts.passed += u32::from(passed);
-            counts.judged += u32::from(judged);
+            match probe.kind {
+                ProbeKind::MustShow => {
+                    self.must_show.outcome += u64::from(passed);
+                    self.must_show.total += 1;
+                }
+                ProbeKind::MustNotShow => {
+                    self.must_not_show.outcome += u64::from(!passed);
+                    self.must_not_show.total += 1;
+                }
+            }
         }
     }
-    /// The probe's counted and judged runs.
-    fn counts(&self, key: &(String, String)) -> Option<ProbeCounts> {
-        self.probes.get(key).copied()
-    }
-    fn rate(&self, key: &(String, String)) -> Option<f64> {
-        let counts = self.counts(key)?;
-        (counts.runs > 0).then(|| counts.passed as f64 / counts.runs as f64)
+    /// The probe's counted runs, or none when the arm ran none of them.
+    fn counts(&self, key: &(String, String)) -> ProbeCounts {
+        self.probes.get(key).copied().unwrap_or_default()
     }
 }
 
-/// The §8.1 rule of a candidate arm against the current one: every probe's
-/// pass rate at least `current − δ`, violations, failed runs and unjudged runs
-/// no higher, and every probe has at least one judged run in each arm. There
-/// is no absolute pass line.
-struct Rule {
-    passes: bool,
-    failures: Vec<String>,
-}
-fn rule(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Rule {
-    let mut failures = Vec::new();
-    for (arm, metrics) in [("current", current), ("candidate", candidate)] {
-        if metrics.judged == 0 {
-            failures.push(format!("the {arm} arm has no judged run"));
-        }
-    }
+/// The evaluation's family, fixed by the scenarios and their probes before
+/// any run (model-prompts §8.1): every (scenario, probe) — a pass rate for a
+/// `must_show` probe, a violation rate for a `must_not_show` one —, the
+/// pooled `must_show` pass rate, the pooled `must_not_show` violation rate,
+/// the failed-run rate and the unjudged-run rate.
+fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Vec<Comparison> {
+    let mut comparisons = Vec::new();
     for scenario in scenarios {
         for probe in &scenario.probes {
             let key = (scenario.id.clone(), probe.id.clone());
-            let current_counts = current.counts(&key);
-            let candidate_counts = candidate.counts(&key);
-            for (arm, counts) in [("current", current_counts), ("candidate", candidate_counts)] {
-                if counts.is_none_or(|counts| counts.judged == 0) {
-                    failures.push(format!(
-                        "{}/{} has no judged run in the {arm} arm",
-                        scenario.id, probe.id
-                    ));
+            let (current_counts, candidate_counts) = (current.counts(&key), candidate.counts(&key));
+            let counted = |counts: ProbeCounts| match probe.kind {
+                ProbeKind::MustShow => Counts::new(counts.passed.into(), counts.runs.into()),
+                ProbeKind::MustNotShow => {
+                    Counts::new((counts.runs - counts.passed).into(), counts.runs.into())
                 }
-            }
-            let (Some(current_counts), Some(candidate_counts)) = (current_counts, candidate_counts)
-            else {
-                continue;
             };
-            let (current_passed, current_runs) = (current_counts.passed, current_counts.runs);
-            let (candidate_passed, candidate_runs) =
-                (candidate_counts.passed, candidate_counts.runs);
-            // §8.1 in integers (δ = 1/20): kp/kn ≥ cp/cn − 1/20
-            // ⇔ 20·kp·cn + cn·kn ≥ 20·cp·kn.
-            let (numerator, denominator) = DELTA;
-            let candidate_side = denominator * candidate_passed as u64 * current_runs as u64
-                + numerator * current_runs as u64 * candidate_runs as u64;
-            let current_side = denominator * current_passed as u64 * candidate_runs as u64;
-            if candidate_side < current_side {
-                failures.push(format!(
-                    "{}/{} falls from {:.3} to {:.3} (δ = {})",
-                    scenario.id,
-                    probe.id,
-                    current_passed as f64 / current_runs as f64,
-                    candidate_passed as f64 / candidate_runs as f64,
-                    delta(),
-                ));
-            }
+            comparisons.push(Comparison {
+                name: format!("{}/{} ({})", scenario.id, probe.id, probe.kind.name()),
+                worse: match probe.kind {
+                    ProbeKind::MustShow => Worse::Lower,
+                    ProbeKind::MustNotShow => Worse::Higher,
+                },
+                current: counted(current_counts),
+                candidate: counted(candidate_counts),
+            });
         }
     }
-    if candidate.violations > current.violations {
-        failures.push(format!(
-            "violations rise from {} to {}",
-            current.violations, candidate.violations
-        ));
-    }
-    if candidate.failed > current.failed {
-        failures.push(format!(
-            "failed runs rise from {} to {}",
-            current.failed, candidate.failed
-        ));
-    }
-    if candidate.unjudged > current.unjudged {
-        failures.push(format!(
-            "unjudged runs rise from {} to {}",
-            current.unjudged, candidate.unjudged
-        ));
-    }
-    Rule {
-        passes: failures.is_empty(),
-        failures,
-    }
+    let rate = |counts: u32, runs: u32| Counts::new(counts.into(), runs.into());
+    comparisons.push(Comparison {
+        name: "pooled must_show".into(),
+        worse: Worse::Lower,
+        current: current.must_show,
+        candidate: candidate.must_show,
+    });
+    comparisons.push(Comparison {
+        name: "pooled must_not_show (violations)".into(),
+        worse: Worse::Higher,
+        current: current.must_not_show,
+        candidate: candidate.must_not_show,
+    });
+    comparisons.push(Comparison {
+        name: "failed runs".into(),
+        worse: Worse::Higher,
+        current: rate(current.failed, current.runs),
+        candidate: rate(candidate.failed, candidate.runs),
+    });
+    comparisons.push(Comparison {
+        name: "unjudged runs".into(),
+        worse: Worse::Higher,
+        current: rate(current.unjudged, current.runs),
+        candidate: rate(candidate.unjudged, candidate.runs),
+    });
+    comparisons
 }
 
 /// The instrument of an evaluation: the text under test, the model and the
@@ -1973,7 +1959,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         )
     });
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher |\n",
+        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-P Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} runs per arm and scenario |\n",
         instrument.text,
         instrument.model.provider_id,
         instrument.model.model_id,
@@ -1983,7 +1969,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         carried(&instrument.judge_configuration),
         instrument.runs,
         instrument.tokens,
-        delta = delta(),
+        delta = rule::DELTA,
+        alpha = rule::ALPHA,
+        floor = rule::FLOOR,
     );
     if same_family(&instrument.model, &instrument.judge) {
         text += "| judge limitation | the judge is the model's own family; the measurement is limited by that |\n";
@@ -2016,33 +2004,37 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         );
         text.push('\n');
     }
-    text +=
-        "\n| scenario | probe | kind | current | candidate |\n| --- | --- | --- | --- | --- |\n";
-    for scenario in scenarios {
-        for probe in &scenario.probes {
-            let key = (scenario.id.clone(), probe.id.clone());
-            let cell = |metrics: Option<&Metrics>| match metrics.and_then(|m| m.rate(&key)) {
-                Some(rate) => format!("{rate:.3}"),
-                None => "–".to_owned(),
-            };
-            text += &format!(
-                "| {} | {} | {} | {} | {} |\n",
-                scenario.id,
-                probe.id,
-                probe.kind.name(),
-                cell(metrics.get("current")),
-                cell(metrics.get("candidate")),
-            );
+    let empty = Metrics::default();
+    let current = metrics.get("current").unwrap_or(&empty);
+    let candidate = metrics.get("candidate").unwrap_or(&empty);
+    // The fewest times an arm ran a scenario, failed and unjudged runs
+    // included: the floor the verdict needs.
+    let mut per_arm: BTreeMap<(&str, &str), u64> = BTreeMap::new();
+    for record in records {
+        *per_arm
+            .entry((record.arm, record.scenario.as_str()))
+            .or_default() += 1;
+    }
+    let mut min_runs = u64::MAX;
+    for arm in ["current", "candidate"] {
+        for scenario in scenarios {
+            let runs = per_arm
+                .get(&(arm, scenario.id.as_str()))
+                .copied()
+                .unwrap_or(0);
+            min_runs = min_runs.min(runs);
         }
     }
-    text += "\n| arm | violations | failed runs | unjudged runs |\n| --- | --- | --- | --- |\n";
-    for arm in ["current", "candidate"] {
-        let empty = Metrics::default();
-        let metrics = metrics.get(arm).unwrap_or(&empty);
-        text += &format!(
-            "| {arm} | {} | {} | {} |\n",
-            metrics.violations, metrics.failed, metrics.unjudged
-        );
+    if scenarios.is_empty() {
+        min_runs = 0;
+    }
+    let family = comparisons(current, candidate, scenarios);
+    let judged = rule::judge(&family, min_runs);
+    text.push('\n');
+    text.push_str(rule::COMPARISON_HEADER);
+    for row in &judged.rows {
+        text += &row.line();
+        text.push('\n');
     }
     let unjudged: Vec<&RunRecord> = records.iter().filter(|record| record.unjudged()).collect();
     if !unjudged.is_empty() {
@@ -2058,17 +2050,14 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             );
         }
     }
-    if let (Some(current), Some(candidate)) = (metrics.get("current"), metrics.get("candidate")) {
-        let rule = rule(current, candidate, scenarios);
-        text += &if rule.passes {
-            format!(
-                "\ncandidate passes: every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher.\n",
-                delta = delta(),
-            )
-        } else {
-            format!("\ncandidate fails: {}.\n", rule.failures.join("; "))
-        };
-    }
+    text.push('\n');
+    text.push_str(&rule::verdict_line(
+        &judged,
+        min_runs,
+        "scenario",
+        "candidate",
+    ));
+    text.push('\n');
     text
 }
 
@@ -2275,62 +2264,194 @@ mod tests {
         }
     }
 
-    /// A candidate exactly at `current − δ` passes the rule; one just below
-    /// fails it, over run counts whose rates as `f64` sit either side of the
-    /// boundary (model-prompts §8.1).
+    /// One arm's runs with `passed` of them passing a single `must_show`
+    /// probe at run `index`.
+    fn arm(scenario: &Scenario, arm: &'static str, passed: usize, runs: usize) -> Vec<RunRecord> {
+        (0..runs)
+            .map(|index| {
+                let verdict = if index < passed {
+                    ProbeVerdict::Present
+                } else {
+                    ProbeVerdict::Absent
+                };
+                record(arm, scenario, &[("reports", verdict)], JudgeOutcome::Judged)
+            })
+            .collect()
+    }
+
+    /// The runner judges the family through the rule module: identical counts
+    /// pass at the floor of 20 runs, fall to inconclusive at 19, and a planted
+    /// loss fails and names its comparison, below the floor too
+    /// (model-prompts §8.1).
     #[test]
-    fn the_rule_passes_at_the_current_minus_delta_and_fails_below_it() {
+    fn the_runner_judges_the_family_at_the_floor() {
         let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
-        let arm = |arm: &'static str, passed: usize, runs: usize| {
-            let records: Vec<_> = (0..runs)
-                .map(|index| {
-                    let verdict = if index < passed {
-                        ProbeVerdict::Present
-                    } else {
-                        ProbeVerdict::Absent
-                    };
-                    record(
-                        arm,
-                        &scenario,
-                        &[("reports", verdict)],
-                        JudgeOutcome::Judged,
-                    )
-                })
-                .collect();
-            metrics(&scenario, &records)
+        let judged = |current: usize, candidate: usize, runs: usize| {
+            let mut records = arm(&scenario, "current", current, runs);
+            records.extend(arm(&scenario, "candidate", candidate, runs));
+            report(
+                &instrument(model()),
+                std::slice::from_ref(&scenario),
+                &records,
+            )
         };
-        for (current, candidate) in [((20, 20), (19, 20)), ((2, 5), (7, 20))] {
-            let verdict = rule(
-                &arm("current", current.0, current.1),
-                &arm("candidate", candidate.0, candidate.1),
-                std::slice::from_ref(&scenario),
+        let text = judged(20, 20, 20);
+        assert!(
+            text.contains(
+                "| case/reports (must_show) | 20/20 (1.000) | 20/20 (1.000) | 0.000 | 1 |"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "candidate passes: no comparison is a regression, and every arm ran every scenario at least 20 times"
+            ),
+            "{text}"
+        );
+        let text = judged(19, 19, 19);
+        assert!(
+            text.contains(
+                "candidate is inconclusive: no comparison is a regression, but the fewest runs on a scenario are 19"
+            ),
+            "{text}"
+        );
+        let text = judged(20, 8, 20);
+        assert!(
+            text.contains("candidate fails: case/reports (must_show) falls from 1.000 to 0.400"),
+            "{text}"
+        );
+        let text = judged(10, 4, 10);
+        assert!(
+            text.contains("candidate fails: case/reports (must_show) falls from 1.000 to 0.400"),
+            "a regression fails below the floor: {text}"
+        );
+    }
+
+    /// A failed run changes no probe's rate: it leaves the counted runs and is
+    /// compared once, in the failed-run rate (model-prompts §8.1).
+    #[test]
+    fn a_failed_run_changes_no_probe_rate_only_the_failed_run_rate() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let current = metrics(&scenario, &arm(&scenario, "current", 20, 20));
+        let mut records = arm(&scenario, "candidate", 20, 20);
+        records.push(record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::CallFailed,
+        ));
+        let candidate = metrics(&scenario, &records);
+        let key = ("case".to_owned(), "reports".to_owned());
+        assert_eq!(
+            candidate.counts(&key),
+            ProbeCounts {
+                passed: 20,
+                runs: 20
+            }
+        );
+        assert_eq!((candidate.failed, candidate.runs), (1, 21));
+        let family = comparisons(&current, &candidate, std::slice::from_ref(&scenario));
+        let probe_row = family
+            .iter()
+            .find(|comparison| comparison.name.starts_with("case/reports"))
+            .unwrap();
+        assert_eq!(probe_row.current, Counts::new(20, 20));
+        assert_eq!(probe_row.candidate, Counts::new(20, 20));
+        let failed = family
+            .iter()
+            .find(|comparison| comparison.name == "failed runs")
+            .unwrap();
+        assert_eq!(failed.current, Counts::new(0, 20));
+        assert_eq!(failed.candidate, Counts::new(1, 21));
+    }
+
+    /// A candidate that violates a `must_not_show` probe more often fails
+    /// through the probe's row and the pooled row beside it, and the report
+    /// prints both arms' counts (model-prompts §8.1).
+    #[test]
+    fn a_violation_rise_fails_through_the_pooled_row() {
+        let scenario = scenario(vec![probe("floods", ProbeKind::MustNotShow)]);
+        let current: Vec<RunRecord> = (0..20)
+            .map(|_| {
+                record(
+                    "current",
+                    &scenario,
+                    &[("floods", ProbeVerdict::Absent)],
+                    JudgeOutcome::Judged,
+                )
+            })
+            .collect();
+        let candidate: Vec<RunRecord> = (0..20)
+            .map(|index| {
+                record(
+                    "candidate",
+                    &scenario,
+                    &[(
+                        "floods",
+                        if index < 8 {
+                            ProbeVerdict::Present
+                        } else {
+                            ProbeVerdict::Absent
+                        },
+                    )],
+                    JudgeOutcome::Judged,
+                )
+            })
+            .collect();
+        let mut records = current;
+        records.extend(candidate);
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| case/floods (must_not_show) | 0/20 (0.000) | 8/20 (0.400) |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| pooled must_not_show (violations) | 0/20 (0.000) | 8/20 (0.400) |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("candidate fails: "),
+            "a violation rise is a regression: {text}"
+        );
+        assert!(text.contains("floods (must_not_show) rises from"), "{text}");
+    }
+
+    /// A candidate whose runs the judge answered less often fails through the
+    /// unjudged-run comparison, and those runs stay out of the probe rates
+    /// (model-prompts §8.1).
+    #[test]
+    fn an_unjudged_rise_fails_through_the_unjudged_run_row() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = arm(&scenario, "current", 20, 20);
+        records.extend(arm(&scenario, "candidate", 12, 12));
+        for _ in 0..8 {
+            let mut run = record(
+                "candidate",
+                &scenario,
+                &[("reports", ProbeVerdict::Unparsed)],
+                JudgeOutcome::Unreadable,
             );
-            assert!(
-                verdict.passes,
-                "{}/{} → {}/{} is exactly the current arm's − δ: {:?}",
-                current.0, current.1, candidate.0, candidate.1, verdict.failures
-            );
+            run.judge_error = Some("the judge answered with no usable verdicts".into());
+            records.push(run);
         }
-        for (current, candidate) in [((20, 20), (18, 20)), ((2, 5), (6, 20))] {
-            let verdict = rule(
-                &arm("current", current.0, current.1),
-                &arm("candidate", candidate.0, candidate.1),
-                std::slice::from_ref(&scenario),
-            );
-            assert!(
-                !verdict.passes,
-                "{}/{} → {}/{} is below the current arm's − δ",
-                current.0, current.1, candidate.0, candidate.1
-            );
-            assert!(
-                verdict
-                    .failures
-                    .iter()
-                    .any(|failure| failure.contains("reports")),
-                "{:?}",
-                verdict.failures
-            );
-        }
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| case/reports (must_show) | 20/20 (1.000) | 12/12 (1.000) |"),
+            "an unjudged run is out of the probe rates: {text}"
+        );
+        assert!(
+            text.contains("| unjudged runs | 0/20 (0.000) | 8/20 (0.400) |"),
+            "{text}"
+        );
+        assert!(text.contains("unjudged runs rises from"), "{text}");
     }
 
     /// The turn account is the export's, not the notice stream's: a turn that
@@ -2498,292 +2619,6 @@ mod tests {
         rebuilt
     }
 
-    /// More violations or more failed runs fail the candidate even when every
-    /// probe's pass rate stays inside δ.
-    #[test]
-    fn more_violations_or_failed_runs_fail_the_candidate() {
-        let scenario = scenario(vec![
-            probe("reports", ProbeKind::MustShow),
-            probe("floods", ProbeKind::MustNotShow),
-        ]);
-        let current = metrics(
-            &scenario,
-            &(0..20)
-                .map(|_| {
-                    record(
-                        "current",
-                        &scenario,
-                        &[
-                            ("reports", ProbeVerdict::Present),
-                            ("floods", ProbeVerdict::Absent),
-                        ],
-                        JudgeOutcome::Judged,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
-        let one_violation: Vec<RunRecord> = (0..20)
-            .map(|index| {
-                let floods = if index == 0 {
-                    ProbeVerdict::Present
-                } else {
-                    ProbeVerdict::Absent
-                };
-                record(
-                    "candidate",
-                    &scenario,
-                    &[("reports", ProbeVerdict::Present), ("floods", floods)],
-                    JudgeOutcome::Judged,
-                )
-            })
-            .collect();
-        let verdict = rule(
-            &current,
-            &metrics(&scenario, &one_violation),
-            std::slice::from_ref(&scenario),
-        );
-        assert!(!verdict.passes);
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure.contains("violations rise")),
-            "{:?}",
-            verdict.failures
-        );
-
-        let one_failure: Vec<RunRecord> = (0..20)
-            .map(|index| {
-                record(
-                    "candidate",
-                    &scenario,
-                    &[
-                        ("reports", ProbeVerdict::Present),
-                        ("floods", ProbeVerdict::Absent),
-                    ],
-                    if index == 0 {
-                        JudgeOutcome::CallFailed
-                    } else {
-                        JudgeOutcome::Judged
-                    },
-                )
-            })
-            .collect();
-        let verdict = rule(
-            &current,
-            &metrics(&scenario, &one_failure),
-            std::slice::from_ref(&scenario),
-        );
-        assert!(!verdict.passes);
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure.contains("failed runs rise")),
-            "{:?}",
-            verdict.failures
-        );
-    }
-
-    /// Unjudged runs are compared between the arms the way failed runs are: a
-    /// candidate with more of them fails the rule, and equal counts do not
-    /// fail it on their own (model-prompts §8.1).
-    #[test]
-    fn more_unjudged_runs_fail_the_candidate() {
-        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
-        let arm = |arm: &'static str, judged: usize, unjudged: usize| {
-            let records: Vec<_> = (0..judged)
-                .map(|_| {
-                    record(
-                        arm,
-                        &scenario,
-                        &[("reports", ProbeVerdict::Present)],
-                        JudgeOutcome::Judged,
-                    )
-                })
-                .chain((0..unjudged).map(|_| {
-                    let mut run = record(
-                        arm,
-                        &scenario,
-                        &[("reports", ProbeVerdict::Unparsed)],
-                        JudgeOutcome::Unreadable,
-                    );
-                    run.judge_error = Some("the judge answered with no usable verdicts".into());
-                    run
-                }))
-                .collect();
-            metrics(&scenario, &records)
-        };
-        let verdict = rule(
-            &arm("current", 20, 0),
-            &arm("candidate", 19, 1),
-            std::slice::from_ref(&scenario),
-        );
-        assert!(!verdict.passes);
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure == "unjudged runs rise from 0 to 1"),
-            "{:?}",
-            verdict.failures
-        );
-        let verdict = rule(
-            &arm("current", 19, 1),
-            &arm("candidate", 19, 1),
-            std::slice::from_ref(&scenario),
-        );
-        assert!(verdict.passes, "{:?}", verdict.failures);
-    }
-
-    /// A probe with no judged run in one arm cannot be compared: the rule
-    /// names the arm rather than reading the missing run as a fall (issue
-    /// #642).
-    #[test]
-    fn a_probe_with_no_judged_run_in_an_arm_fails_the_rule() {
-        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
-        let current = metrics(
-            &scenario,
-            &[record(
-                "current",
-                &scenario,
-                &[("reports", ProbeVerdict::Present)],
-                JudgeOutcome::Judged,
-            )],
-        );
-        let mut unjudged = record(
-            "candidate",
-            &scenario,
-            &[("reports", ProbeVerdict::Unparsed)],
-            JudgeOutcome::Unreadable,
-        );
-        unjudged.judge_error = Some("the judge answered with no usable verdicts: no answer".into());
-        let verdict = rule(
-            &current,
-            &metrics(&scenario, std::slice::from_ref(&unjudged)),
-            std::slice::from_ref(&scenario),
-        );
-        assert!(!verdict.passes);
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure == "case/reports has no judged run in the candidate arm"),
-            "{:?}",
-            verdict.failures
-        );
-        assert!(
-            !verdict
-                .failures
-                .iter()
-                .any(|failure| failure.contains("falls from")),
-            "a missing judged run never reads as a fall: {:?}",
-            verdict.failures
-        );
-    }
-
-    /// A probe needs a judged run in each arm, not merely a counted one
-    /// (model-prompts §8.1, issue #642): a run whose judge call failed still
-    /// counts toward the probe's rate, so a probe whose every run in an arm
-    /// ended that way has no judged run there, and the rule names it. One
-    /// judged run in the arm satisfies the floor.
-    #[test]
-    fn a_probe_needs_a_judged_run_in_each_arm() {
-        let case = scenario(vec![probe("reports", ProbeKind::MustShow)]);
-        let mut other = scenario(vec![probe("fine", ProbeKind::MustShow)]);
-        other.id = "other".into();
-        let scenarios = [case, other];
-        let (case, other) = (&scenarios[0], &scenarios[1]);
-        // One arm: of the probe's runs, the judge answered `judged` of them
-        // with a verdict that fails it and its calls failed for the rest; one
-        // judged run of `other` keeps the arm itself off the arm-level
-        // message.
-        let arm = |arm: &'static str, judged: usize, call_failed: usize, with_other: bool| {
-            let mut metrics = Metrics::default();
-            for _ in 0..judged {
-                metrics.add(
-                    case,
-                    &record(
-                        arm,
-                        case,
-                        &[("reports", ProbeVerdict::Absent)],
-                        JudgeOutcome::Judged,
-                    ),
-                );
-            }
-            for _ in 0..call_failed {
-                metrics.add(
-                    case,
-                    &record(
-                        arm,
-                        case,
-                        &[("reports", ProbeVerdict::Unparsed)],
-                        JudgeOutcome::CallFailed,
-                    ),
-                );
-            }
-            if with_other {
-                metrics.add(
-                    other,
-                    &record(
-                        arm,
-                        other,
-                        &[("fine", ProbeVerdict::Present)],
-                        JudgeOutcome::Judged,
-                    ),
-                );
-            }
-            metrics
-        };
-        // Every one of the probe's runs in the candidate arm ended in a
-        // failed judge call, while the arm has a judged run elsewhere: the
-        // rule names the probe in the candidate arm alone.
-        let verdict = rule(
-            &arm("current", 1, 2, true),
-            &arm("candidate", 0, 2, true),
-            &scenarios,
-        );
-        assert!(!verdict.passes);
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure == "case/reports has no judged run in the candidate arm"),
-            "{:?}",
-            verdict.failures
-        );
-        assert!(
-            !verdict
-                .failures
-                .iter()
-                .any(|failure| failure == "case/reports has no judged run in the current arm"),
-            "{:?}",
-            verdict.failures
-        );
-        // An arm with no judged run at all still gets the arm-level message
-        // beside the probe's.
-        let verdict = rule(
-            &arm("current", 1, 2, true),
-            &arm("candidate", 0, 2, false),
-            &scenarios,
-        );
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|failure| failure == "the candidate arm has no judged run"),
-            "{:?}",
-            verdict.failures
-        );
-        // One judged run in the arm satisfies the probe's floor.
-        let verdict = rule(
-            &arm("current", 1, 2, true),
-            &arm("candidate", 1, 2, true),
-            &scenarios,
-        );
-        assert!(verdict.passes, "{:?}", verdict.failures);
-    }
-
     /// A run that stopped on its wall-clock budget is a failed run, scored as
     /// before, even when its judge gave no answer: only the run's own failure
     /// would leave it out (issue #642).
@@ -2809,7 +2644,10 @@ mod tests {
             std::slice::from_ref(&scenario),
             std::slice::from_ref(&record),
         );
-        assert!(text.contains("| candidate | 0 | 1 | 0 |"), "{text}");
+        assert!(
+            text.contains("| failed runs | – | 1/1 (1.000) |"),
+            "the run is compared as a failed run: {text}"
+        );
         assert!(
             !text.contains("| arm | scenario | run | judge error |"),
             "{text}"
@@ -2835,7 +2673,10 @@ mod tests {
             std::slice::from_ref(&scenario),
             std::slice::from_ref(&unjudged),
         );
-        assert!(text.contains("| candidate | 0 | 0 | 1 |"), "{text}");
+        assert!(
+            text.contains("| unjudged runs | – | 1/1 (1.000) |"),
+            "the unjudged-run rate counts it: {text}"
+        );
         assert!(
             text.contains(
                 "| candidate | case | 0 | the judge answered with no usable verdicts: no answer |"
@@ -3006,10 +2847,9 @@ mod tests {
         let metrics = metrics(&scenario, std::slice::from_ref(&record));
         assert_eq!(metrics.unjudged, 1);
         assert_eq!(metrics.failed, 0);
-        assert_eq!(metrics.judged, 0);
         assert_eq!(
             metrics.counts(&("case".to_owned(), "reports".to_owned())),
-            None,
+            ProbeCounts::default(),
             "an unjudged run answers no probe"
         );
         let text = report(
@@ -3101,7 +2941,10 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         assert_eq!(fixture.judge().len(), 2, "one judge request per arm");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3147,12 +2990,17 @@ mod tests {
             assert_eq!(record["failed"], false, "{record}");
         }
         assert!(
-            report.contains("| case | floods | must_not_show | 1.000 | 1.000 |"),
-            "a contradicted verdict passes the probe: {report}"
+            report.contains("| case/floods (must_not_show) | 0/1 (0.000) | 0/1 (0.000) |"),
+            "a contradicted verdict is no violation: {report}"
         );
-        assert!(report.contains("| current | 0 | 0 | 0 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 0 | 0 |"), "{report}");
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("| pooled must_not_show (violations) | 0/1 (0.000) | 0/1 (0.000) |"),
+            "{report}"
+        );
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
     }
 
     /// The judge's first answer loses a level of escaping in a quote, as one
@@ -3187,7 +3035,10 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -3254,7 +3105,10 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -3328,8 +3182,10 @@ mod tests {
             report.contains("| judge temperature | dropped in 2 of 2 runs the judge was asked |"),
             "a run whose first call failed is a run the judge was asked: {report}"
         );
-        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
+        assert!(
+            report.contains("| failed runs | 1/1 (1.000) | 1/1 (1.000) |"),
+            "{report}"
+        );
         assert!(
             !report.contains("| arm | scenario | run | judge error |"),
             "a failed run is not listed as unjudged: {report}"
@@ -3378,8 +3234,10 @@ mod tests {
                 "the error names the call that failed: {record}"
             );
         }
-        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
+        assert!(
+            report.contains("| failed runs | 1/1 (1.000) | 1/1 (1.000) |"),
+            "{report}"
+        );
         assert!(
             !report.contains("| arm | scenario | run | judge error |"),
             "a failed run is not listed as unjudged: {report}"
@@ -3924,7 +3782,10 @@ mod tests {
         .await;
         let options = fixture.judge_options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -4001,7 +3862,10 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -4173,8 +4037,10 @@ mod tests {
             2,
             "the judge is asked once for each run whose view fits, and never for the other"
         );
-        assert!(report.contains("| current | 0 | 0 | 1 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 0 | 1 |"), "{report}");
+        assert!(
+            report.contains("| unjudged runs | 1/2 (0.500) | 1/2 (0.500) |"),
+            "the unjudged-run rate compares the runs the judge was not asked about: {report}"
+        );
         assert!(
             report.contains("| current | over | 0 | the judge view needs about "),
             "the report lists the unjudged run with its estimate and budget: {report}"
@@ -4184,18 +4050,16 @@ mod tests {
             "{report}"
         );
         assert!(
-            report.contains("| case | ran | must_show | 1.000 | 1.000 |"),
+            report.contains("| case/ran (must_show) | 1/1 (1.000) | 1/1 (1.000) |"),
             "the runs whose view fits are judged: {report}"
         );
         assert!(
-            report.contains("| over | ran | must_show | – | – |"),
+            report.contains("| over/ran (must_show) | – | – |"),
             "an unjudged run is out of the probe rates: {report}"
         );
         assert!(
-            report.contains(
-                "candidate fails: over/ran has no judged run in the current arm; over/ran has no judged run in the candidate arm"
-            ),
-            "the judged-run floor names the runs the judge was not asked about: {report}"
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
         );
     }
 
@@ -4220,7 +4084,10 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -4324,7 +4191,10 @@ mod tests {
             "the resolved --out is the fixture's output directory"
         );
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -4364,7 +4234,10 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -4432,7 +4305,7 @@ mod tests {
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
         assert!(
-            report.contains("candidate passes"),
+            report.contains("candidate is inconclusive: no comparison is a regression"),
             "{report}\nrecords: {:?}",
             fixture.records(&options.out)
         );
@@ -4472,7 +4345,7 @@ mod tests {
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
         assert!(
-            report.contains("candidate passes"),
+            report.contains("candidate is inconclusive: no comparison is a regression"),
             "{report}\nrecords: {:?}",
             fixture.records(&options.out)
         );
