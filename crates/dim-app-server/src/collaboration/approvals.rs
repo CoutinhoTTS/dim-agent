@@ -172,17 +172,23 @@ impl CollaborationSession {
                         .map(|destination| (service, destination))
                 });
             let resources = {
-                let state = self.state.lock().unwrap();
+                let mut state = self.state.lock().unwrap();
                 state
                     .branches
-                    .get(branch_id)
+                    .get_mut(branch_id)
                     .filter(|branch| !branch.closing)
-                    .map(|branch| {
-                        (
+                    .and_then(|branch| {
+                        if branch.observed_approvals.contains_key(&request.approval_id) {
+                            return None;
+                        }
+                        branch
+                            .observed_approvals
+                            .insert(request.approval_id.clone(), None);
+                        Some((
                             branch.tasks.clone(),
                             branch.abort.clone(),
                             branch.dispatcher.clone(),
-                        )
+                        ))
                     })
             };
             let Some((tasks, abort, dispatcher)) = resources else {
@@ -191,10 +197,15 @@ impl CollaborationSession {
             let Some((leader_service, (leader_branch, delegation_id, agent_id))) = destination
             else {
                 let approval = approval.clone();
+                let owner = self.clone();
+                let branch_id = branch_id.to_owned();
                 tasks.spawn(async move {
                     let _ = approval
                         .respond(&request.approval_id, ApprovalDecision::Deny)
                         .await;
+                    if let Some(branch) = owner.state.lock().unwrap().branches.get_mut(&branch_id) {
+                        branch.observed_approvals.remove(&request.approval_id);
+                    }
                 });
                 continue;
             };
@@ -224,12 +235,9 @@ impl CollaborationSession {
                 else {
                     continue;
                 };
-                if branch.observed_approvals.contains_key(&request.approval_id) {
-                    continue;
-                }
                 branch
                     .observed_approvals
-                    .insert(request.approval_id, observation.clone());
+                    .insert(request.approval_id, Some(observation.clone()));
             }
             let member = member.clone();
             let owner = self.clone();
@@ -316,7 +324,8 @@ impl CollaborationSession {
                 .filter(|origin| !origin.closing)?;
             let observation = origin
                 .observed_approvals
-                .get(&source.descriptor.request_id)?;
+                .get(&source.descriptor.request_id)?
+                .as_ref()?;
             (observation.source == *source
                 && observation.leader == leader
                 && observation.branch == branch)

@@ -161,8 +161,10 @@ a truncated substitute.
 
 Collaboration consumes existing delegation/cancel/close/result and branch turn/interrupt facts,
 its request/terminal `input/message`, `input/consumed` / `input/deleted`, decision `step/tool-call` /
-`step/tool-result`, and the original member's `approval/request`, `approval/respond` and
-`approval/cancelled`. Original Approval and existing tool results record the answer. The leader's detail query reads its own committed route state. Original Approval.respond is the
+`step/tool-result`, and the original member's `approval/request`. Member observation watches
+Dispatcher progress and reads the original Approval's pending requests to detect responses and
+cancellations; it does not subscribe to `approval/respond` or `approval/cancelled`.
+Original Approval and existing tool results record the answer. The leader's detail query reads its own committed route state. Original Approval.respond is the
 answer authority and maps an already-ended request to `not_pending`; no separate foreign pending
 read immediately before responding adds another answer guarantee.
 
@@ -244,11 +246,11 @@ cannot reopen it. It uses the [existing notice contract](appserver/session-notic
 | Leader turn ends before request input is adopted | A still-pending driving input follows normal InputQueue scheduling; it can start the next turn. Applying an input just before the previous turn ends does not bind it to that turn; only `input/consumed` binds its decision turn. An interrupted branch instead withdraws it and denies the request |
 | Leader stop/branch end or delegation cancel/close/result | Close route admission, withdraw unapplied request inputs and deny outstanding original asks before releasing assignment resources. Do not cancel unrelated members or branches |
 | Member stop/close or Approval reload | The member branch submits terminal input from its original waiter; the leader consumes it, retiring routes and inputs; no synthetic successful answer |
-| Collaboration branch reload | Stop observation, deny its pending original asks, withdraw held inputs and join tasks before withdrawing services. New generation rebuilds route identities only to retire stale work, never to replay an allow |
+| Collaboration branch reload | The old generation stops observation, retires its routes, denies pending original asks, withdraws held inputs and joins tasks before withdrawing services. The new generation starts with no routes and withdraws unapplied request inputs; a terminal input retires only a route created in that generation, never replaying an allow |
 | Restart/fork | Old executions and route ids confer no authority. Native Approval performs its own abandoned-request recovery; copied leader facts do not recreate a team or pending decision |
 | Leader detaches / client disconnects | Detach is not Session close. Pending requests remain answerable on another attached client; attach replays leader pending Approval requests and clients query details again |
 | Leader closes while detached member work continues | Existing detached-work contract remains. Pending asks are denied; member branch observation denies later asks with no live assignment instead of forwarding to a dead leader |
-| Non-interactive leader (`interactive: false`) | Before denying, send an ordinary leader message to the original member branch explaining that the leader is non-interactive; create no driving leader approval input |
+| Leader cannot decide (`interactive: false` or decision tools not mounted) | Before denying, send an ordinary leader message to the original member branch explaining the specific cause; create no driving leader approval input |
 | Headless `dimcode exec` needs leader approval | Existing client denies it, stops/settles and exits 3; cancellation settles the member ask. No unattended allow fallback |
 
 A definitively failed input submission denies the original ask; an uncertain reply is looked up

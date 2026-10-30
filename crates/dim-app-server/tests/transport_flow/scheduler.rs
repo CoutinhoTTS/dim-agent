@@ -6,6 +6,9 @@ use rutis::host::CtxHost;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+/// The `dim-scheduler` entry (Scheduler §5.2), byte for byte.
+const SCHEDULER_ENTRY: &str = r#"<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next."#;
+
 struct AppliedInputGate {
     held: Arc<AtomicBool>,
     entered: tokio::sync::mpsc::UnboundedSender<(String, String)>,
@@ -220,7 +223,7 @@ async fn reports(session: &dim_agent_runtime::Session, id: &str) -> usize {
             if let EventKind::InputMessage(data) = &event.kind
                 && data.blocks.iter().any(|block| {
                     matches!(block, dim_agent_types::InputBlock::Raw { text, .. }
-                        if text.starts_with("Scheduled job ") && text.contains(id))
+                        if text.starts_with("<dim-scheduler kind=\"report\"") && text.contains(id))
                 })
             {
                 assert!(
@@ -820,6 +823,13 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
     )
     .await;
     assert_eq!(run["state"], "completed", "{run}");
+    // The run Session's request carries the scheduled-run marker and, from the
+    // same Session part, the dim-scheduler entry.
+    let run_session = agent
+        .get_session(run["session_id"].as_str().unwrap())
+        .unwrap();
+    let system = super::reload::last_system(&run_session, "main").await;
+    assert!(system.contains(SCHEDULER_ENTRY), "{system}");
     let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -871,9 +881,160 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
     assert_eq!(request["messages"][1]["content"], first);
     release.send("Scheduled review".into()).unwrap();
     session_title::titled(&mut client, starter.id(), "Scheduled review", "auto").await;
+    // The request that consumed the report carries its entry, registered at
+    // session scope by the Scheduler Session part that wrote the marker.
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let system = super::reload::last_system(&starter, "main").await;
+    assert!(system.contains(SCHEDULER_ENTRY), "{system}");
     server.shutdown();
     server.join().await.unwrap();
     http.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A Scheduler enabled while a Session is open: its Session part registers
+/// the `dim-scheduler` entry mid-Session, on the adopted path, and the
+/// request that consumes the report carries it (Prompt §6.3, model-facing
+/// prompts §6.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_installed_mid_session_carries_its_entry() {
+    use dim_agent_capabilities::{
+        model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
+    };
+    let home = std::env::temp_dir().join(format!(
+        "ds-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let native = home.join("rust");
+    std::fs::create_dir_all(&native).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_local_execution(
+        &mut builder,
+        ModelProviderPlugin::new,
+        WorkspaceToolsConfig {
+            output_root: native.join("outputs"),
+        },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
+    );
+    dim_app_server::permission_rules::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    let mut parts = session_typescript::fixture();
+    parts.rows.clear();
+    let mut config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(native.clone()),
+        unix_path: Some(native.join("daemon.sock")),
+        session_typescript: Some(parts),
+        ..Default::default()
+    };
+    config.session_defaults.tools = Some(["echo", "schedule"].map(String::from).to_vec());
+    config.session_defaults.permission_policy = dim_agent_types::PermissionPolicy {
+        preset: dim_agent_types::PermissionPreset::FullAccess,
+        ..Default::default()
+    };
+    let server = serve(builder, config).await.unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    // The Session opens without the Scheduler and adopts a System without
+    // its entry.
+    let created = client.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&created);
+    let starter = agent
+        .get_session(created["result"]["sessionId"].as_str().unwrap())
+        .unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":starter.id(),"branchId":"main","text":"start"}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let system = super::reload::last_system(&starter, "main").await;
+    assert!(!system.contains(SCHEDULER_ENTRY), "{system}");
+    let package = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/plugins/scheduler")
+        .canonicalize()
+        .unwrap();
+    let installed = client
+        .rpc("plugin.install", json!({"source":{"path":package}}))
+        .await;
+    assert_ok(&installed);
+    assert_eq!(installed["result"]["status"], "running", "{installed}");
+    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let saved = tool(
+        &mut client,
+        &starter,
+        json!({"action":"create","job":{"name":"mid-session","cwd":home,
+            "prompt":"Mid-session entry","schedule":{"at":"2040-01-01T00:00:00Z"}}}),
+    )
+    .await;
+    assert_ne!(saved.is_error, Some(true), "{saved:?}");
+    let job = saved.structured_content.unwrap()["job"]["id"].clone();
+    let accepted = client.rpc("schedule.run_now", json!({"job_id":job})).await;
+    assert_ok(&accepted);
+    let run = settled(&mut client, &job, &accepted["result"]["run_id"]).await;
+    assert_eq!(run["state"], "completed", "{run}");
+    let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = starter.local("main", ..).await.unwrap();
+            let report = history.iter().find(|event| {
+                matches!(&event.kind,
+                    EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(&submission))
+            });
+            if let Some(report) = report
+                && history.iter().any(|event| {
+                    matches!(&event.kind,
+                        EventKind::InputApplied(data) if data.input_id == report.id)
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the report is adopted in the Session opened before the enable");
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":starter.id(),"branchId":"main"}),
+            )
+            .await,
+    );
+    let system = super::reload::last_system(&starter, "main").await;
+    assert!(system.contains(SCHEDULER_ENTRY), "{system}");
+    server.shutdown();
+    server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
 
@@ -2099,6 +2260,18 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                         }
                     })
                     .unwrap();
+                assert!(
+                    text.starts_with(&format!(
+                        "<dim-scheduler kind=\"report\" job=\"{}\" run=\"{}\">",
+                        job.as_str().unwrap(),
+                        id.as_str().unwrap()
+                    )),
+                    "{text}"
+                );
+                assert!(
+                    text.ends_with("\nInspect schedule.history for this job.</dim-scheduler>"),
+                    "{text}"
+                );
                 assert!(text.contains(job.as_str().unwrap()));
                 assert!(text.contains(id.as_str().unwrap()));
                 assert!(text.contains(outcome));
@@ -3812,6 +3985,128 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
             std::fs::read(home.join("scheduler/runs.json")).unwrap(),
             bytes
         );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+/// The tool description and the report's guidance line as the factory
+/// configuration: a candidate replaces each built-in text in the request, and
+/// unset keeps the built-ins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_factory_texts_reach_the_declaration_and_the_report() {
+    const DESCRIPTION: &str = "A candidate schedule description.";
+    const GUIDANCE: &str = "Read the run history before deciding.";
+    for configured in [true, false] {
+        let home = home();
+        let mut parts = rows();
+        if configured {
+            parts.rows[0]["config"] =
+                json!({"description": DESCRIPTION, "report_guidance": GUIDANCE});
+        }
+        let mut config = config(&home);
+        config.session_typescript = Some(parts);
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":home,"interactive":true,"tools":["echo","schedule"]}),
+            )
+            .await;
+        assert_ok(&created);
+        let starter = agent
+            .get_session(created["result"]["sessionId"].as_str().unwrap())
+            .unwrap();
+        let saved = tool(
+            &mut client,
+            &starter,
+            json!({"action":"create","job":{"name":"factory",
+                "schedule":{"at":"2030-01-01T00:00:00Z"},"prompt":"Review the project"}}),
+        )
+        .await;
+        assert_ne!(saved.is_error, Some(true), "{saved:?}");
+        let dim_agent_types::ToolContent::Text(content) = saved.content else {
+            panic!("schedule returns text")
+        };
+        let saved: Value = serde_json::from_str(&content).unwrap();
+
+        // The declaration the model request carries.
+        let history = starter.local("main", ..).await.unwrap();
+        let description = history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => data.request.tools.as_deref().and_then(|tools| {
+                    tools
+                        .iter()
+                        .find(|tool| tool.name == "schedule")
+                        .map(|tool| tool.description.clone())
+                }),
+                _ => None,
+            })
+            .expect("the schedule declaration");
+        if configured {
+            assert_eq!(description, DESCRIPTION);
+        } else {
+            assert!(
+                description.starts_with("Manage scheduled jobs across this host"),
+                "{description}"
+            );
+        }
+
+        // The report the saving branch receives.
+        let started = client
+            .rpc("schedule.run_now", json!({"job_id":saved["job"]["id"]}))
+            .await;
+        assert_ok(&started);
+        let run = settled(
+            &mut client,
+            &saved["job"]["id"],
+            &started["result"]["run_id"],
+        )
+        .await;
+        assert_eq!(run["state"], "completed", "{run}");
+        let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
+        let text = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let history = starter.local("main", ..).await.unwrap();
+                if let Some(text) = history.iter().find_map(|event| match &event.kind {
+                    EventKind::InputMessage(data)
+                        if data.submission_id.as_deref() == Some(&submission) =>
+                    {
+                        data.blocks
+                            .first()
+                            .map(|dim_agent_types::InputBlock::Raw { text, .. }| text.clone())
+                    }
+                    _ => None,
+                }) {
+                    break text;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the report reaches the saving branch");
+        if configured {
+            assert!(
+                text.ends_with(&format!("\n{GUIDANCE}</dim-scheduler>")),
+                "{text}"
+            );
+            assert!(
+                !text.contains("Inspect schedule.history for this job."),
+                "{text}"
+            );
+        } else {
+            assert!(
+                text.ends_with("\nInspect schedule.history for this job.</dim-scheduler>"),
+                "{text}"
+            );
+        }
+        server.shutdown();
+        server.join().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();
     }
 }

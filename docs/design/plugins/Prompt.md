@@ -74,9 +74,9 @@ The exception is the handle a compaction appends to an input it shortened ([mode
 
 ### 3.2 The order
 
-Entries are ordered by their `order`, and entries with the same `order` by their first marker's name; both are data the contributor states, so the order never depends on which part loaded or registered first. The built-in entries use `10` to `90` in steps of ten (§4), leaving the numbers between them for a contribution that must sit inside a group.
+Entries are ordered by their `order`, and entries with the same `order` by their first marker's name; both are data the contributor states, so the order never depends on which part loaded or registered first. The built-in entries use `10` to `120` in steps of ten (§4), leaving the numbers between them for a contribution that must sit inside a group.
 
-The built-in set composes, apart from the channel rule's exception, byte for byte the text the guide held while it was one file. Today's order — exec, the two agent markers, the two branch entries, state, rule, summary, digest — is reproduced by the numbers in §4; no wording and no position changes, so this change carries no policy evaluation ([model-facing prompts §8](../model-prompts.md#8-judging-a-change)).
+The entries at `10` to `90` compose, apart from the channel rule's exception, byte for byte the text the guide held while it was one file. Their order — exec, the two agent markers, the two branch entries, state, rule, summary, digest — is reproduced by the numbers in §4; no wording and no position changes, so this change carries no policy evaluation ([model-facing prompts §8](../model-prompts.md#8-judging-a-change)). The entries at `100` to `120` are new texts, for markers the one-file guide never explained.
 
 ### 3.3 One composition, two paths
 
@@ -117,6 +117,9 @@ Each built-in entry moves verbatim to the capability that writes its markers, an
 | 70 | `dim-rule` | PromptGuide | session | What a rule block is, and how it ends |
 | 80 | `dim-summary` | ContextCompaction's summary strategy part | session | What a summary is |
 | 90 | `dim-digest` | ContextCompaction's context-preparation part | branch | What a digest is |
+| 100 | `dim-shell-input` | ShellInput | session | The operator's own shell command and its output |
+| 110 | `dim-scheduler` | Scheduler's Session part | session | The scheduled-run prompt and the run outcome report |
+| 120 | `dim-workflow` | Workflow's Session part | session | The run's report and its stage markers |
 
 The registrar is the part that writes the marker, not the part that authors the source's words. Prompt turns any `Context` or `State` source into a `<dim-rule>` or `<dim-state>` input, so those two markers are Prompt's even when the source's words are PromptSources'. A profile that installs Prompt without PromptSources can still be handed a context source, and the markers it writes need their entries.
 

@@ -4681,9 +4681,7 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches",
-        "params",
-        "unreachable"
+        "params"
       ]
     },
     {
@@ -9574,6 +9572,18 @@
     },
     {
       "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use crate::prompt_guide::GuideEntries",
+        "use crate::prompt_guide::GuideEntry",
+        "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
       "to": "dim_agent_capabilities::shell_input::testing",
       "references": [
         "mod testing",
@@ -9883,6 +9893,13 @@
     },
     {
       "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities",
+      "references": [
+        "path crate::register_names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path crate::context_block::text"
@@ -9942,7 +9959,15 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
+        "path dim_agent_runtime::SESSION_GROUP",
         "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::register"
       ]
     },
     {
@@ -10143,6 +10168,7 @@
         "path SkillView",
         "path SkillsError",
         "path super::INSTRUCTIONS",
+        "path super::SkillsConfig",
         "use super::SkillSummary",
         "use super::SkillView",
         "use super::SkillsError"
@@ -15541,6 +15567,7 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
+        "path dim_agent_runtime::SESSION_GROUP",
         "use dim_agent_runtime::AgentBuilder"
       ]
     },
@@ -15605,6 +15632,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
+        "path dim_agent_runtime::names::register",
         "use dim_agent_runtime::Names"
       ]
     },
@@ -18978,6 +19006,7 @@
       "references": [
         "path BundledCatalog",
         "path BundledCatalog::load",
+        "path CatalogProvider",
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelMetadata",
@@ -18987,6 +19016,7 @@
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
         "use crate::model_catalog::BundledCatalog",
+        "use crate::model_catalog::CatalogProvider",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
         "use crate::model_catalog::ModelEntry",
@@ -19033,7 +19063,17 @@
       "to": "dim_app_server::provider::legacy",
       "references": [
         "mod legacy",
-        "use legacy::ImportResult"
+        "use legacy::ImportResult",
+        "use legacy::LEGACY_METADATA_FIELDS",
+        "use legacy::LEGACY_PROVIDER_FIELDS",
+        "use legacy::LegacyConversion",
+        "use legacy::LegacyRow",
+        "use legacy::LegacySelection",
+        "use legacy::LegacySnapshot",
+        "use legacy::convert_legacy_provider",
+        "use legacy::convert_legacy_selection",
+        "use legacy::legacy_omitted_fields",
+        "use legacy::read_legacy_source"
       ]
     },
     {
@@ -19336,6 +19376,7 @@
       "from": "dim_app_server::provider::legacy",
       "to": "dim_app_server::model_catalog",
       "references": [
+        "path BundledCatalog",
         "path ModelEntry"
       ]
     },
@@ -19350,12 +19391,13 @@
         "path StaticAuth::AwsBedrock",
         "path StaticAuth::Bearer",
         "path StaticProviderRecord",
+        "path StaticProviderRecord::is_pristine_builtin",
         "path StaticRecordKind::Builtin",
         "path StaticRecordKind::Custom",
+        "path bundled_seed_for",
         "path failure",
         "path managed_authority",
         "path parse_static",
-        "path read_static",
         "path selection_scope",
         "path static_catalog",
         "path storage",
@@ -22145,14 +22187,6 @@
     },
     {
       "from": "dim_cli::clipboard",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path ImageSource",
-        "use dim_agent_types::ImageSource"
-      ]
-    },
-    {
-      "from": "dim_cli::clipboard",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -22201,9 +22235,13 @@
       "from": "dim_cli::clipboard",
       "to": "dim_cli::images",
       "references": [
-        "path images::encoded",
-        "path images::pixels",
-        "use crate::images"
+        "path Attached",
+        "path images::from_bytes",
+        "path images::from_pixels",
+        "path images::guard",
+        "path images::refusal",
+        "use crate::images",
+        "use crate::images::Attached"
       ]
     },
     {
@@ -22211,6 +22249,13 @@
       "to": "dim_cli::clipboard::copy::tests",
       "references": [
         "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::native_flow",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "use dim_agent_capabilities::images::MAX_EDGE"
       ]
     },
     {
@@ -22235,9 +22280,11 @@
       "from": "dim_cli::clipboard::terminal",
       "to": "dim_cli::clipboard",
       "references": [
+        "path IMAGE_READ_LIMIT",
         "path Source",
         "path Source::Image",
         "path Source::Text",
+        "use super::IMAGE_READ_LIMIT",
         "use super::Source"
       ]
     },
@@ -22252,7 +22299,7 @@
       "from": "dim_cli::clipboard::terminal",
       "to": "dim_cli::images",
       "references": [
-        "path images::encoded",
+        "path images::from_bytes",
         "use crate::images"
       ]
     },
@@ -22273,6 +22320,13 @@
         "path Step::Done",
         "path Step::Send",
         "path parse"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::windows_flow",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "use dim_agent_capabilities::images::MAX_EDGE"
       ]
     },
     {
@@ -22343,7 +22397,11 @@
       "to": "dim_cli::images",
       "references": [
         "path images",
+        "path images::Attached",
+        "path images::Item::Image",
+        "path images::Item::Text",
         "path images::file",
+        "path images::is_image",
         "use crate::images"
       ]
     },
@@ -22530,11 +22588,29 @@
     },
     {
       "from": "dim_cli::images",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "path ImageRefusal",
+        "path ImageRefusal::Invalid",
+        "path ImageRefusal::NotAnImage",
+        "path ImageRefusal::TooManyPixels",
+        "path ImageRefusal::UnsupportedFormat",
+        "path ImageSize",
+        "path MAX_PIXELS",
+        "path dim_agent_capabilities::images::ScaledImage",
+        "path dim_agent_capabilities::images::scale_image",
+        "path dim_agent_capabilities::images::scale_pixels",
+        "use dim_agent_capabilities::images::ImageRefusal",
+        "use dim_agent_capabilities::images::ImageSize",
+        "use dim_agent_capabilities::images::MAX_PIXELS"
+      ]
+    },
+    {
+      "from": "dim_cli::images",
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock",
         "path ContentBlock::Image",
-        "path ContentBlock::Text",
         "path ImageSource",
         "path ImageSourceType::Base64",
         "use dim_agent_types::ContentBlock",
@@ -22547,6 +22623,7 @@
       "to": "dim_cli",
       "references": [
         "path Result",
+        "path crate::Error",
         "use crate::Result"
       ]
     },
@@ -24956,9 +25033,7 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_agent_types::content",
       "references": [
-        "path dim_agent_types::ContentBlock",
-        "path dim_agent_types::ContentBlock::Image",
-        "path dim_agent_types::ImageSource"
+        "path dim_agent_types::ContentBlock"
       ]
     },
     {
@@ -24975,6 +25050,9 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_cli::images",
       "references": [
+        "path crate::images::Attached",
+        "path crate::images::Item::Image",
+        "path crate::images::Item::Text",
         "path crate::images::file",
         "path crate::images::is_image"
       ]
@@ -25367,7 +25445,8 @@
       "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::images",
       "references": [
-        "path crate::images::encoded"
+        "path crate::images::from_bytes",
+        "path crate::images::from_pixels"
       ]
     },
     {
@@ -25376,7 +25455,8 @@
       "references": [
         "path Composer",
         "path Composer::new",
-        "path Outcome::SubmitDraft"
+        "path Outcome::SubmitDraft",
+        "path read_planned"
       ]
     },
     {
@@ -29729,6 +29809,13 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::images",
+      "references": [
+        "path crate::images::Attached"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::login",
       "references": [
         "path crate::login::open_browser"
@@ -29940,6 +30027,8 @@
         "path ComposerOutcome::SubmitDraft",
         "path Shell::Private",
         "path Shell::Recorded",
+        "path crate::ui::composer::PlannedFile",
+        "path crate::ui::composer::read_planned",
         "use crate::ui::composer::Composer",
         "use crate::ui::composer::Outcome",
         "use crate::ui::composer::Shell"
@@ -30650,6 +30739,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path InputEvent::Key",
+        "path InputEvent::Paste",
         "path KeyCode",
         "path KeyCode::BackTab",
         "path KeyCode::Backspace",
@@ -30714,6 +30804,7 @@
         "path App",
         "path App::new",
         "path ClipboardRead::Native",
+        "path ImageRead",
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path WebOpened",
@@ -31575,80 +31666,40 @@
     },
     {
       "from": "dim_migration::providers",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path AwsCredentials",
-        "path ModelNetwork",
-        "use dim_agent_capabilities::host::AwsCredentials",
-        "use dim_agent_capabilities::host::ModelNetwork"
-      ]
-    },
-    {
-      "from": "dim_migration::providers",
-      "to": "dim_agent_types",
-      "references": [
-        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
-      ]
-    },
-    {
-      "from": "dim_migration::providers",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path BundledCatalog::load",
-        "path MAX_MODEL_TOKENS",
-        "path ModelEntry",
-        "path ModelSource::Builtin",
-        "path ModelSource::Custom",
-        "path ModelStatus::Unavailable",
-        "path NewApiEndpoint",
-        "path NewApiEndpoint::Anthropic",
-        "path NewApiEndpoint::Gemini",
-        "path NewApiEndpoint::Openai",
-        "path NewApiEndpoint::OpenaiResponse",
-        "path ProviderProjection",
-        "use dim_app_server::model_catalog::BundledCatalog",
-        "use dim_app_server::model_catalog::MAX_MODEL_TOKENS",
-        "use dim_app_server::model_catalog::ModelEntry",
-        "use dim_app_server::model_catalog::ModelSource",
-        "use dim_app_server::model_catalog::ModelStatus",
-        "use dim_app_server::model_catalog::NewApiEndpoint",
-        "use dim_app_server::model_catalog::ProviderProjection"
+        "use dim_app_server::model_catalog::BundledCatalog"
       ]
     },
     {
       "from": "dim_migration::providers",
       "to": "dim_app_server::provider",
       "references": [
-        "path CredentialAuthority",
-        "path CredentialAuthority::Grok",
-        "path CredentialAuthority::OpenaiCodex",
-        "path CredentialAuthority::Static",
-        "path StaticAuth",
-        "path StaticAuth::Anonymous",
-        "path StaticAuth::ApiKey",
-        "path StaticAuth::AwsBedrock",
-        "path StaticAuth::Bearer",
-        "path StaticAuth::CustomHeader",
-        "use dim_app_server::provider::CredentialAuthority",
-        "use dim_app_server::provider::StaticAuth"
+        "path StaticProviderRecord",
+        "path parse_static",
+        "use dim_app_server::provider::StaticProviderRecord",
+        "use dim_app_server::provider::parse_static"
       ]
     },
     {
       "from": "dim_migration::providers",
-      "to": "dim_app_server::provider::preferences",
+      "to": "dim_app_server::provider::legacy",
       "references": [
-        "path ModelPreferences",
-        "use dim_app_server::provider::ModelPreferences"
-      ]
-    },
-    {
-      "from": "dim_migration::providers",
-      "to": "dim_app_server::provider::secrets",
-      "references": [
-        "path ProviderSecret",
-        "path ProviderSecret::Aws",
-        "path ProviderSecret::Token",
-        "use dim_app_server::provider::ProviderSecret"
+        "path LEGACY_METADATA_FIELDS",
+        "path LEGACY_PROVIDER_FIELDS",
+        "path LegacyRow",
+        "path convert_legacy_provider",
+        "path convert_legacy_selection",
+        "path legacy_omitted_fields",
+        "path read_legacy_source",
+        "use dim_app_server::provider::LEGACY_METADATA_FIELDS",
+        "use dim_app_server::provider::LEGACY_PROVIDER_FIELDS",
+        "use dim_app_server::provider::LegacyRow",
+        "use dim_app_server::provider::convert_legacy_provider",
+        "use dim_app_server::provider::convert_legacy_selection",
+        "use dim_app_server::provider::legacy_omitted_fields",
+        "use dim_app_server::provider::read_legacy_source"
       ]
     },
     {
@@ -32675,6 +32726,14 @@
     },
     {
       "module": "dim_cli::clipboard",
+      "path": "ImageKind::Tiff"
+    },
+    {
+      "module": "dim_cli::clipboard",
+      "path": "ImageRefusal::Invalid"
+    },
+    {
+      "module": "dim_cli::clipboard",
       "path": "NSString::from_str"
     },
     {
@@ -33023,10 +33082,6 @@
     },
     {
       "module": "dim_migration::accounts",
-      "path": "char::is_control"
-    },
-    {
-      "module": "dim_migration::providers",
       "path": "char::is_control"
     },
     {

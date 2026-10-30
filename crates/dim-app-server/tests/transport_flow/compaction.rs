@@ -228,9 +228,11 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert_eq!(usage["result"]["outputTokens"], 200.0);
         assert_eq!(usage["result"]["thresholdTokens"], 3800.0 - 0.2 * 3800.0);
         assert_eq!(usage["result"]["baselineSource"], "full_estimate");
+        let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(overhead > 0.);
-        let size = 600.;
+        // One turn stays below the threshold; two cross it.
+        let size = (threshold - overhead) / 2.;
         let missing = client
             .rpc("session.context.compact", json!({"sessionId":sid}))
             .await;
@@ -240,6 +242,18 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         let events = loop {
             turn(&mut client, &sid, &big(index, size)).await;
             index += 1;
+            if index == 1 {
+                let after = client
+                    .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
+                    .await;
+                assert_ok(&after);
+                assert!(
+                    after["result"]["estimatedInputTokens"].as_f64().unwrap()
+                        < after["result"]["thresholdTokens"].as_f64().unwrap(),
+                    "one turn already crosses the threshold: {}",
+                    after["result"]
+                );
+            }
             let events = history(&mut client, &sid).await;
             if events.iter().any(|event| is(event, "context/compaction")
                 && event["data"]["status"] == "completed")
@@ -706,8 +720,12 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
         .unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
+        // The fixed request, the shell-input guide entry included, crosses the
+        // threshold at 0.8 × (window − output) while the window still leaves
+        // room for the requested output, so the turn meets no output-budget
+        // recovery and the threshold skip is what it measures.
         let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 2_700,
+            context_window: 2_900,
             max_output_tokens: 200,
             ..Default::default()
         };
@@ -727,26 +745,46 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
             .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
             .await;
         assert_ok(&usage);
-        assert_eq!(usage["result"]["thresholdTokens"], 2_000.0);
+        let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
+        let budget = (capabilities.context_window - capabilities.max_output_tokens) as f64;
+        // ContextModel::threshold_tokens (context_model.rs:78-83): the trigger
+        // leaves 10% of the input budget, at least 16000 tokens and at most
+        // 20% of it.
+        let reserve = (0.10 * budget).max(16_000.).min(0.20 * budget);
+        assert_eq!(threshold, budget - reserve);
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(
-            overhead > 2_000.0,
+            overhead > threshold,
             "the fixed request alone crosses the threshold: {overhead}"
         );
 
         turn(&mut client, &sid, "first").await;
-        assert_eq!(provider.summaries(), 0);
         let events = history(&mut client, &sid).await;
+        let results: Vec<_> = events
+            .iter()
+            .filter(|event| is(event, "context/compaction"))
+            .collect();
+        // The threshold trigger records the first request's own estimate. It
+        // must leave room for the output the model asks for, or the turn would
+        // meet provider-output-budget recovery instead of this skip.
+        let request = results
+            .first()
+            .and_then(|event| event["data"]["diagnostics"]["estimatedInputTokens"].as_f64())
+            .expect("the threshold compaction records the request estimate");
+        assert!(
+            request + capabilities.max_output_tokens as f64
+                <= capabilities.context_window as f64,
+            "the request leaves no room for the requested output: {request} + {} > {}",
+            capabilities.max_output_tokens,
+            capabilities.context_window
+        );
+        assert_eq!(provider.summaries(), 0);
         let starts: Vec<_> = events
             .iter()
             .filter(|event| is(event, "context/compaction-start"))
             .collect();
         assert_eq!(starts.len(), 1, "{events:?}");
         assert_eq!(starts[0]["data"]["trigger"], "threshold");
-        let results: Vec<_> = events
-            .iter()
-            .filter(|event| is(event, "context/compaction"))
-            .collect();
         assert_eq!(results.len(), 1, "{events:?}");
         assert_eq!(results[0]["data"]["status"], "skipped");
         assert_eq!(results[0]["data"]["reason"], "nothing_to_compact");

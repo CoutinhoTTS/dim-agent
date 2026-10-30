@@ -241,12 +241,12 @@ An owner validates what it is given. Content it refuses (an MCP document that fa
 
 - PluginManager changes `plugins.json` in one step on its in-memory table, then writes the file, then reconciles the layer derived from it and gives owners their commands. A second operation on the same id or name sees the first one's change (`plugin_exists`, or it acts on the new state). Deriving the layer and reconciling it run one at a time, each from the record as it is then, so the layer reconciled last is the latest record's. rutis-loader runs its own operations one at a time.
 - A row that rutis or a command that an owner refuses leaves the configuration as written; the item shows the refusal in `plugin.list` (for example, the new plugin failed because another plugin of a different name provides the same service).
-- `instanceNames`: rutis needs the names a plugin's parts provide in Sessions and branches in the catalog before the runtime starts ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Installing, switching or reloading to a plugin whose `instanceNames` are not in the running catalog records the change and replies `restart_required`; the row is created at the next start. Plugins that only register tools, methods or prompt sources do not have this limit.
+- `instanceNames`: rutis needs the names a plugin's parts provide in Sessions and branches in the catalog before the runtime starts ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Installing, switching or reloading to a plugin whose `instanceNames` are not in the running catalog records the change and replies `restartRequired`; the row is created at the next start. Plugins that only register tools, methods or prompt sources do not have this limit.
 - A reload or replacement in use: the old generation unloads, rutis cancels its running calls, and in-flight turns using it may fail ([ADR 002](../../adr/002-plugin-scope.md) consequences). This is documented, not prevented.
 
 ## 5. Context mapping
 
-PluginManager adds nothing to model context. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). Results of the `plugin` tool say what changed, the status, and `restart_required` when it applies.
+PluginManager adds no text of its own to model context beyond the `plugin` tool. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). The tool's texts are marked by [model-facing prompts §4](../model-prompts.md#4-protocol-and-policy): the command names and each command's argument grammar, the one-line command list the declaration carries, and the `Usage:` line of a usage text are protocol, because the tool parses them exactly; the sentences after the usage line, and in `help`, that say what a command does or does not touch are policy. A malformed command's error result carries the command list or that command's usage, and a refused call's error carries its code (A.2) — both protocol. A completed call's result says what changed, the status, and `restartRequired` when it applies; that is protocol too, because the model decides its next step by it.
 
 ## 6. Interfaces (summary)
 
@@ -373,7 +373,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | Content owner absent at install | That kind is skipped and reported; registered when PluginManager turns the owner on | PluginManager, owner |
 | Content owner reloads | It restores its own registered content | owner |
 | Plugin removed while its owner is off | Its content is withdrawn when the owner is turned on or at the next start | PluginManager |
-| `instanceNames` not in the running catalog | Configuration recorded, `restart_required`; row created at next start | PluginManager |
+| `instanceNames` not in the running catalog | Configuration recorded, `restartRequired`; row created at next start | PluginManager |
 | Process stops during a Git install | Staging directory deleted at next start; `plugins.json` was not written | PluginManager |
 | Process stops after `plugins.json` was written, before the loader or owner command | Next start builds rows from `plugins.json` and brings the owners to it | PluginManager startup |
 
