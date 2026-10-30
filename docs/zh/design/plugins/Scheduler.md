@@ -353,7 +353,7 @@ sequenceDiagram
 
 报告的正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，因此带有标记文字的任务 id 或结局细节无法开启或关闭该标记；属性同样转义。
 
-policy 文本是出厂配置成员：`code.config.description` 替换声明的 description，`code.config.report_guidance` 替换结果报告的指引句；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一句指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。
+policy 文本是出厂配置成员：`code.config.description` 替换声明的 description，`code.config.report_guidance` 替换结果报告的指引句；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一句指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一句话：guide 条目（§5.2）告诉模型报告的最后一句是指引，不属于 scheduler 对这次运行结局的记述，若值有两句，其第一句就会被读成记述的一部分。改动它的 profile 也保持它只有一句。
 
 两个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
 

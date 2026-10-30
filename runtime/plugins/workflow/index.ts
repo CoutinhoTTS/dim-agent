@@ -9,6 +9,8 @@ import session from './session.ts'
 import { settings } from './settings.ts'
 import { bounded, RunStore, type Run } from './store.ts'
 
+/// `report_guidance` is one sentence: the entry names the report's last
+/// sentence as guidance, not part of the workflow's report.
 const options = z.strictObject({
   packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })),
   report_guidance: z.string().min(1).optional(),

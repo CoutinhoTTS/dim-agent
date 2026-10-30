@@ -11,7 +11,9 @@ import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
 
 /// The plugin's factory configuration: the tool description and the
-/// report's guidance sentence, each one whole text.
+/// report's guidance sentence, each one whole text. `report_guidance` is one
+/// sentence: the entry names the report's last sentence as guidance, not
+/// part of the scheduler's account.
 const options = z.strictObject({ description: z.string().min(1).optional(), report_guidance: z.string().min(1).optional() })
 
 function jobPreview(job: Job) {

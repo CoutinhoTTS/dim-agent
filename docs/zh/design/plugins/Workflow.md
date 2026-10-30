@@ -311,7 +311,7 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 | 报告标记 | Protocol：元素 `dim-workflow`、`kind="report"`、`run` 与 `status`，以及该标记开辟的 Steer 输入；正文中的各阶段状态是这次运行的数据，有界预览承载各阶段自己在最后一步的结果。Policy：「Use workflow status with run_id … for stored stage results.」是工作方式指引；其中写到的动作名属 protocol |
 | 阶段标记 | Protocol：元素 `dim-workflow`、`kind="stage"`、`run` 与 `stage`，以及该标记开辟的 Queue 输入；正文为空，其后的提示词是运行自己的文本 |
 
-policy 文本是出厂配置成员：`code.config.report_guidance` 替换报告的指引句，其中的 `{run_id}` 由运行的 id 替换，`code.config.invalid_definition_guidance` 替换 `invalid_definition` 拒绝所带的恢复提示；产品都不设置，因此内置文本生效。一个成员承载一段文本——一句指引或恢复提示——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。
+policy 文本是出厂配置成员：`code.config.report_guidance` 替换报告的指引句，其中的 `{run_id}` 由运行的 id 替换，`code.config.invalid_definition_guidance` 替换 `invalid_definition` 拒绝所带的恢复提示；产品都不设置，因此内置文本生效。一个成员承载一段文本——一句指引或恢复提示——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一句话：guide 条目（§5.2）告诉模型报告的最后一句是指引，不属于 workflow 的报告内容，若值有两句，其第一句就会被读成报告内容的一部分。改动它的 profile 也保持它只有一句。
 
 两个标记共用一个 guide 条目：Workflow 的 Session 部件在 `apply` 中为 `dim-workflow` 注册该条目，按 session 范围生效，因此带任一 kind 的请求都带该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
 
