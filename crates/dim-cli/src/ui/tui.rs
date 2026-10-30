@@ -1948,7 +1948,13 @@ impl App {
     /// Ctrl+V: reads the native clipboard off the interface thread, or asks
     /// the terminal for its clipboard when the native one is out of reach.
     fn read_clipboard(&mut self) {
-        if self.clipboard.is_some() || self.image_read.is_some() {
+        if self.clipboard.is_some() {
+            return;
+        }
+        if self.image_read.is_some() {
+            self.set_notice(t(
+                "An image is still being inserted; paste again when it is in",
+            ));
             return;
         }
         if self.terminal_clipboard {
@@ -6562,6 +6568,29 @@ mod tests {
             app.image_read.is_some(),
             "the next paste starts its own read"
         );
+    }
+
+    /// Ctrl+V during an image read says why it waits, the notice a path
+    /// paste shows, instead of doing nothing.
+    #[test]
+    fn a_clipboard_paste_during_an_image_read_is_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let (mut app, _home) = image_app(work.path());
+        let (send, receive) = std::sync::mpsc::channel();
+        app.image_read = Some(ImageRead {
+            plan: Vec::new(),
+            receive,
+        });
+        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Char('v'),
+            Modifiers::CTRL,
+        )));
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("An image is still being inserted; paste again when it is in")
+        );
+        assert!(app.clipboard.is_none());
+        drop(send);
     }
 
     /// A path paste waits for a pending clipboard read: its image could still
