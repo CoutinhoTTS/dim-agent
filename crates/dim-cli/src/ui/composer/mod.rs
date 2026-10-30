@@ -1038,9 +1038,9 @@ fn image_details(image: &crate::images::Attached) -> String {
         details.push_str(" · ");
         details.push_str(&image.sizes());
     }
-    if image.retyped() {
+    if let Some(types) = image.media_types() {
         details.push_str(" · ");
-        details.push_str(&image.media_types());
+        details.push_str(&types);
     }
     if image.animated {
         details.push_str(" · ");

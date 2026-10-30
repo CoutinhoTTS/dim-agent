@@ -742,9 +742,9 @@ fn image_label(label: &str, image: &images::Attached) -> String {
         label.push_str(" · ");
         label.push_str(&image.sizes());
     }
-    if image.retyped() {
+    if let Some(types) = image.media_types() {
         label.push_str(" · ");
-        label.push_str(&image.media_types());
+        label.push_str(&types);
     }
     if image.animated {
         label.push_str(" · first frame");

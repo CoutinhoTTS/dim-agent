@@ -21903,11 +21903,10 @@
       "to": "dim_cli::images",
       "references": [
         "path Attached",
-        "path images::decode_error",
-        "path images::decode_limits",
         "path images::from_bytes",
         "path images::from_pixels",
         "path images::guard",
+        "path images::refusal",
         "use crate::images",
         "use crate::images::Attached"
       ]
@@ -22265,7 +22264,6 @@
         "path ImageRefusal::UnsupportedFormat",
         "path ImageSize",
         "path MAX_PIXELS",
-        "path dim_agent_capabilities::images::MAX_DECODE_BYTES",
         "path dim_agent_capabilities::images::ScaledImage",
         "path dim_agent_capabilities::images::scale_image",
         "path dim_agent_capabilities::images::scale_pixels",
@@ -32257,6 +32255,14 @@
     {
       "module": "dim_cli::browser",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_cli::clipboard",
+      "path": "ImageKind::Tiff"
+    },
+    {
+      "module": "dim_cli::clipboard",
+      "path": "ImageRefusal::Invalid"
     },
     {
       "module": "dim_cli::clipboard",

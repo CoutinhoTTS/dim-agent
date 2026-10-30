@@ -73,27 +73,16 @@ impl Attached {
     }
 
     /// Both media types, as a marker gives them: `image/png → image/jpeg`.
-    /// Only a retyped image has two.
-    pub fn media_types(&self) -> String {
-        format!(
-            "{} → {}",
-            self.source_media_type
-                .expect("only a retyped image has two media types"),
-            self.source.media_type
-        )
+    /// `None` when the sent bytes keep the source's own type.
+    pub fn media_types(&self) -> Option<String> {
+        let source = self.source_media_type?;
+        (source != self.source.media_type).then(|| format!("{source} → {}", self.source.media_type))
     }
 
     /// Whether the sent pixels are a different size from the source's.
     /// `scaled` says the bytes were re-encoded; this says the size changed.
     pub fn resized(&self) -> bool {
         self.original != self.sent
-    }
-
-    /// Whether the sent media type differs from the source's own form: a
-    /// re-encode that did not change the size still changed what is sent.
-    pub fn retyped(&self) -> bool {
-        self.source_media_type
-            .is_some_and(|media_type| media_type != self.source.media_type)
     }
 }
 
@@ -186,28 +175,6 @@ pub fn guard((width, height): (u32, u32)) -> Result<()> {
     Ok(())
 }
 
-/// The allocation limit every platform decoder is given: [`MAX_DECODE_BYTES`],
-/// the bound the shared decoders use.
-pub fn decode_limits() -> image::Limits {
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(dim_agent_capabilities::images::MAX_DECODE_BYTES);
-    limits
-}
-
-/// A platform decoder's error, with an allocation refused for size reported
-/// as the pixel-guard refusal: at [`MAX_PIXELS`] in the largest decoded format
-/// the image is exactly what the guard is for, not a broken file.
-pub fn decode_error((width, height): (u32, u32), error: image::ImageError) -> crate::Error {
-    if matches!(
-        &error,
-        image::ImageError::Limits(limit)
-            if limit.kind() == image::error::LimitErrorKind::InsufficientMemory
-    ) {
-        return refusal(ImageRefusal::TooManyPixels(ImageSize { width, height }));
-    }
-    error.into()
-}
-
 /// Why an image was refused, as the CLI shows it.
 pub fn refusal(error: ImageRefusal) -> crate::Error {
     match error {
@@ -273,7 +240,7 @@ fn scaled_note(path: &Path, image: &Attached) -> Option<String> {
             image.source.media_type
         ));
     }
-    if image.retyped() {
+    if image.media_types().is_some() {
         return Some(format!(
             "Re-encoded {} as {} ({}×{} px)",
             name.to_string_lossy(),

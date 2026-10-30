@@ -83,17 +83,30 @@ fn read_board(board: &objc2_app_kit::NSPasteboard) -> Result<Source> {
             let image = if format == "public.tiff"
                 && image::guess_format(&bytes).ok() == Some(image::ImageFormat::Tiff)
             {
+                use dim_agent_capabilities::images::{
+                    ImageKind, ImageRefusal, ImageSize, decode_limits, decode_refusal,
+                };
                 use image::ImageDecoder;
                 let mut reader = image::ImageReader::with_format(
                     std::io::Cursor::new(bytes),
                     image::ImageFormat::Tiff,
                 );
-                reader.limits(images::decode_limits());
-                let decoder = reader.into_decoder()?;
+                reader.limits(decode_limits());
+                let decoder = reader.into_decoder().map_err(|error| {
+                    images::refusal(ImageRefusal::Invalid {
+                        kind: ImageKind::Tiff,
+                        reason: error.to_string(),
+                    })
+                })?;
                 let dimensions = decoder.dimensions();
                 images::guard(dimensions)?;
-                let image = image::DynamicImage::from_decoder(decoder)
-                    .map_err(|error| images::decode_error(dimensions, error))?;
+                let stored = ImageSize {
+                    width: dimensions.0,
+                    height: dimensions.1,
+                };
+                let image = image::DynamicImage::from_decoder(decoder).map_err(|error| {
+                    images::refusal(decode_refusal(ImageKind::Tiff, stored, error))
+                })?;
                 images::from_pixels(image)?
             } else {
                 images::from_bytes(bytes)?
@@ -203,6 +216,24 @@ mod native_flow {
                     assert_eq!(decoded.get_pixel(0, 0), &image::Rgb([4, 5, 6]));
                 }
             }
+
+            // A TIFF the decoder cannot read is the image refusal, not a raw
+            // decode error: the header is recognized, the offset points past
+            // the bytes.
+            board.clearContents();
+            assert!(board.setData_forType(
+                Some(&NSData::with_bytes(b"II*\0\x08\0\0\0")),
+                &NSString::from_str("public.tiff")
+            ));
+            let Err(error) = read_board(&board) else {
+                panic!("Expected a refused TIFF")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Invalid or truncated TIFF image: "),
+                "{error}"
+            );
 
             board.clearContents();
             let broken = NSPasteboardItem::new();
