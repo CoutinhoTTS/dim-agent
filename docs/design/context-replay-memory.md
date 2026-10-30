@@ -97,6 +97,8 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 - 一次 prepare 的分配量只跟**新增事件**和**新增消息**有关，不跟历史长度成正比。
 - 冷重建的峰值是一段，而不是整段历史。
 - 重建次数、压缩与快照语义不变；重载后仍能从 Timeline 重建同样的投影。
+- **单个 50 万 token 会话的自身常驻（消息、投影、索引）≤10MB live。** 这项不含 provider 在调用瞬间构造的序列化 body。
+- 调用瞬间的 provider body/response 单独 ≤25MB；进程只加载一个这样的会话时 RSS ≤50MB，两个 ≤80MB，空闲进程 ≤30MB。
 
 ## 5. 方案
 
@@ -104,7 +106,7 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 
 新增 opt-in example（不进 CI）：mock model 造 400–500k token 上下文、100+ 步、无压缩，
 每步记录 Rust live/peak（现有 `MeasuredAllocator`）与 Linux RSS，输出 JSON。
-改动前先跑一遍，作为 P1–P3 的对照。
+输出按 holder 拆分：会话常驻（消息、投影、索引）、调用请求与 provider body、进程基线；同时记录 close 后立即值和收尾后的稳定值。改动前先跑一遍，作为 P1–P3 的对照。
 
 ### P1 共享消息，去掉深拷贝（#709）
 
@@ -171,6 +173,9 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 | 增量/全量一致 | 在固定前缀上交替执行增量续接与全量重放，entries/state 必须一致（复用 checkpoint_projection 的测试模式） |
 | 失败路径 | 取消、host prepare 失败、前缀校验失败都不推进投影；重试仍从上一个成功边界开始 |
 | 每步分配 | P0 example：改动前后的 live/peak 曲线 |
+| 单会话常驻 | 50 万 token 会话自身 ≤10MB live（消息、投影、索引；不含 provider 调用 body） |
+| 调用瞬间 | 会话自身 ≤10MB；provider body/response ≤25MB |
+| 进程 | 一个会话 ≤50MB RSS；两个会话 ≤80MB；空闲 ≤30MB |
 | 堆高水位 | P0 验证最大会话的堆高水位是否随步数增长；不是断言，是测量 |
 | 产品验证 | 同一负载重启后观察 RSS 与 `malloc_info` 的 in-use/free 比例 |
 | 兼容 | `cargo test --workspace --locked`；`xtask check` 不需要 `graph` 变更 |
@@ -193,6 +198,7 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 | P3 的内存 | 保留前缀 entries + `ProjectionCheckpointState`，约为上下文大小；不是历史；重载重建 |
 | P3 的提交点 | 取消、host prepare 失败、前缀校验失败都不推进；下一次从上一个成功边界继续 |
 | P1 的分配 | `Arc` 从 request 移到 entry，替换当前 `map(Arc::new)`，净减少一次/消息；P0 验证 |
+| Provider body | 调用瞬间的序列化 body/response 若超过 25MB，需要在 provider 侧改流式或减少中间树；P1–P3 不改 provider |
 | 备选：分配器调参 | `mallopt(M_MMAP_THRESHOLD)` 或周期 `malloc_trim` 能压 RSS，但不减少分配和 CPU；只作兜底 |
 | 备选：更快压缩 | 改变上下文质量与成本，不在本计划内 |
 | 未做 | 跨 Session 共享投影、历史缓存、快照频率调整、P4 分段读取 |
