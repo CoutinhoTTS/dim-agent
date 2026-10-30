@@ -92,9 +92,9 @@ uses `Loader::restart(row_id)`.
 Session extension templates and returns the `session` row, nested under `agent` by App Server.
 `AgentBuilder::plugin_rows` registers the builder's plugins and the row providing
 `partRegistry` as process rows.
-Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
-isolated loader key under the host; both create an `AgentAnchor` instance.
-`build_at(loader, ctx)` uses the host's existing loader.
+一个宿主只有一个 loader，Agent 建在其中：`AgentBuilder::build(loader, anchor)` 使用宿主已有的 loader，Agent
+既不创建根也不创建 loader，关闭 Agent 只关闭它的 Session。测试、示例和 `xtask` 用 `testing` feature 下的最小宿主
+（`testing::MinimalHost`），它像 App Server 一样装配一个根和它的 loader、创建 `AgentAnchor` 实例，并拥有根的生命周期。
 
 登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待必需行：作用域根、必需挂载器和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。必需挂载器把 profile 要求的部件（`require_feature`、`require_part`）交给实例创建，创建等它们 Active；尚无插件登记的必需部件同样让创建等待。失败则回滚整个候选实例。
 
@@ -398,7 +398,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 | 步骤 | 状态 |
 | --- | --- |
-| runtime：作用域 Plugin 与实例键、实例事件派发、`build_in` | 完成 |
+| runtime：作用域 Plugin 与实例键、实例事件派发、唯一的放置 API `build(loader, anchor)` | 完成 |
 | App Server：进程层 Plugin、`serve`/`RunningServer`、显式 restart（限定集合）与 `service_reloading` | 完成 |
 | 能力重载协议与门面按调用查找 | 完成 |
 | FileStorage、SQLite 资源边界、Aimux 请求对象及开发 resolver 调用方接线 | 完成 |

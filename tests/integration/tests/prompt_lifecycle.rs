@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -142,12 +142,13 @@ async fn model_adoption_preserves_enabled_tools_on_initialization_and_refresh() 
             sources: vec![],
             model: Some(configuration("selected")),
         };
-        let agent = if initial {
+        let agent = MinimalHost::start(&if initial {
             builder_with_initial(host, update.clone())
         } else {
             builder(host)
-        }
-        .build();
+        })
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig {
                 tools: Some(vec!["echo".into()]),
@@ -225,7 +226,7 @@ async fn model_adoption_preserves_enabled_tools_on_initialization_and_refresh() 
 #[tokio::test]
 async fn input_guide_survives_configuration_refresh_and_revocation_without_duplication() {
     let host = Arc::new(Prompts(Mutex::new(BTreeMap::new())));
-    let agent = builder(host.clone()).build();
+    let agent = MinimalHost::start(&builder(host.clone())).await.unwrap();
     let session = agent
         .create_session(SessionConfig {
             system_prompt: "legacy rules".into(),
@@ -452,7 +453,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
                 Ok(Box::new(TamperConfiguration::new(names, tamper)?))
             }),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -543,7 +544,9 @@ async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refre
             release: release.clone(),
             calls: AtomicUsize::new(0),
         });
-        let agent = builder_with_context(host.clone(), prepare).build();
+        let agent = MinimalHost::start(&builder_with_context(host.clone(), prepare))
+            .await
+            .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -725,7 +728,7 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
             ),
             ("broken".into(), Reply::Fail),
         ]))));
-        let agent = builder(host.clone()).build();
+        let agent = MinimalHost::start(&builder(host.clone())).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -952,7 +955,7 @@ async fn overlapping_load_is_superseded_and_close_joins_cancellation() {
                 entry("rules", "old", "old"),
             ),
         )]))));
-        let agent = builder(host.clone()).build();
+        let agent = MinimalHost::start(&builder(host.clone())).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1098,7 +1101,9 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         "rules".into(),
         Reply::Entry(entry("rules", "1", "initial rules")),
     )]))));
-    let agent = builder_with_initial(host, initial.clone()).build();
+    let agent = MinimalHost::start(&builder_with_initial(host, initial.clone()))
+        .await
+        .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1125,8 +1130,9 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         "rules".into(),
         Reply::Fail,
     )]))));
-    let result = builder_with_initial(failing, initial)
-        .build()
+    let result = MinimalHost::start(&builder_with_initial(failing, initial))
+        .await
+        .unwrap()
         .create_session(SessionConfig::default())
         .await;
     let error = match result {
@@ -1336,7 +1342,7 @@ async fn a_restore_keeps_opening_while_dispatch_or_opening_receipts_advance() {
                 }))
             }),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let started = std::time::Instant::now();
         let session = tokio::time::timeout(
             Duration::from_secs(20),
@@ -1391,7 +1397,7 @@ async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
             Ok(Box::new(OpeningFailure::new(names)?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         agent.create_session(SessionConfig::default()),
@@ -1483,7 +1489,7 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                         )?))
                     },
                 ));
-                let agent = builder.build();
+                let agent = MinimalHost::start(&builder).await.unwrap();
                 let creating = agent.clone();
                 let mut creation = tokio::spawn(async move {
                     if restore {
@@ -1609,7 +1615,7 @@ async fn child_opening_deadline_or_close_joins_before_recording_failure() {
         } else {
             Duration::from_secs(5)
         });
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1802,7 +1808,7 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         },
     );
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .restore_session("restored-prompt".into())
         .await
@@ -1973,7 +1979,7 @@ async fn restoring_a_never_started_session_starts_it() {
         },
     );
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .restore_session("empty-prompt-restore".into())
         .await
@@ -1999,14 +2005,15 @@ async fn context_only_initial_prompt_is_inherited_and_unchanged_in_a_child() {
         "rules".into(),
         Reply::Counted(calls.clone(), context_entry("rules", "1", "inherited")),
     )]))));
-    let agent = builder_with_initial(
+    let agent = MinimalHost::start(&builder_with_initial(
         host,
         ConfigureUpdate {
             sources: vec![target],
             model: None,
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -2060,7 +2067,7 @@ async fn same_body_new_version_reconfigures_but_identical_update_is_unchanged() 
         "rules".into(),
         Reply::Entry(entry("rules", "1", "same body")),
     )]))));
-    let agent = builder(host.clone()).build();
+    let agent = MinimalHost::start(&builder(host.clone())).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -2118,7 +2125,7 @@ async fn same_body_new_version_reconfigures_but_identical_update_is_unchanged() 
 #[tokio::test]
 async fn duplicate_targets_are_rejected_before_loading() {
     let host = Arc::new(Prompts(Mutex::new(BTreeMap::new())));
-    let agent = builder(host).build();
+    let agent = MinimalHost::start(&builder(host)).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -2160,7 +2167,7 @@ async fn large_request_can_supersede_a_consumed_load_without_a_history_byte_budg
             )?))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -2217,7 +2224,7 @@ async fn loader_panic_is_reported_to_the_agent_supervisor() {
         "panic".into(),
         Reply::Panic,
     )]))));
-    let agent = builder(host).build();
+    let agent = MinimalHost::start(&builder(host)).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -2311,7 +2318,7 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
                 Ok(Box::new(RetargetModel::new(names, replace_snapshot)?))
             }),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -2375,7 +2382,9 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
 
 #[tokio::test]
 async fn frozen_configuration_rejects_mismatched_identity_and_nonbranch_system_entries() {
-    let agent = builder(Arc::new(Prompts(Mutex::new(BTreeMap::new())))).build();
+    let agent = MinimalHost::start(&builder(Arc::new(Prompts(Mutex::new(BTreeMap::new())))))
+        .await
+        .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

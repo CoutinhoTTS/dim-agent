@@ -1146,7 +1146,6 @@
         "schemars::schema_for",
         "tokio::pin",
         "tokio::select",
-        "tracing::error",
         "vec",
         "write"
       ]
@@ -1299,6 +1298,18 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/state.rs",
       "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_runtime::testing",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/testing.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tracing::error",
+        "vec"
+      ]
     },
     {
       "id": "dim_agent_runtime::timeline_context",
@@ -1626,6 +1637,7 @@
         "format",
         "json",
         "matches",
+        "tokio::select",
         "vec"
       ]
     },
@@ -12379,6 +12391,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::testing",
+      "references": [
+        "mod testing"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::timeline_context",
       "references": [
         "mod timeline_context"
@@ -12404,15 +12423,10 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
-        "path AgentHost",
-        "path AgentHost::Placed",
-        "path AgentHost::Private",
-        "path AgentHost::Within",
         "path Assembly",
         "path AssemblyFinding",
         "path BuiltSession",
         "path Extension",
-        "path Owned",
         "path Placement",
         "path SESSION_GROUP",
         "path SessionAssembly",
@@ -12424,24 +12438,18 @@
         "path check_scope",
         "path crate::assembly::with_copies",
         "path group",
-        "path own_placement",
-        "path release",
         "path required",
         "path rows",
         "path scope_diagnostics",
         "path scope_rows",
         "path shutdown_scope",
-        "use crate::assembly::AgentHost",
         "use crate::assembly::Assembly",
         "use crate::assembly::BuiltSession",
         "use crate::assembly::Extension",
-        "use crate::assembly::Owned",
         "use crate::assembly::Placement",
         "use crate::assembly::SessionInitialization",
         "use crate::assembly::build_session",
         "use crate::assembly::check_scope",
-        "use crate::assembly::own_placement",
-        "use crate::assembly::release",
         "use crate::assembly::scope_diagnostics",
         "use crate::assembly::shutdown_scope"
       ]
@@ -13246,6 +13254,44 @@
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path LoopState"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path Agent",
+        "path agent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AGENT_GROUP",
+        "path AgentBuilder",
+        "path Factory::new",
+        "path Modules",
+        "path Modules::new",
+        "path assembly",
+        "path loader_error",
+        "path row",
+        "path rows",
+        "path wait_active",
+        "use crate::assembly::Factory",
+        "use crate::assembly::loader_error",
+        "use crate::assembly::row"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::testing",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::Build",
+        "path AgentError::aggregate",
+        "path AgentError::from",
+        "path Result",
+        "path error"
       ]
     },
     {
@@ -15791,7 +15837,6 @@
       "to": "dim_app_server::collaboration::approvals",
       "references": [
         "mod approvals",
-        "path approvals::Forwarded",
         "path approvals::Route",
         "path approvals::install"
       ]

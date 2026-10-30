@@ -13,20 +13,20 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::{
-    mcp::{self, McpChange, McpPlugin, McpService, McpSession, McpSourceState},
+    mcp::{self, McpChange, McpPlugin, McpPublication, McpService, McpSession, McpSourceState},
     settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::Ctx;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     convert::Infallible,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -234,10 +234,8 @@ impl ModelDriver for Model {
 }
 
 struct Env {
-    root: Ctx,
-    publication: mcp_host::Host,
     home: PathBuf,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Model>,
     directory: Arc<McpService>,
     remote: Arc<Remote>,
@@ -245,8 +243,35 @@ struct Env {
     stop: CancellationToken,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
-#[path = "fixtures/mcp_host.rs"]
-mod mcp_host;
+/// The host plugins MCP Sessions need, as process rows of the minimal host:
+/// management methods, the MCP publication, FileStorage with `home` as root
+/// 0, Settings and Mcp.
+fn mcp_host_rows(builder: &mut AgentBuilder, home: &Path) {
+    builder.plugin(|names| {
+        Ok(Box::new(
+            dim_app_server::methods::ManagementMethodsPlugin::new(names)?,
+        ))
+    });
+    builder.plugin(|names| Ok(Box::new(McpPublication::new(names)?)));
+    let files = dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.into()]);
+    builder.plugin(move |_| Ok(Box::new(files.clone())));
+    let settings = {
+        let catalog = dim_app_server::catalog();
+        let build = Build::default();
+        SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
+    };
+    builder.plugin(move |_| Ok(Box::new(settings.clone())));
+    builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
+}
+/// Authorizes `home`'s project in the host's Settings.
+async fn authorize_project(host: &MinimalHost, home: &Path) {
+    host.root()
+        .get::<SettingsService>()
+        .unwrap()
+        .authorize_project(home.join("project"), &CancellationToken::new())
+        .await
+        .unwrap();
+}
 impl Env {
     async fn new() -> Self {
         Self::with(|_, _| {}).await
@@ -275,35 +300,6 @@ impl Env {
             json!({"mcpServers":{"docs":configuration(&url, "one")}}).to_string(),
         )
         .unwrap();
-        let root = Ctx::root().unwrap();
-        root.plugin(
-            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-                .unwrap(),
-        );
-        let (publication, _) = mcp_host::Host::start(&root).await;
-        let views = vec![
-            root.plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            ),
-            root.plugin({
-                let catalog = dim_app_server::catalog();
-                let build = Build::default();
-                SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
-            }),
-        ];
-        wait_active(
-            &root,
-            &views,
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.get::<SettingsService>()
-            .unwrap()
-            .authorize_project(home.join("project"), &CancellationToken::new())
-            .await
-            .unwrap();
         let model = Arc::new(Model::default());
         let mut builder = AgentBuilder::new(Default::default());
         builder
@@ -327,14 +323,12 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
-        builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
+        mcp_host_rows(&mut builder, &home);
         configure(&mut builder, &remote);
-        let agent = builder.build_in(&root);
-        agent.start().await.unwrap();
-        let directory = root.get::<McpService>().unwrap();
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        authorize_project(&agent, &home).await;
+        let directory = agent.root().get::<McpService>().unwrap();
         Self {
-            root,
-            publication,
             home,
             agent,
             model,
@@ -389,8 +383,6 @@ impl Env {
     }
     async fn close(self) {
         self.agent.close().await.unwrap();
-        self.publication.close().await;
-        self.root.shutdown().await.unwrap();
         self.stop.cancel();
         self.server.await.unwrap().unwrap();
         std::fs::remove_dir_all(self.home).unwrap();
@@ -1621,36 +1613,6 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             json!({"mcpServers":{"docs":configuration(&mcp_url, "one")}}).to_string(),
         )
         .unwrap();
-        let root = Ctx::root().unwrap();
-        root.plugin(
-            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-                .unwrap(),
-        );
-        let (publication, _) = mcp_host::Host::start(&root).await;
-        let views = vec![
-            root.plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            ),
-            root.plugin({
-                let catalog = dim_app_server::catalog();
-                let build = Build::default();
-                SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
-            }),
-        ];
-        wait_active(
-            &root,
-            &views,
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.get::<SettingsService>()
-            .unwrap()
-            .authorize_project(home.join("project"), &CancellationToken::new())
-            .await
-            .unwrap();
-
         let models = Arc::new(
             AimuxModels::from_config(
                 serde_json::from_value(json!({
@@ -1663,8 +1625,6 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             )
             .unwrap(),
         );
-        root.plugin(AimuxPlugin);
-        root.plugin(ConfiguredModelsPlugin(models.clone()));
         let mut builder = AgentBuilder::new(AgentConfig {
             model: models.default_model().clone(),
             ..Default::default()
@@ -1700,9 +1660,12 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             )));
         dim_agent_aimux::install(&mut builder);
         mcp::install(&mut builder);
-        builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
-        let agent = builder.build_in(&root);
-        agent.start().await.unwrap();
+        mcp_host_rows(&mut builder, &home);
+        builder
+            .plugin(|_| Ok(Box::new(AimuxPlugin)))
+            .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        authorize_project(&agent, &home).await;
 
         let session = agent
             .create_session(SessionConfig {
@@ -1780,8 +1743,6 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             "a later turn also completes"
         );
         agent.close().await.unwrap();
-        publication.close().await;
-        root.shutdown().await.unwrap();
         stop.cancel();
         http.await.unwrap();
         mcp_stop.cancel();

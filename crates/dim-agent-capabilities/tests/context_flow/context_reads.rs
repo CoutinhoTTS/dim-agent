@@ -448,7 +448,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
         reload.install(&mut builder, model.clone());
         defaults::install(&mut builder);
         builder.timeline_store(store);
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -570,7 +570,7 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
             }));
         reload.install(&mut builder, model.clone());
         defaults::install(&mut builder);
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let old_loop = session.service::<dyn LoopState>("main").unwrap();
         let generation = || session.branch_diagnostics("main").unwrap().plugins
@@ -619,7 +619,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
             Context::default(),
         );
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -693,7 +693,7 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
             builder
         };
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -813,7 +813,7 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
             Context::default(),
         );
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -905,7 +905,7 @@ async fn configure_context_read_failure_keeps_the_previous_state_and_allows_retr
             None,
         );
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -976,7 +976,7 @@ async fn concurrent_system_adoptions_include_previous_unpublished_updates() {
     defaults::mock_hosts(&mut builder);
     defaults::install_with_prompt(&mut builder, host.clone(), None);
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1141,7 +1141,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         }),
     );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let mut setup = None;
     for _ in 0..50 {
         let session = agent
@@ -1296,7 +1296,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             );
         defaults::install(&mut builder);
         builder.timeline_store(store);
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1354,7 +1354,7 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
     let store = Arc::new(CountContextReads::default());
     let mut builder = builder(Arc::new(EchoModel));
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

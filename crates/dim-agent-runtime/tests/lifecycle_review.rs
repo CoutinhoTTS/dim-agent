@@ -1,6 +1,7 @@
 //! Independent public regressions for construction ownership and close failures.
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, Feature, SessionConfig, wait_active,
+    AgentBuilder, AgentConfig, AgentError, Feature, SessionConfig, testing::MinimalHost,
+    wait_active,
 };
 use rutis::host::{CtxHost, ErrorKind};
 use rutis::{Ctx, Plugin};
@@ -66,7 +67,8 @@ async fn agent_close_joins_cancelled_construction_and_retains_async_rollback_fai
             }))
         },
     ));
-    let agent = builder.build();
+    let host = MinimalHost::start(&builder).await.unwrap();
+    let agent = host.agent().clone();
     let owner = agent.clone();
     let create = tokio::spawn(async move { owner.create_session(SessionConfig::default()).await });
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
@@ -120,10 +122,10 @@ fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
             }))
         },
     ));
-    let agent = {
-        let _enter = owner_runtime.enter();
-        builder.build()
-    };
+    let host = construction_runtime
+        .block_on(MinimalHost::start(&builder))
+        .unwrap();
+    let agent = host.agent().clone();
     let creator = agent.clone();
     let create = construction_runtime
         .spawn(async move { creator.create_session(SessionConfig::default()).await });

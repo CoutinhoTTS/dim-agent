@@ -38,7 +38,7 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             },
         );
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -300,7 +300,7 @@ async fn committed_summary_drives_current_and_following_model_requests() {
             Ok(Box::new(rewrite(names, Edit::Summary)?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -373,7 +373,7 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
             Ok(Box::new(rewrite(names, Edit::FirstCursor)?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -458,7 +458,7 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
                         Ok(Box::new(rewrite(names, edit)?))
                     }),
             );
-            let agent = builder.build();
+            let agent = MinimalHost::start(&builder).await.unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
                 .await
@@ -541,7 +541,7 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
             )?))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
