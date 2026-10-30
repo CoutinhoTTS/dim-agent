@@ -8196,3 +8196,79 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         "only the empty catalog the daemon can list is refreshed"
     );
 }
+
+/// `dimcode recording on` switches the `model-log` source and names the file.
+#[test]
+fn recording_on_switches_the_model_log() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(
+            &hello,
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+        );
+        let read = wire.read("settings.read");
+        assert_eq!(read["params"], json!({"source":"model-log","scope":"user"}));
+        wire.reply(
+            &read,
+            json!({"revision":"user/model-log:1","document":{"enabled":false}}),
+        );
+        let update = wire.read("settings.update");
+        assert_eq!(
+            update["params"],
+            json!({
+                "source":"model-log",
+                "scope":"user",
+                "expectedRevision":"user/model-log:1",
+                "document":{"enabled":true},
+            })
+        );
+        wire.reply(
+            &update,
+            json!({"revision":"user/model-log:2","document":{"enabled":true}}),
+        );
+    });
+    let output = home.command().args(["recording", "on"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "Model request recording is on: {}\n",
+            home.0.join("model-log/recordings.jsonl").display()
+        )
+    );
+}
+
+/// `dimcode recording` reads the source without writing it.
+#[test]
+fn recording_reports_whether_it_is_on() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(
+            &hello,
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+        );
+        let read = wire.read("settings.read");
+        wire.reply(
+            &read,
+            json!({"revision":"user/model-log:1","document":{"enabled":false}}),
+        );
+    });
+    let output = home.command().arg("recording").output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Model request recording is off.\n"
+    );
+}

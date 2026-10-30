@@ -192,6 +192,13 @@
       ]
     },
     {
+      "id": "dim_agent_aimux::recording",
+      "crate": "dim_agent_aimux",
+      "parent": "dim_agent_aimux",
+      "file": "crates/dim-agent-aimux/src/recording.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_aimux::request",
       "crate": "dim_agent_aimux",
       "parent": "dim_agent_aimux",
@@ -1944,6 +1951,17 @@
       ]
     },
     {
+      "id": "dim_app_server::model_log",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/model_log.rs",
+      "unexpandedMacros": [
+        "json",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::outbound",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -2967,6 +2985,17 @@
       "crate": "dim_cli",
       "parent": "dim_cli::question",
       "file": "crates/dim-cli/src/question/line.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "println"
+      ]
+    },
+    {
+      "id": "dim_cli::recording",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/recording.rs",
       "unexpandedMacros": [
         "format",
         "json",
@@ -5265,6 +5294,13 @@
     },
     {
       "from": "dim_agent_aimux",
+      "to": "dim_agent_aimux::recording",
+      "references": [
+        "mod recording"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux",
       "to": "dim_agent_aimux::request",
       "references": [
         "mod request"
@@ -5537,6 +5573,21 @@
       "references": [
         "path ToolDefinition",
         "use dim_agent_types::ToolDefinition"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::request",
+      "to": "dim_agent_aimux::plugin",
+      "references": [
+        "path crate::plugin::REQUEST_ID_EXTENSION"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::request",
+      "to": "dim_agent_aimux::recording",
+      "references": [
+        "path crate::recording::Capture",
+        "path crate::recording::capture"
       ]
     },
     {
@@ -14096,6 +14147,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::model_log",
+      "references": [
+        "mod model_log",
+        "path model_log::ModelLogPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::outbound",
       "references": [
         "mod outbound"
@@ -18082,6 +18141,57 @@
       ]
     },
     {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_aimux::recording",
+      "references": [
+        "path dim_agent_aimux::recording::set_request_recording"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsChanged",
+        "path SettingsScope::User",
+        "path settings_changes",
+        "use crate::settings::SettingsChanged",
+        "use crate::settings::SettingsScope",
+        "use crate::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_log",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
+      ]
+    },
+    {
       "from": "dim_app_server::outbound",
       "to": "dim_app_server::protocol",
       "references": [
@@ -21515,6 +21625,7 @@
         "path Action::Migration",
         "path Action::Models",
         "path Action::Plugin",
+        "path Action::Recording",
         "path Action::RuntimeInstall",
         "path Action::RuntimeList",
         "path Action::Timeline",
@@ -21711,6 +21822,14 @@
       "to": "dim_cli::question",
       "references": [
         "mod question"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::recording",
+      "references": [
+        "mod recording",
+        "path recording::run"
       ]
     },
     {
@@ -23466,6 +23585,30 @@
       ]
     },
     {
+      "from": "dim_cli::recording",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::recording",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::recording",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::session",
       "to": "dim_agent_types::content",
       "references": [
@@ -23770,6 +23913,7 @@
         "path Command::Provider",
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
+        "path Command::Recording",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::SaveIsolation",
@@ -23942,6 +24086,15 @@
         "path Projection::default",
         "path Projection::for_branch",
         "use crate::projection::Projection"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::recording",
+      "references": [
+        "path crate::recording::read",
+        "path crate::recording::report",
+        "path crate::recording::set"
       ]
     },
     {
@@ -29482,6 +29635,7 @@
         "path Command::Provider",
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
+        "path Command::Recording",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::SaveIsolation",
