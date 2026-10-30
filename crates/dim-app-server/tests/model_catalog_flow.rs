@@ -279,3 +279,42 @@ fn visible_edits_preserve_hidden_fields_and_update_legacy_media_readers() {
         );
     }
 }
+
+/// The listings of some OpenAI-compatible servers name the limits under
+/// other keys; each model keeps what its server states.
+#[test]
+fn listing_keys_of_other_servers_declare_the_limits_they_state() {
+    let catalog = BundledCatalog::load().unwrap();
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    let openrouter = catalog
+        .project(
+            &provider,
+            &json!({
+                "id": "zzzz-openrouter-model", "context_length": 200_000,
+                "top_provider": {"max_completion_tokens": 32_000}
+            }),
+        )
+        .unwrap();
+    assert_eq!(openrouter.capabilities.context_window, Some(200_000));
+    assert_eq!(openrouter.capabilities.max_output_tokens, Some(32_000));
+    let vllm = catalog
+        .project(
+            &provider,
+            &json!({"id": "zzzz-vllm-model", "max_model_len": 32_768}),
+        )
+        .unwrap();
+    assert_eq!(vllm.capabilities.context_window, Some(32_768));
+    assert_eq!(vllm.capabilities.missing_limits(), ["maxOutputTokens"]);
+    let lmstudio = catalog
+        .project(
+            &provider,
+            &json!({"id": "zzzz-lmstudio-model", "max_context_length": 131_072}),
+        )
+        .unwrap();
+    assert_eq!(lmstudio.capabilities.context_window, Some(131_072));
+    assert_eq!(lmstudio.capabilities.missing_limits(), ["maxOutputTokens"]);
+}

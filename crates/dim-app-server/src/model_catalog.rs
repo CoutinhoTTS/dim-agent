@@ -809,16 +809,21 @@ pub fn limits_valid(capabilities: &CatalogCapabilities) -> bool {
 }
 
 /// The values that declare a model's two limits, in the order the projection
-/// reads them: the flat descriptor keys, the nested `limit`, and
-/// `capabilities`. The remote listing and the stored record's `raw` are read
-/// with this one function, so the projection and the upgrade agree on what a
-/// declaration is.
+/// reads them: the flat descriptor keys, the nested `limit`, `capabilities`,
+/// and the nested `top_provider` some listings use. The remote listing and the
+/// stored record's `raw` are read with this one function, so the projection
+/// and the upgrade agree on what a declaration is.
+///
+/// Besides the descriptor keys, the flat keys read are OpenRouter's
+/// `context_length` and `top_provider.max_completion_tokens`, vLLM's
+/// `max_model_len`, and LM Studio's `max_context_length`.
 pub(crate) fn declared_limit_values(input: &Map<String, Value>) -> (Vec<&Value>, Vec<&Value>) {
     fn values<'a>(
         input: &'a Map<String, Value>,
-        keys: [&str; 3],
+        keys: &[&str],
         limit: &str,
         capability: &str,
+        nested: Option<(&str, &str)>,
     ) -> Vec<&'a Value> {
         keys.iter()
             .filter_map(|key| input.get(*key))
@@ -828,20 +833,33 @@ pub(crate) fn declared_limit_values(input: &Map<String, Value>) -> (Vec<&Value>,
                     .get("capabilities")
                     .and_then(|value| value.get(capability)),
             )
+            .chain(
+                nested
+                    .and_then(|(outer, inner)| input.get(outer).and_then(|value| value.get(inner))),
+            )
             .collect()
     }
     (
         values(
             input,
-            ["contextWindow", "context_window", "inputTokenLimit"],
+            &[
+                "contextWindow",
+                "context_window",
+                "inputTokenLimit",
+                "context_length",
+                "max_model_len",
+                "max_context_length",
+            ],
             "context",
             "contextWindow",
+            None,
         ),
         values(
             input,
-            ["maxOutputTokens", "max_output_tokens", "outputTokenLimit"],
+            &["maxOutputTokens", "max_output_tokens", "outputTokenLimit"],
             "output",
             "maxOutputTokens",
+            Some(("top_provider", "max_completion_tokens")),
         ),
     )
 }
