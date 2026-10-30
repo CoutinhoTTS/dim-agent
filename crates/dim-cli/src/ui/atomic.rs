@@ -36,8 +36,10 @@ const LOCK_RETRY: Duration = Duration::from_millis(10);
 ///
 /// On Unix `mode`, when given, is set on every write; without one an
 /// existing file keeps its mode, read through the link. A failure before the
-/// rename leaves the file as it was and removes the temp file, and a file
-/// that cannot be read is left alone rather than treated as an absent one.
+/// rename leaves the file as it was and removes the temp file, a failure
+/// after it reports that the file was replaced but that its directory could
+/// not be synced, and a file that cannot be read is left alone rather than
+/// treated as an absent one.
 ///
 /// The `.lock` file stays after the write: removing it would let two
 /// writers lock two different files. The temp file is
@@ -97,13 +99,21 @@ fn update_within(
     };
     let temp = sibling(&file, &format!(".{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&temp);
-    let replaced = write_temp(&temp, &file, mode, &bytes)
-        .and_then(|()| std::fs::rename(&temp, &file))
-        .and_then(|()| sync_dir(&file));
-    if replaced.is_err() {
+    if let Err(error) =
+        write_temp(&temp, &file, mode, &bytes).and_then(|()| std::fs::rename(&temp, &file))
+    {
         let _ = std::fs::remove_file(&temp);
+        return Err(error);
     }
-    replaced
+    sync_dir(&file).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{} was replaced but its directory could not be synced: {error}",
+                file.display()
+            ),
+        )
+    })
 }
 
 /// The file a write replaces: the target when `path` is a link, and `path`
