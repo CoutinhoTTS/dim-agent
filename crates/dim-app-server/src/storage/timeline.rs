@@ -10,9 +10,9 @@ use super::{
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PolicyFacts, PolicyWindow, PublishCallback, Result,
-    SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineTrace,
-    panic_message,
+    AgentError, BoxFuture, BranchRecord, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow,
+    PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineStore,
+    TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
@@ -2236,6 +2236,46 @@ impl TimelineStore for SqliteTimelineStore {
             }
             self.finish(reader);
             Ok(events)
+        })
+    }
+
+    fn policy_order<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+    ) -> BoxFuture<'a, Result<PolicyOrder>> {
+        Box::pin(async move {
+            let rows = {
+                let guard = self.db.connection.lock().unwrap();
+                let connection = guard
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
+                let mut query = connection
+                    .prepare(
+                        "SELECT event_id, kind FROM timeline_events \
+                         WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+                         ORDER BY sequence",
+                    )
+                    .map_err(error)?;
+                query
+                    .query_map(
+                        params![key.session_id, key.branch_id, through as i64],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(error)?
+            };
+            Ok(PolicyOrder {
+                through,
+                events: rows
+                    .into_iter()
+                    .map(|(id, kind)| PolicyOrderEvent {
+                        id,
+                        turn_start: kind == "turn/start",
+                    })
+                    .collect(),
+            })
         })
     }
 

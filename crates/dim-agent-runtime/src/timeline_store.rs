@@ -40,6 +40,20 @@ pub struct PolicyWindow {
     pub events: Vec<Arc<AgentEvent>>,
 }
 
+/// The event ids and turn starts a compaction needs to enumerate legal cuts,
+/// without decoding event bodies.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyOrder {
+    pub through: u64,
+    pub events: Vec<PolicyOrderEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyOrderEvent {
+    pub id: String,
+    pub turn_start: bool,
+}
+
 fn window_event(event: &AgentEvent) -> bool {
     matches!(
         &event.kind,
@@ -196,6 +210,27 @@ pub trait TimelineStore: Send + Sync + 'static {
                     .into_iter()
                     .map(|record| record.event)
                     .filter(|event| policy_event(event.as_ref()))
+                    .collect(),
+            })
+        })
+    }
+
+    /// The event order for legal compaction cuts.
+    fn policy_order<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+    ) -> BoxFuture<'a, Result<PolicyOrder>> {
+        Box::pin(async move {
+            let records = self.read(key, 1..=through).await?;
+            Ok(PolicyOrder {
+                through,
+                events: records
+                    .into_iter()
+                    .map(|record| PolicyOrderEvent {
+                        turn_start: matches!(&record.event.kind, EventKind::TurnStart(_)),
+                        id: record.event.id.clone(),
+                    })
                     .collect(),
             })
         })

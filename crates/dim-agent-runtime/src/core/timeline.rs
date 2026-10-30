@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyWindow, Result,
-    StoredEvent, TimelineKey, TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder, PolicyWindow,
+    Result, StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -747,6 +747,31 @@ impl Timeline {
             .policy_facts(&self.0.key, through, turn_id)
             .await
     }
+    /// The event order for legal compaction cuts.
+    #[service(skip)]
+    pub async fn policy_order(&self, through: u64) -> Result<PolicyOrder> {
+        let through = self.through(Some(through))?;
+        let segments: Vec<_> = self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
+            .collect();
+        let mut events = Vec::new();
+        for (branch, cut) in segments {
+            if cut == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch,
+            };
+            events.extend(self.0.store.policy_order(&key, cut).await?.events);
+        }
+        Ok(PolicyOrder { through, events })
+    }
+
     /// The anchor and turn window for a known compaction cut.
     #[service(skip)]
     pub async fn policy_window(
