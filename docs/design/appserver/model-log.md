@@ -30,6 +30,10 @@ line to `<home>/model-log/recordings.jsonl`; when it is false nothing is
 recorded. The recorder is replaced on `settings.changed` and stopped when the
 plugin unloads.
 
+With file-backed settings the document is `<home>/model-log.json`; with native
+storage it is the same document in the settings table, written through
+`settings.update` with `source: "model-log"` and `scope: "user"`.
+
 A line holds one call: the input prompt and options, the provider identity, one
 entry per HTTP exchange (request headers and body, response status, headers and
 body, chunk count, `latency_ms`, `ttfb_ms`) and the outcome (`success`, `error`,
