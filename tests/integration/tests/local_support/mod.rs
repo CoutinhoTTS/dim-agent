@@ -570,78 +570,37 @@ pub async fn run(session: &Session, text: &str) {
     session.idle("main").await.unwrap();
 }
 
-/// The in-memory store, recording the segments of every read by branch.
-#[derive(Default)]
-pub struct CountingStore {
-    memory: MemoryTimelineStore,
-    reads: Mutex<Vec<(String, std::ops::RangeInclusive<u64>)>>,
-}
-
-impl CountingStore {
-    /// The segments read since the last call.
-    pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
-        std::mem::take(&mut *self.reads.lock().unwrap())
-    }
-}
-
-impl TimelineStore for CountingStore {
-    fn create_session<'a>(
-        &'a self,
-        id: &'a str,
-        config: &'a SessionConfig,
-    ) -> BoxFuture<'a, Result<()>> {
-        self.memory.create_session(id, config)
-    }
-    fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
-        self.memory.rollback_session(id)
-    }
-    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
-        self.memory.release_session(id)
-    }
-    fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
-        self.memory.session_config(id)
-    }
-    fn branches<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
-        self.memory.branches(id)
-    }
-    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
-        self.memory.head(key)
-    }
-    fn append(
-        &self,
-        key: TimelineKey,
-        events: Vec<StoredEvent>,
-        publish: PublishCallback,
-    ) -> Result<()> {
-        self.memory.append(key, events, publish)
-    }
-    fn read_segments<'a>(
-        &'a self,
-        id: &'a str,
-        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
-    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        self.reads.lock().unwrap().extend(segments.iter().cloned());
-        self.memory.read_segments(id, segments)
-    }
-    fn trace<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        sequence: u64,
-    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
-        self.memory.trace(key, sequence)
-    }
-}
-
 /// The in-memory store, holding the publication of one batch until the test
 /// releases it: a window inside an adoption, after it composed what it
 /// publishes and before it returned.
-#[derive(Default)]
 pub struct HoldingStore {
     memory: MemoryTimelineStore,
     selected: Mutex<Option<String>>,
     held: Mutex<Option<PublishCallback>>,
+    /// The branch whose next read is held, and the gate it waits on.
+    read_branch: Mutex<Option<String>>,
+    gate: tokio::sync::Semaphore,
+    /// The segments of every read, by branch.
+    reads: Mutex<Vec<(String, std::ops::RangeInclusive<u64>)>>,
     /// Notified when a batch is held.
     pub entered: Notify,
+    /// Notified when a held read starts.
+    pub read_entered: Notify,
+}
+
+impl Default for HoldingStore {
+    fn default() -> Self {
+        Self {
+            memory: MemoryTimelineStore::default(),
+            selected: Mutex::new(None),
+            held: Mutex::new(None),
+            read_branch: Mutex::new(None),
+            gate: tokio::sync::Semaphore::new(0),
+            reads: Mutex::new(Vec::new()),
+            entered: Notify::new(),
+            read_entered: Notify::new(),
+        }
+    }
 }
 
 impl HoldingStore {
@@ -649,12 +608,25 @@ impl HoldingStore {
     pub fn hold_next_configuration_on(&self, branch: &str) {
         *self.selected.lock().unwrap() = Some(branch.to_string());
     }
+    /// Holds the next read of `branch`'s segments: the caller parks inside an
+    /// adoption, after it started reading and before it composed.
+    pub fn hold_next_read_of(&self, branch: &str) {
+        *self.read_branch.lock().unwrap() = Some(branch.to_string());
+    }
     /// Publishes the held batch; the test calls it once the work it wants
     /// inside the adoption's window is done.
     pub fn release(&self) {
         if let Some(publish) = self.held.lock().unwrap().take() {
             publish(Ok(()));
         }
+    }
+    /// Lets the held read continue.
+    pub fn release_read(&self) {
+        self.gate.add_permits(1);
+    }
+    /// The segments read since the last call, by branch.
+    pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
     }
 }
 
@@ -711,7 +683,28 @@ impl TimelineStore for HoldingStore {
         id: &'a str,
         segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        self.memory.read_segments(id, segments)
+        let hold = {
+            let mut selected = self.read_branch.lock().unwrap();
+            let hold = selected
+                .as_deref()
+                .is_some_and(|branch| segments.iter().any(|(read, _)| read == branch));
+            if hold {
+                selected.take();
+            }
+            hold
+        };
+        self.reads.lock().unwrap().extend(segments.iter().cloned());
+        Box::pin(async move {
+            if hold {
+                self.read_entered.notify_one();
+                self.gate
+                    .acquire()
+                    .await
+                    .expect("the read gate stays open")
+                    .forget();
+            }
+            self.memory.read_segments(id, segments).await
+        })
     }
     fn trace<'a>(
         &'a self,

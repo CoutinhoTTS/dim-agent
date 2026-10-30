@@ -23,7 +23,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use local_support::{CountingStore, Dirs, HoldingStore, platform, run, system_text};
+use local_support::{Dirs, HoldingStore, platform, run, system_text};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
 use rutis::{Ctx, Plugin};
 use std::{
@@ -34,6 +34,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 /// The frame's first paragraph: the guide opens with it.
@@ -177,6 +178,25 @@ async fn wait_for_configurations(
     })
     .await
     .unwrap_or_else(|_| panic!("{branch} adopted no configuration beyond {count}"))
+}
+
+/// Settles the branch's adoption queue: an empty configure is ordered behind
+/// what the listener enqueued before it and publishes nothing itself.
+async fn drain_adoptions(session: &Session, branch: &str) {
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: None,
+                },
+                branch,
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Unchanged,
+        "the empty configure behind the adoption queue settles unchanged"
+    );
 }
 
 /// The system text of the last request on `branch`.
@@ -474,9 +494,11 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
     )]))));
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(HoldingStore::default());
     let (flag_owner, views_owner) = (flag.clone(), views.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
+    builder.timeline_store(store.clone());
     defaults::install_with_prompt(&mut builder, hosts.clone(), None);
     builder.require_feature(Feature::new("GuideProbeOwner").session(
         "GuideProbeOwner",
@@ -533,12 +555,17 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
     );
 
     // The writer loads: one configuration, its settings and source text
-    // unchanged.
+    // unchanged. The adoption's read is held, so the count below is settled
+    // by the queue itself: the empty configure behind it drains the queue.
+    store.hold_next_read_of("main");
     flag.store(true, Ordering::SeqCst);
     let view = views.lock().unwrap().last().cloned().expect("a probe");
     view.restart().await.unwrap();
-    wait_for_configurations(&session, "main", 1).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the load's adoption reads the context");
+    store.release_read();
+    drain_adoptions(&session, "main").await;
     let published = configurations(&session, "main").await;
     assert_eq!(published.len(), 2, "one load is one guide adoption");
     let (before, after) = (&published[0], &published[1]);
@@ -586,11 +613,15 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
     );
 
     // The writer unloads: one more configuration, the System back to `first`.
+    store.hold_next_read_of("main");
     flag.store(false, Ordering::SeqCst);
     let view = views.lock().unwrap().last().cloned().expect("a probe");
     view.restart().await.unwrap();
-    wait_for_configurations(&session, "main", 2).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the unload's adoption reads the context");
+    store.release_read();
+    drain_adoptions(&session, "main").await;
     let published = configurations(&session, "main").await;
     assert_eq!(published.len(), 3, "one unload is one guide adoption");
     assert_eq!(published[2].system_source, published[1].system_source);
@@ -602,11 +633,12 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
     run(&session, "fourth").await;
     assert_eq!(last_system(&session, "main").await, first);
 
-    // A load that registers no entry publishes nothing and moves no System.
+    // A load that registers no entry publishes nothing and moves no System:
+    // it moves no composition, so the listener enqueues nothing.
     let view = views.lock().unwrap().last().cloned().expect("a probe");
     view.restart().await.unwrap();
+    drain_adoptions(&session, "main").await;
     run(&session, "fifth").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
         configurations(&session, "main").await.len(),
         3,
@@ -623,7 +655,7 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
 async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
     let dirs = Dirs::new();
     let root = platform_root(&dirs);
-    let store = Arc::new(CountingStore::default());
+    let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
     let (flag_owner, views_owner) = (flag.clone(), views.clone());
@@ -702,13 +734,19 @@ async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
         configurations(&session, &child).await.len(),
     );
 
-    // The entry is scoped to main: only main composes a different guide.
+    // The entry is scoped to main: only main composes a different guide. The
+    // adoption's read is held, and the empty configure behind it drains the
+    // queue before the read record is judged.
     store.take();
+    store.hold_next_read_of("main");
     flag.store(true, Ordering::SeqCst);
     let view = views.lock().unwrap().last().cloned().expect("a probe");
     view.restart().await.unwrap();
-    wait_for_configurations(&session, "main", main_count).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the entry's adoption reads its branch's context");
+    store.release_read();
+    drain_adoptions(&session, "main").await;
     let reads = store.take();
     assert!(
         reads.iter().all(|(branch, _)| branch != &child),
@@ -800,14 +838,20 @@ async fn an_entry_registered_while_its_branch_opens_is_adopted() {
         _ = &mut creation => panic!("the Session opened before its publication was held"),
         () = async {
             store.entered.notified().await;
+            // The first adoption after the registration reads the context;
+            // holding that read lets the queue settle before the count below.
+            store.hold_next_read_of("main");
             flag.store(true, Ordering::SeqCst);
             let view = views.lock().unwrap().last().cloned().expect("a probe");
             view.restart().await.unwrap();
             store.release();
         } => creation.await.unwrap(),
     };
-    wait_for_configurations(&session, "main", 1).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the registration's adoption reads the context");
+    store.release_read();
+    drain_adoptions(&session, "main").await;
     let published = configurations(&session, "main").await;
     assert_eq!(
         published.len(),
@@ -840,6 +884,507 @@ async fn an_entry_registered_while_its_branch_opens_is_adopted() {
         last_system(&session, "main").await,
         with_entry,
         "the request carries the System the open's guide adoption published"
+    );
+    agent.close().await.unwrap();
+}
+
+/// #661: a fork inherits its parent's configuration, so the child's own
+/// branch-scoped entry reaches its System only through an adoption at its
+/// open. That adoption composes the child's entries and leaves the parent's
+/// System untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_composes_its_own_entries_at_its_open() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let flag = Arc::new(AtomicBool::new(true));
+    let text = Arc::new(Mutex::new(None));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let tables = Arc::new(Mutex::new(Vec::new()));
+    let agent = branch_probe_agent(
+        &dirs,
+        &root,
+        None,
+        flag.clone(),
+        text.clone(),
+        None,
+        views.clone(),
+        tables.clone(),
+    );
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "on main").await;
+    let main_system = last_system(&session, "main").await;
+    let main_entry = branch_probe_entry("main");
+    assert!(main_system.contains(&main_entry), "{main_system:?}");
+    let main_configurations = configurations(&session, "main").await.len();
+
+    // The child loads its own copy of the writer, which registers for the
+    // child's branch. Its open adopts the guide over the configuration it
+    // inherited.
+    let at = session.sequence("main").unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .expect("the second line starts");
+    session.idle(&child).await.unwrap();
+    let child_entry = branch_probe_entry(&child);
+    let adopted = configurations(&session, &child).await;
+    assert_eq!(
+        adopted.len(),
+        main_configurations + 1,
+        "one guide adoption at the child's open"
+    );
+    let child_system = system_text(
+        adopted
+            .last()
+            .expect("the child's configuration")
+            .system
+            .as_ref()
+            .expect("the child's System"),
+    );
+    assert!(child_system.contains(&child_entry), "{child_system:?}");
+    assert!(!child_system.contains(&main_entry), "{child_system:?}");
+    assert_eq!(
+        adopted.last().expect("the child's configuration").settings,
+        last_configured(&session, "main").await.settings,
+        "the adoption keeps the configuration the child inherited"
+    );
+
+    // The parent's System and its adopted configurations are unchanged.
+    assert_eq!(
+        configurations(&session, "main").await.len(),
+        main_configurations,
+        "the child's adoption records nothing on its parent"
+    );
+    assert_eq!(last_system(&session, "main").await, main_system);
+
+    // A request on the child carries its own entry, once.
+    session
+        .submit("on the line".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    let line = last_system(&session, &child).await;
+    assert!(line.contains(&child_entry), "{line:?}");
+    assert_eq!(line.matches("<dim-probe").count(), 1, "{line:?}");
+    assert!(!line.contains(&main_entry), "{line:?}");
+    agent.close().await.unwrap();
+}
+
+/// #661: a Session restored after a writer joined or left its set converges at
+/// the restore's open. The baseline is the entries in force at load, so the
+/// restored branch's adopted System would otherwise stay what the previous
+/// run left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_branch_converges_on_the_entries_its_writers_register() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let flag = Arc::new(AtomicBool::new(false));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "first").await;
+    assert!(!last_system(&session, "main").await.contains(PROBE_ENTRY));
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    // The writer joins the Session's set: the restored branch adopts the
+    // entry at its open.
+    flag.store(true, Ordering::SeqCst);
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let session = agent.restore_session(id.clone()).await.unwrap();
+    wait_for_configurations(&session, "main", 1).await;
+    let adopted = last_configured(&session, "main").await;
+    let system = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(system.contains(PROBE_ENTRY), "{system:?}");
+    run(&session, "second").await;
+    assert!(last_system(&session, "main").await.contains(PROBE_ENTRY));
+    agent.close().await.unwrap();
+
+    // The writer leaves it: the next restore drops the entry the same way.
+    flag.store(false, Ordering::SeqCst);
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let session = agent.restore_session(id).await.unwrap();
+    wait_for_configurations(&session, "main", 2).await;
+    let adopted = last_configured(&session, "main").await;
+    let system = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(!system.contains(PROBE_ENTRY), "{system:?}");
+    run(&session, "third").await;
+    assert!(!last_system(&session, "main").await.contains(PROBE_ENTRY));
+    agent.close().await.unwrap();
+}
+
+/// #661: a guide adoption that was reading when its branch started closing
+/// records nothing. Its writer withdraws as the branch shuts down, so the
+/// composition left behind is not one the branch ever ran with; the adopted
+/// System stays the one it did run with, entry included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guide_adoption_racing_its_branch_close_records_nothing() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let store = Arc::new(HoldingStore::default());
+    let flag = Arc::new(AtomicBool::new(true));
+    let text = Arc::new(Mutex::new(None));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let tables = Arc::new(Mutex::new(Vec::new()));
+    let agent = branch_probe_agent(
+        &dirs,
+        &root,
+        Some(store.clone()),
+        flag.clone(),
+        text.clone(),
+        None,
+        views.clone(),
+        tables.clone(),
+    );
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "on main").await;
+    let at = session.sequence("main").unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .expect("the second line starts");
+    session.idle(&child).await.unwrap();
+    // The child adopts a configuration of its own, composed for its entries.
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("line")),
+                },
+                &child,
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    let child_entry = branch_probe_entry(&child);
+    assert!(
+        system_text(
+            last_configured(&session, &child)
+                .await
+                .system
+                .as_ref()
+                .expect("the child's System")
+        )
+        .contains(&child_entry)
+    );
+
+    // The writer's next generation moves the child's composition, and the
+    // adoption that follows reads the child's context. The read is held so
+    // that the close begins while the adoption waits inside it.
+    store.hold_next_read_of(&child);
+    *text.lock().unwrap() = Some(child_entry.replace("registered", "re-registered"));
+    branch_view(&views, &child).restart().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the adoption reads the child's context");
+
+    // The branch closes. Its shutdown withdraws the child's own entry, and
+    // the stop is recorded while the adoption still waits on the read.
+    let table = tables.lock().unwrap()[0].clone();
+    let ending = session.end_branch(
+        &child,
+        BranchSource::Host {
+            operation_id: "end".into(),
+        },
+    );
+    tokio::pin!(ending);
+    tokio::select! {
+        result = &mut ending => panic!("the close returned while its adoption was held: {result:?}"),
+        () = wait_until_withdrawn(&table, &child) => {}
+    }
+    store.release_read();
+    ending.await.unwrap();
+
+    // Nothing is recorded after the stop: the last configuration is the one
+    // the branch ran with, and it carries the entry.
+    let key = TimelineKey {
+        session_id: session.id().into(),
+        branch_id: child.clone(),
+    };
+    let head = store.head(&key).await.unwrap();
+    let events = store.read(&key, 1..=head).await.unwrap();
+    let stopped = events
+        .iter()
+        .rposition(|record| matches!(record.event.kind, EventKind::StopInterrupt(_)))
+        .expect("the close records its stop");
+    assert_eq!(
+        events[stopped + 1..]
+            .iter()
+            .filter(|record| matches!(record.event.kind, EventKind::ContextConfigured(_)))
+            .count(),
+        0,
+        "a closing branch records no guide adoption"
+    );
+    let adopted = events
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event.kind {
+            EventKind::ContextConfigured(data) => Some(data),
+            _ => None,
+        })
+        .expect("the child's adopted configuration");
+    let system = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(system.contains(&child_entry), "{system:?}");
+    agent.close().await.unwrap();
+}
+
+/// #661: the Session unload's shutdown records nothing either. A writer that
+/// withdraws in it leaves the persisted System as the branch ran with it, and
+/// the restored branch carries the entry its writer registers again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_withdrawing_as_the_session_unloads_is_not_recorded() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let store = Arc::new(HoldingStore::default());
+    let flag = Arc::new(AtomicBool::new(true));
+    let text = Arc::new(Mutex::new(None));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let tables = Arc::new(Mutex::new(Vec::new()));
+    let agent = branch_probe_agent(
+        &dirs,
+        &root,
+        Some(store.clone()),
+        flag.clone(),
+        text.clone(),
+        None,
+        views.clone(),
+        tables.clone(),
+    );
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "on main").await;
+    let entry = branch_probe_entry("main");
+    assert!(
+        system_text(
+            configurations(&session, "main").await[0]
+                .system
+                .as_ref()
+                .expect("main's System")
+        )
+        .contains(&entry)
+    );
+    let recorded = configurations(&session, "main").await.len();
+    let id = session.id().to_owned();
+
+    // The next generation moves the composition; the adoption's read is held.
+    store.hold_next_read_of("main");
+    let reregistered = entry.replace("registered", "re-registered");
+    *text.lock().unwrap() = Some(reregistered.clone());
+    branch_view(&views, "main").restart().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the adoption reads main's context");
+
+    // The Session unloads while the adoption waits: its shutdown withdraws
+    // the writer's entry before the branch freezes.
+    let table = tables.lock().unwrap()[0].clone();
+    let closing = agent.close();
+    tokio::pin!(closing);
+    tokio::select! {
+        result = &mut closing => panic!("the unload returned while its adoption was held: {result:?}"),
+        () = wait_until_withdrawn(&table, "main") => {}
+    }
+    store.release_read();
+    closing.await.unwrap();
+
+    // The persisted history records no configuration beyond the one the
+    // branch ran with.
+    let key = TimelineKey {
+        session_id: id.clone(),
+        branch_id: "main".into(),
+    };
+    let head = store.head(&key).await.unwrap();
+    let events = store.read(&key, 1..=head).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(record.event.kind, EventKind::ContextConfigured(_)))
+            .count(),
+        recorded,
+        "the unload records no guide adoption"
+    );
+
+    // The restored branch carries the entry its writer registers again.
+    let agent = branch_probe_agent(
+        &dirs,
+        &platform_root(&dirs),
+        Some(store.clone()),
+        flag.clone(),
+        text.clone(),
+        None,
+        views.clone(),
+        tables.clone(),
+    );
+    let restored = agent.restore_session(id).await.unwrap();
+    wait_for_configurations(&restored, "main", recorded).await;
+    let adopted = last_configured(&restored, "main").await;
+    let system = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(system.contains(&reregistered), "{system:?}");
+    agent.close().await.unwrap();
+}
+
+/// #661: a writer whose generation reloads withdraws and re-registers the
+/// same entry. The adoption that the withdrawal enqueues composes when it
+/// runs, not when it was enqueued, so it finds the composition where it
+/// started and records nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reloaded_writer_that_keeps_its_entry_records_nothing() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let store = Arc::new(HoldingStore::default());
+    let flag = Arc::new(AtomicBool::new(true));
+    let text = Arc::new(Mutex::new(None));
+    let gate = Arc::new(LoadGate::default());
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let tables = Arc::new(Mutex::new(Vec::new()));
+    let agent = branch_probe_agent(
+        &dirs,
+        &root,
+        Some(store.clone()),
+        flag.clone(),
+        text.clone(),
+        Some(gate.clone()),
+        views.clone(),
+        tables.clone(),
+    );
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "on main").await;
+    let entry = branch_probe_entry("main");
+    let recorded = configurations(&session, "main").await.len();
+    assert!(
+        system_text(
+            last_configured(&session, "main")
+                .await
+                .system
+                .as_ref()
+                .expect("main's System")
+        )
+        .contains(&entry)
+    );
+
+    // The reload withdraws the entry and holds the new generation's load, so
+    // the composition is "the writer is away" for as long as the test needs.
+    gate.arm();
+    store.hold_next_read_of("main");
+    let reloading = branch_view(&views, "main").restart();
+    tokio::pin!(reloading);
+    tokio::select! {
+        result = &mut reloading => panic!("the reload returned before its load was held: {result:?}"),
+        () = gate.applying.notified() => {}
+    }
+    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+        .await
+        .expect("the withdrawal's adoption reads the context");
+
+    // The new generation registers the same entry; the adoption composes
+    // now, finds the composition it started from and records nothing.
+    gate.open();
+    reloading.await.unwrap();
+    store.release_read();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: None,
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Unchanged,
+        "the configure is queued behind the adoption and settles after it"
+    );
+    assert_eq!(
+        configurations(&session, "main").await.len(),
+        recorded,
+        "a reload that keeps its entry records nothing"
     );
     agent.close().await.unwrap();
 }
@@ -942,6 +1487,220 @@ impl DynPlugin for GuideProbe {
             }
             Ok(Effect::Done)
         })
+    }
+}
+
+/// The entry a branch-scoped probe registers, for the branch that loads it.
+fn branch_probe_entry(branch: &str) -> String {
+    format!(
+        r#"<dim-probe branch="{branch}">: an entry a contributor registered for the branch that loaded it; the composition places it between the state and the rule entries."#
+    )
+}
+
+/// The branch-scoped probe's own view, by branch.
+fn branch_view(views: &Mutex<Vec<(String, FiberView)>>, branch: &str) -> FiberView {
+    views
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(id, _)| id == branch)
+        .map(|(_, view)| view.clone())
+        .expect("a branch probe view")
+}
+
+/// A gate on a probe generation's load: a reload that is armed holds the
+/// composition at "the writer is away" until the test opens it.
+#[derive(Default)]
+struct LoadGate {
+    armed: AtomicBool,
+    applying: Notify,
+    release: Notify,
+}
+impl LoadGate {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+    fn open(&self) {
+        self.release.notify_one();
+    }
+}
+
+/// The owner of the branch-scoped probe: a part of every branch, which
+/// registers its entry for the branch that loads it and records its view.
+struct BranchGuideProbeOwner {
+    flag: Arc<AtomicBool>,
+    text: Arc<Mutex<Option<String>>>,
+    gate: Option<Arc<LoadGate>>,
+    views: Arc<Mutex<Vec<(String, FiberView)>>>,
+    tables: Arc<Mutex<Vec<Arc<GuideEntries>>>>,
+    key: Key<GuideEntries>,
+    identity: Key<TimelineIdentity>,
+}
+impl BranchGuideProbeOwner {
+    fn new(
+        names: &Names<'_>,
+        flag: Arc<AtomicBool>,
+        text: Arc<Mutex<Option<String>>>,
+        gate: Option<Arc<LoadGate>>,
+        views: Arc<Mutex<Vec<(String, FiberView)>>>,
+        tables: Arc<Mutex<Vec<Arc<GuideEntries>>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            flag,
+            text,
+            gate,
+            views,
+            tables,
+            key: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for BranchGuideProbeOwner {
+    fn name(&self) -> &str {
+        "BranchGuideProbeOwner"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.key.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
+            let table = ctx.require_at(&self.key)?;
+            self.tables.lock().unwrap().push(table.clone());
+            let branch = identity.branch_id.clone();
+            let view = ctx.plugin(BranchGuideProbe {
+                flag: self.flag.clone(),
+                text: self.text.clone(),
+                gate: self.gate.clone(),
+                table,
+                branch: branch.clone(),
+            });
+            (&view).await.map_err(|error| {
+                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    format!("branch guide probe failed: {error}").into(),
+                ))
+            })?;
+            self.views.lock().unwrap().push((branch, view));
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// A contributor whose registration depends on the test's flag: with it set,
+/// each generation registers an entry for the branch that loaded it.
+struct BranchGuideProbe {
+    flag: Arc<AtomicBool>,
+    text: Arc<Mutex<Option<String>>>,
+    gate: Option<Arc<LoadGate>>,
+    table: Arc<GuideEntries>,
+    branch: String,
+}
+impl DynPlugin for BranchGuideProbe {
+    fn name(&self) -> &str {
+        "BranchGuideProbe"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            if let Some(gate) = &self.gate
+                && gate.armed.load(Ordering::SeqCst)
+            {
+                gate.applying.notify_one();
+                gate.release.notified().await;
+            }
+            if self.flag.load(Ordering::SeqCst) {
+                let text = self
+                    .text
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| branch_probe_entry(&self.branch));
+                self.table.register(
+                    ctx,
+                    GuideScope::Branch(self.branch.clone()),
+                    GuideEntry {
+                        markers: vec!["dim-probe".into()],
+                        order: 65,
+                        text,
+                    },
+                )?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The agent the branch-probe flows run on: the workspace tools, a branch
+/// probe on every branch, and the store the flow hands it.
+#[allow(clippy::too_many_arguments)]
+fn branch_probe_agent(
+    dirs: &Dirs,
+    root: &Ctx,
+    store: Option<Arc<HoldingStore>>,
+    flag: Arc<AtomicBool>,
+    text: Arc<Mutex<Option<String>>>,
+    gate: Option<Arc<LoadGate>>,
+    views: Arc<Mutex<Vec<(String, FiberView)>>>,
+    tables: Arc<Mutex<Vec<Arc<GuideEntries>>>>,
+) -> Agent {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    mock_model_hosts(&mut builder);
+    if let Some(store) = store {
+        builder.timeline_store(store);
+    }
+    workspace(&mut builder, dirs);
+    defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
+    builder.require_feature(Feature::new("BranchGuideProbeOwner").branch(
+        "BranchGuideProbeOwner",
+        move |names| {
+            Ok(Box::new(BranchGuideProbeOwner::new(
+                names,
+                flag.clone(),
+                text.clone(),
+                gate.clone(),
+                views.clone(),
+                tables.clone(),
+            )?))
+        },
+    ));
+    builder.build_in(root)
+}
+
+/// The agent the restore flow runs on: one in-memory store across Agents, and
+/// the Session-scoped probe whose registration the flag controls.
+fn restore_guide_agent(
+    store: Arc<MemoryTimelineStore>,
+    flag: Arc<AtomicBool>,
+    views: Arc<Mutex<Vec<FiberView>>>,
+) -> Agent {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    builder.timeline_store(store);
+    defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
+    builder.require_feature(Feature::new("GuideProbeOwner").session(
+        "GuideProbeOwner",
+        move |names| {
+            Ok(Box::new(GuideProbeOwner {
+                flag: flag.clone(),
+                views: views.clone(),
+                key: names.key()?,
+                scope: GuideScope::Session,
+            }))
+        },
+    ));
+    builder.build()
+}
+
+/// Waits until `branch`'s guide composes no probe entry: its writer
+/// withdraws.
+async fn wait_until_withdrawn(table: &GuideEntries, branch: &str) {
+    let mut changes = table.changes();
+    while table.compose(branch).contains("<dim-probe") {
+        changes.changed().await.expect("the table stays open");
     }
 }
 
