@@ -8,6 +8,7 @@ use dim_agent_capabilities::{
     model_provider::ModelProvider,
     tool_executor::ToolExecutor,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -260,7 +261,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
                     Ok(Box::new(Extension::new(names, extension_plugin.clone())?))
                 }),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = soon(agent.create_session(SessionConfig::default()))
             .await
             .unwrap();
@@ -422,7 +423,7 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
             InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -483,7 +484,7 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
     soon(agent.close()).await.unwrap();
 }
 
-fn gated() -> (Agent, Arc<Gate>) {
+async fn gated() -> (MinimalHost, Arc<Gate>) {
     let gate = Arc::new(Gate::default());
     gate.once.store(true, Ordering::SeqCst);
     let copy = gate.clone();
@@ -495,7 +496,7 @@ fn gated() -> (Agent, Arc<Gate>) {
             InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
         }),
     );
-    (builder.build(), gate)
+    (MinimalHost::start(&builder).await.unwrap(), gate)
 }
 fn interrupt() -> EventDraft {
     EventKind::StopInterrupt(StopInterruptData {
@@ -513,7 +514,7 @@ fn echoed(events: &[Arc<AgentEvent>], text: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_steer_input_after_a_stop_starts_a_turn() {
-    let (agent, _gate) = gated();
+    let (agent, _gate) = gated().await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -614,7 +615,7 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
             }),
         );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -688,7 +689,7 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
             InputGate::part(names, copy.clone(), After::Loop, "turn/end")
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -877,7 +878,7 @@ async fn a_stop_during_output_keeps_its_text_and_closes_every_started_call() {
     let mut builder = channel_builder(model.clone());
     builder.timeline_store(store.clone());
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1037,7 +1038,7 @@ async fn a_replaced_request_commits_no_output_its_host_still_streams() {
     let (model, chunks) = channel_model();
     let mut builder = channel_builder(model.clone());
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1181,7 +1182,7 @@ async fn a_steer_during_preparation_ends_the_request_before_the_model_call() {
         );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1286,7 +1287,7 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
         }),
     );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1498,7 +1499,7 @@ async fn a_steer_is_not_consumed_between_a_failed_call_and_its_terminal() {
     let mut builder = channel_builder(model.clone());
     let (gate, hold) = hold_terminal(&mut builder);
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1561,7 +1562,7 @@ async fn a_steer_is_not_consumed_between_a_failed_preparation_and_its_terminal()
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     let (gate, hold) = hold_terminal(&mut builder);
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();

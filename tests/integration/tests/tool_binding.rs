@@ -13,6 +13,7 @@ use dim_agent_capabilities::{
         ToolSourceSet, ToolSourcesState, ToolSourcesView, definition, tool_provider_changes,
     },
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -175,7 +176,7 @@ impl DynPlugin for SourcePlugin {
 }
 
 struct Env {
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<ScriptedModel>,
 }
 
@@ -200,12 +201,12 @@ fn selection(model_id: &str) -> ModelSelection {
     }
 }
 
-fn env(source: Arc<TestSource>, store: Option<Arc<MemoryTimelineStore>>) -> Env {
-    env_named(source, store, "mcp")
+async fn env(source: Arc<TestSource>, store: Option<Arc<MemoryTimelineStore>>) -> Env {
+    env_named(source, store, "mcp").await
 }
 
 /// `env` with the test source registered under `name`.
-fn env_named(
+async fn env_named(
     source: Arc<TestSource>,
     store: Option<Arc<MemoryTimelineStore>>,
     name: &'static str,
@@ -239,7 +240,7 @@ fn env_named(
     );
     add_source(&mut builder, source, name);
     Env {
-        agent: builder.build(),
+        agent: MinimalHost::start(&builder).await.unwrap(),
         model,
     }
 }
@@ -342,6 +343,34 @@ impl Plugin for EnableContributor {
         ctx.provide(ContributorEnabled)?;
         Ok(())
     }
+}
+/// A minimal host for `builder` whose loader runs [`EnableContributor`] as
+/// a row the test adds ([`enable`]) and removes ([`disable`]).
+async fn contributing(builder: &AgentBuilder) -> MinimalHost {
+    let catalog = builder.catalog().clone();
+    MinimalHost::start_with(builder, move |_, modules| {
+        register_part(modules, &catalog, |_| Ok(Box::new(EnableContributor)))?;
+        Ok(())
+    })
+    .await
+    .unwrap()
+}
+/// Adds the [`EnableContributor`] row and waits until it is Active.
+async fn enable(host: &MinimalHost) {
+    let row = serde_json::json!({ "id": "EnableContributor", "name": "EnableContributor" });
+    host.set_rows(vec![row]).await.unwrap();
+    let enabled = host
+        .loader()
+        .entries()
+        .into_iter()
+        .find(|row| row.id == "EnableContributor")
+        .and_then(|row| row.view)
+        .expect("the EnableContributor row is placed");
+    plugin_state(&enabled, rutis::host::FiberState::Active).await;
+}
+/// Removes the [`EnableContributor`] row.
+async fn disable(host: &MinimalHost) {
+    host.set_rows(vec![]).await.unwrap();
 }
 struct OptionalContributor {
     generations: Arc<AtomicUsize>,
@@ -496,9 +525,6 @@ async fn a_preparing_request_keeps_its_contributor_generation() {
     }
     for replace in [false, true] {
         let dirs = Dirs::new();
-        let root = Ctx::root().unwrap();
-        let enabled = root.plugin(EnableContributor);
-        plugin_state(&enabled, rutis::host::FiberState::Active).await;
         let config = SessionConfig {
             cwd: dirs.root.to_string_lossy().into_owned(),
             tools: Some(vec!["optional".into(), "echo".into()]),
@@ -522,7 +548,9 @@ async fn a_preparing_request_keeps_its_contributor_generation() {
             Arc::default(),
             provided.clone(),
         );
-        let agent = builder.build_in(&root);
+        let agent = contributing(&builder).await;
+        let root = agent.root().clone();
+        enable(&agent).await;
         let session = agent.create_session(config).await.unwrap();
         session
             .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -531,7 +559,7 @@ async fn a_preparing_request_keeps_its_contributor_generation() {
         tokio::time::timeout(Duration::from_secs(5), ready.notified())
             .await
             .expect("preparation read its declaration");
-        enabled.dispose().await.unwrap();
+        disable(&agent).await;
         let provider = root
             .view(
                 session
@@ -550,7 +578,7 @@ async fn a_preparing_request_keeps_its_contributor_generation() {
             "preparation keeps its original source alive"
         );
         if replace {
-            root.plugin(EnableContributor);
+            enable(&agent).await;
             plugin_state(&provider, rutis::host::FiberState::Active).await;
         }
         resume.send(()).unwrap();
@@ -592,7 +620,6 @@ async fn a_preparing_request_keeps_its_contributor_generation() {
             }
         );
         agent.close().await.unwrap();
-        root.shutdown().await.unwrap();
     }
 }
 
@@ -630,12 +657,10 @@ async fn custom_preparation_keeps_none_empty_and_filtered_declarations() {
         (Some(vec![unavailable]), false),
     ] {
         let dirs = Dirs::new();
-        let root = Ctx::root().unwrap();
-        let enabled = root.plugin(EnableContributor);
-        plugin_state(&enabled, rutis::host::FiberState::Active).await;
         let mut builder = unconfigured_builder(Arc::new(Selected(selected.clone())));
         add_optional(&mut builder, Arc::default(), Arc::default(), Arc::default());
-        let agent = builder.build_in(&root);
+        let agent = contributing(&builder).await;
+        enable(&agent).await;
         let session = agent
             .create_session(SessionConfig {
                 cwd: dirs.root.to_string_lossy().into_owned(),
@@ -678,15 +703,11 @@ async fn custom_preparation_keeps_none_empty_and_filtered_declarations() {
             assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if data.outcome == TurnOutcome::Failed { error: "invalid input: tool unavailable has no handler".into() })));
         }
         agent.close().await.unwrap();
-        root.shutdown().await.unwrap();
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations() {
-    let root = Ctx::root().unwrap();
-    let enabled = root.plugin(EnableContributor);
-    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let generations = Arc::new(AtomicUsize::new(0));
     let hold = Arc::new(Gate::default());
     let held = hold.clone();
@@ -702,7 +723,9 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         }),
     );
     add_optional(&mut builder, generations, held, provided.clone());
-    let agent = builder.build_in(&root);
+    let agent = contributing(&builder).await;
+    let root = agent.root().clone();
+    enable(&agent).await;
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec!["optional".into(), "absent".into(), "echo".into()]),
@@ -751,7 +774,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
     tokio::time::timeout(Duration::from_secs(5), hold.entered.notified())
         .await
         .unwrap();
-    enabled.dispose().await.unwrap();
+    disable(&agent).await;
     plugin_state(&provider, rutis::host::FiberState::Pending).await;
     session.idle("main").await.unwrap();
     assert!(
@@ -796,8 +819,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
     // (#241); this configuration has no tool part, so the next request
     // declares it with no adoption fact.
     let reloaded = session.sequence("main").unwrap();
-    let enabled = root.plugin(EnableContributor);
-    plugin_state(&enabled, rutis::host::FiberState::Active).await;
+    enable(&agent).await;
     plugin_state(&provider, rutis::host::FiberState::Active).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -852,14 +874,10 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
     session.idle("main").await.unwrap();
     assert_eq!(last_result(&session, "main").await, "generation 3");
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn contributors_are_current_for_the_first_request_without_initial_configuration() {
-    let root = Ctx::root().unwrap();
-    let enabled = root.plugin(EnableContributor);
-    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
     let hold = Arc::new(Gate::default());
@@ -874,9 +892,14 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
             hold.clone(),
             Arc::default(),
         );
-        builder.build_in(&root)
+        async move {
+            let agent = contributing(&builder).await;
+            enable(&agent).await;
+            agent
+        }
     };
-    let agent = build();
+    let agent = build().await;
+    let root = agent.root().clone();
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec!["optional".into(), "echo".into()]),
@@ -900,9 +923,9 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
                 .id,
         )
         .unwrap();
-    enabled.dispose().await.unwrap();
+    disable(&agent).await;
     plugin_state(&provider, rutis::host::FiberState::Pending).await;
-    let enabled = root.plugin(EnableContributor);
+    enable(&agent).await;
     plugin_state(&provider, rutis::host::FiberState::Active).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -914,7 +937,7 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
     let id = session.id().to_owned();
     agent.close().await.unwrap();
 
-    let agent = build();
+    let agent = build().await;
     let restored = agent.restore_session(id).await.unwrap();
     restored
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -927,8 +950,6 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
     );
     assert_eq!(last_result(&restored, "main").await, "generation 3");
     agent.close().await.unwrap();
-    enabled.dispose().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -947,7 +968,7 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
     }
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
-    let env = env(source.clone(), None);
+    let env = env(source.clone(), None).await;
     let session = env.session().await;
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
     let other = env.session().await;
@@ -1019,7 +1040,7 @@ async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_relea
         &log,
         Some(hold.clone()),
     )]);
-    let env = env(source.clone(), None);
+    let env = env(source.clone(), None).await;
     let session = env.session().await;
     let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
@@ -1061,7 +1082,7 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
         set("mcp:c", "c1", &["gate"], &log, None),
         set("mcp:d", "d1", &["branch"], &log, None),
     ]);
-    let env = env(source.clone(), None);
+    let env = env(source.clone(), None).await;
     let session = env.session().await;
     let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:a", "a1")]).await;
@@ -1089,7 +1110,7 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
 async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:z", "z1", &["lookup"], &log, None)]);
-    let env = env(source.clone(), None);
+    let env = env(source.clone(), None).await;
     let session = env.session().await;
     let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:z", "z1")]).await;
@@ -1131,7 +1152,7 @@ async fn a_session_without_a_mount_list_declares_every_registered_tool() {
     ] {
         let (source, log) = (TestSource::new(), Arc::new(Log::default()));
         source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
-        let env = env(source, None);
+        let env = env(source, None).await;
         let session = env
             .agent
             .create_session(SessionConfig {
@@ -1151,7 +1172,7 @@ async fn a_session_without_a_mount_list_declares_every_registered_tool() {
 async fn a_child_branch_binds_the_inherited_tools() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
-    let env = env(source.clone(), None);
+    let env = env(source.clone(), None).await;
     let session = env.session().await;
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
     env.model.push(Step::Tool("lookup", serde_json::json!({})));
@@ -1179,7 +1200,7 @@ async fn a_restored_branch_adopts_the_new_versions_before_its_first_request() {
     let store = Arc::new(MemoryTimelineStore::default());
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
-    let env1 = env(source, Some(store.clone()));
+    let env1 = env(source, Some(store.clone())).await;
     let session = env1.session().await;
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
     let id = session.id().to_owned();
@@ -1187,7 +1208,7 @@ async fn a_restored_branch_adopts_the_new_versions_before_its_first_request() {
 
     let source = TestSource::new();
     source.seed(vec![set("mcp:a", "v2", &["lookup"], &log, None)]);
-    let env2 = env(source, Some(store));
+    let env2 = env(source, Some(store)).await;
     let restored = env2.agent.restore_session(id).await.unwrap();
     adopted(&restored, "main", &[("mcp:a", "v2")]).await;
     env2.turn(&restored, "main", &["lookup"]).await;
@@ -1198,7 +1219,7 @@ async fn a_restored_branch_adopts_the_new_versions_before_its_first_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_model_update_and_a_tool_adoption_both_take_effect() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-    let env = env(source.clone(), None);
+    let env = env(source.clone(), None).await;
     let session = env.session().await;
     let source = session.session_service::<TestSource>().unwrap();
     let (configured, _) = tokio::join!(
@@ -1318,10 +1339,10 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             },
         ));
         let env = Env {
-            agent: builder.build(),
+            agent: MinimalHost::start(&builder).await.unwrap(),
             model,
         };
-        let agent = env.agent.clone();
+        let agent = env.agent.agent().clone();
         let creating = tokio::spawn(async move {
             agent
                 .create_session(SessionConfig {
@@ -1379,13 +1400,13 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
 async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("contributed:a", "v1", &["lookup"], &log, None)]);
-    let env = env_named(source, None, "contributed");
+    let env = env_named(source, None, "contributed").await;
     let session = env.session().await;
     adopted(&session, "main", &[("contributed:a", "v1")]).await;
     env.turn(&session, "main", &["lookup"]).await;
     assert_eq!(last_result(&session, "main").await, "v1 ran lookup");
 
-    let invalid = env_named(TestSource::new(), None, "#contributed");
+    let invalid = env_named(TestSource::new(), None, "#contributed").await;
     let error = invalid
         .agent
         .create_session(SessionConfig {
@@ -1420,9 +1441,6 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
         }
     }
 
-    let root = Ctx::root().unwrap();
-    let enabled = root.plugin(EnableContributor);
-    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let gate = Arc::new(Gate::default());
     let hold = gate.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -1433,7 +1451,9 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
         Feature::new("CloseGate")
             .branch("CloseGate", move |_| Ok(Box::new(CloseGate(hold.clone())))),
     );
-    let agent = builder.build_in(&root);
+    let agent = contributing(&builder).await;
+    let root = agent.root().clone();
+    enable(&agent).await;
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec!["optional".into(), "echo".into()]),
@@ -1479,10 +1499,10 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
         .subscribe();
     let first = follow(&mut sources, |version| version.is_some()).await;
 
-    enabled.dispose().await.unwrap();
+    disable(&agent).await;
     plugin_state(&provider, rutis::host::FiberState::Pending).await;
     follow(&mut sources, |version| version.is_none()).await;
-    let enabled = root.plugin(EnableContributor);
+    enable(&agent).await;
     plugin_state(&provider, rutis::host::FiberState::Active).await;
     let second = follow(&mut sources, |version| version.is_some()).await;
     assert_ne!(second, first);
@@ -1491,21 +1511,24 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    enabled.dispose().await.unwrap();
-    plugin_state(&provider, rutis::host::FiberState::Pending).await;
-    let refreshed = tokio::time::timeout(Duration::from_millis(150), sources.changed())
-        .await
-        .is_ok();
-    gate.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), closing)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    // The loader unloads the row at once, and its reconcile returns once the
+    // held close has ended.
+    let ((), refreshed) = tokio::join!(disable(&agent), async {
+        plugin_state(&provider, rutis::host::FiberState::Pending).await;
+        let refreshed = tokio::time::timeout(Duration::from_millis(150), sources.changed())
+            .await
+            .is_ok();
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        refreshed
+    });
     assert!(!refreshed, "a closing Session refreshed its tools");
     assert_eq!(offered(&sources.borrow()), second);
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 /// The version of `key` in the newest tool part `branch` adopted.
@@ -1552,9 +1575,6 @@ impl DynPlugin for RegistryProbe {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_persisted_contributed_version_names_one_generation_across_restores() {
-    let root = Ctx::root().unwrap();
-    let enabled = root.plugin(EnableContributor);
-    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
     let log = Arc::new(Log::default());
@@ -1590,7 +1610,11 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
                 }))
             },
         ));
-        builder.build_in(&root)
+        async move {
+            let agent = contributing(&builder).await;
+            enable(&agent).await;
+            agent
+        }
     };
     let config = SessionConfig {
         tools: Some(vec!["optional".into(), "echo".into()]),
@@ -1600,7 +1624,7 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         },
         ..SessionConfig::default()
     };
-    let agent = build();
+    let agent = build().await;
     let session = agent.create_session(config).await.unwrap();
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -1614,7 +1638,7 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
     let id = session.id().to_owned();
     agent.close().await.unwrap();
 
-    let agent = build();
+    let agent = build().await;
     let restored = agent.restore_session(id).await.unwrap();
     restored
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -1635,6 +1659,4 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         Some("v1")
     );
     agent.close().await.unwrap();
-    enabled.dispose().await.unwrap();
-    root.shutdown().await.unwrap();
 }

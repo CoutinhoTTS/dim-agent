@@ -119,7 +119,7 @@ fn facts(window: f64) -> Context {
 async fn effects_session(
     script: Arc<Script>,
     context: Context,
-) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+) -> (MinimalHost, dim_agent_runtime::Session) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .process_value(Arc::new(ModelHost(script)))
@@ -147,7 +147,7 @@ async fn effects_session(
             }),
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec![

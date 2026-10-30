@@ -17,7 +17,7 @@ use dim_agent_capabilities::{
     host::*,
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::Connection;
@@ -271,7 +271,7 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
             }),
         );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await?;
     let session = agent
         .create_session(SessionConfig {
             system_prompt: "s".repeat(800_000),
@@ -618,7 +618,7 @@ async fn reads() -> std::result::Result<(), Error> {
                     Ok(Box::new(CaptureStop::new(names, stop_target.clone())?))
                 }),
             );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await?;
         let session = agent.restore_session(name.into()).await?;
         session.idle("main").await?;
         let active = captured.lock().unwrap().clone().unwrap().get("main")?;

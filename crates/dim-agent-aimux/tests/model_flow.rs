@@ -3,7 +3,7 @@ use axum::{
 };
 use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRenderer, host::*};
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use futures_util::StreamExt;
 use rutis::host::CtxHost;
@@ -156,30 +156,13 @@ fn builder(models: Arc<AimuxModels>, tools: Arc<dyn ToolDriver>) -> AgentBuilder
     dim_agent_aimux::install(&mut builder);
     builder
 }
-struct ModelAgent {
-    agent: Agent,
-    root: rutis::Ctx,
-}
-impl std::ops::Deref for ModelAgent {
-    type Target = Agent;
-    fn deref(&self) -> &Agent {
-        &self.agent
-    }
-}
-impl ModelAgent {
-    async fn close(&self) -> dim_agent_runtime::Result<()> {
-        self.agent.close().await?;
-        self.root.shutdown().await.map_err(Into::into)
-    }
-}
-fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> ModelAgent {
-    let root = rutis::Ctx::root().unwrap();
-    root.plugin(AimuxPlugin);
-    root.plugin(ConfiguredModelsPlugin(models.clone()));
-    let agent = custom
-        .unwrap_or_else(|| builder(models, Arc::new(MockTools)))
-        .build_in(&root);
-    ModelAgent { agent, root }
+/// The host's model plugins are process rows of its loader.
+async fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> MinimalHost {
+    let mut builder = custom.unwrap_or_else(|| builder(models.clone(), Arc::new(MockTools)));
+    builder
+        .plugin(|_| Ok(Box::new(AimuxPlugin)))
+        .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
+    MinimalHost::start(&builder).await.unwrap()
 }
 fn session_config() -> SessionConfig {
     SessionConfig {
@@ -263,7 +246,7 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
 async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let server = TestServer::start().await;
-        let agent = model_agent(server.models(), None);
+        let agent = model_agent(server.models(), None).await;
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
@@ -331,7 +314,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let server = TestServer::start().await; let agent = model_agent(server.models(), None);
+        let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("wait".into(), InputMode::Queue, "main").await.unwrap();
         // Streaming text is progress until its block ends (agent-029).
@@ -352,7 +335,7 @@ async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let server = TestServer::start().await; let agent = model_agent(server.models(), None);
+        let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
         for prompt in ["unauthorized", "truncated", "length"] {
             let session = agent.create_session(session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
@@ -370,7 +353,7 @@ async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
 #[tokio::test]
 async fn model_configuration_rejects_unknown_models_before_session_start() {
     let server = TestServer::start().await;
-    let agent = model_agent(server.models(), None);
+    let agent = model_agent(server.models(), None).await;
     let mut config = session_config();
     config.model.model_id = "not-registered".into();
     assert!(agent.create_session(config).await.is_err());
@@ -465,7 +448,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         for remove_tools in [false, true] {
             let mut builder = builder(models.clone(), Arc::new(MockTools));
             builder.require_feature(Feature::new("test.final-model-request").branch("test.final-model-request", move |names| Ok(Box::new(OverrideRequest { remove_tools, timeline: names.key()? }))));
-            let agent = model_agent(models.clone(), Some(builder)); let session = agent.create_session(session_config()).await.unwrap();
+            let agent = model_agent(models.clone(), Some(builder)).await; let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = session.history("main", None).await.unwrap();

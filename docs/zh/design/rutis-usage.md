@@ -43,10 +43,11 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 一个 effect，和 Cordis 把 `ctx.on` 绑定到调用方一样：插件的这一代运行多久，登记就保持多久；这一代无论怎样结束，
 登记都会撤销。生成器的依赖在实例挂载它时按它的作用域检查，所以点名了作用域之外的组的部件在那时失败。
 
-**插件在哪里运行。** App Server 把插件作为它 loader 里的进程行放置，并以进程名字 `partRegistry` 把登记处交给它们。
-库宿主或测试把插件加到 Agent builder 上（`AgentBuilder::plugin`），自己放置的 Agent 把它们挂进自己的 loader。
-登记处属于一次放置：自己放置的 Agent 只挂它自己的插件登记的部件，所以同一个 builder 建出的两个 Agent 不会挂上
-彼此的部件。
+**插件在哪里运行。** 一个宿主只有一个 loader，它的 Agent 就建在这个 loader 里（`AgentBuilder::build(loader, anchor)`）。
+App Server 把插件作为它 loader 里的进程行放置，并以进程名字 `partRegistry` 把登记处交给它们。测试、示例和 `xtask`
+也是宿主，和 App Server 一样：最小宿主（`dim_agent_runtime::testing::MinimalHost`）用同样的方式装配一个根和它的
+loader，把加到 Agent builder 上的插件（`AgentBuilder::plugin`）放成进程行。每个最小宿主有自己的登记处，所以同一个
+builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
 
 **挂载。** 每个 Session 实例和分支实例里都有两个挂载器行，除了作用域自己的机制，它们是该组仅有的行。
 
@@ -83,12 +84,12 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - capabilities 各 crate 的每个功能、App Server 的每个 Session 部件，都是一个登记自己部件的插件：
   `Feature`（不持有进程状态的插件）用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加。
   安装函数就是 profile，它按名字要求自己安装的部件（`require_feature`、`require_part`）。App Server 把 builder
-  的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；自己放置的
-  Agent 在自己的 loader 里挂载它们，用自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
+  的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；最小宿主也这样
+  做，用它自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
   持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
   WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
-  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
-  第一个 Session 或 `Agent::start` 时启动自己的插件。
+  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。最小宿主在启动时
+  启动它的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - `partRegistry` 可以跨语言调用：TypeScript 或 Python 插件是进程里的一行，用 `registerDefinition` 登记自己的部件（附录 B，[#403](https://github.com/arcships/dim/issues/403)）；声明了组的行会被 App Server 拒绝。
 
@@ -352,9 +353,9 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 ```
 
 必需挂载器挂载 profile 要求的部件（`AgentBuilder::require_part`），把它们和必需行一起交给实例的发布；
-必需部件尚未有人登记时，创建在自己的时限内等它登记。builder 的登记处（`AgentBuilder::parts`）服务于宿主放置的
-Agent（`build_at`），宿主以 `partRegistry` 把它提供给自己的进程插件（`AgentBuilder::plugin_rows`）；自己放置的
-Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `ctx` 的一个 effect。
+必需部件尚未有人登记时，创建在自己的时限内等它登记。builder 的登记处（`AgentBuilder::parts`）服务于宿主建出的
+Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自己的进程插件（`AgentBuilder::plugin_rows`）；
+最小宿主建一个自己的登记处。登记是调用方 `ctx` 的一个 effect。
 挂载器在 rutis 自己的级联清理之前先卸下自己挂的副本，所以已经失败的副本在实例关闭时不会再报一次错；
 `SessionLoader` 从所在实例的 Session scope 行创建实例，因为 loader 只能从行的上下文放置实例。
 
@@ -363,8 +364,7 @@ Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `
 
 宿主为进程名称配置的值（例如脚本化的 `ModelHost`）用 `AgentBuilder::process_value`。Agent 组行
 （`AgentBuilder::agent_row`）包含它的提供方，并按 Agent 实例隔离该名称，因此共享宿主的其他 Agent、宿主自己
-对该名称的提供方都不会与它冲突。自行托管的 Agent 放置这一行；使用 `build_at` 的宿主把它放进自己的 loader，
-该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
+对该名称的提供方都不会与它冲突。宿主把这一行放进自己的 loader，该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
 
 ### A.3 已定的问题
 
