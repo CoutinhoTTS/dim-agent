@@ -472,14 +472,11 @@ impl ContextPreparation {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
         let through = self.timeline.committed();
-        let context = self
+        let (context, history) = self
             .history
             .context(&self.timeline, through)
             .await
             .map_err(ContextOpError::Read)?;
-        let history = (self.history.render)(&context).map_err(|error| {
-            ContextOpError::Read(AgentError::fault("ContextPreparation", error))
-        })?;
         let request =
             configured_request(&context, &history).ok_or(ContextOpError::NotConfigured)?;
         let view = policy
@@ -536,13 +533,12 @@ impl ContextPreparation {
         validate_capability_snapshot(&request)?;
         *self.prepared.lock().unwrap() =
             Some((source.turn_id.clone(), source.through, request.clone()));
-        let context = self
+        let (context, history) = self
             .history
             .context(&self.timeline, source.through)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
         crate::context_policy::check_cancel(&cancel)?;
-        let history = (self.history.render)(&context).map_err(HostError::failed)?;
         let prefix = context_messages(&context, &history);
         if request.messages.len() < prefix.len()
             || !prefix

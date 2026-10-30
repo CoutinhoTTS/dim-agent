@@ -1,6 +1,6 @@
 //! The Loop's compaction step and the record contract (ContextCompaction
 //! §5.3–§5.8, acceptance 3–6 and 8 at the capability level).
-use super::context_reads::TASK_READS;
+use super::context_reads::{CountContextReads, TASK_READS};
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
@@ -447,6 +447,85 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     let text = serde_json::to_string(&request.messages).unwrap();
     assert!(!text.contains("first") && !text.contains("second") && text.contains("third"));
     assert_paired(&events);
+    agent.close().await.unwrap();
+}
+
+/// Counts renders across the one test that installs it.
+static RENDERS: AtomicUsize = AtomicUsize::new(0);
+
+fn counting_render(context: &ContextHistory) -> std::result::Result<Vec<HistoryEntry>, String> {
+    RENDERS.fetch_add(1, Ordering::SeqCst);
+    project_context_history(context)
+}
+
+/// A checkpointed context read plus its caller's use renders once: the render
+/// that validates the checkpoint is the render the step keeps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_checkpointed_step_renders_its_context_once() {
+    let store = Arc::new(CountContextReads::default());
+    let mut builder = builder_with_strategy(
+        Arc::new(EchoModel),
+        HistoryRenderer {
+            render: counting_render,
+            ..HistoryRenderer::default()
+        },
+        Scripted::new(Mode::Cut),
+        None,
+    );
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    turns(&session, &[first().as_str(), "second", "third"]).await;
+    let command = session
+        .service::<AgentLoop>("main")
+        .unwrap()
+        .compact()
+        .unwrap();
+    let events = until(&session, |events| result_for(events, command).is_some()).await;
+    assert!(matches!(
+        result_for(&events, command).unwrap().outcome,
+        ContextCompactionResult::Completed { .. }
+    ));
+    let through = session.sequence("main").unwrap();
+    let key = TimelineKey {
+        session_id: session.id().into(),
+        branch_id: "main".into(),
+    };
+    let default = HistoryRenderer::default();
+    let snapshot = store
+        .latest_snapshot(&key, through, default.checkpoint_interpreter)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let anchor = events
+        .iter()
+        .find(|event| event.id == snapshot.event_id)
+        .unwrap();
+    let checkpoint = (default.decode_checkpoint)(&snapshot, anchor).unwrap();
+    store.ranges.lock().unwrap().clear();
+    RENDERS.store(0, Ordering::SeqCst);
+    let command = session
+        .service::<AgentLoop>("main")
+        .unwrap()
+        .compact()
+        .unwrap();
+    let events = until(&session, |events| result_for(events, command).is_some()).await;
+    assert!(result_for(&events, command).is_some());
+    assert!(
+        store.ranges.lock().unwrap().iter().any(|(branch, range)| {
+            branch == "main" && *range.start() == checkpoint.resume.sequence
+        }),
+        "the step must read from the checkpoint's resume"
+    );
+    assert_eq!(
+        RENDERS.load(Ordering::SeqCst),
+        1,
+        "a checkpointed read and its use render once"
+    );
     agent.close().await.unwrap();
 }
 

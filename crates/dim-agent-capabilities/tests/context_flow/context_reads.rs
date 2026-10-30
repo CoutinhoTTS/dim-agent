@@ -766,7 +766,7 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
                 .await
                 .unwrap();
                 store.earliest_read.store(u64::MAX, Ordering::SeqCst);
-                let recovered = renderer
+                let (recovered, _) = renderer
                     .context(&timeline, timeline.sequence())
                     .await
                     .unwrap();

@@ -1,5 +1,5 @@
 use crate::prompt_state::PromptSnapshot;
-use dim_agent_runtime::{ContextHistory, Timeline};
+use dim_agent_runtime::{AgentError, ContextHistory, Timeline};
 use dim_agent_types::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -126,7 +126,35 @@ impl HistoryRenderer {
         Ok(snapshot)
     }
 
+    /// The context at `through` with its rendering. A read renders once: the
+    /// render that validates a checkpoint is the one returned, and without a
+    /// checkpoint the context is rendered here too. A checkpoint that does not
+    /// render is a cache miss and yields the full replay with its rendering.
     pub async fn context(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<(ContextHistory, Vec<HistoryEntry>)> {
+        let context = timeline
+            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await?;
+        match (self.render)(&context) {
+            Ok(history) => Ok((context, history)),
+            Err(_) if context.checkpoint.is_some() => {
+                let context = timeline.context(through).await?;
+                let history =
+                    (self.render)(&context).map_err(|error| AgentError::fault("History", error))?;
+                Ok((context, history))
+            }
+            Err(error) => Err(AgentError::fault("History", error)),
+        }
+    }
+
+    /// The context at `through` alone, for readers that inspect events instead
+    /// of rendering them. No render is made without a checkpoint; one made to
+    /// validate a checkpoint is discarded, and a checkpoint that does not
+    /// render falls back to the full replay.
+    pub async fn read(
         &self,
         timeline: &Timeline,
         through: u64,
@@ -146,7 +174,7 @@ pub async fn read_context(
     timeline: &Timeline,
     through: u64,
 ) -> dim_agent_runtime::Result<ContextHistory> {
-    HistoryRenderer::default().context(timeline, through).await
+    HistoryRenderer::default().read(timeline, through).await
 }
 
 /// One message an input or the projection places, with the in-effect

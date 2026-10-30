@@ -7656,7 +7656,9 @@
       "from": "dim_agent_capabilities::history",
       "to": "dim_agent_runtime::error",
       "references": [
-        "path dim_agent_runtime::Result"
+        "path AgentError::fault",
+        "path dim_agent_runtime::Result",
+        "use dim_agent_runtime::AgentError"
       ]
     },
     {
