@@ -21,9 +21,12 @@
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
 //! asked, or a judge call failed — the first call, its retry without a
-//! temperature, or a re-ask. The judge's verdicts are read from a JSON array
-//! or from one object per line; a reply that gives no verdict, or leaves a
-//! statement without one, is asked again with what was wrong, at most twice.
+//! temperature, or a re-ask. The judge is asked for `present` or `absent`;
+//! the verdict parser it shares with the summary evaluation also accepts
+//! `contradicted`, which a `must_not_show` probe treats as not shown. The
+//! judge's verdicts are read from a JSON array or from one object per line; a
+//! reply that gives no verdict, or leaves a statement without one, is asked
+//! again with what was wrong, at most twice.
 //! A run the judge answered but still gave no usable verdicts for after the
 //! re-asks is unjudged, and so is a run whose view does not fit the judge's
 //! budget, which is never asked: either adds nothing to its arm's probe
