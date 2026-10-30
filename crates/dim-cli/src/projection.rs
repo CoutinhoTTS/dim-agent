@@ -644,7 +644,15 @@ impl Projection {
                 }
                 TurnEnd::Failed
             }
-            TurnOutcome::Cancelled { .. } => {
+            TurnOutcome::Cancelled { reason } => {
+                if reason == crate::model::view::INTERRUPT_REASON {
+                    let index = self.push(
+                        format!("interrupted-{sequence}"),
+                        RowKind::Status,
+                        reason.clone(),
+                    );
+                    self.row(index).tone = Some(RowTone::Warning);
+                }
                 self.push(
                     format!("stopped-{sequence}"),
                     RowKind::Status,

@@ -758,10 +758,12 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
         let stop = wire.read("session.stop");
         assert_eq!(stop["params"]["sessionId"], "session");
         assert_eq!(stop["params"]["branchId"], "child");
+        assert_eq!(stop["params"]["reason"], "User interrupted the run.");
         wire.reply(&stop, json!({}));
         let main = wire.read("session.stop");
         assert_eq!(main["params"]["sessionId"], "session");
         assert_eq!(main["params"]["branchId"], "main");
+        assert_eq!(main["params"]["reason"], "User interrupted the run.");
         wire.reply(&main, json!({}));
         step(
             wire,
