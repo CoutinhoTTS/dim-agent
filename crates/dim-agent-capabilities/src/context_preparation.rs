@@ -7,7 +7,8 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline, TimelineIdentity,
+    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
+    Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -36,6 +37,9 @@ pub struct ConfigurationPublisher {
     /// The Session's guide entries: the System it publishes carries the
     /// composition over the entries in force at that adoption.
     guide: Arc<GuideEntries>,
+    /// The branch's phase: a guide adoption on a closing branch is dropped
+    /// rather than recorded.
+    branch_phase: Arc<BranchLifecycle>,
 }
 
 impl ConfigurationPublisher {
@@ -202,8 +206,13 @@ impl ConfigurationPublisher {
     /// from the adopted one: a guide adoption, the settings it keeps —
     /// model, tools and source text — unchanged. A branch that adopted no
     /// configuration publishes nothing, and so does one whose composition
-    /// did not move.
+    /// did not move. Nothing is recorded on a branch that is closing: its
+    /// writers are withdrawing because it is shutting down, and the System
+    /// they leave behind is not one the branch ever ran with.
     pub(crate) async fn adopt_guide(&self) -> dim_agent_runtime::Result<()> {
+        if self.closing() {
+            return Ok(());
+        }
         let context =
             crate::history::read_context(&self.timeline, self.timeline.sequence()).await?;
         let Some(previous) = context_configuration(&context) else {
@@ -215,10 +224,33 @@ impl ConfigurationPublisher {
         if data.system == previous.system {
             return Ok(());
         }
-        let appended = self
-            .timeline
-            .append(EventKind::ContextConfigured(data).into())?;
-        self.await_published(appended.sequence).await.map(|_| ())
+        // The append rechecks the phase under the commit lock: the branch may
+        // have started closing while the context was read.
+        let appended = self.timeline.append_batch_registered(
+            vec![EventKind::ContextConfigured(data).into()],
+            |_| {
+                if self.closing() {
+                    Err(AgentError::Cancelled(
+                        "the branch closed before its guide adoption".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        self.await_published(
+            appended
+                .last()
+                .expect("single-event batch returned one event")
+                .sequence,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Whether the branch is closing or closed.
+    fn closing(&self) -> bool {
+        self.branch_phase.phase() >= BranchPhase::Closing
     }
 
     /// The configuration that records an adoption changing no model and no
@@ -646,6 +678,7 @@ pub struct ContextPreparationPlugin {
     history: Key<HistoryRenderer>,
     identity: Key<TimelineIdentity>,
     guide: Key<GuideEntries>,
+    branch_phase: Key<BranchLifecycle>,
 }
 impl ContextPreparationPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -660,6 +693,7 @@ impl ContextPreparationPlugin {
             history: names.key()?,
             identity: names.key()?,
             guide: names.key()?,
+            branch_phase: names.key()?,
         })
     }
 }
@@ -677,6 +711,7 @@ impl DynPlugin for ContextPreparationPlugin {
             self.history.erase(),
             self.identity.erase(),
             self.guide.erase(),
+            self.branch_phase.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -689,6 +724,7 @@ impl DynPlugin for ContextPreparationPlugin {
             let history = ctx.require_at(&self.history)?;
             let identity = ctx.require_at(&self.identity)?;
             let guide = ctx.require_at(&self.guide)?;
+            let branch_phase = ctx.require_at(&self.branch_phase)?;
             if strategy.0.is_some() {
                 guide.register(
                     ctx,
@@ -704,6 +740,7 @@ impl DynPlugin for ContextPreparationPlugin {
                 timeline: timeline.clone(),
                 identity: (*identity).clone(),
                 guide: guide.clone(),
+                branch_phase,
             });
             ctx.provide_at(self.publisher.clone(), publisher)?;
             let service = Arc::new(ContextPreparation {

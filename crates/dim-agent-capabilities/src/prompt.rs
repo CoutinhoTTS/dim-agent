@@ -439,20 +439,27 @@ impl Prompt {
     /// `Open` handler took before its adoption composed, and starts after
     /// that adoption has run. A change that composes the same guide for
     /// this branch, such as another branch's entry, costs one composition
-    /// and no read of the branch's context.
+    /// and no read of the branch's context. The listener ends when the
+    /// branch starts closing: an entry that withdraws only because the
+    /// branch is shutting down must not move its System.
     fn listen_guide(self: &Arc<Self>, mut changes: watch::Receiver<u64>, mut composed: String) {
-        let branch = self.identity.branch_id.clone();
+        let branch_id = self.identity.branch_id.clone();
+        let branch_phase = self.branch_phase.clone();
         let owner = self.clone();
         self.tasks.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
+                    _ = branch_phase.closing() => return,
                     _ = owner.lifecycle.cancelled() => return,
                     changed = changes.changed() => if changed.is_err() {
                         return;
                     },
                 }
-                let guide = owner.guide.compose(&branch);
+                if owner.branch_phase.phase() >= BranchPhase::Closing {
+                    return;
+                }
+                let guide = owner.guide.compose(&branch_id);
                 if guide == composed {
                     continue;
                 }
@@ -790,8 +797,16 @@ impl DynPlugin for PromptPlugin {
                                 .unwrap_or_else(|panic| {
                                     Err(AgentError::fault("Prompt", panic_message(panic)))
                                 });
+                            // A branch that closed while the adoption waited on
+                            // the queue is not a fault: the item is dropped
+                            // with the others.
                             if let Err(error) = result
-                                && !matches!(error, AgentError::Storage(_))
+                                && !matches!(
+                                    error,
+                                    AgentError::Storage(_)
+                                        | AgentError::Closed(_)
+                                        | AgentError::Cancelled(_)
+                                )
                             {
                                 owner.faults.report(error);
                             }

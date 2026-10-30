@@ -7058,7 +7058,11 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path BranchLifecycle",
+        "path BranchPhase::Closing",
         "path TimelineIdentity",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase",
         "use dim_agent_runtime::TimelineIdentity"
       ]
     },
@@ -8695,16 +8699,10 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
-      "to": "dim_agent_runtime::branch",
-      "references": [
-        "path branch"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
+        "path BranchPhase::Closing",
         "path TimelineIdentity"
       ]
     },
