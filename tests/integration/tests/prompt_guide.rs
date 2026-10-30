@@ -1389,6 +1389,96 @@ async fn a_reloaded_writer_that_keeps_its_entry_records_nothing() {
     agent.close().await.unwrap();
 }
 
+/// #661: a composition that moved and returned while the branch opened is
+/// adopted too. The open can compose the System from the middle of such a
+/// change while the composition it compares against reads as before, so the
+/// adoption after the open, which compares against the System the branch
+/// carries, is what converges it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_composition_that_moved_and_returned_while_its_branch_opens_is_adopted() {
+    let flag = Arc::new(AtomicBool::new(true));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(HoldingStore::default());
+    let target = PromptSourceTarget {
+        source: "rules".into(),
+        scope: PromptScope::Branch {
+            timeline: "main".into(),
+        },
+    };
+    let hosts = Arc::new(GatedPrompts {
+        entry: PromptEntry {
+            source: "rules".into(),
+            version: "1".into(),
+            body: "rules one".into(),
+            scope: PromptScope::Branch {
+                timeline: "main".into(),
+            },
+            delivery: PromptDelivery::System,
+            order: 0,
+        },
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let (flag_owner, views_owner) = (flag.clone(), views.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    builder.timeline_store(store.clone());
+    defaults::install_with_prompt(
+        &mut builder,
+        hosts.clone(),
+        Some(ConfigureUpdate {
+            sources: vec![target],
+            model: Some(configuration("configured")),
+        }),
+    );
+    builder.require_feature(Feature::new("GuideProbeOwner").session(
+        "GuideProbeOwner",
+        move |names| {
+            Ok(Box::new(GuideProbeOwner {
+                flag: flag_owner.clone(),
+                views: views_owner.clone(),
+                key: names.key()?,
+                scope: GuideScope::Session,
+            }))
+        },
+    ));
+    let agent = builder.build();
+
+    // The open loads first, composes after its load returns, and then waits
+    // for the publication. The entry withdraws inside the load and returns
+    // inside the publication, so the adoption sees the composition moved
+    // and came back.
+    store.hold_next_configuration_on("main");
+    let creation = agent.create_session(SessionConfig::default());
+    tokio::pin!(creation);
+    let session = tokio::select! {
+        _ = &mut creation => panic!("the Session opened before its publication was held"),
+        () = async {
+            hosts.started.notified().await;
+            flag.store(false, Ordering::SeqCst);
+            let view = views.lock().unwrap().last().cloned().expect("a probe");
+            view.restart().await.unwrap();
+            hosts.release.notify_one();
+            store.entered.notified().await;
+            flag.store(true, Ordering::SeqCst);
+            let view = views.lock().unwrap().last().cloned().expect("a probe");
+            view.restart().await.unwrap();
+            store.release();
+        } => creation.await.unwrap(),
+    };
+    wait_for_configurations(&session, "main", 1).await;
+    let published = configurations(&session, "main").await;
+    let adopted = published.last().expect("the adoption after the open");
+    let system = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(system.contains(PROBE_ENTRY), "{system:?}");
+    run(&session, "after the open").await;
+    assert!(
+        last_system(&session, "main").await.contains(PROBE_ENTRY),
+        "the request carries the entry its writer registered again"
+    );
+    agent.close().await.unwrap();
+}
+
 /// The channel rule states the handle a compaction appends to an input it
 /// shortened: the one case the "separate user messages" sentence is not
 /// true of, and therefore part of the protocol.
@@ -1416,6 +1506,27 @@ async fn the_frame_states_the_compaction_handle() {
         "the handle is stated once: {guide:?}"
     );
     agent.close().await.unwrap();
+}
+
+/// A prompt host whose first load waits until the test opens it: the window
+/// in which the open adoption has not composed the System yet.
+struct GatedPrompts {
+    entry: PromptEntry,
+    started: Notify,
+    release: Notify,
+}
+impl LoadPrompt for GatedPrompts {
+    fn load(
+        &self,
+        _: PromptSourceTarget,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Option<PromptEntry>> {
+        Box::pin(async move {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Some(self.entry.clone()))
+        })
+    }
 }
 
 /// A minimal prompt host: one entry per source, replaced by the test.
