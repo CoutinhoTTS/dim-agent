@@ -143,15 +143,15 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Exec output and offloaded `read` results | `<database directory>/command-output/<S>/` | Step 3 |
 | Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
 | Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
-| Collaboration relations that name S, and the Agents S leads or owns | Durable: `agent_sessions.leader_session_id` and `agents.owner_session_id` ([Collaboration §6](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)); Collaboration's relations are rebuilt from them | Agents deletes a leader with its Team: each member's own delete, then the Agent records, then S. Collaboration drops a relation when it observes a member's close ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_ended`) or the delete of an unloaded member, and rebuilds the rest when it loads ([idle unload §7](idle-unload.md#7-races-and-interactions)) |
+| Collaboration relations that name S, the member Sessions S leads and the Agents S owns | Durable: `agent_sessions.leader_session_id` and `agents.owner_session_id` ([Collaboration §6](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)); Collaboration's relations are rebuilt from them | Agents deletes a leader with its Team: each member's own delete, in which SessionStore removes that Session's rows, then the Agent records Agents owns, then S. Collaboration drops a relation when it observes a member's close ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_ended`) or the delete of an unloaded member, and rebuilds the rest when it loads ([idle unload §7](idle-unload.md#7-races-and-interactions)) |
 
 A delete does not remove:
 
 - **Other owners' records that name S**, such as Scheduler and Workflow run records in `pluginFiles`. When their
   owners use the id, they get `session_closed`, as for a closed Session.
 - **Other Sessions.** A fork of S is a Session with its own rows. A deleted leader's members and the Agents it owns are
-  its Team, and its delete ends them with it ([Collaboration §6](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime));
-  they are not another owner's records.
+  its Team, and its delete ends them with it ([Collaboration §6](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)):
+  SessionStore removes each member's rows and Agents removes the Agent records, each owning its own record.
 - **Host configuration** (provider selections by workspace, MCP project enablement). It is not per Session.
 
 ### 3.4 Clients and subscriptions

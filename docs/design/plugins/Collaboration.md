@@ -89,10 +89,10 @@ The producer keeps these invariants:
 
 ### 6.2 Who may address what
 
-- The `agent` tool resolves a target Agent only when it is public, or its owner is the caller's own Session or the leader of the Team the caller belongs to. Every other id, and an id that does not exist, are `agent_not_found`.
+- The `agent` tool resolves a target Agent only when it is public, or its owner is the caller's own Session or the leader of the Team the caller belongs to. Every other id, and an id that does not exist, are `agent_not_found`. An owned Agent with no member Session is an incomplete delegation, so a `request` that targets it is `agent_not_found` too: only its creation and its first member Session make it an Agent a Team can use.
 - A member of another Team is `team_member_not_found`. This is Collaboration's address space: the Session RPC methods (`session.attach`, `session.delete` and the rest) still accept a member's id under their own client authorization, and it is not an address through the `agent` tool outside its Team.
 - Visibility never follows from what the process happens to hold: a relation that is absent is a refusal, never a public record. A restart and a reload of Agents or Collaboration keep this rule.
-- The tool's `list` reports an Agent to the Teams above, members included, and `inspect` to leaders only. The RPC `agent.list` serves the public directory, so an owned Agent does not appear there. Owner Session ids are Collaboration's records and stay out of the client protocol.
+- The tool's `list` reports an Agent to the Teams above, members included, and `inspect` to leaders only. The public RPC treats an owned Agent as absent: `agent.list` does not list it, and `agent.close` answers as an unknown id. Owner Session ids are Collaboration's records and stay out of the client protocol.
 
 ### 6.3 Lifetime
 
@@ -117,7 +117,7 @@ The producer keeps these invariants:
 
 ### 6.5 Requirements raised to other owners
 
-- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete a Session's members and owned Agents, running each member's own delete, and remove the record of an owned Agent whose last member Session is deleted; expose ownership to Collaboration without adding it to the client protocol; remove an incomplete or orphaned owned Agent at startup.
+- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete a Session's members and owned Agents, running each member's own delete, and remove the record of an owned Agent whose last member Session is deleted; answer a `request` that names an owned Agent with no member Session and the public `agent.close` of an owned Agent as the existing unknown-Agent error; expose ownership to Collaboration without adding it to the client protocol; remove an incomplete or orphaned owned Agent at startup.
 - **SessionStore and native storage.** Store `agent_sessions.leader_session_id`; decide both columns' format version, upgrade and indexes; remove one Session's rows in its own transaction, which a Team's delete runs once per member before the leader's own rows.
 - **Session deletion and fork.** Record the Team cascade, its order and the last-member rule among a delete's effects (§6.3), replace the rule that a deleted leader keeps its members, and refuse `session.fork` on a member Session.
 

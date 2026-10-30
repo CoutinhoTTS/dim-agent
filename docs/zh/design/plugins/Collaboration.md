@@ -68,7 +68,7 @@ Session 部件在自己的 `apply` 中为每个标记各注册一个条目，按
 
 ## 6. 委派的所有权与寿命
 
-Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次委派创建哪个 Agent、哪些 Session，它们归谁、谁能寻址、何时结束。承载这些事实的列属于[原生存储格式](../appserver/native-storage-format.md)。
+Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次委派创建哪个 Agent、哪些 Session，它们归谁、谁能寻址、何时结束。承载这些事实的列属于[原生存储格式](../../../design/appserver/native-storage-format.md)。
 
 ### 6.1 持久事实
 
@@ -89,16 +89,16 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 ### 6.2 谁能寻址什么
 
-- `agent` 工具只解析公开的、或 owner 是调用方自己的 Session、或调用方所属 Team 的 leader 的 Agent。其他任何 id 与不存在的 id 一样返回 `agent_not_found`。
+- `agent` 工具只解析公开的、或 owner 是调用方自己的 Session、或调用方所属 Team 的 leader 的 Agent。其他任何 id 与不存在的 id 一样返回 `agent_not_found`。没有成员 Session 的被拥有 Agent 是未完成的委派，因此指向它的 `request` 同样返回 `agent_not_found`：只有它的创建与第一个成员 Session 才让它成为 Team 可用的 Agent。
 - 其他 Team 的成员返回 `team_member_not_found`。这是 Collaboration 的地址空间：`session.attach`、`session.delete` 等 Session RPC 仍按各自的客户端授权接受成员 id，但它在 `agent` 工具中在 Team 之外不构成地址。
 - 可见性从不来自进程碰巧持有的东西：缺失的关系是拒绝，绝不是公开记录。重启、Agents 或 Collaboration 的重载都保持这条规则。
-- 工具的 `list` 向上面这些 Team 报告 Agent（包括成员），`inspect` 只给 leader。RPC 的 `agent.list` 只服务公开目录，因此被拥有的 Agent 不会出现在那里。owner 的 Session id 是 Collaboration 的记录，不进入客户端协议。
+- 工具的 `list` 向上面这些 Team 报告 Agent（包括成员），`inspect` 只给 leader。公开 RPC 把被拥有的 Agent 当作不存在：`agent.list` 不列出它，`agent.close` 按未知 id 回答。owner 的 Session id 是 Collaboration 的记录，不进入客户端协议。
 
 ### 6.3 寿命
 
 - 重启从持久事实恢复 Team：被拥有的 Agent 以被拥有状态装载，成员 Session 连同 leader 一起装载。卸载、未被读取或重载都不会让任何记录变成公开。
 - `close` 在本进程内结算请求并关闭成员 Session。Session 记录、它的 leader 与它 Agent 的记录都保留，因此重启后该成员作为普通 Session 重新装载，leader 仍能寻址它；closed 是进程状态，不写入存储。
-- 删除 leader Session 会结束它的 Team，由 Agents 执行：对 leader 领导的每个成员，执行该成员自己的删除（已装载则关闭、结算其工作、删除命令输出，并由 SessionStore 在它自己的事务里删除行）；然后关闭 leader 拥有的每个 Agent 并删除其记录；最后关闭并删除 leader 自己。Team 之间没有单一事务：成员行引用 leader，所以先删成员；中途失败或崩溃会留下 leader 与残缺的 Team，重试即可完成。挂在成员上的客户端会看到它像自己的删除一样先关闭再消失，进行中的成员工作由该关闭结算。
+- 删除 leader Session 会结束它的 Team，由 Agents 执行：对 leader 领导的每个成员，执行该成员自己的删除（已装载则关闭、结算其工作、删除命令输出，并由 SessionStore 在它自己的事务里删除行）；然后关闭 leader 拥有的每个 Agent 并删除其记录；最后关闭并删除 leader 自己。Team 之间没有单一事务：成员行引用 leader，所以先删成员；中途失败或崩溃会留下 leader 与残缺的 Team，重试即可完成。删除已经不在的 Agent 记录会成功，因此最后一个成员自己的删除与这次删除都可能移除它。挂在成员上的客户端会看到它像自己的删除一样先关闭再消失，进行中的成员工作由该关闭结算。
 - 删除被拥有 Agent 的最后一个成员 Session 时，在成员行消失后关闭该 Agent 并删除其记录。两步之间失败会留下没有成员的被拥有 Agent，由启动清理。公开 Agent 不会因为删除成员 Session 而被删。
 - 对成员 Session 做 fork 会被拒绝：fork 会带上成员的角色与其 Agent，却没有 leader，既不是成员也不是普通对话。对 leader 做 fork 不领导任何成员，源的被拥有 Agent 与成员留在源。
 - 自身创建失败的委派会删掉它为这次请求创建的 Agent 记录，因此不会留下没有成员 Session 的被拥有 Agent。
@@ -117,13 +117,13 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 ### 6.5 向其他所有者提出的需求
 
-- **Agents。** 存储 `agents.owner_session_id`；以带 owner 的方式创建 Agent、删除 Agent 记录，作为具名操作；把被存储的 Agent 按被拥有状态装载；删除 Session 时执行每个成员自己的删除并删除它拥有的 Agent，以及最后一个成员 Session 被删时的被拥有 Agent 记录；向 Collaboration 提供所有权，但不加入客户端协议；启动时清理未完成或失去 owner 的被拥有 Agent。
+- **Agents。** 存储 `agents.owner_session_id`；以带 owner 的方式创建 Agent、删除 Agent 记录，作为具名操作；把被存储的 Agent 按被拥有状态装载；删除 Session 时执行每个成员自己的删除并删除它拥有的 Agent，以及最后一个成员 Session 被删时的被拥有 Agent 记录；对指向没有成员 Session 的被拥有 Agent 的 `request`、以及公开的 `agent.close`，按现有的未知 Agent 错误回答；向 Collaboration 提供所有权，但不加入客户端协议；启动时清理未完成或失去 owner 的被拥有 Agent。
 - **SessionStore 与原生存储。** 存储 `agent_sessions.leader_session_id`；决定两列的格式版本、升级与索引；在它自己的事务里删除一个 Session 的行，Team 的删除在 leader 自己的行之前对每个成员各执行一次。
 - **Session 删除与 fork。** 把 Team 的级联、其次序与最后成员规则记入删除的效果（§6.3），替换“删除 leader 保留成员”的规则，并拒绝对成员 Session 执行 `session.fork`。
 
 ### 6.6 这次删掉什么
 
-- Collaboration 的临时 Agent 记账：内存里的 `temporary` 表、`release_temporary`、关闭观察里的临时 Agent 统计，以及“两个成员同时结束会残留一个 Agent”的已知问题（[idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)）。没有打开 Session 的被拥有 Agent 交给 Agents 自己的装载与卸载规则。
+- Collaboration 的临时 Agent 记账：内存里的 `temporary` 表、`release_temporary`、关闭观察里的临时 Agent 统计，以及“两个成员同时结束会残留一个 Agent”的已知问题（[空闲卸载 §7](../appserver/idle-unload.md#7-竞争与交互)）。没有打开 Session 的被拥有 Agent 交给 Agents 自己的装载与卸载规则。
 - 启动时把每个被存储的 Agent 都当公开 Agent 装载：被拥有的按被拥有装载，未完成的被清理。
 - “未知 id 就是公开”：缺失的关系是拒绝。
 - 关系表的进程内存权威：Collaboration 装载时从存储的 leader 重建。
