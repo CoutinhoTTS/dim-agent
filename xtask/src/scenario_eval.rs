@@ -2183,15 +2183,19 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     }
     let in_parts: Vec<&RunRecord> = records
         .iter()
-        .filter(|record| record.judged() && record.judge_parts > 1)
+        .filter(|record| record.judge_parts > 1)
         .collect();
     if !in_parts.is_empty() {
         text += "\nA probe that relates events in different parts of a Timeline may be judged less reliably than one confined to a part.\n";
-        text += "\n| arm | scenario | run | parts |\n| --- | --- | --- | --- |\n";
+        text += "\n| arm | scenario | run | parts | unjudged |\n| --- | --- | --- | --- | --- |\n";
         for record in in_parts {
             text += &format!(
-                "| {} | {} | {} | {} |\n",
-                record.arm, record.scenario, record.run, record.judge_parts,
+                "| {} | {} | {} | {} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                record.judge_parts,
+                if record.unjudged() { "yes" } else { "" },
             );
         }
     }
