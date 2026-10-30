@@ -881,9 +881,11 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         matches!(&pages[..], [(branch, 0, events)] if *branch == child && (*events as u64) < child_head),
         "{pages:?}, {child_head}"
     );
+    // A checkpointed read checks its anchor with a read of that one row.
     assert!(
         of(&child).iter().all(|range| *range.start() == 1
             || *range.start() > child_head
+            || *range.start() == *range.end()
             || *range.end() == child_head),
         "{reads:?}"
     );
@@ -891,6 +893,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         of("main").iter().all(|range| *range.start() == 1
             || *range.start() > main_head
             || *range == (2..=main_head)
+            || *range.start() == *range.end()
             || *range.end() == cut),
         "{reads:?}"
     );
