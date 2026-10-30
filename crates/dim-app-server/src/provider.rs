@@ -411,39 +411,26 @@ impl ProviderRecord {
             disabled_model_ids: self.disabled_model_ids.clone(),
             models: entries
                 .into_iter()
-                .filter_map(|entry| {
+                .filter_map(|mut entry| {
                     let source = self
                         .models
                         .iter()
                         .find(|model| model.entry.model_id == entry.model_id)?;
-                    let mut capabilities = entry.capabilities;
-                    if let Some(found) = bundled.fallback(&entry.model_id) {
-                        capabilities.context_window = capabilities
-                            .context_window
-                            .or(found.capabilities.context_window);
-                        capabilities.max_output_tokens = capabilities
-                            .max_output_tokens
-                            .or(found.capabilities.max_output_tokens);
-                    }
-                    let missing_limits = capabilities.missing_limits();
+                    fill_bundled_limits(bundled, &mut entry);
+                    let missing_limits = entry.capabilities.missing_limits();
                     // `limits_undeclared` is derived from the effective limits,
                     // so a supplied limit makes the model available again.
-                    let unavailable_reason = source
-                        .unavailable_reason
-                        .clone()
-                        .filter(|reason| reason != "limits_undeclared")
-                        .or_else(|| {
-                            (!missing_limits.is_empty()).then(|| "limits_undeclared".into())
-                        });
+                    let unavailable_reason =
+                        limits_reason(source.unavailable_reason.clone(), &missing_limits);
                     Some(ProviderModel {
                         id: entry.model_id,
                         name: entry.display_name,
                         endpoint: Some(source.protocol),
                         config: ModelConfig {
-                            max_tokens: capabilities.max_output_tokens.map(|n| n as f64),
+                            max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
                             ..Default::default()
                         },
-                        capabilities,
+                        capabilities: entry.capabilities,
                         missing_limits,
                         unavailable_reason,
                         zdr: source.zdr,
@@ -1156,6 +1143,29 @@ fn drop_undeclared_limits(model: &mut ModelEntry) -> bool {
         changed = true;
     }
     changed
+}
+
+/// The limits a model does not declare come from the bundled catalog, which
+/// owns the descriptors both the catalog and the management view publish.
+pub(crate) fn fill_bundled_limits(bundled: &BundledCatalog, model: &mut ModelEntry) {
+    if let Some(found) = bundled.fallback(&model.model_id) {
+        model.capabilities.context_window = model
+            .capabilities
+            .context_window
+            .or(found.capabilities.context_window);
+        model.capabilities.max_output_tokens = model
+            .capabilities
+            .max_output_tokens
+            .or(found.capabilities.max_output_tokens);
+    }
+}
+
+/// A stored reason other than the limit-derived one stands; otherwise an
+/// absent limit names `limits_undeclared`, so a supplied limit clears it.
+pub(crate) fn limits_reason(reason: Option<String>, missing_limits: &[String]) -> Option<String> {
+    reason
+        .filter(|reason| reason != "limits_undeclared")
+        .or_else(|| (!missing_limits.is_empty()).then(|| "limits_undeclared".into()))
 }
 
 fn save_catalog(

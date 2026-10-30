@@ -292,16 +292,7 @@ impl ProviderService {
                             Some(replacement) => inherit_limits(replacement.clone(), &source.entry),
                             None => source.entry.clone(),
                         };
-                        if let Some(found) = bundled.fallback(&model.model_id) {
-                            model.capabilities.context_window = model
-                                .capabilities
-                                .context_window
-                                .or(found.capabilities.context_window);
-                            model.capabilities.max_output_tokens = model
-                                .capabilities
-                                .max_output_tokens
-                                .or(found.capabilities.max_output_tokens);
-                        }
+                        fill_bundled_limits(bundled, &mut model);
                         let missing_limits = model.capabilities.missing_limits();
                         ManagementModel {
                             enabled: !record.disabled_model_ids.contains(&model.model_id),
@@ -313,17 +304,9 @@ impl ProviderService {
                             },
                             endpoint: Some(source.protocol),
                             missing_limits: missing_limits.clone(),
-                            unavailable_reason: unavailable
-                                .map(str::to_owned)
-                                .or_else(|| {
-                                    source
-                                        .unavailable_reason
-                                        .clone()
-                                        .filter(|reason| reason != "limits_undeclared")
-                                })
-                                .or_else(|| {
-                                    (!missing_limits.is_empty()).then(|| "limits_undeclared".into())
-                                }),
+                            unavailable_reason: unavailable.map(str::to_owned).or_else(|| {
+                                limits_reason(source.unavailable_reason.clone(), &missing_limits)
+                            }),
                             actions,
                             endpoint_override: None,
                         }
