@@ -89,9 +89,11 @@ Both call the same composition, so a host-prepared request carries the same fram
 
 Prompt's own two call sites stay where they are: ContextPreparation places the System it publishes, and Loop places the System of the request it assembles. What changes is where the guide text comes from — the composition instead of a fixed file — not who places it. Removing the two placements is [#555](../model-prompts.md#97-loop-and-contextpreparation)'s.
 
-### 3.4 Fixed between adoptions
+### 3.4 Adopted when its writer loads
 
-On the adopted path an entry takes effect at the adoption that loads its writer, which is the point at which that writer's tool declarations already change the request prefix. Between adoptions the guide does not change: a registration made in between waits for the next adoption, and a withdrawal made in between ends at the next adoption. On the host-prepared path the guide changes only where a writer loads or unloads, the points at which that path's tool declarations change the request, since it binds its tools per request.
+A guide entry takes effect when its writer loads and ends when its writer unloads, which is the point at which that writer's tool declarations already change the request prefix. Prompt adopts the guide there: every open branch whose composition moved publishes one `context/configured` with its settings — the model, the tools and the source text — unchanged, and with the System composed over the entries in force; a branch whose composition did not move neither publishes nor reads its context. Between those points the guide does not change, because an entry reaches the table only from its writer's `apply` and leaves with that writer's generation.
+
+The host-prepared path changes the guide at the same points without publishing anything, because it composes the guide into the request it assembles. A branch started after a load composes the entries in force at its open, and a request built from an adopted configuration carries the System that branch adopted.
 
 No request assembles a guide of its own, and no contributor appends text to a request. That is what keeps the guide from forking a cached prefix in the middle of a Session: the guide is part of the prefix, and it moves only when the prefix legitimately moves.
 
@@ -149,14 +151,14 @@ Each capability in §4 adds one dependency, its Session's `guideEntries`, and re
 
 ### 6.3 ContextPreparation: the entries and the published System
 
-The target in §3.4 needs one change outside Prompt, and it is [ContextPreparation](../../architecture/rust-agent/plugins/ContextPreparation.md)'s ([#555](../model-prompts.md#97-loop-and-contextpreparation)). The publisher composes the guide at every adoption that publishes a System: a prompt change that renders the System composes the new source text with the entries in force, and a tools-only or model-only adoption re-renders the guide over the source text the branch adopted.
+The target in §3.4 needs one change in [ContextPreparation](../../architecture/rust-agent/plugins/ContextPreparation.md)'s publisher ([#555](../model-prompts.md#97-loop-and-contextpreparation)) and one in Prompt. The publisher composes the guide at every adoption that publishes a System: a prompt change that renders the System composes the new source text with the entries in force, and a tools-only, model-only or guide adoption re-renders the guide over the source text the branch adopted.
 
 - The published configuration records that source text apart from the guide it carried (`context/configured.system_source`), so the source stays what the branch adopted even as the guide is composed again.
-- A tools-only or model-only adoption that changes the entries in force composes the guide as it reads now, over the recorded source text: a writer that loads with such an adoption has its entry in force at that adoption, not only at the next adoption that renders the System.
+- A tools-only or model-only adoption, and a guide adoption, compose the guide as it reads now over the recorded source text: a writer that loads has its entry in force at the load itself, whether or not that load also adopts its tools, and one whose composition already reads so publishes nothing.
 - A configuration written before the source was recorded has none to re-render from: it keeps its adopted System, guide included, and only a later adoption that renders the System replaces it. `restoring_a_session_keeps_its_adopted_system_and_model` (`tests/integration/tests/prompt_lifecycle.rs`) restores such a System from `context/configured`; recomposing it from the snapshot's prompt sources alone would put the guide where the adopted System stands.
 - The request reads the adopted System as it is: Loop carries `context/configured.system` into a request built from it, and a host-prepared request carries the composition Prompt composes. Neither appends text of its own.
 
-Prompt and the table need no change for this: the composition is already there to call, and the entries in force already follow their writers' generations.
+The trigger is Prompt's. Its branch part declares a read of the table and subscribes to a `changes()` the table forwards from its registrations, so the watch stays with the registry the entries live in rather than crossing into ContextPreparation. The listener takes its version and the composition it starts from before the branch's own open adoption composes, and starts once that adoption has run: a registration made while the open runs therefore moves the composition the listener compares against and is adopted, instead of entering a baseline taken afterwards and marked as seen. Each change after it composes the branch's guide again in memory, which reads neither the Timeline nor the store, and enqueues one guide adoption on the same serial queue a model change and a tool adoption use only when that text moved; the item on a closing branch is dropped with the others.
 
 ## 7. Rule check
 
