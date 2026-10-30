@@ -107,7 +107,8 @@ The producer keeps these invariants:
 
 | Situation | Result |
 | --- | --- |
-| A target Agent is public or owned by the caller's Team | The request proceeds |
+| A target Agent is public, or owned by the caller's Team and has a member Session | The request proceeds |
+| A target Agent is owned by the caller's Team and has no member Session | `agent_not_found`: an incomplete delegation is not a reusable Agent |
 | A target Agent is owned by another Team, or absent | `agent_not_found`, with the existing text |
 | A member Session belongs to another Team, or is absent | `team_member_not_found` |
 | The owned Agent or its first member Session cannot be created | `member_create_failed: <reason>`; the record created for the request is removed |

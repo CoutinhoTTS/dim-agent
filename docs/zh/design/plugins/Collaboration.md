@@ -107,7 +107,8 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 | 情形 | 结果 |
 | --- | --- |
-| 目标 Agent 公开，或 owner 属于调用方的 Team | 请求继续 |
+| 目标 Agent 公开，或 owner 属于调用方的 Team 且有成员 Session | 请求继续 |
+| 目标 Agent 的 owner 属于调用方的 Team 但没有成员 Session | `agent_not_found`：未完成的委派不是可复用的 Agent |
 | 目标 Agent 属于其他 Team，或不存在 | `agent_not_found`，沿用现有文本 |
 | 成员 Session 属于其他 Team，或不存在 | `team_member_not_found` |
 | 被拥有的 Agent 或它的第一个成员 Session 创建失败 | `member_create_failed: <原因>`；为这次请求创建的记录被删除 |
