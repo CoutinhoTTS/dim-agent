@@ -13,7 +13,9 @@
 //! and `candidate` with the candidate file in place of the text `--text`
 //! names. Each arm runs every scenario `--runs` times, one fixed judge reads
 //! a view of each run's exported Timeline, in parts when the view exceeds the
-//! judge's declared window, and the report applies the relative rule of
+//! judge's declared window — a probe is `present` when any part finds it,
+//! `contradicted` when no part finds it present and a part contradicts it,
+//! and `absent` otherwise — and the report applies the relative rule of
 //! model-prompts §8.1: every probe's pass rate is at least the current arm's
 //! minus 0.05, the candidate's violations, failed runs and unjudged runs are
 //! no higher, and every probe has at least one judged run in each arm. There
@@ -719,7 +721,20 @@ struct ProbeRecord {
 enum ProbeVerdict {
     Present,
     Absent,
+    Contradicted,
     Unparsed,
+}
+impl ProbeVerdict {
+    /// How strongly one part's verdict speaks for the run: a part that finds
+    /// the probe outranks one that contradicts it, which outranks one that
+    /// finds nothing. The combined verdict is the strongest any part gave.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Present => 2,
+            Self::Contradicted => 1,
+            Self::Absent | Self::Unparsed => 0,
+        }
+    }
 }
 /// How one run's judging ended (model-prompts §8.1). The outcome is a typed
 /// field, so nothing tells a run the judge could not be asked from one it
@@ -1730,8 +1745,9 @@ async fn ask_part(
 /// whether the judge had to drop its temperature, how many times it was asked
 /// again, and how many parts of the view it took. A view longer than the
 /// judge's window is asked in parts, each with the same statements; a probe is
-/// `present` when any part answers `present`, quoted from that part, and
-/// `absent` otherwise. A reply that gives no verdict, or leaves a probe
+/// `present` when any part answers `present`, otherwise `contradicted` when a
+/// part answers `contradicted`, otherwise `absent`, quoted from the part whose
+/// verdict is kept. A reply that gives no verdict, or leaves a probe
 /// without one, is asked again with what was wrong, at most [`REASKS`] times;
 /// a call that fails during a re-ask ends the asking, and a part that fails or
 /// stays unusable after its re-asks leaves the whole run unjudged
@@ -1752,7 +1768,7 @@ async fn judge_export(
         .collect::<Vec<_>>()
         .join("\n");
     let parts = judge_parts(&statements, view, judge, limits);
-    let mut combined: BTreeMap<String, (Verdict, Option<String>)> = BTreeMap::new();
+    let mut combined: BTreeMap<String, (ProbeVerdict, Option<String>)> = BTreeMap::new();
     let mut asking = Asking::default();
     let mut outcome = JudgeOutcome::Judged;
     let mut error = None;
@@ -1766,9 +1782,16 @@ async fn judge_export(
         match ask_part(host, resolver, judge, scenario, &text, cancel, &mut asking).await {
             Ok(judged) => {
                 for Judgement { id, verdict, quote } in judged {
-                    let quote = quote.filter(|quote| !quote.is_empty());
-                    if !matches!(combined.get(&id), Some((Verdict::Present, _))) {
-                        combined.insert(id, (verdict, quote));
+                    let verdict = match verdict {
+                        Verdict::Present => ProbeVerdict::Present,
+                        Verdict::Absent => ProbeVerdict::Absent,
+                        Verdict::Contradicted => ProbeVerdict::Contradicted,
+                    };
+                    let kept = combined
+                        .get(&id)
+                        .is_some_and(|(kept, _)| kept.rank() >= verdict.rank());
+                    if !kept {
+                        combined.insert(id, (verdict, quote.filter(|quote| !quote.is_empty())));
                     }
                 }
             }
@@ -1791,11 +1814,7 @@ async fn judge_export(
                 ProbeRecord {
                     id: probe.id.clone(),
                     kind: probe.kind.name(),
-                    verdict: if verdict == Verdict::Present {
-                        ProbeVerdict::Present
-                    } else {
-                        ProbeVerdict::Absent
-                    },
+                    verdict,
                     quote,
                 }
             })
@@ -1896,7 +1915,10 @@ impl Metrics {
                 .map(|record| record.verdict);
             let passed = match probe.kind {
                 ProbeKind::MustShow => verdict == Some(ProbeVerdict::Present),
-                ProbeKind::MustNotShow => verdict == Some(ProbeVerdict::Absent),
+                ProbeKind::MustNotShow => matches!(
+                    verdict,
+                    Some(ProbeVerdict::Absent | ProbeVerdict::Contradicted)
+                ),
             };
             if probe.kind == ProbeKind::MustNotShow && verdict == Some(ProbeVerdict::Present) {
                 self.violations += 1;
