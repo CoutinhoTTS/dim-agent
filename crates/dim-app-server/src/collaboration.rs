@@ -815,7 +815,14 @@ impl CollaborationSession {
     ) -> Result<ToolResult, HostError> {
         let input: Input = match serde_json::from_value(Value::Object(call.input)) {
             Ok(input) => input,
-            Err(error) => return Ok(refusal(Refusal::InvalidInput, &error.to_string())),
+            Err(error) => {
+                return Ok(refusal(
+                    Refusal::InvalidInput,
+                    &format!(
+                        "{error}. Member actions require agentId + sessionId from list. Detached exec commands use exec_stop with their taskId; no member action was performed."
+                    ),
+                ));
+            }
         };
         let leader_only = matches!(
             input,
@@ -2179,7 +2186,7 @@ fn explain(error: Refusal) -> &'static str {
         }
         Refusal::MemberCreateFailed => "the Agent could not create a member Session",
         Refusal::TeamMemberNotFound => {
-            "the participant is not in your team or does not belong to this agentId; use list"
+            "the participant is not in your team or does not belong to this agentId; use list for agentId + sessionId. Detached exec commands use exec_stop with their taskId"
         }
         Refusal::Busy => "the member is working; wait for its result or cancel it",
         Refusal::MemberClosed => "the participant's Session is closed",
@@ -2240,7 +2247,7 @@ const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
   Agent. Returns immediately; the member's final result arrives later as an input. One
   task per member at a time. The user's subagent model policy may override the model a
   new member's profile requests.
-- cancel / close: stop a member's current task / remove the member from your team.
+- cancel / close: require agentId + sessionId to stop a member's current task / remove the member from your team. Detached exec Task IDs belong to exec_stop, not agent.
 - message: send information to a team member. Default mode \"append\" adds context the
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
   receiver must change course now.
@@ -2289,20 +2296,43 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
                 },
             });
             (
-                json!([
-                    "request", "cancel", "close", "message", "read", "list", "inspect", "result"
-                ]),
+                vec![
+                    "request", "cancel", "close", "message", "read", "list", "inspect", "result",
+                ],
                 LEADER_DESCRIPTION,
             )
         }
-        CollaborationRole::Member => (json!(["message", "read", "list"]), MEMBER_DESCRIPTION),
+        CollaborationRole::Member => (vec!["message", "read", "list"], MEMBER_DESCRIPTION),
     };
     properties["action"] = json!({"type": "string", "enum": actions});
+    let mut variants = Vec::new();
+    for action in &actions {
+        let choices = match *action {
+            "request" => vec![
+                vec!["action", "prompt", "agentId"],
+                vec!["action", "prompt", "profile"],
+            ],
+            "cancel" | "close" | "read" => vec![vec!["action", "agentId", "sessionId"]],
+            "message" => vec![vec!["action", "agentId", "sessionId", "content"]],
+            "inspect" => vec![vec!["action", "agentId"]],
+            "result" => vec![vec!["action", "resultId"]],
+            "list" => vec![vec!["action"]],
+            _ => unreachable!("declared agent action"),
+        };
+        for required in choices {
+            let mut fields = serde_json::Map::new();
+            for field in &required {
+                fields.insert((*field).into(), properties[*field].clone());
+            }
+            fields.insert("action".into(), json!({"type":"string","enum":[action]}));
+            variants.push(json!({"type":"object","properties":fields,"required":required}));
+        }
+    }
     definition(
         AGENT_TOOL,
         description,
         json!({"type": "object", "required": ["action"], "additionalProperties": false,
-            "properties": properties}),
+            "properties": properties, "anyOf": variants}),
     )
 }
 
