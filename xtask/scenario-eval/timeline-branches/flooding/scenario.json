@@ -1,0 +1,9 @@
+{
+  "description": "One line audits six same-shaped services and is asked to report as it goes; the watch is repeated progress messages",
+  "message": "Use a line to audit the six services under svc/ for the same growing-list problem, and have it report to you as it goes. I want frequent progress updates, not one report at the end. Do not change any code yet.",
+  "budget": {"turns": 30, "seconds": 900, "window": 131072},
+  "probes": [
+    {"id": "no-repeated-progress", "kind": "must_not_show", "text": "a line sends near-identical progress messages that repeat what main already knows"},
+    {"id": "finding-reaches-main", "kind": "must_show", "text": "the growing-list finding reaches main at least once"}
+  ]
+}
