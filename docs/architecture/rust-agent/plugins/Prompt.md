@@ -20,6 +20,7 @@ replaying history; rebuilding restores it from checkpoint configuration and fact
 | `B:Timeline` | Write controls and rebuild adopted context. |
 | `S:FaultReporter` | Report owned work failures. |
 | `B:BranchOpening` | Register initial prompt completion receipt. |
+| `S:GuideEntries` | The entries whose load or unload moves this branch's composition. |
 
 ## Events and lifetime
 
@@ -53,7 +54,7 @@ owners, rule check and complete-candidate concurrency limit.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:InitialPromptConfiguration`、`S:PromptHost` |
+| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:GuideEntries`、`S:InitialPromptConfiguration`、`S:PromptHost` |
 | 提供 | `B:Prompt`、`B:StateCell<PromptSnapshot>`、`B:dyn ConfigureControl` |
 | 被注入于 | `PromptSourcesBranch`、`SkillsBranch`、`ToolBinding` |
 <!-- /generated -->
@@ -77,13 +78,20 @@ None: it provides the table and owns its two entries.
 
 A registration is an effect of the part that made it: it is withdrawn when that
 part unloads, and a reloaded part replaces its entry instead of doubling it. A
-composition already made is unaffected by a later registration or withdrawal:
-the adopted System is fixed until the next adoption that publishes a
-configuration. A tools-only or model-only adoption re-renders the guide over
-the source text the configuration records, and one written before the source
-was recorded keeps its adopted System. Entries
-reach the model only through the System a branch adopted or through the request
-Loop assembles, never through a request of their own.
+composition already made is unaffected by a later registration or withdrawal on
+its own: the adopted System moves only at an adoption that publishes a
+configuration. Prompt's branch part makes the load or unload one of them:
+before the branch's own open adoption composes it takes the entries'
+`changes()` watch and the composition it starts from, and once that adoption
+has run it composes the branch's guide again on every change and adopts it with
+the settings unchanged on every open branch whose composition moved, a
+registration made while the open runs included. A branch whose composition did
+not move reads nothing, because the composition reads the in-memory entries
+only. A tools-only or model-only adoption re-renders the guide over the source
+text the configuration records, and one written before the source was recorded
+keeps its adopted System. Entries reach the model only through the System a
+branch adopted or through the request Loop assembles, never through a request
+of their own.
 
 ### Tests
 
@@ -91,7 +99,8 @@ Loop assembles, never through a request of their own.
 `both_paths_carry_one_composition`,
 `an_adopted_request_and_the_summarizers_request_carry_one_system`,
 `a_tools_only_adoption_carries_the_entry_its_writer_registers`,
-`an_entry_waits_for_the_next_adoption_that_renders_the_system`,
+`an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads`,
+`a_branch_scoped_entry_publishes_only_on_its_branch`,
 `each_branch_keeps_its_own_entries`, `the_frame_states_the_compaction_handle`;
 [reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
 `an_entry_leaves_with_its_contributor`.
@@ -102,5 +111,5 @@ Loop assembles, never through a request of their own.
 | 作用域 | Session |
 | 注入 | — |
 | 提供 | `S:GuideEntries`、`S:dyn HostDispatch#guideEntries` |
-| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`TimelineTree` |
+| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`Prompt`、`TimelineTree` |
 <!-- /generated -->

@@ -182,22 +182,9 @@ impl ConfigurationPublisher {
                 .iter()
                 .any(|draft| matches!(draft.kind, EventKind::ContextConfigured(_)))
         {
-            let (system, system_source) = self.rerendered(&before, previous_configuration.as_ref());
-            drafts.push(
-                EventKind::ContextConfigured(ContextConfiguredData {
-                    timeline: self.identity.branch_id.clone(),
-                    revision: Uuid::new_v4().to_string(),
-                    previous: previous_configuration.as_ref().map(|data| PromptReference {
-                        timeline: data.timeline.clone(),
-                        revision: data.revision.clone(),
-                    }),
-                    prompt: before.system_revision.clone(),
-                    settings: Box::new(settings),
-                    system,
-                    system_source,
-                })
-                .into(),
-            );
+            let data =
+                self.rerendered_configuration(&before, previous_configuration.as_ref(), settings);
+            drafts.push(EventKind::ContextConfigured(data).into());
         }
         if drafts.is_empty() {
             register(&[])?;
@@ -208,6 +195,59 @@ impl ConfigurationPublisher {
             .last()
             .expect("non-empty publication batch")
             .sequence;
+        self.await_published(sequence).await.map(Some)
+    }
+
+    /// Publishes the System over the entries in force now when it differs
+    /// from the adopted one: a guide adoption, the settings it keeps —
+    /// model, tools and source text — unchanged. A branch that adopted no
+    /// configuration publishes nothing, and so does one whose composition
+    /// did not move.
+    pub(crate) async fn adopt_guide(&self) -> dim_agent_runtime::Result<()> {
+        let context =
+            crate::history::read_context(&self.timeline, self.timeline.sequence()).await?;
+        let Some(previous) = context_configuration(&context) else {
+            return Ok(());
+        };
+        let before = PromptSnapshot::from_context(&context);
+        let data =
+            self.rerendered_configuration(&before, Some(&previous), (*previous.settings).clone());
+        if data.system == previous.system {
+            return Ok(());
+        }
+        let appended = self
+            .timeline
+            .append(EventKind::ContextConfigured(data).into())?;
+        self.await_published(appended.sequence).await.map(|_| ())
+    }
+
+    /// The configuration that records an adoption changing no model and no
+    /// tool: the System re-rendered over the source text the branch adopted,
+    /// with `settings` as the adoption leaves them.
+    fn rerendered_configuration(
+        &self,
+        before: &PromptSnapshot,
+        previous: Option<&ContextConfiguredData>,
+        settings: ModelConfiguration,
+    ) -> ContextConfiguredData {
+        let (system, system_source) = self.rerendered(before, previous);
+        ContextConfiguredData {
+            timeline: self.identity.branch_id.clone(),
+            revision: Uuid::new_v4().to_string(),
+            previous: previous.map(|data| PromptReference {
+                timeline: data.timeline.clone(),
+                revision: data.revision.clone(),
+            }),
+            prompt: before.system_revision.clone(),
+            settings: Box::new(settings),
+            system,
+            system_source,
+        }
+    }
+
+    /// Waits until the batch ending at `sequence` is published, so a commit
+    /// failure reaches the caller before the next adoption runs.
+    async fn await_published(&self, sequence: u64) -> dim_agent_runtime::Result<u64> {
         let mut publication = self.timeline.watch();
         while publication.borrow().0 < sequence {
             if let Some(error) = self.timeline.failure() {
@@ -217,7 +257,7 @@ impl ConfigurationPublisher {
                 AgentError::fault("ConfigurationPublisher", "publication channel ended")
             })?;
         }
-        Ok(Some(sequence))
+        Ok(sequence)
     }
 
     /// The System and its source text for a model- or tool-only adoption:

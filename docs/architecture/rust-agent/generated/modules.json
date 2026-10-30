@@ -8677,12 +8677,27 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "use crate::prompt_guide::GuideEntries"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",
         "path PromptSnapshot::default",
         "path PromptSnapshot::from_context",
         "use crate::prompt_state::PromptSnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_runtime::branch",
+      "references": [
+        "path branch"
       ]
     },
     {

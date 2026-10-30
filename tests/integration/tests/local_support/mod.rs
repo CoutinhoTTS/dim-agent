@@ -569,3 +569,155 @@ pub async fn run(session: &Session, text: &str) {
         .unwrap();
     session.idle("main").await.unwrap();
 }
+
+/// The in-memory store, recording the segments of every read by branch.
+#[derive(Default)]
+pub struct CountingStore {
+    memory: MemoryTimelineStore,
+    reads: Mutex<Vec<(String, std::ops::RangeInclusive<u64>)>>,
+}
+
+impl CountingStore {
+    /// The segments read since the last call.
+    pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
+    }
+}
+
+impl TimelineStore for CountingStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        self.reads.lock().unwrap().extend(segments.iter().cloned());
+        self.memory.read_segments(id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+}
+
+/// The in-memory store, holding the publication of one batch until the test
+/// releases it: a window inside an adoption, after it composed what it
+/// publishes and before it returned.
+#[derive(Default)]
+pub struct HoldingStore {
+    memory: MemoryTimelineStore,
+    selected: Mutex<Option<String>>,
+    held: Mutex<Option<PublishCallback>>,
+    /// Notified when a batch is held.
+    pub entered: Notify,
+}
+
+impl HoldingStore {
+    /// Holds the next batch on `branch` that carries a `context/configured`.
+    pub fn hold_next_configuration_on(&self, branch: &str) {
+        *self.selected.lock().unwrap() = Some(branch.to_string());
+    }
+    /// Publishes the held batch; the test calls it once the work it wants
+    /// inside the adoption's window is done.
+    pub fn release(&self) {
+        if let Some(publish) = self.held.lock().unwrap().take() {
+            publish(Ok(()));
+        }
+    }
+}
+
+impl TimelineStore for HoldingStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        let hold = {
+            let mut selected = self.selected.lock().unwrap();
+            let hold = selected.as_deref() == Some(key.branch_id.as_str())
+                && events
+                    .iter()
+                    .any(|event| matches!(event.event.kind, EventKind::ContextConfigured(_)));
+            if hold {
+                selected.take();
+            }
+            hold
+        };
+        if !hold {
+            return self.memory.append(key, events, publish);
+        }
+        self.memory.append(key, events, Box::new(|_| ()))?;
+        *self.held.lock().unwrap() = Some(publish);
+        self.entered.notify_one();
+        Ok(())
+    }
+    fn read_segments<'a>(
+        &'a self,
+        id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        self.memory.read_segments(id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+}

@@ -3,6 +3,7 @@ use crate::{
     context_block,
     context_preparation::{ConfigurationPublisher, ToolSetAdoption},
     host::{HostError, PromptHost},
+    prompt_guide::GuideEntries,
     prompt_state::PromptSnapshot,
 };
 use dim_agent_runtime::*;
@@ -15,7 +16,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
@@ -82,6 +83,9 @@ enum Adoption {
         event: Arc<AgentEvent>,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// The entries in force changed: adopt the guide if its composition over
+    /// them moved.
+    Guide,
     Tools {
         tools: ToolSetAdoption,
         cancel: CancellationToken,
@@ -118,6 +122,8 @@ pub struct Prompt {
     branch_phase: Arc<BranchLifecycle>,
     opening: Arc<BranchOpening>,
     opened: tokio::sync::watch::Sender<Option<Result<()>>>,
+    /// The Session's guide entries: the composition the listener adopts.
+    guide: Arc<GuideEntries>,
     tasks: TaskTracker,
     state: Mutex<PromptState>,
     adoption: tokio::sync::mpsc::UnboundedSender<Adoption>,
@@ -417,6 +423,47 @@ impl Prompt {
         }
     }
 
+    /// The registrations watch and the composition it starts from, both
+    /// taken before the branch's `Open` adoption composes the System. A
+    /// registration made while that adoption runs therefore moves the
+    /// composition the listener compares against, rather than entering a
+    /// baseline taken afterwards and marked as already seen.
+    fn guide_watch(&self) -> (watch::Receiver<u64>, String) {
+        (
+            self.guide.changes(),
+            self.guide.compose(&self.identity.branch_id),
+        )
+    }
+
+    /// Listens for guide registrations over the watch and composition the
+    /// `Open` handler took before its adoption composed, and starts after
+    /// that adoption has run. A change that composes the same guide for
+    /// this branch, such as another branch's entry, costs one composition
+    /// and no read of the branch's context.
+    fn listen_guide(self: &Arc<Self>, mut changes: watch::Receiver<u64>, mut composed: String) {
+        let branch = self.identity.branch_id.clone();
+        let owner = self.clone();
+        self.tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = owner.lifecycle.cancelled() => return,
+                    changed = changes.changed() => if changed.is_err() {
+                        return;
+                    },
+                }
+                let guide = owner.guide.compose(&branch);
+                if guide == composed {
+                    continue;
+                }
+                composed = guide;
+                if owner.adoption.send(Adoption::Guide).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
     fn schedule_adoption(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
         match self.adoption.send(Adoption::Event(event)) {
             Ok(()) => Ok(()),
@@ -612,6 +659,7 @@ pub struct PromptPlugin {
     faults: rutis::host::Key<FaultReporter>,
     branch_phase: rutis::host::Key<BranchLifecycle>,
     opening: rutis::host::Key<BranchOpening>,
+    guide: rutis::host::Key<GuideEntries>,
     state: rutis::host::Key<StateCell<PromptSnapshot>>,
     prompt: rutis::host::Key<Prompt>,
     configure: rutis::host::Key<dyn ConfigureControl>,
@@ -628,6 +676,7 @@ impl PromptPlugin {
             faults: names.key()?,
             branch_phase: names.key()?,
             opening: names.key()?,
+            guide: names.key()?,
             state: names.state_cell()?,
             prompt: names.key()?,
             configure: names.key()?,
@@ -649,6 +698,7 @@ impl DynPlugin for PromptPlugin {
             self.faults.erase(),
             self.branch_phase.erase(),
             self.opening.erase(),
+            self.guide.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -662,6 +712,7 @@ impl DynPlugin for PromptPlugin {
             let faults = ctx.require_at(&self.faults)?;
             let branch_phase = ctx.require_at(&self.branch_phase)?;
             let opening = ctx.require_at(&self.opening)?;
+            let guide = ctx.require_at(&self.guide)?;
             if ctx.cancellation_token().is_cancelled() {
                 return Ok(Effect::Done);
             }
@@ -677,6 +728,7 @@ impl DynPlugin for PromptPlugin {
                 branch_phase,
                 opening,
                 opened: tokio::sync::watch::channel(None).0,
+                guide,
                 tasks: TaskTracker::new(),
                 state: Mutex::new(PromptState::default()),
                 adoption,
@@ -719,6 +771,7 @@ impl DynPlugin for PromptPlugin {
                         None => break,
                         Some(Adoption::Event(event)) => event,
                         Some(Adoption::Open { event, reply }) => {
+                            let (changes, composed) = owner.guide_watch();
                             let result = AssertUnwindSafe(owner.open(&event))
                                 .catch_unwind()
                                 .await
@@ -727,6 +780,21 @@ impl DynPlugin for PromptPlugin {
                                 });
                             owner.opened.send_replace(Some(result.clone()));
                             let _ = reply.send(result);
+                            owner.listen_guide(changes, composed);
+                            continue;
+                        }
+                        Some(Adoption::Guide) => {
+                            let result = AssertUnwindSafe(owner.publisher.adopt_guide())
+                                .catch_unwind()
+                                .await
+                                .unwrap_or_else(|panic| {
+                                    Err(AgentError::fault("Prompt", panic_message(panic)))
+                                });
+                            if let Err(error) = result
+                                && !matches!(error, AgentError::Storage(_))
+                            {
+                                owner.faults.report(error);
+                            }
                             continue;
                         }
                         Some(Adoption::Tools {

@@ -26,9 +26,11 @@ failure, with `context/compaction-start` and one `context/compaction` around
 each strategy call. `usage` reads the head's budget without writing. Its publisher commits prompt changes, adopted inputs and
 `context/configured` atomically; it composes the System at every adoption that
 publishes a configuration. A change that renders the System composes the new
-source text, and a model- or tool-only update re-renders the guide over the
-source text the configuration records (`system_source`), so a writer that loads
-with one has its entry in force at that adoption. A configuration written
+source text, and a model- or tool-only or guide update re-renders the guide over
+the source text the configuration records (`system_source`), so a writer that
+loads has its entry in force at that adoption. A guide adoption publishes only
+when the composition over the entries in force differs from the adopted System,
+with the settings unchanged. A configuration written
 before the source was recorded keeps its adopted System
 ([Prompt §6.3](../../../design/plugins/Prompt.md#63-contextpreparation-the-entries-and-the-published-system)). Preparation is single-flight, tracked,
 cancelled by stop/steer and joined during cleanup; cleanup aggregates failures.

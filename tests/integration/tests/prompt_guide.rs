@@ -23,7 +23,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use local_support::{Dirs, platform, run, system_text};
+use local_support::{CountingStore, Dirs, HoldingStore, platform, run, system_text};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
 use rutis::{Ctx, Plugin};
 use std::{
@@ -144,6 +144,39 @@ async fn last_configured(session: &Session, branch: &str) -> ContextConfiguredDa
             _ => None,
         })
         .unwrap_or_else(|| panic!("no adopted configuration on {branch}"))
+}
+
+/// Every adopted configuration on `branch`, oldest first.
+async fn configurations(session: &Session, branch: &str) -> Vec<ContextConfiguredData> {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextConfigured(data) => Some(data.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `branch`'s adopted configurations once it has more than `count` of them.
+async fn wait_for_configurations(
+    session: &Session,
+    branch: &str,
+    count: usize,
+) -> Vec<ContextConfiguredData> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let published = configurations(session, branch).await;
+            if published.len() > count {
+                return published;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{branch} adopted no configuration beyond {count}"))
 }
 
 /// The system text of the last request on `branch`.
@@ -413,12 +446,13 @@ async fn an_adopted_request_and_the_summarizers_request_carry_one_system() {
     agent.close().await.unwrap();
 }
 
-/// A registration made between adoptions waits for the next adoption that
-/// renders the System — the first configuration or a change of sources: it
-/// does not change the System a branch already adopted, and that adoption
-/// composes it into the new System.
+/// #661: on the adopted path an entry takes effect when its writer loads and
+/// ends when it unloads. Prompt adopts the guide at that point: one
+/// `context/configured` for each branch whose composition moved, its settings
+/// and source text unchanged, and nothing at all for a load that registers no
+/// entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_entry_waits_for_the_next_adoption_that_renders_the_system() {
+async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() {
     let target = PromptSourceTarget {
         source: "rules".into(),
         scope: PromptScope::Branch {
@@ -451,6 +485,7 @@ async fn an_entry_waits_for_the_next_adoption_that_renders_the_system() {
                 flag: flag_owner.clone(),
                 views: views_owner.clone(),
                 key: names.key()?,
+                scope: GuideScope::Session,
             }))
         },
     ));
@@ -474,100 +509,148 @@ async fn an_entry_waits_for_the_next_adoption_that_renders_the_system() {
     );
     run(&session, "first").await;
     let first = last_system(&session, "main").await;
-    run(&session, "second").await;
-    let second = last_system(&session, "main").await;
-    assert_eq!(first, second, "two turns between adoptions share a prefix");
     assert_guide_shape(
-        guide_of(&second),
+        guide_of(&first),
         &[
             "<dim-branch-line",
             "<dim-state source=\"dim/environment/date\">",
         ],
     );
-    assert!(!second.contains(PROBE_ENTRY));
+    assert!(!first.contains(PROBE_ENTRY));
+    assert_eq!(
+        configurations(&session, "main").await.len(),
+        1,
+        "the adoption composes the System once"
+    );
 
-    // A contributor's new generation registers an entry in between.
+    // Two turns with no writer loading share a prefix and publish nothing.
+    run(&session, "second").await;
+    assert_eq!(last_system(&session, "main").await, first);
+    assert_eq!(
+        configurations(&session, "main").await.len(),
+        1,
+        "a Session whose writers stay put adopts nothing while it runs"
+    );
+
+    // The writer loads: one configuration, its settings and source text
+    // unchanged.
     flag.store(true, Ordering::SeqCst);
     let view = views.lock().unwrap().last().cloned().expect("a probe");
     view.restart().await.unwrap();
-    run(&session, "third").await;
-    let third = last_system(&session, "main").await;
+    wait_for_configurations(&session, "main", 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let published = configurations(&session, "main").await;
+    assert_eq!(published.len(), 2, "one load is one guide adoption");
+    let (before, after) = (&published[0], &published[1]);
     assert_eq!(
-        third, second,
-        "a registration made between adoptions waits for the next adoption that renders the System"
-    );
-    assert!(!third.contains(PROBE_ENTRY));
-
-    // The next adoption that renders the System composes the entry into the
-    // System it publishes.
-    hosts.0.lock().unwrap().insert(
-        "rules".to_string(),
-        PromptEntry {
-            source: "rules".into(),
-            version: "2".into(),
-            body: "rules one".into(),
-            scope: PromptScope::Branch {
-                timeline: "main".into(),
-            },
-            delivery: PromptDelivery::System,
-            order: 0,
-        },
+        after.settings, before.settings,
+        "a guide adoption keeps the model and the tools"
     );
     assert_eq!(
-        session
-            .configure(
-                ConfigureUpdate {
-                    sources: vec![target.clone()],
-                    model: None,
-                },
-                "main",
-            )
-            .await
-            .unwrap(),
-        ConfigureOutcome::Adopted
+        after.system_source, before.system_source,
+        "the source text stays what the branch adopted"
     );
-    run(&session, "fourth").await;
-    let fourth = last_system(&session, "main").await;
-    assert!(
-        fourth.contains(PROBE_ENTRY),
-        "the adoption carries the entry: {fourth:?}"
-    );
+    let loaded = system_text(after.system.as_ref().expect("the adopted System"));
+    assert!(loaded.contains(PROBE_ENTRY), "{loaded:?}");
     assert_eq!(
-        fourth.replacen(&format!("{PROBE_ENTRY}\n\n"), "", 1),
-        third,
+        loaded.replacen(&format!("{PROBE_ENTRY}\n\n"), "", 1),
+        first,
         "the new System differs from the last one only by the registered entry"
     );
+    run(&session, "third").await;
+    assert_eq!(
+        last_system(&session, "main").await,
+        loaded,
+        "the next request carries the System the load adopted"
+    );
 
-    // The withdrawal ends the same way: fixed for this System, gone at the
-    // next adoption that renders the System.
+    // A branch started after the load carries the entry.
+    let at = session.sequence("main").unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .expect("the second line starts");
+    session.idle(&child).await.unwrap();
+    assert!(
+        last_system(&session, &child).await.contains(PROBE_ENTRY),
+        "a line started after the load carries the entry"
+    );
+
+    // The writer unloads: one more configuration, the System back to `first`.
     flag.store(false, Ordering::SeqCst);
     let view = views.lock().unwrap().last().cloned().expect("a probe");
     view.restart().await.unwrap();
-    run(&session, "fifth").await;
+    wait_for_configurations(&session, "main", 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let published = configurations(&session, "main").await;
+    assert_eq!(published.len(), 3, "one unload is one guide adoption");
+    assert_eq!(published[2].system_source, published[1].system_source);
     assert_eq!(
-        last_system(&session, "main").await,
-        fourth,
-        "a withdrawal made in between waits for the next adoption that renders the System"
+        system_text(published[2].system.as_ref().expect("the adopted System")),
+        first,
+        "the withdrawal ends where its writer unloads, byte for byte"
     );
-    hosts.0.lock().unwrap().insert(
-        "rules".to_string(),
-        PromptEntry {
-            source: "rules".into(),
-            version: "3".into(),
-            body: "rules one".into(),
-            scope: PromptScope::Branch {
-                timeline: "main".into(),
-            },
-            delivery: PromptDelivery::System,
-            order: 0,
+    run(&session, "fourth").await;
+    assert_eq!(last_system(&session, "main").await, first);
+
+    // A load that registers no entry publishes nothing and moves no System.
+    let view = views.lock().unwrap().last().cloned().expect("a probe");
+    view.restart().await.unwrap();
+    run(&session, "fifth").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        configurations(&session, "main").await.len(),
+        3,
+        "a load that registers no entry adds no configuration"
+    );
+    assert_eq!(last_system(&session, "main").await, first);
+    agent.close().await.unwrap();
+}
+
+/// #661: a branch-scoped entry changes one branch's composition. That branch
+/// adopts the guide, and the other open branch composes the same guide it
+/// adopted, publishes nothing and reads no context for the change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let store = Arc::new(CountingStore::default());
+    let flag = Arc::new(AtomicBool::new(false));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let (flag_owner, views_owner) = (flag.clone(), views.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    mock_model_hosts(&mut builder);
+    builder.timeline_store(store.clone());
+    workspace(&mut builder, &dirs);
+    defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
+    builder.require_feature(Feature::new("GuideProbeOwner").session(
+        "GuideProbeOwner",
+        move |names| {
+            Ok(Box::new(GuideProbeOwner {
+                flag: flag_owner.clone(),
+                views: views_owner.clone(),
+                key: names.key()?,
+                scope: GuideScope::Branch("main".into()),
+            }))
         },
-    );
+    ));
+    let agent = builder.build_in(&root);
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
             .configure(
                 ConfigureUpdate {
-                    sources: vec![target.clone()],
-                    model: None,
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
                 },
                 "main",
             )
@@ -575,12 +658,188 @@ async fn an_entry_waits_for_the_next_adoption_that_renders_the_system() {
             .unwrap(),
         ConfigureOutcome::Adopted
     );
-    run(&session, "sixth").await;
-    let sixth = last_system(&session, "main").await;
-    assert!(!sixth.contains(PROBE_ENTRY), "{sixth:?}");
+    run(&session, "on main").await;
+
+    // The second line adopts a configuration of its own, composed for its own
+    // entries.
+    let at = session.sequence("main").unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .expect("the second line starts");
+    session.idle(&child).await.unwrap();
     assert_eq!(
-        sixth, third,
-        "the withdrawal ends at the next adoption that renders the System"
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("line")),
+                },
+                &child,
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    session
+        .submit("the line's own turn".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    let main_before = last_system(&session, "main").await;
+    let line_before = last_system(&session, &child).await;
+    let (main_count, line_count) = (
+        configurations(&session, "main").await.len(),
+        configurations(&session, &child).await.len(),
+    );
+
+    // The entry is scoped to main: only main composes a different guide.
+    store.take();
+    flag.store(true, Ordering::SeqCst);
+    let view = views.lock().unwrap().last().cloned().expect("a probe");
+    view.restart().await.unwrap();
+    wait_for_configurations(&session, "main", main_count).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let reads = store.take();
+    assert!(
+        reads.iter().all(|(branch, _)| branch != &child),
+        "the other line reads no context for the entry: {reads:?}"
+    );
+    assert!(
+        reads.iter().any(|(branch, _)| branch == "main"),
+        "the entry's branch composes and adopts it: {reads:?}"
+    );
+    assert_eq!(
+        configurations(&session, "main").await.len(),
+        main_count + 1,
+        "the entry's own branch adopts the guide"
+    );
+    assert_eq!(
+        configurations(&session, &child).await.len(),
+        line_count,
+        "the other line composes the same System and publishes nothing"
+    );
+    run(&session, "after the load").await;
+    let main_after = last_system(&session, "main").await;
+    assert!(main_after.contains(PROBE_ENTRY), "{main_after:?}");
+    assert_eq!(
+        main_after.replacen(&format!("{PROBE_ENTRY}\n\n"), "", 1),
+        main_before,
+        "main's System moves by the entry and nothing else"
+    );
+    session
+        .submit("the line's next turn".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    assert_eq!(
+        last_system(&session, &child).await,
+        line_before,
+        "the other line's prefix stays byte-identical"
+    );
+    agent.close().await.unwrap();
+}
+
+/// #661: an entry registered while the branch's open adoption runs is
+/// adopted. The listener takes the registrations watch and its composition
+/// before that adoption composes, so the entry moves the composition it
+/// compares against; taken afterwards, the baseline would already carry the
+/// entry and count it as seen, and the branch would keep a System composed
+/// without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_registered_while_its_branch_opens_is_adopted() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let store = Arc::new(HoldingStore::default());
+    let flag = Arc::new(AtomicBool::new(false));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let (flag_owner, views_owner) = (flag.clone(), views.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    mock_model_hosts(&mut builder);
+    builder.timeline_store(store.clone());
+    workspace(&mut builder, &dirs);
+    defaults::install_with_prompt(
+        &mut builder,
+        Arc::new(EmptyPromptHost),
+        Some(ConfigureUpdate {
+            sources: Vec::new(),
+            model: Some(configuration("initial")),
+        }),
+    );
+    builder.require_feature(Feature::new("GuideProbeOwner").session(
+        "GuideProbeOwner",
+        move |names| {
+            Ok(Box::new(GuideProbeOwner {
+                flag: flag_owner.clone(),
+                views: views_owner.clone(),
+                key: names.key()?,
+                scope: GuideScope::Session,
+            }))
+        },
+    ));
+    let agent = builder.build_in(&root);
+
+    // The open adoption composes the System, then waits for its publication.
+    // The entry registers inside that window, after the composition.
+    store.hold_next_configuration_on("main");
+    let creation = agent.create_session(SessionConfig {
+        system_prompt: "configured rules".into(),
+        ..work_config(&dirs)
+    });
+    tokio::pin!(creation);
+    let session = tokio::select! {
+        _ = &mut creation => panic!("the Session opened before its publication was held"),
+        () = async {
+            store.entered.notified().await;
+            flag.store(true, Ordering::SeqCst);
+            let view = views.lock().unwrap().last().cloned().expect("a probe");
+            view.restart().await.unwrap();
+            store.release();
+        } => creation.await.unwrap(),
+    };
+    wait_for_configurations(&session, "main", 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let published = configurations(&session, "main").await;
+    assert_eq!(
+        published.len(),
+        2,
+        "the entry registered during the open is one guide adoption"
+    );
+    let (opened, adopted) = (&published[0], &published[1]);
+    let opened_system = system_text(opened.system.as_ref().expect("the open adopted a System"));
+    assert!(
+        !opened_system.contains(PROBE_ENTRY),
+        "the open composed before the entry registered: {opened_system:?}"
+    );
+    assert_eq!(
+        adopted.settings, opened.settings,
+        "a guide adoption keeps the model and the tools"
+    );
+    assert_eq!(
+        adopted.system_source, opened.system_source,
+        "the source text stays what the branch adopted"
+    );
+    let with_entry = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(with_entry.contains(PROBE_ENTRY), "{with_entry:?}");
+    assert_eq!(
+        with_entry.replacen(&format!("{PROBE_ENTRY}\n\n"), "", 1),
+        opened_system,
+        "the new System differs from the open's only by the registered entry"
+    );
+    run(&session, "after the open").await;
+    assert_eq!(
+        last_system(&session, "main").await,
+        with_entry,
+        "the request carries the System the open's guide adoption published"
     );
     agent.close().await.unwrap();
 }
@@ -633,6 +892,7 @@ struct GuideProbeOwner {
     flag: Arc<AtomicBool>,
     views: Arc<Mutex<Vec<FiberView>>>,
     key: Key<GuideEntries>,
+    scope: GuideScope,
 }
 impl Plugin for GuideProbeOwner {
     type Deps = ();
@@ -640,6 +900,7 @@ impl Plugin for GuideProbeOwner {
         let view = ctx.plugin(GuideProbe {
             flag: self.flag.clone(),
             key: self.key.clone(),
+            scope: self.scope.clone(),
         });
         (&view).await.map_err(|error| {
             rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
@@ -656,6 +917,7 @@ impl Plugin for GuideProbeOwner {
 struct GuideProbe {
     flag: Arc<AtomicBool>,
     key: Key<GuideEntries>,
+    scope: GuideScope,
 }
 impl DynPlugin for GuideProbe {
     fn name(&self) -> &str {
@@ -670,7 +932,7 @@ impl DynPlugin for GuideProbe {
             if self.flag.load(Ordering::SeqCst) {
                 table.register(
                     ctx,
-                    GuideScope::Session,
+                    self.scope.clone(),
                     GuideEntry {
                         markers: vec!["dim-probe".into()],
                         order: 65,
@@ -950,6 +1212,20 @@ async fn a_tools_only_adoption_carries_the_entry_its_writer_registers() {
             .as_ref()
             .is_some_and(|tools| tools.iter().any(|tool| tool.name == "probe")),
         "the request declares the tool the adoption carried"
+    );
+
+    // The load registered a tool and an entry, so it may take a tool adoption
+    // and a guide adoption; both compose one System, so the prefix moves once.
+    let published = configurations(&session, "main").await;
+    assert!(
+        published.len() <= 3,
+        "one load publishes at most one configuration per change"
+    );
+    assert!(
+        published[1..]
+            .windows(2)
+            .all(|pair| pair[0].system == pair[1].system),
+        "the two adoptions of one load compose one System"
     );
     agent.close().await.unwrap();
 }
