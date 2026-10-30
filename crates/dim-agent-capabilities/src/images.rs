@@ -1,6 +1,6 @@
 //! One scaling step for every place that turns a local image into an image
-//! block. `read` is the caller here; the CLI's attachments will add the second
-//! one (#657), so both send an image the same way.
+//! block: `read` and the CLI's attachments both call it, so both send an image
+//! the same way.
 use image::{
     AnimationDecoder, DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Rgb,
     RgbImage, codecs::jpeg::JpegEncoder, imageops::FilterType, metadata::Orientation,
