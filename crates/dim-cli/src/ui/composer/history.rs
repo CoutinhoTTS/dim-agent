@@ -123,6 +123,28 @@ mod tests {
         assert_eq!(store.buckets["/x"], vec!["ok"]);
     }
 
+    /// A linked history file stays a link, its target takes the append, and
+    /// no lock is left in the linked directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_history_stays_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let linked = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        let target = linked.join(FILE);
+        std::fs::write(&target, "{\"version\":1,\"buckets\":{\"/keep\":[\"a\"]}}").unwrap();
+        symlink(&target, path(&home)).unwrap();
+        append(&home, "/work", "entry").unwrap();
+        assert!(std::fs::symlink_metadata(path(&home)).unwrap().is_symlink());
+        let store: Store = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(store.buckets["/keep"], vec!["a"]);
+        assert_eq!(store.buckets["/work"], vec!["entry"]);
+        assert!(!linked.join("input-history.json.lock").exists());
+    }
+
     /// Concurrent CLIs appending to one home keep every entry.
     #[test]
     fn concurrent_appends_keep_every_entry() {

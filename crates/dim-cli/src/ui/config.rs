@@ -183,6 +183,28 @@ mod tests {
         }
     }
 
+    /// A `config.json` that is a symbolic link stays a link, its target
+    /// takes the write, and the lock stays in the home.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_stays_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let linked = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        let target = linked.join("config.json");
+        std::fs::write(&target, "{\"kept\": true}\n").unwrap();
+        symlink(&target, path(&home)).unwrap();
+        assert_eq!(write(&home, "added", 1.into()), None);
+        assert!(std::fs::symlink_metadata(path(&home)).unwrap().is_symlink());
+        let config: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(config["kept"], true);
+        assert_eq!(config["added"], 1);
+        assert!(!linked.join("config.json.lock").exists());
+    }
+
     /// A file that cannot be read is not replaced by one holding a single
     /// key; the error comes back and the path stays as it was.
     #[cfg(unix)]

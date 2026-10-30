@@ -13,27 +13,37 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a writer sleeps between attempts on a lock another one holds.
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 
-/// Replaces the file at `path` with the bytes `update` returns for its
-/// current contents, or leaves it alone when `update` returns `None`.
+/// Replacing a file whole, under a cross-process lock.
 ///
-/// Writers queue on an exclusive lock over `<path>.lock`, so two processes
-/// keep each other's changes, and wait at most two seconds for each other:
-/// past that a writer reports that another dimcode is updating the file and
-/// leaves it alone. A lock that cannot be taken at all is reported with its
-/// error; the write is not attempted without one, because a home whose
-/// filesystem refuses locks cannot hold the `dimcode.sqlite` beside the file
-/// either. The new bytes go to a sibling temp file that is synced and
-/// renamed over `path`, so a reader, which takes no lock, sees either the
-/// old file or the new one. On Unix `mode`, when given, is set on
-/// every write; without one an existing file keeps its mode. A failure
-/// before the rename leaves `path` as it was and removes the temp file, and
-/// a file that cannot be read is left alone rather than treated as an
-/// absent one.
+/// Writers queue on an exclusive lock over `<path>.lock`, beside the path the
+/// caller names, so two processes that share a home keep each other's
+/// changes. A writer waits at most two seconds for the lock: past that it
+/// reports that another dimcode is updating the file and leaves it alone. A
+/// lock that cannot be taken at all is reported with its error; the write is
+/// not attempted without one, because a home whose filesystem refuses locks
+/// cannot hold the `dimcode.sqlite` beside the file either.
+///
+/// The file is resolved first: a `path` that is a symbolic link is followed,
+/// and the temp file, the rename and the directory sync go beside the
+/// resolved file, so the link stays a link and its target takes the write,
+/// as `std::fs::write` did before. A path that does not exist yet is used as
+/// given; any other resolution error is returned and the file is left alone.
+/// The lock still sits beside the named path, not beside the resolved file,
+/// so a linked `config.json` leaves no lock in the user's linked directory.
+/// The new bytes go to a sibling temp file that is synced and renamed over
+/// the resolved file, so a reader, which takes no lock, sees either the old
+/// file or the new one.
+///
+/// On Unix `mode`, when given, is set on every write; without one an
+/// existing file keeps its mode, read through the link. A failure before the
+/// rename leaves the file as it was and removes the temp file, and a file
+/// that cannot be read is left alone rather than treated as an absent one.
 ///
 /// The `.lock` file stays after the write: removing it would let two
-/// writers lock two different files. The temp file is `<path>.<pid>.tmp`; a
-/// stale one is removed first and the new one is opened with `create_new`,
-/// so a planted symlink at the path is not followed.
+/// writers lock two different files. The temp file is
+/// `<resolved>.<pid>.tmp`; a stale one is removed first and the new one is
+/// opened with `create_new`, so a planted symlink at the path is not
+/// followed.
 pub fn update(
     path: &Path,
     mode: Option<u32>,
@@ -76,7 +86,8 @@ fn update_within(
             }
         }
     }
-    let current = match std::fs::read(path) {
+    let file = resolve(path)?;
+    let current = match std::fs::read(&file) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
@@ -84,15 +95,25 @@ fn update_within(
     let Some(bytes) = update(current.as_deref())? else {
         return Ok(());
     };
-    let temp = sibling(path, &format!(".{}.tmp", std::process::id()));
+    let temp = sibling(&file, &format!(".{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&temp);
-    let replaced = write_temp(&temp, path, mode, &bytes)
-        .and_then(|()| std::fs::rename(&temp, path))
-        .and_then(|()| sync_dir(path));
+    let replaced = write_temp(&temp, &file, mode, &bytes)
+        .and_then(|()| std::fs::rename(&temp, &file))
+        .and_then(|()| sync_dir(&file));
     if replaced.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     replaced
+}
+
+/// The file a write replaces: the target when `path` is a link, and `path`
+/// itself when it does not exist yet.
+fn resolve(path: &Path) -> io::Result<PathBuf> {
+    match std::fs::canonicalize(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(path.to_owned()),
+        Err(error) => Err(error),
+    }
 }
 
 fn write_temp(temp: &Path, path: &Path, mode: Option<u32>, bytes: &[u8]) -> io::Result<()> {
