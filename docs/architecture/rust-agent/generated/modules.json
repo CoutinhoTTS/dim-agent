@@ -30145,6 +30145,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::clipboard",
+      "references": [
+        "path crate::clipboard::Source::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::session",
       "references": [
         "path Command",
@@ -30299,6 +30306,7 @@
       "references": [
         "path App",
         "path App::new",
+        "path ClipboardRead::Native",
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path WebOpened",
