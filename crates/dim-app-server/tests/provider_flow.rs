@@ -1036,6 +1036,67 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     assert_eq!(snapshot.capabilities.context_window, 64000);
     assert_eq!(snapshot.capabilities.max_output_tokens, 8000);
     assert_eq!(selection.config.unwrap().max_tokens, Some(8000.0));
+    // The Session keeps the adopted snapshot. Resetting the descriptor
+    // override that declared the limits puts the model back to its discovery
+    // result, which declares nothing, and the next request fails naming what
+    // the model lost, before credentials or the network.
+    let reset = provider
+        .update_model_config(
+            NARROW.into(),
+            declared.version,
+            "narrow".into(),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reset.models[0].missing_limits,
+        ["contextWindow", "maxOutputTokens"]
+    );
+    let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+    let request = Arc::new(ModelRequest {
+        capability_snapshot: Some(snapshot),
+        ..ModelRequest::new(NARROW, "narrow", vec![Message::text(Role::User, "hello")])
+    });
+    let error = resolver
+        .0
+        .resolve(request, cancel.clone())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            &error,
+            dim_agent_capabilities::host::HostError::Failed { message, .. }
+                if message.contains("contextWindow") && message.contains("maxOutputTokens")
+        ),
+        "{error:?}"
+    );
+    // Declaring both again lets the next selection adopt them.
+    let redeclared = provider
+        .update_model_config(
+            NARROW.into(),
+            reset.version,
+            "narrow".into(),
+            serde_json::from_value(json!({"contextWindow":96000,"maxOutputTokens":12000})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let reselected = provider
+        .configuration(Some(narrow()), None, ModelPreferences::default(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        reselected
+            .capability_snapshot
+            .unwrap()
+            .capabilities
+            .context_window,
+        96000
+    );
+    assert_eq!(redeclared.models[0].missing_limits, Vec::<String>::new());
     root.shutdown().await.unwrap();
     server.abort();
     std::fs::remove_dir_all(home).unwrap();
