@@ -758,7 +758,7 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
                     "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),
                         "auth":{"type":"anonymous"}},"enabled":true,
                     "models":[{"modelId":"title","displayName":"Title","status":"active",
-                        "capabilities":dim_agent_types::ModelCapabilities::default()}]
+                        "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]
                 }),
             )
             .await,

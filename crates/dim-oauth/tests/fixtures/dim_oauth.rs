@@ -90,7 +90,8 @@ pub fn default_models() -> Value {
         {"id":"fixture-model","dim":{"id":"fixture-model","displayName":"Fixture model",
             "endpoint_type":"openai","contextWindow":32000,"maxOutputTokens":128,
             "reasoning":{"supported":true,"effortOptions":["low","high"]}},"zdr":true},
-        {"id":"fixture-claude","dim":{"id":"fixture-claude","endpoint_type":"anthropic"}},
+        {"id":"fixture-claude","dim":{"id":"fixture-claude","endpoint_type":"anthropic",
+            "contextWindow":64000,"maxOutputTokens":2048}},
         {"id":"fixture-image","dim":{"id":"fixture-image","endpoint_type":"openai",
             "raw":{"modalities":{"input":["text"],"output":["image"]}}}},
         {"id":"fixture-gemini","dim":{"id":"fixture-gemini","endpoint_type":"gemini"}}

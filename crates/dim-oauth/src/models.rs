@@ -288,6 +288,16 @@ fn apply_dim_rules(entry: &mut Object, explicit_context: bool) {
     let ids = variants(entry["modelId"].as_str().unwrap_or_default());
     if !explicit_context && ids.iter().any(|id| GPT5.is_match(id)) {
         entry["capabilities"]["contextWindow"] = json!(258000);
+        // The managed catalog declares this value itself, so a later format
+        // upgrade keeps it as a declaration.
+        if let Some(fields) = entry
+            .get_mut("metadata")
+            .and_then(|metadata| metadata.get_mut("capabilityOverrideFields"))
+            .and_then(Value::as_array_mut)
+            && !fields.iter().any(|field| field == "contextWindow")
+        {
+            fields.push(json!("contextWindow"));
+        }
     }
     let Some(reasoning) = entry
         .get_mut("metadata")
@@ -381,25 +391,21 @@ fn project(
     let mut caps = found_caps.clone().unwrap_or_else(|| {
         object(Some(
             &json!({"modalities":["text"],"toolCalling":true,"streaming":true,
-            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
-            "contextWindow":128000,"maxOutputTokens":16384}),
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}),
         ))
     });
     let found_limit = |key: &str| found_caps.as_ref().and_then(|c| c.get(key)).cloned();
-    caps.insert(
-        "contextWindow".into(),
-        context.map_or_else(
-            || found_limit("contextWindow").unwrap_or(json!(128000)),
-            Value::from,
-        ),
-    );
-    caps.insert(
-        "maxOutputTokens".into(),
-        output.map_or_else(
-            || found_limit("maxOutputTokens").unwrap_or(json!(16384)),
-            Value::from,
-        ),
-    );
+    // A limit the relay neither declares nor the bundled catalog supplies
+    // stays absent; the model is then listed as undeclared, never given one.
+    for (key, declared) in [("contextWindow", context), ("maxOutputTokens", output)] {
+        if let Some(declared) = declared {
+            caps.insert(key.into(), Value::from(declared));
+        } else if let Some(found) = found_limit(key) {
+            caps.insert(key.into(), found);
+        } else {
+            caps.remove(key);
+        }
+    }
     for key in [
         "toolCalling",
         "streaming",
@@ -540,7 +546,7 @@ fn project(
             .any(|v| v != "chat")
         || strings(actions.as_ref()).iter().any(|v| v != "chat")
         || (!output_modalities.is_empty() && !output_modalities.iter().any(|m| m == "text"));
-    let unavailable_reason = if route.is_none() {
+    let mut unavailable_reason = if route.is_none() {
         Some("unsupported_endpoint")
     } else if non_chat {
         Some("unsupported_model_type")
@@ -639,6 +645,17 @@ fn project(
         entry.insert("modelGuidePrompt".into(), json!(guide));
     }
     apply_dim_rules(&mut entry, dim.is_some() && context.is_some());
+    if unavailable_reason.is_none()
+        && ["contextWindow", "maxOutputTokens"].iter().any(|key| {
+            entry
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.get(*key))
+                .and_then(Value::as_u64)
+                .is_none()
+        })
+    {
+        unavailable_reason = Some("limits_undeclared");
+    }
     Ok(ManagedModel {
         entry: serde_json::from_value(Value::Object(entry)).map_err(|_| INVALID)?,
         protocol: route.unwrap_or(ModelProtocol::OpenaiCompatible),

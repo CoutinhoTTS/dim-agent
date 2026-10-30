@@ -296,7 +296,7 @@ async fn web_settings_permission_cancellation_and_restore() {
         let mut client = Client::new_version(&server, false, 3).await;
         if !restoring {
             assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
-                    "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
+                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
             assert_ok(
                 &client
                     .rpc(
@@ -620,7 +620,7 @@ async fn boot_web() -> (
     let (server, model_requests, _) = super::session_typescript::start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
     assert_ok(
         &client
             .rpc(

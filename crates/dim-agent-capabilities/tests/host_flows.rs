@@ -2110,11 +2110,7 @@ async fn tool_result_estimates(image: bool) -> Vec<f64> {
             provider_id: config.model.provider_id.clone(),
             model_id: config.model.model_id.clone(),
         },
-        capabilities: ModelCapabilities {
-            context_window: 128_000,
-            max_output_tokens: 4_096,
-            ..Default::default()
-        },
+        capabilities: ModelCapabilities::with_limits(128_000, 4_096),
         reasoning: None,
         service_tier: None,
     });

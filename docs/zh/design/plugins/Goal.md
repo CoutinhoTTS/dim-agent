@@ -402,7 +402,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 标记名 `dim-goal`；它的 `kind` 值 `goal`、`status`、`continuation`，以及 Pursuit 的 `evaluate`、`evaluate-again`、`report`（[Pursuit](Pursuit.md) §5）；它的 key `goal:objective` 与 `goal:status` | 协议 | 折叠、客户端与指南条目都要读它们。改动与行为和断言它的流程测试同批落地，并让按旧形式记录的历史仍可理解 |
 | 折叠与客户端读取的属性名与值——`op` 及其 `set`、`edit`、`pause`、`resume`、`clear`、`completed`、`blocked`；`status` 及其 `active`、`cleared`；`reason` 及其 `user`、`new_branch`、`interrupted`、`limit`、`turn_failed` 和 Pursuit 的 `evaluation_failed`；`branch`、`count`、`limit`、`after`、`judge`、`evaluation`、`evaluator`、`result`、`by`——以及标签行 `Objective:`、`Result:`、`Blocker:`、`Evaluator report:` | 协议 | 属性与标签命名一种机制（[model-facing prompts §4](../model-prompts.md#4-协议与策略)）；上面的编码规则与它们同属协议 |
 | 本页措辞改动涉及的三句话：目标块的、续跑块的，以及 §3.4 与 §5 那一行陈述的子分支规则 | 策略 | 它们说的是怎么工作，不是运行时做什么：目标仍属于一条线，另一条线既不续跑它，也不为它调用 `goal_update` |
-| 上表其余块中的句子，以及 `goal_update` 的声明描述 | 策略 | 关于怎么工作的指引；与它并列的 schema 和结果格式是协议 |
+| 上表其余块中的句子 | 策略 | 关于怎么工作的指引。与它们并列的 `goal_update` 声明是协议——它的 schema、结果格式，以及陈述调用做什么的描述 “Report that the current goal is completed or blocked.” |
 
 协议行只随行为与它的流程测试一起改动；策略行可替换，每次改动都按 §A.5.2 评估。
 

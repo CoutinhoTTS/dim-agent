@@ -501,6 +501,22 @@ pub fn convert_legacy_provider(
             }
         });
     }
+    // User-supplied entries declare what they state, unless the value may be
+    // the assumed pair the legacy schema and v24's probe filled in. The
+    // `models` of a `bundled` or `remote` row are listing output, so they keep
+    // the v26 rewrite's stricter rule: an unmarked limit that `metadata.raw`
+    // does not declare is dropped whatever its value. A `user` row's `models`
+    // is the seed the record starts from — the previous record's models or,
+    // without a target, the bundled definition's — and not the row's input, so
+    // it stays exactly as that seed states it.
+    for model in &mut models {
+        if models_source != "user" {
+            drop_undeclared_limits(model);
+        }
+    }
+    for model in user_models.iter_mut().chain(&mut overrides) {
+        declare_supplied_limits(model);
+    }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
     let model_preferences: BTreeMap<String, ModelPreferences> = metadata

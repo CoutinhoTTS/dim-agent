@@ -165,7 +165,7 @@ Full table in Appendix B.
 
 ### 5.1 Model-facing texts
 
-The two declarations are built-in declarations and their marks are [#549](https://github.com/arcships/dim/issues/549)'s. Both result texts are protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)):
+The two declarations are built-in and protocol throughout ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)): both schemas, and both descriptions, which state what each call does and returns — "Search the web. Returns numbered titles, URLs and snippets." and "Read a public web page as text. Use start_char to continue at the returned final URL.", the second naming the continuation argument and the final URL the result carries. Both result texts are protocol:
 
 | Text | Class |
 | --- | --- |
@@ -174,7 +174,7 @@ The two declarations are built-in declarations and their marks are [#549](https:
 | `[Truncated: call web_fetch again with start_char=<end> to continue.]` and `Redirected to <url>; call web_fetch with that URL to follow it.` | Protocol: the handles that continue a read; the model passes them back |
 | The search result list, the fetched text slice and the redirect notice's URL | The service's and the page's own content, carried as material |
 
-Web writes no marker and contributes no guide entry, and its policy text is the declarations' guidance, which is #549's.
+Web writes no marker and contributes no guide entry; its declarations have no policy text.
 
 ## 6. Interfaces (summary)
 

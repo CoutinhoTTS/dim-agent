@@ -173,6 +173,7 @@ pub fn from_bytes(bytes: Vec<u8>) -> Result<Attached> {
 }
 
 /// An image from pixels a platform decoder produced: a clipboard bitmap.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub fn from_pixels(image: image::DynamicImage) -> Result<Attached> {
     let image = dim_agent_capabilities::images::scale_pixels(image).map_err(refusal)?;
     attach(image, None)
@@ -180,6 +181,7 @@ pub fn from_pixels(image: image::DynamicImage) -> Result<Attached> {
 
 /// The shared pixel guard on a decoder's dimensions, run before the decoder
 /// is asked for any pixel.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn guard((width, height): (u32, u32)) -> Result<()> {
     let size = ImageSize { width, height };
     if size.pixels() > MAX_PIXELS {

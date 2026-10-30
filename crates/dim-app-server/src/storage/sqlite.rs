@@ -11,7 +11,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 25;
+pub const FORMAT: u32 = 26;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -19,7 +19,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26))",
     ),
     (
         "settings_documents",
@@ -113,7 +113,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 11] = [
+const UPGRADES: [(u32, &[&str]); 12] = [
     (
         13,
         &[
@@ -150,6 +150,10 @@ const UPGRADES: [(u32, &[&str]); 11] = [
     // decode; the marker only.
     (23, &[]),
     (24, &[]),
+    // #522: model limits that only a declaration writes, which a v25
+    // daemon cannot decode; the marker only, and the Provider-owned
+    // rewriter runs at this step.
+    (25, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -333,6 +337,9 @@ impl SqliteStorage {
                     if *from == 24 {
                         tx.execute_batch("DROP INDEX timeline_events_by_end")
                             .map_err(storage)?;
+                    }
+                    if *from == 25 {
+                        crate::provider::rewrite_stored_limits(&tx)?;
                     }
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])

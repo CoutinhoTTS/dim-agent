@@ -212,7 +212,7 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
     assert_eq!(chat.unavailable_reason, None);
     assert!(chat.zdr);
     assert_eq!(chat.entry.display_name, "Fixture model");
-    assert_eq!(chat.entry.capabilities.context_window, 32000);
+    assert_eq!(chat.entry.capabilities.context_window, Some(32000));
     assert!(chat.entry.capabilities.reasoning);
     assert_eq!(model("fixture-claude").protocol, ModelProtocol::Anthropic);
     assert_eq!(model("fixture-claude").unavailable_reason, None);
@@ -280,6 +280,44 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
         .unwrap();
     assert_eq!(required.code, "account_required");
     drop(lease);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_model_without_declared_limits_is_published_as_undeclared() {
+    let fixture = oauth::start().await;
+    *fixture.service.models.lock().unwrap() = Some(json!({"data":[
+        {"id":"zzzz-relay-undisclosed","dim":{"id":"zzzz-relay-undisclosed","endpoint_type":"openai"}},
+        {"id":"zzzz-relay-declared","dim":{"id":"zzzz-relay-declared","endpoint_type":"openai",
+            "contextWindow":64000,"maxOutputTokens":8000}}
+    ]}));
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    login(&providers, &fixture.base).await;
+    let catalog = providers.catalog(PROVIDER, &cancel()).await.unwrap();
+    let model = |id: &str| {
+        catalog
+            .models
+            .iter()
+            .find(|model| model.entry.model_id == id)
+            .unwrap()
+            .clone()
+    };
+    // No relay value and no bundled match: the limit stays absent and the
+    // model keeps a reason instead of being given a substitute window.
+    let undeclared = model("zzzz-relay-undisclosed");
+    assert_eq!(
+        undeclared.entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    assert_eq!(
+        undeclared.unavailable_reason.as_deref(),
+        Some("limits_undeclared")
+    );
+    let declared = model("zzzz-relay-declared");
+    assert!(declared.entry.capabilities.missing_limits().is_empty());
+    assert_eq!(declared.unavailable_reason, None);
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

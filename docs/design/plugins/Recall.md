@@ -358,7 +358,7 @@ only grow at its end, so an offset returned once keeps pointing at the same line
 
 ### 5.4 Model-facing texts
 
-The declaration's marks are [#549](https://github.com/arcships/dim/issues/549)'s. The tool's results are protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)):
+The `recall` declaration is protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)): its schema, and the description's sentences, which state what a page returns, the arguments that open or search, and the `[input <id>]` handle that opens a shortened input. The tool's results are protocol too:
 
 | Text | Class |
 | --- | --- |

@@ -714,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        25
+        i64::from(dim_app_server::storage::STORE_FORMAT)
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -959,16 +959,16 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     let db = fixture(&source);
     db.execute_batch("CREATE TABLE providers (providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT, defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT, accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER, retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT, activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT, metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER); CREATE TABLE provider_selections (selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT, createdAt TEXT, updatedAt TEXT, version INTEGER);").unwrap();
     let models = json!([
-        {"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()},
-        {"modelId":"disabled-model","displayName":"Disabled model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()},
-        {"modelId":"unavailable-model","displayName":"Unavailable model","status":"unavailable","capabilities":dim_agent_types::ModelCapabilities::default()}
+        {"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"inputTokenLimit":128_000,"outputTokenLimit":16_384}}},
+        {"modelId":"disabled-model","displayName":"Disabled model","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)},
+        {"modelId":"unavailable-model","displayName":"Unavailable model","status":"unavailable","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)}
     ]);
     db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,accountUsageSettings,models,modelsSource,metadata,enabled,version) VALUES ('legacy-provider','custom','Legacy','openai-responses','https://model.example/v1',?1,?2,?3,?4,'remote',?5,1,1)",params![json!({"type":"bearer"}).to_string(),json!({"type":"bearer","token":"private-provider-secret"}).to_string(),json!({"unsupported":"private-unused-secret"}).to_string(),models.to_string(),json!({"disabledModelIds":["disabled-model"]}).to_string()]).unwrap();
     db.execute("INSERT INTO provider_selections (selectionId,scope,providerId,modelId,version) VALUES ('chosen','global','legacy-provider','legacy-model',1)",[]).unwrap();
     let router_models = json!([
-        {"modelId":"image-route","displayName":"Image route","status":"active","capabilities":dim_agent_types::ModelCapabilities::default(),"metadata":{"raw":{"endpointType":"image-generation"}}},
-        {"modelId":"ambiguous-route","displayName":"Ambiguous route","status":"active","capabilities":dim_agent_types::ModelCapabilities::default(),"metadata":{"raw":{"selectable_endpoint_types":["anthropic","gemini"]}}},
-        {"modelId":"claude-route","displayName":"Chat route","status":"active","capabilities":dim_agent_types::ModelCapabilities::default(),"metadata":{"raw":{"selectableEndpointTypes":["anthropic","gemini"]}}}
+        {"modelId":"image-route","displayName":"Image route","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"endpointType":"image-generation"}}},
+        {"modelId":"ambiguous-route","displayName":"Ambiguous route","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"selectable_endpoint_types":["anthropic","gemini"]}}},
+        {"modelId":"claude-route","displayName":"Chat route","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"selectableEndpointTypes":["anthropic","gemini"],"inputTokenLimit":128_000,"outputTokenLimit":16_384}}}
     ]);
     db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,metadata,enabled,version) SELECT 'router',source,displayName,'new-api-router',baseUrl,auth,credential,?1,modelsSource,'{}',enabled,version FROM providers WHERE providerId='legacy-provider'", [router_models.to_string()]).unwrap();
     let selection_workspaces = directory.path().join("selection-workspaces");
@@ -1249,10 +1249,134 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     root.shutdown().await.unwrap();
 }
 
+/// #522: a legacy limit equal to the assumed pair imports as undeclared,
+/// while a typed or `metadata.raw`-declared value imports as a declaration;
+/// the `models` of a `bundled` or `remote` row are listing output, so an
+/// unmarked limit no raw item declares is dropped whatever its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_declares_only_the_limits_the_source_does() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let db = fixture(&source);
+    db.execute_batch("CREATE TABLE providers (providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT, defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT, accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER, retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT, activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT, metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER); CREATE TABLE provider_selections (selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT, createdAt TEXT, updatedAt TEXT, version INTEGER);").unwrap();
+    let limits = |context: u64, output: u64| {
+        json!({"modalities":["text"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
+            "contextWindow":context,"maxOutputTokens":output})
+    };
+    let models = json!([
+        {"modelId":"assumed","displayName":"Assumed","status":"active",
+         "capabilities":limits(128_000,16_384)},
+        {"modelId":"mixed","displayName":"Mixed","status":"active",
+         "capabilities":limits(32_000,16_384)},
+        {"modelId":"declared","displayName":"Declared","status":"active",
+         "capabilities":limits(64_000,8_000),
+         "metadata":{"raw":{"inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
+    ]);
+    db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES ('legacy-limits','custom','Legacy limits','openai-responses','https://model.example/v1',?1,?2,?3,'user',1,1)", params![json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), models.to_string()]).unwrap();
+    let listing = json!([
+        {"modelId":"derived","displayName":"Derived","status":"active",
+         "capabilities":limits(200_000,20_000)},
+        {"modelId":"listed-declared","displayName":"Listed Declared","status":"active",
+         "capabilities":limits(200_000,20_000),
+         "metadata":{"raw":{"inputTokenLimit":200_000,"outputTokenLimit":20_000}}}
+    ]);
+    for (id, source) in [("legacy-remote", "remote"), ("legacy-bundled", "bundled")] {
+        db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES (?1,'custom',?2,'openai-responses','https://model.example/v1',?3,?4,?5,?6,1,1)", params![id, format!("Legacy {source}"), json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), listing.to_string(), source]).unwrap();
+    }
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("config.json"),
+        r#"{"locale":null,"tuiNotifyOnComplete":false}"#,
+    )
+    .unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let migration = root.get::<Migration>().unwrap();
+    let report = migration.run(source.clone(), true, None).await.unwrap();
+    for id in ["legacy-limits", "legacy-remote", "legacy-bundled"] {
+        assert!(
+            report.objects.iter().any(|item| item.kind == "provider"
+                && item.id == id
+                && item.outcome == Outcome::Imported),
+            "{report:?}"
+        );
+    }
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let record: Value = serde_json::from_str(
+        &native
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='legacy-limits'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let models = record["userModels"].as_array().unwrap();
+    let entry = |id: &str| models.iter().find(|model| model["modelId"] == id).unwrap();
+    let assumed = entry("assumed");
+    assert!(assumed["capabilities"].get("contextWindow").is_none());
+    assert!(assumed["capabilities"].get("maxOutputTokens").is_none());
+    let mixed = entry("mixed");
+    assert_eq!(mixed["capabilities"]["contextWindow"], 32_000);
+    assert!(mixed["capabilities"].get("maxOutputTokens").is_none());
+    assert_eq!(
+        mixed["metadata"]["capabilityOverrideFields"],
+        json!(["contextWindow"])
+    );
+    let declared = entry("declared");
+    assert_eq!(declared["capabilities"]["contextWindow"], 64_000);
+    assert_eq!(declared["capabilities"]["maxOutputTokens"], 8_000);
+    assert_eq!(
+        declared["metadata"]["capabilityOverrideFields"],
+        json!(["contextWindow", "maxOutputTokens"])
+    );
+    for id in ["legacy-remote", "legacy-bundled"] {
+        let record: Value = serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let models = record["models"].as_array().unwrap();
+        let entry = |model_id: &str| {
+            models
+                .iter()
+                .find(|model| model["modelId"] == model_id)
+                .unwrap()
+        };
+        let derived = entry("derived");
+        assert!(
+            derived["capabilities"].get("contextWindow").is_none(),
+            "{id}"
+        );
+        assert!(
+            derived["capabilities"].get("maxOutputTokens").is_none(),
+            "{id}"
+        );
+        let declared = entry("listed-declared");
+        assert_eq!(declared["capabilities"]["contextWindow"], 200_000);
+        assert_eq!(declared["capabilities"]["maxOutputTokens"], 20_000);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_converts_providers_and_selections_through_the_provider_mapping() {
     fn legacy_model(id: &str) -> Value {
-        json!({"modelId":id,"displayName":id,"status":"active","capabilities":dim_agent_types::ModelCapabilities::default()})
+        json!({"modelId":id,"displayName":id,"status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"inputTokenLimit":128_000,"outputTokenLimit":16_384}}})
     }
     #[allow(clippy::too_many_arguments)]
     fn insert_legacy_row(
@@ -1410,7 +1534,7 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
     );
     let unknown = json!([{
         "modelId":"legacy-model","displayName":"legacy-model","status":"active",
-        "capabilities":dim_agent_types::ModelCapabilities::default(),
+        "capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),
         "futureField":true
     }]);
     insert_legacy_row(
@@ -1715,7 +1839,7 @@ async fn migration_preserves_removed_client_settings_and_refuses_unsupported_tar
     let preview = directory.path().join("preview");
     std::fs::create_dir_all(preview.join("rust")).unwrap();
     let native = Connection::open(preview.join("rust/dimcode.sqlite")).unwrap();
-    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=25));INSERT INTO agent_store_format VALUES(25);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
+    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=27));INSERT INTO agent_store_format VALUES(27);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
     drop(native);
     let before = std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap();
     let root = rutis::Ctx::root().unwrap();

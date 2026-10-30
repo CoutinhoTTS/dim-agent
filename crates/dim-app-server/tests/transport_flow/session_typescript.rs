@@ -84,9 +84,9 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000009","displayName":"Auxiliary fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"bearer"},"credential":{"action":"set","value":"auxiliary-fixture-secret"}},"models":[{"modelId":"title", "displayName":"Title", "status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()},
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
             {"modelId":"hang", "displayName":"Hang", "status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
     assert_ok(
         &client
             .rpc(

@@ -2,7 +2,7 @@
 //! `/reasoning` (reasoning effort), `/fast` (service tier) and `/agent`.
 
 use crate::{Result, client::Client, wire::Configuration};
-use dim_agent_types::{ModelCapabilities, ModelReasoning, ModelServiceTier};
+use dim_agent_types::{CatalogCapabilities, ModelReasoning, ModelServiceTier};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -87,7 +87,7 @@ pub async fn run(
         #[derive(Deserialize)]
         struct CatalogModel {
             id: String,
-            capabilities: ModelCapabilities,
+            capabilities: CatalogCapabilities,
             metadata: Option<Preferences>,
         }
         #[derive(Deserialize)]
