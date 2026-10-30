@@ -79,16 +79,21 @@
 //! configuration file the product ships (`--defaults FILE`, by default the
 //! one in this repository), through the App Server's own default plugin
 //! configuration, so the TypeScript plugins run in every scenario. Their
-//! rows need Node and the `@arcships/rutis-runtime` packages: the runner
-//! reads `DIM_TEST_NODE` and `DIM_TEST_JS_RUNTIME` from the environment, and
-//! each default plugin's packages must be installed (`npm ci --prefix
-//! <plugin directory>`). For example:
+//! rows need Node, the `@arcships/rutis-runtime` packages and each default
+//! plugin's own packages: the runner reads `DIM_TEST_NODE` and
+//! `DIM_TEST_JS_RUNTIME` from the environment. For example:
 //!
 //! ```text
 //! DIM_TEST_NODE="$(command -v node)" \
 //! DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
 //! cargo run --locked -p xtask -- scenario-eval ...
 //! ```
+//!
+//! A source checkout installs those packages first: `npm ci --prefix
+//! runtime --ignore-scripts` for the rutis runtime, and `npm ci --prefix
+//! runtime/plugins/<name> --ignore-scripts` for `goal`, `session-title`,
+//! `workflow` and `scheduler`, the default plugins that ship a
+//! `package.json` (`plugin-authoring` ships only a Skill).
 //!
 //! A candidate for a TypeScript plugin's text replaces a member of that
 //! plugin's factory configuration, which is its manifest `config`: the
@@ -130,7 +135,9 @@
 //!   `afterSeconds` of wall clock or, for `whenToolCall`, when a
 //!   `step/tool-use` event carries the substring. A steer sets exactly one of
 //!   the two. A question the run asks is declined: the scenario scripts no
-//!   answer to it.
+//!   answer to it. The message is queued input, as the product's own first
+//!   message is; the steers are the operator's and are submitted in Steer
+//!   mode, so each one ends a wait and reaches a `main` that is waiting.
 //! - `budget.turns` bounds the turns over every line and `budget.seconds` the
 //!   wall clock from the first submission; both stop the run. `budget.window`
 //!   is the context window the scenario is written for and is checked, not
@@ -158,7 +165,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::AgentBuilder;
 use dim_agent_types::{
-    Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
+    InputMode, Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
 };
 use dim_app_server::RunningServer;
 use dim_client::{Client, ConnectionConfig, Message as WireMessage, Server as WireServer};
@@ -1218,7 +1225,7 @@ async fn drive(
             return driven;
         }
     }
-    if let Err(error) = submit(client, &session, &scenario.message).await {
+    if let Err(error) = submit(client, &session, &scenario.message, None).await {
         driven.stop = "error";
         driven.error = Some(error);
         return driven;
@@ -1232,8 +1239,8 @@ async fn drive(
         .map(|steer| (steer, false))
         .collect();
     let mut last_event = Instant::now();
-    // An input the runner submitted is outstanding until its turn starts; a
-    // line that has not started it yet is not idle.
+    // An input the runner submitted is outstanding until a turn starts for it
+    // or the run consumes it; a line that has done neither is not idle.
     let mut awaiting = true;
     loop {
         match fire_due(client, &session, &mut steers, started).await {
@@ -1276,7 +1283,12 @@ async fn drive(
                         {
                             branches.insert(branch.to_owned());
                         }
-                        if event["type"] == "turn" && event["name"] == "start" {
+                        // A steer is taken inside the turn it reaches, so no
+                        // turn starts for it: either event means the input is
+                        // no longer outstanding.
+                        if (event["type"] == "turn" && event["name"] == "start")
+                            || (event["type"] == "input" && event["name"] == "consumed")
+                        {
                             awaiting = false;
                         }
                         if event["type"] == "turn" && event["name"] == "end" {
@@ -1361,12 +1373,25 @@ async fn decline_question(client: &mut Client, session: &str, branch: &str, even
     }
 }
 
-async fn submit(client: &mut Client, session: &str, text: &str) -> std::result::Result<(), String> {
+/// The `session.submit` params. A mode names how `main` takes the input: a
+/// steer ends a wait and replaces a request that has produced no output yet,
+/// while the operator's first message carries no mode and is queued.
+fn submit_params(session: &str, text: &str, mode: Option<InputMode>) -> Value {
+    let mut params = json!({"sessionId": session, "branchId": "main", "text": text});
+    if let Some(mode) = mode {
+        params["mode"] = json!(mode);
+    }
+    params
+}
+
+async fn submit(
+    client: &mut Client,
+    session: &str,
+    text: &str,
+    mode: Option<InputMode>,
+) -> std::result::Result<(), String> {
     client
-        .rpc(
-            "session.submit",
-            json!({"sessionId": session, "branchId": "main", "text": text}),
-        )
+        .rpc("session.submit", submit_params(session, text, mode))
         .await
         .map(|_| ())
         .map_err(|error| format!("session.submit failed: {error}"))
@@ -1386,7 +1411,7 @@ async fn fire_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            submit(client, session, &steer.text).await?;
+            submit(client, session, &steer.text, Some(InputMode::Steer)).await?;
             sent = true;
         }
     }
@@ -1413,7 +1438,7 @@ async fn fire_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            submit(client, session, &steer.text).await?;
+            submit(client, session, &steer.text, Some(InputMode::Steer)).await?;
             sent = true;
         }
     }
@@ -2273,6 +2298,24 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    /// A scenario's steers are the operator's: they go out in Steer mode, so
+    /// a waiting `main` takes them, and the initial message carries no mode
+    /// and is queued input (issue #728).
+    #[test]
+    fn a_steer_is_submitted_in_steer_mode_and_the_message_without_one() {
+        let params = submit_params("session", "go", None);
+        assert!(params.get("mode").is_none(), "{params}");
+        let message: dim_app_server::protocol::Submit =
+            serde_json::from_value(params).expect("the first message is a Submit");
+        assert_eq!(message.text.as_deref(), Some("go"));
+        assert_eq!(message.mode, None);
+        let params = submit_params("session", "also", Some(InputMode::Steer));
+        let steer: dim_app_server::protocol::Submit =
+            serde_json::from_value(params).expect("a steer is a Submit");
+        assert_eq!(steer.text.as_deref(), Some("also"));
+        assert_eq!(steer.mode, Some(InputMode::Steer));
     }
 
     /// A candidate exactly at `current − δ` passes the rule; one just below
@@ -4202,7 +4245,8 @@ mod tests {
     /// A run offers the shipped assembly's whole tool catalog — the workspace
     /// tools and Questions, not only the mock profile's three — carries a
     /// workspace tool's result into its next request (model-prompts §8.1), and
-    /// fires a steer on that tool's call.
+    /// fires an operator steer on that tool's call, whose text reaches the
+    /// model with the result.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_run_offers_the_product_tools_and_carries_a_tool_result() {
         const STEER: &str = "STEER: name the file you just read.";
@@ -4225,15 +4269,20 @@ mod tests {
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
-            assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
+            // A steer taken before the next request is assembled joins it
+            // (one turn, two requests); one taken later replaces a request in
+            // flight or starts a turn of its own (three requests, one or two
+            // turns).
+            let turns = record["turns"].as_u64().unwrap_or_default();
+            assert!((1..=2).contains(&turns), "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         for arm in ["current", "candidate"] {
             let requests = fixture.arm(arm);
-            assert_eq!(
-                requests.len(),
-                3,
-                "{arm}: the tool call, the answer after it, and the steer's turn"
+            assert!(
+                (2..=3).contains(&requests.len()),
+                "{arm}: {} requests: {requests:?}",
+                requests.len()
             );
             let body: Value = serde_json::from_str(&requests[0]).unwrap();
             let offered: Vec<&str> = body["tools"]
@@ -4255,9 +4304,10 @@ mod tests {
                 requests[1].contains(FILE_TEXT),
                 "{arm}: the read result reaches the next request"
             );
+            let last = requests.last().expect("a request");
             assert!(
-                requests[2].contains(STEER),
-                "{arm}: the steer's text reaches the next turn"
+                last.contains(STEER),
+                "{arm}: the steer's text reaches a request"
             );
         }
     }
