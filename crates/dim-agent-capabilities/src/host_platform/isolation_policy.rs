@@ -43,7 +43,7 @@ pub(super) fn effective(policy: &IsolationPolicy) -> Result<IsolationPolicyEffec
                 .into(),
         ),
         2 => Ok(IsolationPolicyEffective {
-            sandbox: policy.sandbox.unwrap_or(Sandbox::Workspace),
+            sandbox: policy.sandbox.unwrap_or(Sandbox::Host),
             escalation: policy.escalation.unwrap_or(IsolationEscalation::Ask),
         }),
         _ => Err("host-isolation.json version must be 1 or 2".into()),

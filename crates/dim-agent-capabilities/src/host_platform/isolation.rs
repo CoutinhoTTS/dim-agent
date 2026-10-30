@@ -1,6 +1,6 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, Sandbox, TemporaryDirectory};
 use super::IsolationPolicy as PolicyFile;
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, Sandbox, TemporaryDirectory};
 use crate::file_storage::FileStorageError;
 use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
@@ -16,7 +16,7 @@ struct Policy {
 impl Policy {
     fn default_policy() -> Self {
         Self {
-            sandbox: Sandbox::Workspace,
+            sandbox: Sandbox::Host,
             read_only_paths: None,
             writable_paths: None,
             environment: None,
@@ -41,12 +41,6 @@ impl Policy {
             writable_paths: file.writable_paths,
             environment: file.environment,
         })
-    }
-
-    /// The host enforces the boundary; it does not make a second admission
-    /// decision. A requested boundary is used as given.
-    fn resolve(&self, requested: Option<Sandbox>, _location: &str) -> Result<Sandbox, ProcessSpecError> {
-        Ok(requested.unwrap_or(self.sandbox))
     }
 }
 
@@ -118,7 +112,6 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
-        requested: Option<Sandbox>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
         let invalid = |reason| ProcessSpecError {
@@ -147,7 +140,7 @@ impl HostPlatform {
             None => Policy::default_policy(),
         };
         let location = self.isolation_location();
-        let sandbox = policy.resolve(requested, &location)?;
+        let sandbox = policy.sandbox;
         let enabled = sandbox != Sandbox::Host;
         let environment = policy.environment.unwrap_or_else(|| {
             [
@@ -573,7 +566,7 @@ fn policy_versions_name_the_sandbox() {
     assert_eq!(ask.sandbox, Sandbox::Network);
 
     let defaults = Policy::decode(br#"{"version":2}"#).unwrap();
-    assert_eq!(defaults.sandbox, Sandbox::Workspace);
+    assert_eq!(defaults.sandbox, Sandbox::Host);
 
     assert!(Policy::decode(br#"{"version":1,"sandbox":"host"}"#).is_err());
     assert!(Policy::decode(br#"{"version":2,"enabled":false}"#).is_err());
@@ -582,18 +575,10 @@ fn policy_versions_name_the_sandbox() {
 
 #[cfg(test)]
 #[test]
-fn a_call_uses_the_node_sandbox_and_accepts_a_request() {
-    let deny = Policy::decode(br#"{"version":2,"escalation":"deny"}"#).unwrap();
-    assert_eq!(deny.resolve(None, "policy").unwrap(), Sandbox::Workspace);
-    assert_eq!(
-        deny.resolve(Some(Sandbox::Host), "policy").unwrap(),
-        Sandbox::Host
-    );
+fn a_call_uses_the_node_sandbox() {
+    let defaults = Policy::decode(br#"{"version":2}"#).unwrap();
+    assert_eq!(defaults.sandbox, Sandbox::Host);
 
-    let node = Policy::decode(br#"{"version":2,"sandbox":"network","escalation":"ask"}"#).unwrap();
-    assert_eq!(node.resolve(None, "policy").unwrap(), Sandbox::Network);
-    assert_eq!(
-        node.resolve(Some(Sandbox::Workspace), "policy").unwrap(),
-        Sandbox::Workspace
-    );
+    let node = Policy::decode(br#"{"version":2,"sandbox":"network"}"#).unwrap();
+    assert_eq!(node.sandbox, Sandbox::Network);
 }
