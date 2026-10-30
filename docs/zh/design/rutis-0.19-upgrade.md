@@ -19,7 +19,7 @@ rutis 删掉的 API，Dim 一律改用 rutis 规定的新写法，不加重建�
 | 项 | 现状 | 目标 |
 | --- | --- | --- |
 | `Cargo.toml` 工作区依赖 | `rutis`、`rutis-bridge` 0.17.1；`rutis-loader` 0.17.1，带 `node`、`python` | 0.19.0；`rutis-loader` 只带 `node`（0.19 没有 `python` feature，`node` 会启用 `runtimes`） |
-| 新增依赖 | — | `rutis-host` 0.19.0，加在 `dim-app-server`，以及启动运行时的测试和示例中 |
+| 新增依赖 | — | 无。Dim 自己拉起运行时（M4）；npm 上的 `@arcships/rutis-host` 只是测试用的开发依赖（M10） |
 | `xtask` | `rutis-bridge`，带 `exports` | `rutis-types` 0.19.0 |
 | `runtime/package.json` 及锁文件 | `@arcships/rutis-runtime`、`@arcships/rutis` 0.17.1 | 0.19.0；另加开发依赖 `@arcships/rutis-host` 0.19.0（M10） |
 | `runtime/plugins/{goal,scheduler,session-title,workflow}/package.json` 及锁文件 | `@arcships/rutis` 0.17.1 | 0.19.0 |
@@ -64,9 +64,9 @@ Python 行都无法连接。
 
 | 0.17.1 | 0.19.0 |
 | --- | --- |
-| `rutis_bridge::runtime::LocalRuntime`（`node`、`python`、`named`、`interpreter`、`python_path`、stdio、`handle`） | `rutis_host::connect::SpawnPlugin::new(name, launcher, anchor)`，配合 `rutis_host::languages::{node, python}::launcher`；构造方法相同 |
+| `rutis_bridge::runtime::LocalRuntime`（`node`、`python`、`named`、`interpreter`、`python_path`、stdio、`handle`） | 宿主自己的连接插件：`rutis_bridge::runtime::Launcher`、`pipe::greeted`、`Session::new`、`RuntimeStates`。迁移指南给的 `rutis_host::connect::SpawnPlugin` 用的也是这些零件；Dim 不链接它（M4） |
 | `RuntimePlugin`、服务 `runtime::Runtime` | 删除；状态通过 `RuntimeHandle::state()` 读取，取值不变 |
-| `Stdio::Lines` | `rutis_host::output::lines(stream, prefix)` |
+| `Stdio::Lines` | `pipe::Stdio::Pipe(factory)`；Dim 的 factory 把逐行输出转给 `tracing` |
 | `rutis_loader::runtime::RuntimeResolver::node` / `::modules`、`with_catalog`、`invalidate` | 改为一个 `rutis_loader::runtime::SessionResolver`（`npm(&catalog, row)`、`runtime(handle)`、`attach(&loader)`、`follow_row(row)`）；没有需要失效的缓存；npm 名字由 Node 解析 |
 | `RuntimeRows`、`RowsSource`、`RuntimeRowsPlugin` | `SessionRows::key(row)`；`SessionResolver::follow_row` |
 | `ServiceCatalog::share_registered_only()` | 删除：所有没有另行登记的名字都按名字共享 |
@@ -169,27 +169,53 @@ Python 行都无法连接。
 现在在 rutis 里按它的共享键等待，而不是交给运行时自己处理。[Dim 如何使用 rutis §3.4](rutis-usage.md#34-服务目录)
 删掉关于 `share_registered_only` 的那句话。
 
-### M4. 本地运行时是会话
+### M4. 本地运行时是会话，由 Dim 自己的连接插件拉起
 
-- **启动。** Node 运行时 `session-node` 和 Python 运行时 `py` 都是 `SpawnPlugin`，由
-  `rutis_host::languages::{node, python}::launcher` 构造，解释器、Python 路径和 stdio 沿用 Dim 现在的设置；
-  标准错误经 `rutis_host::output::lines` 输出。
-  - 使用配置路径时，`SessionNodeRuntime` 和 `SessionPythonRuntime` 这两行把各自的 `SpawnPlugin` 作为子插件
-    挂载并等待它。loader 的行本身已经是一行，而 `SpawnPlugin` 会把自己的 fiber 标记为运行时的行，
-    所以它不能直接跑在行的 fiber 上。
-  - 在 `RuntimeManager` 下，由 `Mounted` 子插件持有 `SpawnPlugin`。`runtime.list` 读取
-    `RuntimeHandle::state()`，`runtime.install` 重启这个子插件，与现在相同。
+0.19 把本地运行时变成会话的对端，并把"每种语言怎么启动"的知识从 rutis-bridge 里挪了出去。迁移指南给
+`LocalRuntime` 指的替代是 `rutis_host::connect::SpawnPlugin`。如果照做，Dim 就要为了拉起两个进程，链接整个
+`rutis-host` 应用 crate：它的整套命令、WebSocket 和 TLS 栈、第二套 tokio-tungstenite，以及 loader 的 Go、Swift feature。
+
+Dim 本身就是宿主，拉起运行时本来就是 RuntimeManager 的事。rutis 对需要的两点都有文档：
+
+- 自己的连接，就是一个把 `Channel` 交给 `Session::new` 的连接插件；
+- 由宿主启动的运行时，命令行是 `<channel> --id <name> <project>`（[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.0/docs/migration-0.19.md)
+  "一起升级"一节）。
+
+`SpawnPlugin` 用到的零件在 rutis-bridge 里都是公开的。所以 Dim 不链接 `rutis-host`。
+
+- **运行时的行。** 每个运行时是一个进程行，行 id 就是运行时的名字：`session-node` 和 `py`。它的插件
+  `RuntimeConnection` 是 Dim 自己的连接插件，做四件事：
+  - 用 `rutis_bridge::runtime::Launcher` 按运行时的启动命令建好进程，在继承的 channel 上带 `--id <name>` 启动它，
+    并等它问候（`pipe::greeted`）；
+  - 挂载 `Session::new(channel)`。loader 会标记这一行，所以会话在 `session_key("session-node")` /
+    `session_key("py")` 提供自己的句柄，`SessionResolver` 就在那里找到它。不需要任何内部 API；
+  - 维护运行时的 `RuntimeStates`：正在启动、就绪、失败或已停止，以及进程是怎么结束的（`ended_status`）；
+  - 通过 `pipe::Stdio::Pipe` 把标准错误逐行转给 `tracing`。标准输入和输出为空，与现在相同。
+- **启动命令。** Dim 保留 rutis-host 自己的启动器为这两个包用的两条命令（`languages/node.rs`、
+  `languages/python.rs`），解释器和路径沿用 Dim 现在的配置：
+  - Node：在 `@arcships/rutis-runtime` 包里执行 `node --import tsx src/runner.mjs`；
+  - Python：在它的项目里执行 `python -m rutis`，把项目和插件包放进 `PYTHONPATH`，并设置 `PYTHONUNBUFFERED=1`、
+    `PYTHONDONTWRITEBYTECODE=1`。
+- **运行时什么时候启动。** 这一行注入一个携带启动命令的、仅限 Rust 的进程级服务（`nodeRuntime`、
+  `pythonRuntime`），所以在命令就绪之前，rutis 会让它一直等着。
+  - 使用配置路径时（`--node`、`--js-runtime`、`--python`），App Server 在启动时提供这个命令，这一行是必需行，
+    与现在相同。
+  - 在 RuntimeManager 下，由 RuntimeManager 在获取到运行时之后提供它，不再把 `LocalRuntime` 挂成自己的子插件。
+    这一行是可选行，所以启动从不等待下载。
+  - 失败或进程结束之后的 `runtime.install` 会重新提供这个命令，rutis 随之重新加载这一行。`runtime.list` 从同一个
+    `RuntimeStates` 读取 `RuntimeHandle::state()`。
 - **标识。** App Server 的根提供 `LocalId("dim-daemon")`。这个内核在每个会话里都用它问候，运行时的会话和
   leaf 的会话（M8）都是。它不挂载 `Session::service()`：那个插件提供名为 `sessions` 的服务，而这个名字已经是
   Dim 的 `AgentDirectory`。
 - **解析。** 一个 `SessionResolver::npm(catalog, "session-node")` 服务两个运行时，放在解析链最后。
-  - 对每个运行时调用 `runtime(handle)`；在 loader 挂载前调用 `attach(&loader)`；loader 运行后对每个运行时
-    调用 `follow_row`。
+  - 对每个运行时的 `RuntimeStates` 调用 `runtime(handle)`；在 loader 挂载前调用 `attach(&loader)`；loader 运行后
+    对每个运行时调用 `follow_row`。
   - Dim 自己的包装改名为 `SnapshotResolver`。它继续检查每一行的 `provides` 快照、加上 `workflowFiles`，
     但不再分流 `py:` 名字。
   - 识别"运行时没在运行"的方式与 loader 相同：没有 schema，且 `meta.schema` 是一段文字。不匹配这段文字的内容。
-- **门槛。** 准入原来等 `RuntimeRows`，现在改为等 `SessionRows::key(name)`。删除 `NodeRows` 部件以及
-  `SessionNodeRows` / `SessionPythonRows` 两行。
+- **门槛。** 准入原来等 `RuntimeRows`，现在改为等 `SessionRows::key(name)`。删除的有：`NodeRows` 部件；
+  `SessionNodeRows` / `SessionPythonRows` 两行；以及 `SessionNodeRuntime` / `SessionPythonRuntime` 两行，由
+  `session-node` 和 `py` 两行取代。
 - **重新加载。** `plugin.reload` 只调用 `Loader::reload(row)`。没有解析器缓存了，Node 运行时每次解析都会重新
   描述模块。
 - **Python。** 系统解释器的检查改为要求 3.12。
@@ -388,7 +414,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 `.github/workflows/ci.yml` 运行的检查，在工作区根目录按它的顺序：
 
-1. `cargo deny --locked check advisories licenses`（dependencies 任务）：`rutis-host` 及其依赖会引进来
+1. `cargo deny --locked check advisories licenses`（dependencies 任务）
 2. `cargo build --workspace --locked`、`cargo fmt --all -- --check`、
    `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`
 3. `cargo run --locked -p xtask -- check`，然后 `graph`。`npm/branch-services.d.ts` 过期时 `check` 也会失败。提交的图
@@ -418,8 +444,11 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 - **`before` 顺序（M2）：** 同一分支上的两个变形按现在的顺序生效并记录各自的步骤；某个变形失败时保留原始 draft；
   另一个分支的变形不运行。
-- **运行时的行（M4）：** TypeScript 行和 Python 行都能启动，`runtime.list` 能列出它们，经历一次
-  `runtime.install` 重启后仍在，准入会等待运行时的行；`plugin.reload` 能用上改动后的模块。
+- **运行时的行（M4）：**
+  - `session-node` 和 `py` 两行在启动命令提供之前一直等待，RuntimeManager 获取到运行时之后才启动；
+  - TypeScript 行和 Python 行都能启动，`runtime.list` 能列出它们，经历一次 `runtime.install` 重启后仍在；
+  - 准入会等待运行时的行；
+  - `plugin.reload` 能用上改动后的模块。
 - **快照行（M4）：** 运行时停着时解析的行，按它的 `provides` 快照被接受。
 - **`loader`（M5）：** 注入 `loader` 的 TypeScript 行可以 `reload` 某一行、读取 `status`；`create` 和 `remove` 会被拒绝，
   因为 Dim 没有配置可编辑层。
@@ -448,7 +477,10 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 - [Dim 如何使用 rutis](rutis-usage.md)：§1 和 §2（"插件在哪里运行"和"隔离标签"两段，它们描述的是按 Agent 自带的 loader 和 M6 删掉的标签计数器）、§3.4（M3）、§3.5（运行时的行与 `isolate`）、
   §5（"Dim 使用 rutis 0.17.1"）、附录 A（`LocalId`、运行时的绑定）和附录 B（Python 3.12）。
 - [Tui](../../design/plugins/Tui.md)：§3.1、§3.6（示意图、Link、Hosted `Tui` 改为 leaf 自己的 `Tui`、Leaving、`ui.open` 的回复、`hello` feature 那段、Later）、§8、§9 和 §10（M8）。
-- [RuntimeManager](plugins/RuntimeManager.md)：示意图、Python 版本要求、运行时与解析器各节，以及服务名（M4）。
+- [RuntimeManager](plugins/RuntimeManager.md) 的 §1–§3 和 §5（M4）：
+  - 它提供启动命令（`nodeRuntime`、`pythonRuntime`），不再挂载 `LocalRuntime`；
+  - `session-node` 和 `py` 两行取代 `Runtime#…` 这些名字；
+  - Python 版本要求。
 - [PluginManager](plugins/PluginManager.md)：`waitingFor` 和重新加载（M9、M4），以及需求一节里对 rutis 0.17.1 的引用。
 - [设计总览](overview.md)：
   - 其中"只有进程插件登记管理方法"的管理平面表述：对端也能拿到 `managementMethods`（M8）；
@@ -478,7 +510,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
-| 经由 `rutis-host` 会编译两个版本的 tokio-tungstenite（0.29 和 0.30） | 接受；Dim 自己的 WebSocket 代码继续使用 0.29 |
+| Dim 保留的启动命令和运行时包脱节 | 它们和这些包一起固定版本（`runtime/package.json`、`runtime/python-requirements.txt`），由 Node 和 Python 驱动的流程测试实际启动两个运行时 |
 
 回滚：撤销这次升级改动和固定版本即可。没有任何持久化格式变化；Timeline、存储和线上格式的夹具都不动。
 
@@ -501,7 +533,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | §4 规则 11（受信插件，明确的边界） | M8 写明 leaf 链接暴露了什么，信任边界保持在本地用户；审批和权限都不变 |
 | AGENTS 规则 6（冻结的夹具） | 不动 `crates/dim-agent-types/tests/fixtures/` |
 | ADR 002 D1–D5 | 作用域放置、接线、依赖和配置都不变：运行时仍是进程部件，leaf 仍属于 CLI 进程。M6 把 Agent 的放置 API 改成唯一的 `build(loader, anchor)`，遵循 [ADR 004](../../adr/004-loader-plugin-management.md) 的"不引入第二个 loader" |
-| ADR 006 D2 | Dim 直接使用 rutis 的会话、解析器和运行时插件，不为被删的 API 加包装 |
+| ADR 006 D2 | Dim 直接使用 rutis 的会话和解析器；用 rutis 写明的"宿主自己的连接"形式拉起运行时；不为被删的 API 加包装 |
 
 ## 11. 消融检查
 
@@ -513,5 +545,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   Agent 的一种放置方式（M6）。
 - 不在 CI 里加 `git diff --exit-code -- npm/branch-services.d.ts`：`xtask check` 已经会在这个文件过期时失败。
 - Dim 只为 rutis 不做的事保留自己的解析器包装：`provides` 快照检查和 `workflowFiles`。
-- 没有兼容层：直接使用 `rutis-host` 的 `SpawnPlugin`，而不是复制一份。复制等于在 Dim 里重建被删的 `LocalRuntime`。
+- 没有兼容层，也不引入宿主应用。运行时由 Dim 自己的连接插件拉起，这是 rutis 为"宿主自己的连接"写明的形式，
+  用的是 rutis-bridge 的公开零件。不为了两条启动命令去链接 `rutis-host` crate。`RuntimeManager` 不再挂载子插件：
+  它只提供启动命令，由 rutis 的门控启动这一行。
 - `ui.leaf.2` 复用现有的 feature 回退机制，不新增版本检查。
