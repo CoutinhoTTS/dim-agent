@@ -60,19 +60,24 @@ A fork copies every current row in both tables at the fork's commit, including a
 by a command that was still running at the fork point. The fork owns those files; a file the
 source registers later is not owned.
 
-Delete removes an output directory in the pre-commit step, before it releases the session's
-rows. `command-output/<session>/` is removed only if this database has rows for that session and
-no row of another session — in this database or any other database sharing the directory —
-names a path under it. `.dim/exec/<session>/<branch>/` is removed by HostPlatform under the same
-rule; that directory is outside SessionStore's file storage. The check is against rows other
-than the deleting session's, so a fork's rows keep the directory. Keeping the removal before the
-row commit preserves the crash argument in `session-deletion-and-fork.md`: a leftover directory
-in a shared location cannot be found later.
+Delete removes every output directory named by the deleting session's rows in the pre-commit
+step, before it releases those rows. That includes its own `command-output/<S>/` and any
+inherited `command-output/<parent>/` or `.dim/exec/<parent>/<branch>/` paths copied by a fork. A
+directory is removed only if this database has rows for the deleting session and no row of
+another session in this database names a path under it. When S is deleted, F's rows keep S's
+directory; when F is deleted, F's copied rows name S's directory, so F's delete removes it. A
+directory shared with another database is that database's responsibility; this guard is scoped
+to this database and the cross-database case is accepted.
 
-The new table is part of a native storage format version after the one #671 takes; the number is
-claimed in #596 by the implementation. Its upgrade creates the table empty and rolls back on
-failure. There is no backfill: output written before the upgrade is unowned, a resumed session
-may ask once, and a fork made after the upgrade inherits no output rows.
+The session-files owner supplies the paths and the last-owner answer; HostPlatform removes the
+`.dim/exec` directory it owns. HostPlatform does not read ownership rows. Keeping the removal
+before the row commit preserves the crash argument in `session-deletion-and-fork.md`: a leftover
+directory in a shared location cannot be found later.
+
+The new table is native format v27, after #671's v26; the implementation claims v27 in the next
+format decision. Its upgrade creates the table empty and rolls back on failure. There is no
+backfill: output written before the upgrade is unowned, a resumed session may ask once, and a
+fork made after the upgrade inherits no output rows.
 
 Command output may grow after a fork. The fork owns the file and reads its current content; a
 point-in-time copy is a separate concern.
