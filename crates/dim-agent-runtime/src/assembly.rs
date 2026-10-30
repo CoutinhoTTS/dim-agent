@@ -157,6 +157,12 @@ type BindValue = Arc<dyn Fn(&Names<'_>) -> std::result::Result<ProvideValue, Err
 type ProvideValue = Box<dyn Fn(&Ctx) -> std::result::Result<(), Error> + Send + Sync>;
 /// The module of the part providing an Agent's process values.
 const PROCESS_VALUES: &str = "ProcessValues";
+/// The rows of a Session and of a branch that must be Active.
+#[derive(Default)]
+struct RequiredRows {
+    session: Arc<[String]>,
+    branch: Arc<[String]>,
+}
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
@@ -182,6 +188,9 @@ pub(crate) struct Assembly {
     pub parts: Arc<crate::parts::PartRegistry>,
     /// Registered parts the profile requires, by name.
     required_parts: Arc<HashSet<String>>,
+    /// The rows a Session and a branch need Active, as [`AgentBuilder::install`]
+    /// named them.
+    required_rows: Arc<Mutex<RequiredRows>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
     /// The builder's catalog, as its Agents were built: the facades read a
@@ -214,6 +223,7 @@ impl AgentBuilder {
                 features: Default::default(),
                 parts: Arc::default(),
                 required_parts: Arc::default(),
+                required_rows: Arc::default(),
                 extensions: vec![],
                 catalog: Arc::default(),
             },
@@ -542,6 +552,10 @@ impl AgentBuilder {
                 session.push(group(name, rows));
             }
             let required_session: Arc<[String]> = required_session.into();
+            *assembly.required_rows.lock().unwrap() = RequiredRows {
+                session: required_session.clone(),
+                branch: required_branch.clone(),
+            };
             builtins.register(session_scope_module, move |build| {
                 let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
                     rutis::Error::from(ErrorKind::PluginFailed(
@@ -1249,6 +1263,7 @@ impl TimelineFactory {
             });
             let started = {
                 let value = owner.clone();
+                let required = parent.assembly.required_rows.lock().unwrap().branch.clone();
                 create_instance(
                     &parent.loader,
                     &session.ctx,
@@ -1257,17 +1272,12 @@ impl TimelineFactory {
                     self.startup_timeout(),
                     &cancel,
                     &parent.assembly.abandoned,
+                    required,
                     {
                         let owner = owner.clone();
                         move || {
                             let instance = *owner.instance.lock().unwrap();
-                            let required = owner
-                                .loaded
-                                .lock()
-                                .unwrap()
-                                .as_ref()
-                                .map(|loaded| loaded.scope.required.clone());
-                            (instance, required, owner.mounted.lock().unwrap().clone())
+                            (instance, owner.mounted.lock().unwrap().clone())
                         }
                     },
                 )
@@ -1383,11 +1393,8 @@ async fn create_instance(
     timeout: Duration,
     cancel: &CancellationToken,
     abandoned: &tokio_util::task::TaskTracker,
-    instance: impl Fn() -> (
-        Option<rutis::host::InstanceId>,
-        Option<Arc<[String]>>,
-        crate::parts::Opened,
-    ),
+    required: Arc<[String]>,
+    instance: impl Fn() -> (Option<rutis::host::InstanceId>, crate::parts::Opened),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
     let mut progress = StartupProgress::new(ctx, timeout).map_err(|error| (error, None))?;
     let mut creation = {
@@ -1440,11 +1447,10 @@ async fn create_instance(
             return Err((error, found));
         }
     };
-    let required = instance().1;
     let failures = created
         .report
         .into_iter()
-        .filter(|(id, _)| required.as_ref().is_none_or(|rows| rows.contains(id)))
+        .filter(|(id, _)| required.contains(id))
         .filter_map(|(id, result)| match result {
             InstanceResult::Failed(error) if crate::parts::PartMounter::is_row(&id) => {
                 Some(AgentError::Build(loader_error(error).to_string()))
@@ -1460,18 +1466,29 @@ async fn create_instance(
     if let Err(error) = AgentError::aggregate(failures) {
         return Err((error, Some(created)));
     }
-    let Some(required) = required else {
-        return Err((
-            AgentError::Build(format!("{group} scope did not load")),
-            Some(created),
-        ));
-    };
-    let mut waiting = rows(&loader.entries(), &created.view, Some(&required));
-    waiting.extend(instance().2.required);
-    let ready = progress
-        .wait(active_rows(&waiting, cancel), || vec![created.view.id])
+    // The instance's settle returns with its group or a row still waiting for
+    // dependencies. The group spawns the rows and the required rows mount the
+    // parts, so each is read once the one before it is Active.
+    let group = [created.view.clone()];
+    let mut ready = progress
+        .wait(active_rows(&group, cancel), || vec![created.view.id])
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
+        .unwrap_or_else(|| Err(timed_out(ctx, &group)));
+    let mut waiting = rows(&loader.entries(), &created.view, Some(&required));
+    if ready.is_ok() {
+        ready = progress
+            .wait(active_rows(&waiting, cancel), || vec![created.view.id])
+            .await
+            .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
+    }
+    if ready.is_ok() {
+        let parts = instance().1.required;
+        waiting.extend(parts.iter().cloned());
+        ready = progress
+            .wait(active_rows(&parts, cancel), || vec![created.view.id])
+            .await
+            .unwrap_or_else(|| Err(timed_out(ctx, &parts)));
+    }
     created.children = rows(&loader.entries(), &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
@@ -1481,7 +1498,7 @@ async fn create_instance(
         .iter()
         .filter(|view| !waiting.iter().any(|required| required.id == view.id))
         .cloned()
-        .chain(instance().2.optional)
+        .chain(instance().1.optional)
         .collect();
     let settled = async {
         for view in waiting.iter().chain(&optional) {
@@ -1627,17 +1644,12 @@ pub(crate) async fn build_session(
         let owner = owner.clone();
         move || {
             let instance = *owner.instance.lock().unwrap();
-            let required = owner
-                .loaded
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|loaded| loaded.required.clone());
-            (instance, required, owner.mounted.lock().unwrap().clone())
+            (instance, owner.mounted.lock().unwrap().clone())
         }
     };
     let started = {
         let value = owner.clone();
+        let required = owner.assembly.required_rows.lock().unwrap().session.clone();
         create_instance(
             &placement.loader,
             host,
@@ -1646,6 +1658,7 @@ pub(crate) async fn build_session(
             startup_timeout,
             &owner.closing,
             &owner.assembly.abandoned,
+            required,
             instance(&owner),
         )
         .await
