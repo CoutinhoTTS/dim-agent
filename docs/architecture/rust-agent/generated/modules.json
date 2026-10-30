@@ -200,6 +200,7 @@
         "format",
         "json",
         "matches",
+        "tracing::warn",
         "unreachable",
         "vec"
       ]
