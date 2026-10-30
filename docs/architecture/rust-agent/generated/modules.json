@@ -18820,13 +18820,6 @@
     },
     {
       "from": "dim_app_server::provider::editing",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path model"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path FieldUpdate",
@@ -18862,6 +18855,7 @@
         "path failure",
         "path optional_non_null",
         "path read_static",
+        "path reject_user_model_conflicts",
         "path validate_static_record"
       ]
     },
@@ -19243,6 +19237,7 @@
         "path StaticRecordKind::Builtin",
         "path failure",
         "path read_static",
+        "path reject_user_model_conflicts",
         "path static_catalog",
         "path validate_static_record"
       ]
