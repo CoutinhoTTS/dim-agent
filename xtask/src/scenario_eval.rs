@@ -6,7 +6,7 @@
 //! ```text
 //! cargo run --locked -p xtask -- scenario-eval --scenarios DIR --text ID
 //!     --candidate FILE [--text ID --candidate FILE]... --model PROVIDER/MODEL
-//!     --judge PROVIDER/MODEL --runs N --home DIR --out DIR
+//!     --judge PROVIDER/MODEL --runs N --home DIR --out DIR [--jobs N]
 //!     [--model-config FILE]
 //! ```
 //!
@@ -14,8 +14,12 @@
 //! and `candidate` with each candidate file in place of the text its `--text`
 //! id names. Every `--text ID --candidate FILE` pair replaces one text, a
 //! text named twice is an error, and the report gives each candidate text's
-//! own token cost. Each arm runs every scenario `--runs` times, and one fixed
-//! judge reads a view of each run's exported Timeline.
+//! own token cost. The runs are interleaved: for each run index and scenario
+//! the `current` run is scheduled before the `candidate` one, so a drift in
+//! the endpoint lands on both arms alike, and the records come out in that
+//! order whatever order the runs complete in. `--jobs N` (default 1) runs N
+//! runs at once; each run keeps its own workspace copy, product home, local
+//! endpoint and Session, and the counts do not depend on N.
 //!
 //! The report applies the rule of model-prompts §8.1. One comparison is the
 //! candidate arm's loss against the current arm on one rate: a regression
@@ -163,7 +167,10 @@
 //! Server's local endpoint sits under the system temporary directory, because
 //! a Unix socket's path is short and a run's directory is not; each run
 //! owns its endpoint directory and removes it when the run ends, on success
-//! and on error, without affecting other runs.
+//! and on error, without affecting other runs. A run's home, Session, judge
+//! calls and endpoint are its own, so `--jobs` needs nothing of them: every
+//! run serves its own App Server on its own endpoint, and the runner holds no
+//! state a second run reads.
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::rule::{self, Comparison, Counts, Worse};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
@@ -177,6 +184,7 @@ use dim_agent_types::{
 };
 use dim_app_server::RunningServer;
 use dim_client::{Client, ConnectionConfig, Message as WireMessage, Server as WireServer};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -279,7 +287,8 @@ async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Res
             return Err("set DIM_TEST_JS_RUNTIME: the default plugins import it".into());
         }
     }
-    let overrides = overrides(&options.texts)?;
+    let candidate = overrides(&options.texts)?;
+    let current = Overrides::default();
     let scenarios = read_scenarios(&options.scenarios)?;
     let home = isolated_home(&options.home)?;
     if let Some(path) = &options.model_config {
@@ -287,32 +296,50 @@ async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Res
             .map_err(|error| format!("--model-config {}: {error}", path.display()))?;
     }
     let cancel = CancellationToken::new();
-    let mut records = Vec::new();
-    let mut instrument = Instrument::new(options);
-    for (arm, overrides) in [("current", Overrides::default()), ("candidate", overrides)] {
-        for scenario in &scenarios {
-            for run in 0..options.runs {
+    let instrument = Instrument::new(options);
+    // Every run keeps its own instrument, merged in schedule order below, so
+    // nothing in the report depends on which run finished first.
+    let schedule = schedule(options.runs, scenarios.len());
+    let mut pending: Vec<Option<(RunRecord, Instrument)>> =
+        (0..schedule.len()).map(|_| None).collect();
+    let (home, observe, scenarios, cancel) = (&home, &observe, &scenarios, &cancel);
+    let planned = schedule
+        .iter()
+        .enumerate()
+        .map(|(index, &(arm, scenario, run))| {
+            let mut measured = instrument.clone();
+            let overrides = match arm {
+                "current" => &current,
+                _ => &candidate,
+            };
+            async move {
                 let record = run_once(
                     options,
-                    &home,
+                    home,
                     arm,
-                    &overrides,
-                    &observe,
-                    scenario,
+                    overrides,
+                    observe,
+                    &scenarios[scenario],
                     run,
-                    &cancel,
-                    &mut instrument,
+                    cancel,
+                    &mut measured,
                 )
                 .await?;
-                instrument.judge_temperature_dropped += usize::from(record.temperature_dropped);
-                instrument.judge_asked_runs += usize::from(!matches!(
-                    record.judge_outcome,
-                    JudgeOutcome::NotAsked | JudgeOutcome::Unfit
-                ));
-                instrument.judge_reasks += record.judge_reasks as usize;
-                records.push(record);
+                Ok::<_, Box<dyn std::error::Error>>((index, record, measured))
             }
-        }
+        });
+    let mut in_flight = futures_util::stream::iter(planned).buffer_unordered(options.jobs);
+    while let Some(finished) = in_flight.next().await {
+        let (index, record, measured) = finished?;
+        pending[index] = Some((record, measured));
+    }
+    drop(in_flight);
+    let mut instrument = instrument;
+    let mut records = Vec::with_capacity(schedule.len());
+    for entry in pending {
+        let (record, measured) = entry.ok_or("a scheduled run finished without a record")?;
+        instrument.merge(&record, measured);
+        records.push(record);
     }
     let mut jsonl = String::new();
     for record in &records {
@@ -320,9 +347,26 @@ async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Res
         jsonl.push('\n');
     }
     std::fs::write(options.out.join("runs.jsonl"), jsonl)?;
-    let report = report(&instrument, &scenarios, &records);
+    let report = report(&instrument, scenarios, &records);
     std::fs::write(options.out.join("scenario.md"), &report)?;
     Ok(report)
+}
+
+/// The evaluation's runs in the order it schedules them: for each run index,
+/// every scenario, `current` then `candidate` (model-prompts §8.1). The
+/// order is fixed before any run starts, so the records are deterministic
+/// whatever order the runs complete in, and `--jobs` changes only how many
+/// runs are in flight.
+fn schedule(runs: usize, scenarios: usize) -> Vec<(&'static str, usize, usize)> {
+    let mut schedule = Vec::with_capacity(runs * scenarios * 2);
+    for run in 0..runs {
+        for scenario in 0..scenarios {
+            for arm in ["current", "candidate"] {
+                schedule.push((arm, scenario, run));
+            }
+        }
+    }
+    schedule
 }
 
 struct Options {
@@ -332,6 +376,9 @@ struct Options {
     model: ModelId,
     judge: ModelId,
     runs: usize,
+    /// How many runs are in flight at once; the schedule does not depend on
+    /// it.
+    jobs: usize,
     out: PathBuf,
     home: PathBuf,
     model_config: Option<PathBuf>,
@@ -353,7 +400,7 @@ impl Options {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
                      --text ID --candidate FILE [--text ID --candidate FILE]... \
                      --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N \
-                     --home DIR --out DIR [--model-config FILE] \
+                     --home DIR --out DIR [--jobs N] [--model-config FILE] \
                      [--defaults FILE]; a text named twice is an error, and a \
                      run whose view does not fit the judge's own declared \
                      window is unjudged, so a model configuration narrowed for \
@@ -364,7 +411,7 @@ impl Options {
         let mut args = args.into_iter();
         let (mut scenarios, mut home, mut out) = (None, None, None);
         let (mut text, mut model, mut judge) = (None, None, None);
-        let (mut runs, mut model_config, mut defaults) = (None, None, None);
+        let (mut runs, mut jobs, mut model_config, mut defaults) = (None, None, None, None);
         let mut texts: Vec<(String, Arc<str>)> = Vec::new();
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
@@ -388,6 +435,7 @@ impl Options {
                 "--model" => model = Some(target(&value)?),
                 "--judge" => judge = Some(target(&value)?),
                 "--runs" => runs = Some(value.parse::<usize>()?),
+                "--jobs" => jobs = Some(value.parse::<usize>()?),
                 "--home" => home = Some(PathBuf::from(value)),
                 "--out" => out = Some(PathBuf::from(value)),
                 "--model-config" => model_config = Some(PathBuf::from(value)),
@@ -410,6 +458,7 @@ impl Options {
             model: model.ok_or(usage)?,
             judge: judge.ok_or(usage)?,
             runs: runs.filter(|runs| *runs > 0).ok_or(usage)?,
+            jobs: jobs.unwrap_or(1).max(1),
             out: output_directory(&out.ok_or(usage)?)?,
             home: home.ok_or(usage)?,
             model_config,
@@ -1924,7 +1973,9 @@ fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -
 /// candidate's own token cost, the model and the judge with the configuration
 /// they carry, and the runs (model-prompts §8.1). A run resolves the
 /// configurations and the judge's window, so every run measures its own copy;
-/// the report reads the first.
+/// the evaluation merges them in schedule order and the report reads the
+/// first.
+#[derive(Clone)]
 struct Instrument {
     texts: Vec<String>,
     model: ModelId,
@@ -1964,6 +2015,25 @@ impl Instrument {
             judge_asked_runs: 0,
             judge_reasks: 0,
         }
+    }
+    /// Adds one run's measurement. The configurations and the window are the
+    /// same in every run, so the first one kept stands; the counts add up.
+    fn merge(&mut self, record: &RunRecord, measured: Instrument) {
+        self.model_configuration = self
+            .model_configuration
+            .take()
+            .or(measured.model_configuration);
+        self.judge_configuration = self
+            .judge_configuration
+            .take()
+            .or(measured.judge_configuration);
+        self.judge_window = self.judge_window.take().or(measured.judge_window);
+        self.judge_temperature_dropped += usize::from(record.temperature_dropped);
+        self.judge_asked_runs += usize::from(!matches!(
+            record.judge_outcome,
+            JudgeOutcome::NotAsked | JudgeOutcome::Unfit
+        ));
+        self.judge_reasks += record.judge_reasks as usize;
     }
 }
 
@@ -2024,7 +2094,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         .map(|(text, tokens)| format!("`{text}`: {tokens:.0}"))
         .collect();
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | {} |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-P Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} runs per arm and scenario |\n",
+        "| | |\n| --- | --- |\n| text | {} |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-p Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} runs per arm and scenario |\n",
         texts.join(", "),
         instrument.model.provider_id,
         instrument.model.model_id,
@@ -2392,6 +2462,86 @@ mod tests {
         };
         assert!(error.contains("goal/objective is named twice"), "{error}");
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The arms are interleaved: for each run index and scenario the current
+    /// arm is scheduled before the candidate one (model-prompts §8.1). The
+    /// order is fixed before any run starts, so `--jobs` cannot change which
+    /// runs are made or in which order the records come out.
+    #[test]
+    fn the_schedule_alternates_the_arms() {
+        assert_eq!(
+            schedule(2, 2),
+            vec![
+                ("current", 0, 0),
+                ("candidate", 0, 0),
+                ("current", 1, 0),
+                ("candidate", 1, 0),
+                ("current", 0, 1),
+                ("candidate", 0, 1),
+                ("current", 1, 1),
+                ("candidate", 1, 1),
+            ]
+        );
+    }
+
+    /// `--jobs 2` runs two runs at once, each with its own workspace copy and
+    /// Session, and schedules the same runs as `--jobs 1`: the records are the
+    /// four the schedule fixes, in its order (model-prompts §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn jobs_change_how_many_runs_are_in_flight_not_which() {
+        let fixture = Fixture::start(
+            "jobs",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.runs = 2;
+        options.jobs = 2;
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        let ran: Vec<(&str, &str, u64)> = records
+            .iter()
+            .map(|record| {
+                (
+                    record["arm"].as_str().unwrap(),
+                    record["scenario"].as_str().unwrap(),
+                    record["run"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ran,
+            vec![
+                ("current", "case", 0),
+                ("candidate", "case", 0),
+                ("current", "case", 1),
+                ("candidate", "case", 1),
+            ],
+            "the same runs as --jobs 1, in the schedule's order"
+        );
+        for (arm, _, run) in &ran {
+            assert!(
+                options
+                    .out
+                    .join(arm)
+                    .join("case")
+                    .join(format!("run-{run}"))
+                    .join("workspace")
+                    .is_dir(),
+                "{arm} run {run} kept its own workspace copy"
+            );
+        }
     }
 
     /// One arm's runs with `passed` of them passing a single `must_show`
@@ -3634,6 +3784,7 @@ mod tests {
                 model: self.target(),
                 judge: self.target(),
                 runs: 1,
+                jobs: 1,
                 out,
                 home: self.home.clone(),
                 model_config: Some(self.models.clone()),
