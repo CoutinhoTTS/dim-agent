@@ -1626,7 +1626,6 @@
         "format",
         "json",
         "matches",
-        "tokio::select",
         "vec"
       ]
     },
@@ -15792,7 +15791,7 @@
       "to": "dim_app_server::collaboration::approvals",
       "references": [
         "mod approvals",
-        "path approvals::Observation",
+        "path approvals::Forwarded",
         "path approvals::Route",
         "path approvals::install"
       ]
@@ -15896,8 +15895,7 @@
       "from": "dim_app_server::collaboration::approvals",
       "to": "dim_agent_runtime::config",
       "references": [
-        "path CollaborationRole::Leader",
-        "path CollaborationRole::Member"
+        "path CollaborationRole::Leader"
       ]
     },
     {
@@ -15923,12 +15921,15 @@
         "path AgentEvent",
         "path ApprovalDecision::Allow",
         "path ApprovalDecision::Deny",
+        "path ApprovalRequestData",
+        "path EventKind::ApprovalCancelled",
+        "path EventKind::ApprovalRequest",
+        "path EventKind::ApprovalRespond",
         "path EventKind::CollaborationCancel",
         "path EventKind::CollaborationClose",
         "path EventKind::InputConsumed",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
-        "path EventKind::StopInterrupt",
         "path EventKind::ToolCall",
         "path EventKind::ToolResult",
         "path EventKind::TurnEnd",

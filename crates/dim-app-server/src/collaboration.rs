@@ -722,7 +722,7 @@ struct BranchRecord {
     dispatcher: Arc<Dispatcher>,
     approvals: BTreeMap<String, approvals::Route>,
     approval_calls: BTreeMap<(String, String), String>,
-    observed_approvals: BTreeMap<String, Option<Arc<approvals::Observation>>>,
+    forwarded_approvals: BTreeMap<String, approvals::Forwarded>,
     timeline: Arc<Timeline>,
     tasks: TaskTracker,
     /// Cancels waiting for members on unload.
@@ -1269,11 +1269,8 @@ impl CollaborationSession {
         event: Arc<AgentEvent>,
     ) -> BoxFuture<'static, dim_agent_runtime::Result<()>> {
         self.approval_event(branch_id, &event);
-        if matches!(
-            event.kind,
-            EventKind::ApprovalRequest(_) | EventKind::InputMessage(_)
-        ) {
-            self.observe_member_approvals(branch_id);
+        if self.role == CollaborationRole::Member {
+            self.member_approval_event(branch_id, &event);
         }
         match &event.kind {
             EventKind::TurnStart(data) => {
@@ -1342,6 +1339,7 @@ impl CollaborationSession {
                 undelivered.insert(id.clone());
             }
         }
+        let mut covered = BTreeSet::new();
         let members: Vec<_> = requests
             .values_mut()
             .filter(|request| {
@@ -1350,6 +1348,8 @@ impl CollaborationSession {
                     && (turn.is_none() || undelivered.contains(&request.op))
             })
             .map(|request| {
+                request.approvals_open = false;
+                covered.insert(request.op.clone());
                 if turn.is_none() {
                     request.settle = Some(CollaborationOutcome::Cancelled {
                         reason: LEADER_CLOSED.into(),
@@ -1358,6 +1358,17 @@ impl CollaborationSession {
                 (request.session.clone(), request.done.subscribe())
             })
             .collect();
+        let retired = {
+            let ids = branch
+                .approvals
+                .iter()
+                .filter(|(_, route)| covered.contains(&route.descriptor.delegation_id))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| branch.approvals.remove(&id))
+                .collect::<Vec<_>>()
+        };
         if !members.is_empty() {
             let abort = branch.abort.clone();
             branch.tasks.spawn(async move {
@@ -1372,6 +1383,8 @@ impl CollaborationSession {
                 }
             });
         }
+        drop(state);
+        self.spawn_retire(branch_id, retired);
     }
 
     /// Starts delivery work, or refuses an operation of an interrupted turn
@@ -2709,6 +2722,8 @@ impl DynPlugin for CollaborationTimelinePlugin {
                     "step/tool-call",
                     "step/tool-result",
                     "approval/request",
+                    "approval/respond",
+                    "approval/cancelled",
                 ],
                 move |event| {
                     let gate = gate.clone();
@@ -2756,7 +2771,7 @@ impl DynPlugin for CollaborationTimelinePlugin {
                     dispatcher: dispatcher.clone(),
                     approvals: BTreeMap::new(),
                     approval_calls: BTreeMap::new(),
-                    observed_approvals: BTreeMap::new(),
+                    forwarded_approvals: BTreeMap::new(),
                     timeline,
                     tasks,
                     abort: CancellationToken::new(),
@@ -2774,16 +2789,6 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 },
             );
             drop(rebuilding);
-            if service.role == CollaborationRole::Member {
-                let observer = service.clone();
-                let observed = branch_id.clone();
-                let activation = phase.clone();
-                cleanup_tasks.spawn(async move {
-                    if activation.activated().await {
-                        observer.observe_member_approvals(&observed);
-                    }
-                });
-            }
             if !stale_inputs.is_empty() {
                 cleanup_tasks.spawn(async move {
                     if !phase.activated().await {

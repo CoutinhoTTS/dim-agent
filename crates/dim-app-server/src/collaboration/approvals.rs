@@ -7,23 +7,18 @@ use dim_agent_capabilities::{
 };
 use sha2::{Digest, Sha256};
 
+#[derive(Clone)]
 pub(super) struct Route {
-    relay: Arc<Relay>,
-    retired: bool,
+    id: String,
+    pub(super) descriptor: MemberApprovalDescriptor,
+    input_id: String,
     turn_id: Option<String>,
 }
 
-struct Relay {
-    id: String,
-    descriptor: MemberApprovalDescriptor,
-    approval: Arc<Approval>,
-    input_id: String,
-    retirement: tokio::sync::OnceCell<()>,
-}
-
-pub(super) struct Observation {
+/// A member ask already submitted to its leader branch, until the member's
+/// own Approval ends it.
+pub(super) struct Forwarded {
     source: Source,
-    approval: Arc<Approval>,
     leader: String,
     branch: String,
 }
@@ -112,16 +107,22 @@ struct DetailParams {
     request_id: String,
 }
 
-impl Relay {
-    async fn deny(&self) {
-        let _ = self
-            .approval
-            .respond(&self.descriptor.request_id, ApprovalDecision::Deny)
-            .await;
-    }
-}
-
 impl CollaborationSession {
+    fn member_approval(&self, session_id: &str, branch_id: &str) -> Option<Arc<Approval>> {
+        let (_, member) = self.collaboration.index.session(session_id)?;
+        member.service::<Approval>(branch_id).ok()
+    }
+
+    async fn deny_member(&self, descriptor: &MemberApprovalDescriptor) {
+        if let Some(approval) =
+            self.member_approval(&descriptor.member.session_id, &descriptor.member.branch_id)
+        {
+            let _ = approval
+                .respond(&descriptor.request_id, ApprovalDecision::Deny)
+                .await;
+        }
+    }
+
     fn approval_destination(&self, member: &str) -> Option<(String, String, String)> {
         let state = self.state.lock().unwrap();
         let request = state
@@ -139,201 +140,175 @@ impl CollaborationSession {
         ))
     }
 
-    pub(super) fn observe_member_approvals(self: &Arc<Self>, branch_id: &str) {
-        if self.role != CollaborationRole::Member {
-            return;
-        }
-        let Some((_, member)) = self.collaboration.index.session(&self.session_id) else {
-            return;
-        };
-        let Ok(approval) = member.service::<Approval>(branch_id) else {
-            return;
-        };
-        let mut pending = Vec::new();
-        approval.replay(|request| pending.push(request.clone()));
-        for request in pending {
-            let leader_id = self
-                .collaboration
-                .directory
-                .relations
-                .lock()
-                .unwrap()
-                .get(&self.session_id)
-                .map(|relation| relation.leader.clone());
-            let leader = leader_id
-                .and_then(|id| self.collaboration.index.session(&id))
-                .map(|(_, session)| session);
-            let destination = leader
-                .as_ref()
-                .and_then(|leader| leader.session_service::<CollaborationSession>().ok())
-                .and_then(|service| {
-                    service
-                        .approval_destination(&self.session_id)
-                        .map(|destination| (service, destination))
-                });
-            let resources = {
-                let mut state = self.state.lock().unwrap();
-                state
-                    .branches
-                    .get_mut(branch_id)
-                    .filter(|branch| !branch.closing)
-                    .and_then(|branch| {
-                        if branch.observed_approvals.contains_key(&request.approval_id) {
-                            return None;
-                        }
-                        branch
-                            .observed_approvals
-                            .insert(request.approval_id.clone(), None);
-                        Some((
-                            branch.tasks.clone(),
-                            branch.abort.clone(),
-                            branch.dispatcher.clone(),
-                        ))
-                    })
-            };
-            let Some((tasks, abort, dispatcher)) = resources else {
-                continue;
-            };
-            let Some((leader_service, (leader_branch, delegation_id, agent_id))) = destination
-            else {
-                let approval = approval.clone();
-                let owner = self.clone();
-                let branch_id = branch_id.to_owned();
-                tasks.spawn(async move {
-                    let _ = approval
-                        .respond(&request.approval_id, ApprovalDecision::Deny)
-                        .await;
-                    if let Some(branch) = owner.state.lock().unwrap().branches.get_mut(&branch_id) {
-                        branch.observed_approvals.remove(&request.approval_id);
-                    }
-                });
-                continue;
-            };
-            let leader = leader.expect("destination requires a leader Session");
-            let observation = Arc::new(Observation {
-                source: Source::new(MemberApprovalDescriptor {
-                    delegation_id,
-                    member: MemberApprovalTarget {
-                        agent_id,
-                        session_id: member.id().into(),
-                        branch_id: branch_id.into(),
-                    },
-                    request_id: request.approval_id.clone(),
-                    call: request.call,
-                    reason: request.reason,
-                }),
-                approval: approval.clone(),
-                leader: leader.id().into(),
-                branch: leader_branch.clone(),
-            });
-            {
-                let mut state = self.state.lock().unwrap();
-                let Some(branch) = state
-                    .branches
-                    .get_mut(branch_id)
-                    .filter(|branch| !branch.closing)
-                else {
-                    continue;
-                };
-                branch
-                    .observed_approvals
-                    .insert(request.approval_id, Some(observation.clone()));
-            }
-            let member = member.clone();
-            let owner = self.clone();
-            let branch_id = branch_id.to_owned();
-            tasks.spawn(async move {
-                let source = &observation.source;
-                let approval = &observation.approval;
-                if !leader_service.interactive || !leader_service.approval_tools {
-                    let reason = if !leader_service.interactive { "the leader Session is non-interactive" } else { "the leader's approval decision tools are not mounted" };
-                    if let Ok(sender) = leader_service.sender() {
-                        let input = leader_service.message_input(&sender, format!("Tool approval {} is denied because {reason}.", source.descriptor.request_id), InputMode::Steer);
-                        let _ = member.input(input, &branch_id).await;
-                    }
-                    let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                } else {
-                    let mut changes = dispatcher.watch();
-                    let mut leader_changes = leader.dispatch_watch(&leader_branch).ok();
-                    let input = source.input(false);
-                    let committed = leader.input(input.clone(), &leader_branch).await;
-                    if matches!(committed, Ok(ref event) if matches!(&event.kind, EventKind::InputMessage(data) if data == &input)) {
-                        loop {
-                            let mut pending = false;
-                            approval.replay(|request| pending |= request.approval_id == source.descriptor.request_id);
-                            if !pending { break; }
-                            if leader_service.approval_destination(member.id()).is_none_or(|(branch, delegation, _)| branch != leader_branch || delegation != source.descriptor.delegation_id) {
-                                let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                                break;
-                            }
-                            let Some(leader_changes) = leader_changes.as_mut() else {
-                                let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                                break;
-                            };
-                            tokio::select! {
-                                _ = abort.cancelled() => {
-                                    let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                                    break;
-                                }
-                                _ = leader.closed() => {
-                                    let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                                    break;
-                                }
-                                result = changes.changed() => {
-                                    if result.is_err() {
-                                        let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                                        break;
-                                    }
-                                }
-                                result = leader_changes.changed() => {
-                                    if result.is_err() {
-                                        let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if let Err(error) = leader.input(source.input(true), &leader_branch).await
-                            && !leader.is_closing()
-                            && leader_service.approval_destination(member.id()).is_some_and(|(branch, delegation, _)| branch == leader_branch && delegation == source.descriptor.delegation_id)
-                        {
-                            dispatcher.fail(error);
-                        }
-                    } else {
-                        let _ = approval.respond(&source.descriptor.request_id, ApprovalDecision::Deny).await;
-                    }
-                }
-                if let Some(branch) = owner.state.lock().unwrap().branches.get_mut(&branch_id) {
-                    branch.observed_approvals.remove(&source.descriptor.request_id);
-                }
-            });
+    /// Forwards each of the member branch's own approval asks to the leader
+    /// branch, and its terminated ask back. Only the member's own events are
+    /// read; the leader branch folds the committed inputs and settles them.
+    pub(super) fn member_approval_event(self: &Arc<Self>, branch_id: &str, event: &AgentEvent) {
+        match &event.kind {
+            EventKind::ApprovalRequest(data) => self.forward_approval(branch_id, data),
+            EventKind::ApprovalRespond(data) => self.end_approval(branch_id, &data.approval_id),
+            EventKind::ApprovalCancelled(data) => self.end_approval(branch_id, &data.approval_id),
+            _ => {}
         }
     }
 
-    fn observed_approval(
-        &self,
-        source: &Source,
-        leader: &str,
-        branch: &str,
-    ) -> Option<Arc<Approval>> {
-        let approval = {
+    fn forward_approval(self: &Arc<Self>, branch_id: &str, request: &ApprovalRequestData) {
+        let tasks = {
             let state = self.state.lock().unwrap();
-            let origin = state
+            let Some(branch) = state
                 .branches
-                .get(&source.descriptor.member.branch_id)
-                .filter(|origin| !origin.closing)?;
-            let observation = origin
-                .observed_approvals
-                .get(&source.descriptor.request_id)?
-                .as_ref()?;
-            (observation.source == *source
-                && observation.leader == leader
-                && observation.branch == branch)
-                .then(|| observation.approval.clone())
-        }?;
-        let mut pending = false;
-        approval.replay(|request| pending |= request.approval_id == source.descriptor.request_id);
-        pending.then_some(approval)
+                .get(branch_id)
+                .filter(|branch| !branch.closing)
+            else {
+                return;
+            };
+            if branch
+                .forwarded_approvals
+                .contains_key(&request.approval_id)
+            {
+                return;
+            }
+            branch.tasks.clone()
+        };
+        let leader = self
+            .collaboration
+            .directory
+            .relations
+            .lock()
+            .unwrap()
+            .get(&self.session_id)
+            .map(|relation| relation.leader.clone())
+            .and_then(|id| self.collaboration.index.session(&id));
+        let Some((_, leader)) = leader else {
+            self.deny(branch_id, &request.approval_id);
+            return;
+        };
+        let Some(leader_service) = leader.session_service::<CollaborationSession>().ok() else {
+            self.deny(branch_id, &request.approval_id);
+            return;
+        };
+        let Some((leader_branch, delegation_id, agent_id)) =
+            leader_service.approval_destination(&self.session_id)
+        else {
+            self.deny(branch_id, &request.approval_id);
+            return;
+        };
+        if !leader_service.interactive || !leader_service.approval_tools {
+            let reason = if !leader_service.interactive {
+                "the leader Session is non-interactive"
+            } else {
+                "the leader's approval decision tools are not mounted"
+            };
+            let owner = self.clone();
+            let branch_id = branch_id.to_owned();
+            let request_id = request.approval_id.clone();
+            tasks.spawn(async move {
+                if let Ok(sender) = leader_service.sender() {
+                    let input = leader_service.message_input(
+                        &sender,
+                        format!("Tool approval {request_id} is denied because {reason}."),
+                        InputMode::Steer,
+                    );
+                    if let Some((_, member)) = owner.collaboration.index.session(&owner.session_id)
+                    {
+                        let _ = member.input(input, &branch_id).await;
+                    }
+                }
+                owner.deny(&branch_id, &request_id);
+            });
+            return;
+        }
+        let source = Source::new(MemberApprovalDescriptor {
+            delegation_id,
+            member: MemberApprovalTarget {
+                agent_id,
+                session_id: self.session_id.clone(),
+                branch_id: branch_id.into(),
+            },
+            request_id: request.approval_id.clone(),
+            call: request.call.clone(),
+            reason: request.reason.clone(),
+        });
+        {
+            let mut state = self.state.lock().unwrap();
+            let Some(branch) = state
+                .branches
+                .get_mut(branch_id)
+                .filter(|branch| !branch.closing)
+            else {
+                return;
+            };
+            branch.forwarded_approvals.insert(
+                request.approval_id.clone(),
+                Forwarded {
+                    source: source.clone(),
+                    leader: leader.id().into(),
+                    branch: leader_branch.clone(),
+                },
+            );
+        }
+        let owner = self.clone();
+        let branch_id = branch_id.to_owned();
+        tasks.spawn(async move {
+            let input = source.input(false);
+            let committed = leader.input(input.clone(), &leader_branch).await;
+            if !matches!(committed, Ok(ref event) if matches!(&event.kind, EventKind::InputMessage(data) if data == &input))
+            {
+                owner.end_approval(&branch_id, &source.descriptor.request_id);
+                owner.deny(&branch_id, &source.descriptor.request_id);
+            }
+        });
+    }
+
+    fn end_approval(self: &Arc<Self>, branch_id: &str, approval_id: &str) {
+        let Some((tasks, forwarded)) = ({
+            let mut state = self.state.lock().unwrap();
+            state.branches.get_mut(branch_id).map(|branch| {
+                (
+                    branch.tasks.clone(),
+                    branch.forwarded_approvals.remove(approval_id),
+                )
+            })
+        }) else {
+            return;
+        };
+        let Some(forwarded) = forwarded else {
+            return;
+        };
+        let owner = self.clone();
+        tasks.spawn(async move {
+            let Some((_, leader)) = owner.collaboration.index.session(&forwarded.leader) else {
+                return;
+            };
+            let _ = leader
+                .input(forwarded.source.input(true), &forwarded.branch)
+                .await;
+        });
+    }
+
+    fn deny(self: &Arc<Self>, branch_id: &str, approval_id: &str) {
+        let tasks = {
+            let state = self.state.lock().unwrap();
+            state
+                .branches
+                .get(branch_id)
+                .map(|branch| branch.tasks.clone())
+        };
+        let Some(tasks) = tasks else {
+            return;
+        };
+        let owner = self.clone();
+        let branch_id = branch_id.to_owned();
+        let approval_id = approval_id.to_owned();
+        tasks.spawn(async move {
+            if let Ok(approval) = owner
+                .tree
+                .get(&branch_id)
+                .and_then(|branch| branch.service::<Approval>())
+            {
+                let _ = approval.respond(&approval_id, ApprovalDecision::Deny).await;
+            }
+        });
     }
 
     fn committed_approval(&self, branch_id: &str, event: &AgentEvent) -> Option<Route> {
@@ -350,113 +325,104 @@ impl CollaborationSession {
         {
             return None;
         }
-        let (_, member) = self
-            .collaboration
-            .index
-            .session(&descriptor.member.session_id)?;
-        let observer = member.session_service::<CollaborationSession>().ok()?;
-        let approval = observer.observed_approval(&source, &self.session_id, branch_id)?;
         Some(Route {
-            relay: Arc::new(Relay {
-                id: source.approval_id,
-                descriptor: source.descriptor,
-                approval,
-                input_id: event.id.clone(),
-                retirement: tokio::sync::OnceCell::new(),
-            }),
-            retired: false,
+            id: source.approval_id,
+            descriptor: source.descriptor,
+            input_id: event.id.clone(),
             turn_id: None,
         })
     }
 
-    async fn retire_approval(&self, branch_id: &str, id: &str) {
-        let target = {
-            let mut state = self.state.lock().unwrap();
-            state.branches.get_mut(branch_id).and_then(|branch| {
-                branch.approvals.get_mut(id).map(|route| {
-                    route.retired = true;
-                    (
-                        route.relay.clone(),
-                        branch.ctx.clone(),
-                        branch.dispatcher.clone(),
-                    )
+    fn take_routes(&self, branch_id: &str, keep: impl Fn(&Route) -> bool) -> Vec<Route> {
+        let mut state = self.state.lock().unwrap();
+        let Some(branch) = state.branches.get_mut(branch_id) else {
+            return Vec::new();
+        };
+        let ids = branch
+            .approvals
+            .iter()
+            .filter(|(_, route)| keep(route))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| branch.approvals.remove(&id))
+            .collect()
+    }
+
+    async fn retire_route(&self, branch_id: &str, route: &Route) {
+        let (ctx, dispatcher) = {
+            let state = self.state.lock().unwrap();
+            let Some(branch) = state.branches.get(branch_id) else {
+                return;
+            };
+            (branch.ctx.clone(), branch.dispatcher.clone())
+        };
+        notify(
+            &ctx,
+            &self.session_id,
+            SessionNotice {
+                source: "Collaboration".into(),
+                kind: "memberApprovalEnded".into(),
+                data: serde_json::to_value(MemberApprovalEnded {
+                    branch_id: branch_id.into(),
+                    approval_id: route.id.clone(),
                 })
-            })
-        };
-        let Some((route, ctx, dispatcher)) = target else {
-            return;
-        };
-        route
-            .retirement
-            .get_or_init(|| async {
-                notify(
-                    &ctx,
-                    &self.session_id,
-                    SessionNotice {
-                        source: "Collaboration".into(),
-                        kind: "memberApprovalEnded".into(),
-                        data: serde_json::to_value(MemberApprovalEnded {
-                            branch_id: branch_id.into(),
-                            approval_id: id.into(),
-                        })
-                        .expect("member approval notice serializes"),
+                .expect("member approval notice serializes"),
+            },
+        );
+        self.deny_member(&route.descriptor).await;
+        if let Ok(branch) = self.tree.get(branch_id)
+            && let Ok(queue) = branch.service::<InputQueue>()
+            && let Err(error) = queue
+                .withdraw(
+                    InputWithdrawData {
+                        input_id: route.input_id.clone(),
+                        reason: Some("Member approval ended".into()),
                     },
-                );
-                route.deny().await;
-                if let Ok(branch) = self.tree.get(branch_id)
-                    && let Ok(queue) = branch.service::<InputQueue>()
-                    && let Err(error) = queue
-                        .withdraw(
-                            InputWithdrawData {
-                                input_id: route.input_id.clone(),
-                                reason: Some("Member approval ended".into()),
-                            },
-                            None,
-                        )
-                        .await
-                    && !branch.is_closing()
-                {
-                    dispatcher.fail(error);
-                }
-            })
-            .await;
-        if let Some(branch) = self.state.lock().unwrap().branches.get_mut(branch_id) {
-            branch.approvals.remove(id);
+                    None,
+                )
+                .await
+            && !branch.is_closing()
+        {
+            dispatcher.fail(error);
         }
     }
 
-    pub(super) async fn retire_member_approvals(&self, branch_id: &str, member: &str) {
-        let ids = {
+    pub(super) fn spawn_retire(self: &Arc<Self>, branch_id: &str, routes: Vec<Route>) {
+        if routes.is_empty() {
+            return;
+        }
+        let tasks = {
             let state = self.state.lock().unwrap();
             state
                 .branches
                 .get(branch_id)
-                .map(|branch| {
-                    branch
-                        .approvals
-                        .values()
-                        .filter(|route| route.relay.descriptor.member.session_id == member)
-                        .map(|route| route.relay.id.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+                .map(|branch| branch.tasks.clone())
         };
-        for id in ids {
-            self.retire_approval(branch_id, &id).await;
+        let Some(tasks) = tasks else {
+            return;
+        };
+        let owner = self.clone();
+        let branch_id = branch_id.to_owned();
+        tasks.spawn(async move {
+            for route in routes {
+                owner.retire_route(&branch_id, &route).await;
+            }
+        });
+    }
+
+    pub(super) async fn retire_member_approvals(&self, branch_id: &str, member: &str) {
+        let routes = self.take_routes(branch_id, |route| {
+            route.descriptor.member.session_id == member
+        });
+        for route in routes {
+            self.retire_route(branch_id, &route).await;
         }
     }
 
     pub(super) async fn retire_branch_approvals(&self, branch_id: &str) {
-        let ids = {
-            let state = self.state.lock().unwrap();
-            state
-                .branches
-                .get(branch_id)
-                .map(|branch| branch.approvals.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
-        for id in ids {
-            self.retire_approval(branch_id, &id).await;
+        for route in self.take_routes(branch_id, |_| true) {
+            self.retire_route(branch_id, &route).await;
         }
     }
 
@@ -464,7 +430,7 @@ impl CollaborationSession {
         let committed = self.committed_approval(branch_id, event);
         if committed.is_none()
             && let EventKind::InputMessage(input) = &event.kind
-            && Source::parse(input, false).is_some()
+            && let Some(source) = Source::parse(input, false)
         {
             let resources = self
                 .state
@@ -491,19 +457,19 @@ impl CollaborationSession {
                             )
                             .await;
                     }
+                    owner.deny_member(&source.descriptor).await;
                 });
             }
         }
-        let ids = {
+        let mut retired: Vec<(String, Route)> = Vec::new();
+        {
             let mut state = self.state.lock().unwrap();
-            let mut targets = Vec::new();
-            let member = match &event.kind {
+            if let Some((member, agent_id)) = match &event.kind {
                 EventKind::CollaborationCancel(data) | EventKind::CollaborationClose(data) => {
                     Some((data.session_id.as_str(), data.agent_id.as_str()))
                 }
                 _ => None,
-            };
-            if let Some((member, agent_id)) = member {
+            } {
                 let owner = state
                     .requests
                     .get_mut(member)
@@ -515,67 +481,59 @@ impl CollaborationSession {
                 if let Some(owner) = owner
                     && let Some(branch) = state.branches.get_mut(&owner)
                 {
-                    for route in branch
+                    let ids = branch
                         .approvals
-                        .values_mut()
-                        .filter(|route| route.relay.descriptor.member.session_id == member)
-                    {
-                        route.retired = true;
-                        targets.push((owner.clone(), route.relay.id.clone()));
+                        .iter()
+                        .filter(|(_, route)| route.descriptor.member.session_id == member)
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    for id in ids {
+                        if let Some(route) = branch.approvals.remove(&id) {
+                            retired.push((owner.clone(), route));
+                        }
                     }
-                }
-            }
-            if matches!(event.kind, EventKind::StopInterrupt(_)) {
-                for request in state
-                    .requests
-                    .values_mut()
-                    .filter(|request| request.branch == branch_id)
-                {
-                    request.approvals_open = false;
                 }
             }
             let Some(branch) = state.branches.get_mut(branch_id) else {
                 return;
             };
-            let ids: Vec<String> = match &event.kind {
+            let mut removed = Vec::new();
+            match &event.kind {
                 EventKind::InputMessage(data) => {
                     if let Some(route) = committed {
-                        branch
-                            .approvals
-                            .entry(route.relay.id.clone())
-                            .or_insert(route);
+                        branch.approvals.entry(route.id.clone()).or_insert(route);
                     }
-                    Source::parse(data, true)
-                        .and_then(|source| {
-                            branch
-                                .approvals
-                                .get(&source.approval_id)
-                                .filter(|route| route.relay.descriptor == source.descriptor)
-                                .map(|route| vec![route.relay.id.clone()])
-                        })
-                        .unwrap_or_default()
+                    if let Some(source) = Source::parse(data, true)
+                        && branch
+                            .approvals
+                            .get(&source.approval_id)
+                            .is_some_and(|route| route.descriptor == source.descriptor)
+                    {
+                        removed.push(source.approval_id);
+                    }
                 }
                 EventKind::InputConsumed(data) => {
+                    let turn = branch.current_turn.clone();
                     for route in branch.approvals.values_mut() {
-                        if route.relay.input_id == data.input_id {
-                            route.turn_id = branch.current_turn.clone();
+                        if route.input_id == data.input_id {
+                            route.turn_id = turn.clone();
                         }
                     }
-                    Vec::new()
                 }
-                EventKind::StopInterrupt(_) => branch.approvals.keys().cloned().collect(),
-                EventKind::TurnEnd(data) => branch
-                    .approvals
-                    .values()
-                    .filter(|route| route.turn_id.as_ref() == Some(&data.turn_id))
-                    .map(|route| route.relay.id.clone())
-                    .collect(),
-                EventKind::InputDeleted(data) => branch
-                    .approvals
-                    .values()
-                    .filter(|route| route.relay.input_id == data.input_id)
-                    .map(|route| route.relay.id.clone())
-                    .collect(),
+                EventKind::TurnEnd(data) => removed.extend(
+                    branch
+                        .approvals
+                        .iter()
+                        .filter(|(_, route)| route.turn_id.as_ref() == Some(&data.turn_id))
+                        .map(|(id, _)| id.clone()),
+                ),
+                EventKind::InputDeleted(data) => removed.extend(
+                    branch
+                        .approvals
+                        .iter()
+                        .filter(|(_, route)| route.input_id == data.input_id)
+                        .map(|(id, _)| id.clone()),
+                ),
                 EventKind::ToolCall(data) => {
                     for call in &data.calls {
                         if matches!(
@@ -586,16 +544,13 @@ impl CollaborationSession {
                             && let Some(route) = branch.approvals.get_mut(&answer.approval_id)
                         {
                             route.turn_id = Some(data.turn_id.clone());
-                            branch.approval_calls.insert(
-                                (event.id.clone(), call.id.clone()),
-                                route.relay.id.clone(),
-                            );
+                            branch
+                                .approval_calls
+                                .insert((event.id.clone(), call.id.clone()), route.id.clone());
                         }
                     }
-                    Vec::new()
                 }
                 EventKind::ToolResult(data) => {
-                    let mut ids = Vec::new();
                     if let Some(batch) = &data.call_event_id {
                         for result in &data.results {
                             if let Some(id) = branch
@@ -603,53 +558,34 @@ impl CollaborationSession {
                                 .remove(&(batch.clone(), result.call_id.clone()))
                                 && result.result.is_error == Some(true)
                             {
-                                ids.push(id);
+                                removed.push(id);
                             }
                         }
                     }
-                    ids
                 }
-                _ => Vec::new(),
-            };
-            for id in &ids {
-                if let Some(route) = branch.approvals.get_mut(id) {
-                    route.retired = true;
+                _ => {}
+            }
+            for id in removed {
+                if let Some(route) = branch.approvals.remove(&id) {
+                    retired.push((branch_id.to_owned(), route));
                 }
             }
-            targets.extend(ids.into_iter().map(|id| (branch_id.to_owned(), id)));
-            targets
-        };
-        for (branch_id, id) in ids {
-            let this = self.clone();
-            let tasks = self
-                .state
-                .lock()
-                .unwrap()
-                .branches
-                .get(&branch_id)
-                .map(|branch| branch.tasks.clone());
-            if let Some(tasks) = tasks {
-                tasks.spawn(async move {
-                    this.retire_approval(&branch_id, &id).await;
-                });
-            }
+        }
+        for (owner, route) in retired {
+            self.spawn_retire(&owner, vec![route]);
         }
     }
 
-    fn approval_route(&self, branch_id: &str, id: &str) -> Option<Arc<Relay>> {
+    fn approval_route(&self, branch_id: &str, id: &str) -> Option<Route> {
         let state = self.state.lock().unwrap();
         let branch = state.branches.get(branch_id)?;
         if branch.closing {
             return None;
         }
         let route = branch.approvals.get(id)?;
-        let request = state
-            .requests
-            .get(&route.relay.descriptor.member.session_id)?;
-        (request.approvals_open
-            && request.op == route.relay.descriptor.delegation_id
-            && !route.retired)
-            .then(|| route.relay.clone())
+        let request = state.requests.get(&route.descriptor.member.session_id)?;
+        (request.approvals_open && request.op == route.descriptor.delegation_id)
+            .then(|| route.clone())
     }
 
     async fn approval_detail(
@@ -721,9 +657,7 @@ impl ToolHandler for DecisionTool {
                 ));
             };
             if cancel.is_cancelled() {
-                self.session
-                    .retire_approval(&context.branch_id, &route.id)
-                    .await;
+                self.session.spawn_retire(&context.branch_id, vec![route]);
                 return Err(HostError::Cancelled(
                     "Member approval decision cancelled".into(),
                 ));
@@ -733,10 +667,17 @@ impl ToolHandler for DecisionTool {
             } else {
                 ApprovalDecision::Deny
             };
-            let result = route
-                .approval
-                .respond(&route.descriptor.request_id, decision)
-                .await;
+            let result = match self.session.member_approval(
+                &route.descriptor.member.session_id,
+                &route.descriptor.member.branch_id,
+            ) {
+                Some(approval) => {
+                    approval
+                        .respond(&route.descriptor.request_id, decision)
+                        .await
+                }
+                None => Err(ApprovalRespondError::Unknown),
+            };
             let code = match result {
                 Ok(()) => "answered",
                 Err(ApprovalRespondError::Unknown | ApprovalRespondError::Cancelled) => {
@@ -745,8 +686,7 @@ impl ToolHandler for DecisionTool {
                 Err(ApprovalRespondError::Closed) => "unavailable",
             };
             self.session
-                .retire_approval(&context.branch_id, &route.id)
-                .await;
+                .spawn_retire(&context.branch_id, vec![route.clone()]);
             Ok(success(
                 json!({"code":code,"approvalId":route.id,"target":route.descriptor.member,"decision":decision}),
             ))

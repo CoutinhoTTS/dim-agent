@@ -4482,6 +4482,7 @@ async fn approval_team(runs: Arc<AtomicUsize>) -> (RunningServer, Agent) {
                 tools: Some(vec![
                     "agent".into(),
                     "echo".into(),
+                    "wait".into(),
                     "danger".into(),
                     "member_approval_allow".into(),
                     "member_approval_reject".into(),
@@ -4840,6 +4841,46 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
             assert_eq!(ended["result"]["state"], "ended", "{action}");
             assert_eq!(runs.load(Ordering::SeqCst), 0, "{action}");
         }
+        let socket = server.unix_path.clone().unwrap();
+        server.shutdown(); server.join().await.unwrap();
+        tokio::fs::remove_dir_all(socket.parent().unwrap()).await.unwrap();
+    }).await.unwrap();
+}
+
+/// A turn stop covers only that turn's undelivered work. A member delegated in
+/// an earlier turn keeps running and keeps route admission, so its later ask
+/// still reaches the user instead of being denied from a closed destination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_turn_keeps_a_delivered_members_later_approval_reachable() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (server, agent) = approval_team(runs.clone()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","wait","danger","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent","wait"]}})).await;
+        assert_ok(&created);
+        let lead = created["result"]["sessionId"].as_str().unwrap();
+        let leader = agent.get_session(lead).unwrap();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":lead})).await);
+        let worker_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"].as_str().unwrap().to_owned();
+        say(&mut client, lead, tool(json!({"action":"request","agentId":worker_agent,"prompt":"tool:wait {\"millis\":15000}"})), "queue").await;
+        let member = next_member(&leader, 0).await;
+        let member_session = agent.get_session(&member).unwrap();
+        say(&mut client, lead, "tool:wait {\"millis\":60000}".into(), "queue").await;
+        poll("the stopped turn's wait call", async || {
+            events(&leader).await.iter().any(|event| matches!(&event.kind, EventKind::ToolCall(data) if data.calls.iter().any(|call| call.name == "wait"))).then_some(())
+        }).await;
+        assert_ok(&client.rpc("session.stop", json!({"sessionId":lead,"branchId":"main"})).await);
+        let child = member_session.branch("main".into(), 0, dim_agent_runtime::BranchOptions { prompt: "tool:danger {\"command\":\"later\"}".into(), source: dim_agent_types::BranchSource::Host { operation_id: "stopped-leader-child".into() } }).await.unwrap();
+        let request = client.notice("approval.request").await;
+        let request_id = request["params"]["requestId"].as_str().unwrap();
+        let detail = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
+        assert_eq!(detail["result"]["state"], "pending");
+        assert_eq!(detail["result"]["descriptor"]["call"]["input"]["command"], "later");
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert_ok(&client.rpc("approval.respond", json!({"sessionId":lead,"branchId":"main","requestId":request_id,"decision":"allow"})).await);
+        poll("the allowed member action runs", async || (runs.load(Ordering::SeqCst) == 1).then_some(())).await;
+        tokio::time::timeout(Duration::from_secs(10), member_session.idle(&child)).await.unwrap().unwrap();
+        member_session.stop("main", "test cleanup".into()).await.unwrap();
         let socket = server.unix_path.clone().unwrap();
         server.shutdown(); server.join().await.unwrap();
         tokio::fs::remove_dir_all(socket.parent().unwrap()).await.unwrap();
