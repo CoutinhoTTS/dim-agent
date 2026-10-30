@@ -147,6 +147,14 @@ class IssueReporterFlowTest(unittest.TestCase):
         self.assertEqual(done, ["opened #2 (frontier/analysis-failed)"])
         self.assertEqual(self.github.issues[1]["state"], "open")
 
+    def test_an_unscoreable_night_never_closes_the_tracking_issue(self) -> None:
+        """Every trial on disk passed, but the run could not be scored (exit 6)."""
+        self.open_tracking()
+        done = self.night(6, run_json(trials=30, trial_passes=30),
+                          analysis_failed=True, analysis_ok=False)
+        self.assertNotIn("closed #1 (frontier/tracking)", done)
+        self.assertEqual(self.github.issues[1]["state"], "open")
+
     def test_a_clean_night_closes_the_tracking_issue_without_analysis(self) -> None:
         """Every trial passed, so nothing is failing even if the analyzer failed."""
         self.open_tracking()
@@ -215,14 +223,17 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def night(self, outcomes: dict[str, float], replies: dict[str, dict], known: dict,
-              baseline: dict[str, int] | None = None) -> tuple:
+    def night(self, outcomes: dict[str, float | list[float]], replies: dict[str, dict],
+              known: dict, baseline: dict[str, int] | None = None, exit_code: int = 0) -> tuple:
         run_dir = self.root / f"run{len(list(self.root.iterdir()))}"
         harbor = run_dir / "harbor"
         harbor.mkdir(parents=True)
         rewards: dict[str, list[str]] = {}
-        for task, reward in outcomes.items():
-            trial = harbor / f"{task}__x"
+        trials = [(task, reward, f"{task}__{i}")
+                  for task, value in outcomes.items()
+                  for i, reward in enumerate(value if isinstance(value, list) else [value])]
+        for task, reward, name in trials:
+            trial = harbor / name
             (trial / "agent").mkdir(parents=True)
             (trial / "verifier").mkdir()
             task_dir = self.root / "tasks" / task
@@ -242,7 +253,7 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
                 "exception_info": None}))
             rewards.setdefault(str(reward), []).append(trial.name)
         (harbor / "result.json").write_text(json.dumps({
-            "id": "job", "n_total_trials": len(outcomes),
+            "id": "job", "n_total_trials": len(trials),
             "stats": {"evals": {"dim": {"reward_stats": {"reward": rewards}, "exception_stats": {}}}}}))
         baseline_path = None
         if baseline is not None:
@@ -254,7 +265,7 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
                "baseline": str(baseline_path) if baseline_path else None,
                "merges": [{"sha": self.merge, "subject": "Merge pull request #548 from arcships/grep",
                            "verdict": "visible", "matched_rules": [], "visible_files": ["grep.rs"]}],
-               "l2": {"trials": len(outcomes), "trial_passes": sum(r == 1.0 for r in outcomes.values())}}
+               "l2": {"trials": len(trials), "trial_passes": sum(r == 1.0 for _, r, _ in trials)}}
         (run_dir / "run.json").write_text(json.dumps(run))
 
         def ask(prompt: str) -> str:
@@ -266,7 +277,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         analysis = {"model": "fake", "baseline": baseline is not None,
                     "failures": [analyze.asdict(f) for f in failures]}
         track = issues.tracking("frontier", run, analysis, "arcships/dim")
-        done = issues.report(self.github, "frontier", 0, run, [], analysis_ok=True, track=track)
+        done = issues.report(self.github, "frontier", exit_code, run, [], analysis_ok=True,
+                             track=track)
         return failures, updated, track, done
 
     def test_failures_are_explained_and_known_causes_are_not_news(self) -> None:
@@ -338,6 +350,28 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
                  "evidence": "curl: (28)", "same_as_known": False, "suspects": []}
         *_, done = self.night({"hard": 0.0}, {"hard": reply}, {}, {"hard": 0})
         self.assertEqual(done, ["opened #1 (frontier/tracking)"])
+
+    def test_an_unscoreable_night_does_not_close_the_issue(self) -> None:
+        """Exit 6: nothing was scored, so nothing failed, and nothing was measured."""
+        reply = {"category": "agent", "cause": "Broke.", "evidence": "x",
+                 "same_as_known": False, "suspects": []}
+        _, known, _, _ = self.night({"regex": 0.0}, {"regex": reply}, {})
+        *_, done = self.night({"regex": -1.0}, {}, known, exit_code=6)
+        self.assertEqual(done, [])
+        self.assertEqual(self.github.issues[1]["state"], "open")
+
+    def test_a_task_that_failed_several_trials_is_one_failure(self) -> None:
+        reply = {"category": "agent", "cause": "Broke.", "evidence": "x",
+                 "same_as_known": False, "suspects": []}
+        failures, _, track, _ = self.night({"regex": [0.0, 0.0, 1.0]}, {"regex": reply}, {})
+        self.assertEqual([(f.task, f.failed_trials, f.scored_trials) for f in failures],
+                         [("tb/regex", 2, 3)])
+        self.assertEqual(len(self.prompts), 1)
+        self.assertIn("failed 2 of its 3 scored trials", self.prompts[0])
+        self.assertEqual(track.title, "[eval] frontier: 1 tracked failure(s)")
+        self.assertEqual(track.body.count("#### `tb/regex`"), 1)
+        self.assertEqual(track.news.count("#### `tb/regex`"), 1)
+        self.assertIn("2/3 trials failed", track.body)
 
     def test_a_trial_nothing_scored_is_not_a_failure(self) -> None:
         failures, updated, _, _ = self.night({"regex": -1.0}, {}, {})

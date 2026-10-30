@@ -88,9 +88,13 @@ Reply with one JSON object and nothing else:
 @dataclass
 class Failure:
     task: str
+    #: The failed trial whose evidence was analyzed; with k>1 a task is
+    #: analyzed once, from its first failed trial.
     trial: str
     reward: float | None
     exception: str | None
+    failed_trials: int = 1
+    scored_trials: int = 1
     category: str = "unknown"
     cause: str = ""
     evidence: str = ""
@@ -236,30 +240,37 @@ def failed_trials(job: results.JobReport) -> list[results.Trial]:
 
 def analyze(run_dir: Path, repo: Path, known: dict,
             ask, today: str) -> tuple[list[Failure], dict]:
-    """Analyze every failed trial. Returns the failures and the updated record.
+    """Analyze every task with a failed trial. Returns the failures and the updated record.
 
     ``ask`` takes a prompt and returns the model's reply text.
     """
     run = json.loads((run_dir / "run.json").read_text())
     job = results.read_job(run_dir / "harbor")
     changes, names = window_changes(repo, run)
-    failed = failed_trials(job)
+    failed: dict[str, list[results.Trial]] = {}
+    for trial in failed_trials(job):
+        failed.setdefault(trial.task_name, []).append(trial)
+    scored = {task.task_name: sum(t.scored for t in task.trials) for task in job.tasks}
     passed = {t.task_name for t in job.trials if t.reward == 1.0}
     baseline = baseline_tasks(run)
 
-    def one(trial: results.Trial) -> Failure:
+    def one(trials: list[results.Trial]) -> Failure:
+        trial = trials[0]
         failure = Failure(task=trial.task_name, trial=trial.trial_name,
                           reward=trial.reward, exception=trial.exception,
+                          failed_trials=len(trials), scored_trials=scored[trial.task_name],
                           baseline_passes=(baseline or {}).get(trial.task_name, {}).get("passes"))
         previous = known.get(trial.task_name)
         known_text = (f"Last time this task failed, the cause was recorded as: "
                       f"[{previous['category']}] {previous['cause']}\n"
                       "Set same_as_known to true only if tonight's failure has the same cause.\n"
                       if previous else "This task has no recorded earlier failure; set same_as_known to false.\n")
+        evidence = evidence_for(trial, run_dir / "harbor" / trial.trial_name)
+        if failure.scored_trials > 1:
+            evidence["outcome"] += (f"; the task failed {failure.failed_trials} of its "
+                                    f"{failure.scored_trials} scored trials, this is the first")
         try:
-            reply = parse_reply(ask(PROMPT.format(
-                known=known_text, changes=changes,
-                **evidence_for(trial, run_dir / "harbor" / trial.trial_name))))
+            reply = parse_reply(ask(PROMPT.format(known=known_text, changes=changes, **evidence)))
         except Exception as error:  # noqa: BLE001 - one bad reply must not lose the night
             failure.error = f"{type(error).__name__}: {error}"[:300]
             # Already failing: not news, whatever tonight's reply was.
@@ -275,7 +286,7 @@ def analyze(run_dir: Path, repo: Path, known: dict,
         return failure
 
     with ThreadPoolExecutor(PARALLEL_CALLS) as pool:
-        failures = list(pool.map(one, failed))
+        failures = list(pool.map(one, failed.values()))
 
     updated = {task: entry for task, entry in known.items() if task not in passed}
     for failure in failures:

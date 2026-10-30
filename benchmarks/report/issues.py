@@ -9,7 +9,7 @@ report/analyze.py. Two kinds of issue:
   harness failure whatever the baseline says, or when there is no baseline. The
   issue opens when a tracked failure appears, gets a comment only when a new one
   does, has its body kept current silently otherwise, and closes when a night
-  that was analyzed has no tracked failure left. Tasks the baseline fails too
+  that measured something (exit 0 or 7, ledger pushed) has no tracked failure left. Tasks the baseline fails too
   are listed in the body and never open or keep the issue open.
 * Pipeline problems (``eval-pipeline``): each problem kind of each suite has at
   most one open issue, found by a marker in its body: a repeat adds a comment
@@ -226,6 +226,8 @@ def tracking(suite: str, run: dict, analysis: dict, repo: str) -> Tracking:
 
     def detail(f: dict) -> list[str]:
         since = f" · failing since {f['first_seen']} ({f['nights']} night(s))" if f["first_seen"] else ""
+        if f["scored_trials"] > 1:
+            since = f" · {f['failed_trials']}/{f['scored_trials']} trials failed" + since
         if f["error"]:
             return ["", f"#### `{f['task']}` — not analyzed{since}", f"{f['error']}"]
         suspects = "; ".join(f"{link(s['pr'])} ({s['confidence']}): {s['reason']}"
@@ -350,8 +352,13 @@ def report(github: GitHub, suite: str, exit_code: int, run: dict | None,
     done = []
     if found:
         github.ensure_label()
+    # Only a night that measured something can say the tracked failures are
+    # gone. An unscoreable run (exit 6) analyzes no failure because its trials
+    # were never scored, and reads as "nothing tracked" without being so.
+    measured = exit_code in SCORED_EXITS and not ledger_push_failed
     l2 = (run or {}).get("l2") or {}
-    if track is None and l2.get("trials") and l2.get("trial_passes") == l2.get("trials"):
+    if (track is None and measured and l2.get("trials")
+            and l2.get("trial_passes") == l2.get("trials")):
         # Every trial passed: nothing is failing, analyzed or not.
         track = Tracking(f"{suite}/tracking", "", "", None, 0)
     if track is not None:
@@ -369,7 +376,7 @@ def report(github: GitHub, suite: str, exit_code: int, run: dict | None,
                 done.append(f"commented on #{issue['number']} ({track.key})")
             else:
                 done.append(f"updated #{issue['number']} ({track.key})")
-        elif issue is not None:
+        elif issue is not None and measured:
             run_id = (run or {}).get("run_id", "the latest run")
             github.comment(issue["number"], f"No tracked failure in `{run_id}`; closing.")
             github.close(issue["number"])
