@@ -173,16 +173,31 @@ PluginManager 写入（[PluginManager](plugins/PluginManager.md)）。`LoaderPlu
 [Dim 如何使用 rutis §2](rutis-usage.md#2-插件是一行实例挂载它的部件)"隔离标签"）。
 
 这个例外在 0.19 上行不通了。`LoaderPlugin` 还会提供 `LoaderService`，它是 rutis-loader 的私有类型，键无法隔离，
-所以同一宿主里的第二个 loader 会因 `ServiceExists` 失败。因此本次升级恢复这条规则：
+所以同一宿主里的第二个 loader 会因 `ServiceExists` 失败。因此本次升级恢复这条规则。Agent 只有两种放置方式：
 
-- `build_in` 只能把 Agent 放进还没有 loader 的宿主，它挂载的 loader 就是这个宿主唯一的 loader。自己已有 loader
-  的宿主用 `build_at` 放置 Agent。第二个 loader 会在放置时被 rutis 拒绝，Dim 不另加检查。
-- `own_placement` 不再按 Agent 的标签隔离 `Loader`、`PartRegistry` 和 mounter，标签计数器也一起删掉。
-  这些隔离只是为了让两个 loader 共用一个宿主。
-- `agents_of_one_builder_mount_only_their_own_plugins_parts`（`tests/integration/tests/part_registry.rs`）
-  把两个 Agent 放在两个 root 下，各有一个 loader。测试仍然检查每次放置都有自己的部件登记表。
-- Dim 如何使用 rutis §2 删掉"两个共享宿主的 Agent 给各自的 loader、部件登记表和 mounter 用同一个标签"那句话。
-  single-tree 对 `build_in` 的描述改为：Agent 的 loader 就是宿主唯一的 loader。
+| 放置方式 | 宿主 | 使用方 |
+| --- | --- | --- |
+| `build_at(loader, anchor)` | 宿主拥有 loader；每个 Agent 是它的一个实例，与宿主自己的进程行放在一起 | App Server |
+| `build()` | Agent 自己就是宿主：一个私有 root，以及这个 root 唯一的 loader | 测试和库宿主 |
+
+删除 `build_in`。在 loader 按宿主划分之后，它就等于由调用方提供 root 的 `build()`。它唯一的额外作用，是让调用方
+绕开 loader，直接在 root 上挂宿主插件；而一个插件就是 loader 里的一行
+（[ADR 006 D3](../adr/006-plugin-contract.md#d3-插件是一行每个实例挂载为它登记的部件)）。它在 19 个测试和示例
+文件里共有 37 处调用，按下面的方式迁移：
+
+- **在 Agent 启动前挂上的宿主插件**（`RecoveryHosts`、`AimuxPlugin`、`ConfiguredModelsPlugin` 等）改为通过
+  `AgentBuilder::plugin` 成为 Agent 的 loader 里的行，或通过 `process_value`、`session_value` 作为值提供；Agent 改用
+  `build()` 构建。
+- **在 Agent 运行期间挂上或卸下的宿主插件**改为测试自己持有一个 loader，在其中增删行；Agent 用 `build_at` 放进
+  这个 loader。`tests/integration/tests/tool_binding.rs` 里的 `EnableContributor` 就属于这一类。
+- **`agents_of_one_builder_mount_only_their_own_plugins_parts`**（`tests/integration/tests/part_registry.rs`）改用
+  `build()` 构建两个 Agent。测试仍然检查每次放置都有自己的部件登记表。
+
+`AgentHost::Within` 随 `build_in` 一起删除。`own_placement` 按 Agent 对 `Loader`、`PartRegistry` 和 mounter 做的隔离及其
+标签计数器也一起删除：这些隔离只是为了让两个 loader 共用一个宿主。
+
+Dim 如何使用 rutis §2 删掉"两个共享宿主的 Agent 给各自的 loader、部件登记表和 mounter 用同一个标签"那句话。
+single-tree 和 `AgentBuilder` 的文档改为只列出这两种放置方式。
 
 多个 Agent 仍然可以通过 `build_at` 共享一个宿主，`agent_row` 已经会隔离进程值。这条路径不变。
 
@@ -266,7 +281,7 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
 | 步骤 | 工作 | 门槛 |
 | --- | --- | --- |
 | 1 | 固定版本和锁文件（M1）；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.0 |
-| 2 | 内核与服务目录：M2、M3、M6 | `cargo test -p dim-agent-runtime -p dim-agent-capabilities`；`cargo test -p dim-agent-integration-tests --test part_registry`；§6 中 Timeline `before` 的检查 |
+| 2 | 内核与服务目录：M2、M3、M6，连同从 `build_in` 迁出的测试 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 和放置的检查。App Server 迁出的测试从步骤 3 起运行 |
 | 3 | 运行时：M4、M5、M9 | App Server 和 `tests/integration` 中由 Node、Python 驱动的流程测试 |
 | 4 | leaf：M7、M8 | `cargo test -p dimcode --test ui_leaf`；`transport_flow ui_host::` |
 | 5 | TypeScript 包与工具：M10、`xtask types` | `runtime/plugins/*` 的插件测试；`runtime/plugin-sdk.test.mjs`；`xtask check` |
@@ -295,8 +310,8 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
   `runtime.install` 重启后仍在，准入会等待运行时的行；`plugin.reload` 能用上改动后的模块。
 - **快照行（M4）：** 运行时停着时解析的行，按它的 `provides` 快照被接受。
 - **`loader`（M5）：** 注入 `loader` 的 TypeScript 行拿不到 rutis 的行服务。
-- **放置（M6）：** 去掉按 Agent 的隔离后，用 `build_in` 放置的 Agent 仍能加载；同一个 builder 构建、分别放在
-  两个 root 下的两个 Agent 只挂载各自插件的部件。
+- **放置（M6）：** 从 `build_in` 迁出的测试保留原有断言。同一个 builder 用 `build()` 构建的两个 Agent 只挂载各自
+  插件的部件。Session 运行期间测试加入、随后又删除的贡献者行，会先进入 Session 的工具，之后再离开。
 - **leaf（M8）：** 现有的 `ui_leaf` PTY 流程（启动、`/new`、`/web`、退出码、替换代次、被杀掉的 leaf、
   `ui.close`、daemon 关闭）。新增三项检查：
   - leaf 试图在 daemon 上运行插件时，因为没有安装该插件而失败；
@@ -325,7 +340,8 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
 | --- | --- |
 | 宿主、运行时和 leaf 之间版本不一致（握手会拒绝） | M1 在一个提交里升级所有固定版本；`ui.leaf.2` 让版本不一致的 CLI 和 daemon 改走直接 TUI |
 | daemon 的服务变得可以从 leaf 访问 | M8：私有地址、隔离会话插件目录、核对 id、只拨 loopback；Tui §8 写明这一点 |
-| 宿主里出现第二个 loader（两个 `build_in` Agent，或把 `build_in` 放进已有 loader 的宿主） | M6：loader 按宿主划分；第二个会在放置时被 rutis 拒绝；共享宿主的 Agent 用 `build_at` |
+| 宿主里出现第二个 loader | M6：loader 按宿主划分；删除 `build_in` 后，只有 `build()` 会创建 loader，而且建在它自己的 root 里；共享宿主的 Agent 用 `build_at` |
+| 迁移 37 处 `build_in` 调用改变了测试所检查的内容 | 每个迁出的测试保留原有断言；运行期间挂宿主插件的测试改为在自己持有的 loader 里增删行 |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
@@ -356,7 +372,7 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
 
 - 直接删除、不做替代：`NodeRows` 及其两行；解析器缓存和 `invalidate`；`share_registered_only`；`TuiRow` 对
   `plugins` offer 的等待；leaf 和 daemon 各自的 `Transport` 实现、`StaticIdentity`，以及 `UiHostPlugin` 的传输和身份；
-  `own_placement` 按 Agent 的隔离及其标签计数器（M6）。
+  `build_in`、`AgentHost::Within`，以及 `own_placement` 按 Agent 的隔离及其标签计数器（M6）。
 - Dim 只为 rutis 不做的事保留自己的解析器包装：`provides` 快照检查和 `workflowFiles`。
 - 没有兼容层：直接使用 `rutis-host` 的 `SpawnPlugin`，而不是复制一份。复制等于在 Dim 里重建被删的 `LocalRuntime`。
 - `ui.leaf.2` 复用现有的 feature 回退机制，不新增版本检查。

@@ -189,19 +189,34 @@ host ([single-tree](../architecture/rust-agent/single-tree.md), [How Dim uses ru
 
 On 0.19 this exception no longer works. `LoaderPlugin` also provides `LoaderService`, which is private
 to rutis-loader, so its key cannot be isolated, and a second loader in one host fails with
-`ServiceExists`. The upgrade therefore restores the rule:
+`ServiceExists`. The upgrade therefore restores the rule. An Agent is placed in one of two ways:
 
-- `build_in` places an Agent in a host that has no loader. The loader it mounts is that host's only
-  loader. A host with a loader of its own places its Agents with `build_at`. rutis refuses a second
-  loader at placement, and Dim adds no check of its own.
-- `own_placement` no longer isolates `Loader`, `PartRegistry` and the mounter under a per-Agent label,
-  and its label counter goes. That isolation existed only so two loaders could share a host.
-- `agents_of_one_builder_mount_only_their_own_plugins_parts` (`tests/integration/tests/part_registry.rs`)
-  places its two Agents under two roots, one loader each. The test still checks that each placement
-  has its own part registry.
-- How Dim uses rutis §2 drops the sentence about two Agents sharing a host giving their loader, part
-  registry and mounter one label. single-tree's description of `build_in` says the Agent's loader is
-  the host's only one.
+| Placement | The host | Used by |
+| --- | --- | --- |
+| `build_at(loader, anchor)` | The host owns the loader; each Agent is an instance of it, beside the host's own process rows | The App Server |
+| `build()` | The Agent is its own host: a private root and that root's only loader | Tests and library hosts |
+
+`build_in` is removed. With one loader per host, it would be `build()` with a root the caller supplies.
+The only other thing it offered was mounting host plugins on that root, outside any loader, and a
+plugin is a loader row ([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)).
+Its 37 calls, in 19 test and example files, move as follows:
+
+- **Host plugins mounted before the Agent starts** (`RecoveryHosts`, `AimuxPlugin`,
+  `ConfiguredModelsPlugin`, …) become rows of the Agent's loader through `AgentBuilder::plugin`, or
+  values through `process_value` and `session_value`. The Agent is then built with `build()`.
+- **Host plugins mounted or unloaded while the Agent runs** are rows that the test adds to and removes
+  from a loader it owns. The Agent is placed in that loader with `build_at`. This covers
+  `EnableContributor` in `tests/integration/tests/tool_binding.rs`.
+- **`agents_of_one_builder_mount_only_their_own_plugins_parts`** (`tests/integration/tests/part_registry.rs`)
+  builds its two Agents with `build()`. It still checks that each placement has its own part registry.
+
+`AgentHost::Within` goes with `build_in`. So do `own_placement`'s per-Agent isolation of `Loader`,
+`PartRegistry` and the mounter and its label counter: that isolation existed only so that two loaders
+could share a host.
+
+How Dim uses rutis §2 drops the sentence about two Agents sharing a host giving their loader, part
+registry and mounter one label. single-tree and `AgentBuilder`'s documentation name the two
+placements.
 
 Agents sharing a host keep doing so through `build_at`, where `agent_row` already isolates the
 process values. That path is unchanged.
@@ -306,7 +321,7 @@ commit.
 | Step | Work | Gate |
 | --- | --- | --- |
 | 1 | Pins and lock files (M1); the authoring pin | `cargo metadata` resolves; the lock files name 0.19.0 |
-| 2 | Kernel and catalog: M2, M3, M6 | `cargo test -p dim-agent-runtime -p dim-agent-capabilities`; `cargo test -p dim-agent-integration-tests --test part_registry`; the Timeline `before` checks of §6 |
+| 2 | Kernel and catalog: M2, M3, M6, with the tests moved off `build_in` | The tests of the crates below `dim-app-server` and of `tests/integration` (`extensions.rs` follows in step 3); the Timeline `before` and placement checks of §6. The App Server's moved tests run from step 3 |
 | 3 | Runtimes: M4, M5, M9 | Node- and Python-backed flow tests of the App Server and `tests/integration` |
 | 4 | Leaf: M7, M8 | `cargo test -p dimcode --test ui_leaf`; `transport_flow ui_host::` |
 | 5 | TypeScript packages and tooling: M10, `xtask types` | Plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs`; `xtask check` |
@@ -337,8 +352,9 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - **Snapshot rows (M4):** a row resolved while its runtime is down is accepted against its `provides`
   snapshot.
 - **`loader` (M5):** a TypeScript row that injects `loader` does not get rutis's row service.
-- **Placement (M6):** Agents placed with `build_in` load without the per-Agent isolation, and two
-  Agents built from one builder under two roots mount only their own plugins' parts.
+- **Placement (M6):** the tests moved from `build_in` keep their assertions. Two Agents built from one
+  builder with `build()` mount only their own plugins' parts. A contributor row that the test adds while
+  a Session runs, and later removes, reaches the Session's tools and leaves them again.
 - **Leaf (M8):** the existing `ui_leaf` PTY flow (start, `/new`, `/web`, exit code, replacement
   generations, a killed leaf, `ui.close`, daemon shutdown). Three new checks:
   - a leaf's attempt to run a daemon plugin fails with no plugin installed;
@@ -371,7 +387,8 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | --- | --- |
 | Versions drift across the host, the runtimes and the leaf (the handshake refuses) | M1 bumps every pin in one commit; `ui.leaf.2` keeps a mismatched CLI and daemon on the direct TUI |
 | The daemon's services become reachable from a leaf | M8: private address, isolated session catalog, id checks, loopback only; Tui §8 states it |
-| A host gets a second loader (two `build_in` Agents, or `build_in` into a host with a loader) | M6: a loader is per host; rutis refuses the second at placement; Agents sharing a host use `build_at` |
+| A host gets a second loader | M6: a loader is per host; `build_in` is removed, so only `build()` creates a loader, in a root of its own; Agents sharing a host use `build_at` |
+| Moving 37 `build_in` calls changes what a test checks | Each moved test keeps its assertions; the tests that mount host plugins while running move to rows in a loader they own |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |
 | Unknown npm names wait instead of failing | `RuntimeManager`'s status shows the wait; M9 adjusts the test that relied on the failure |
@@ -404,7 +421,7 @@ The upgrade adds no part, event or fact.
 - Removed with no replacement: `NodeRows` and its two rows; the resolver cache and `invalidate`;
   `share_registered_only`; `TuiRow`'s wait on the `plugins` offer; the leaf's and the daemon's
   `Transport` implementations, `StaticIdentity` and `UiHostPlugin`'s transport and identity;
-  `own_placement`'s per-Agent isolation and its label counter (M6).
+  `build_in`, `AgentHost::Within`, and `own_placement`'s per-Agent isolation and its label counter (M6).
 - Dim keeps its own resolver wrapper only for what rutis does not do: the `provides` snapshot check
   and `workflowFiles`.
 - No compatibility shim: `SpawnPlugin` is used from `rutis-host` rather than copied. A copy would
