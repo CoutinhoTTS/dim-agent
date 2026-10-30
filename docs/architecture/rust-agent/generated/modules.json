@@ -1118,7 +1118,6 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/assembly.rs",
       "unexpandedMacros": [
-        "cfg",
         "format",
         "json",
         "matches",
@@ -1126,7 +1125,8 @@
         "tokio::pin",
         "tokio::select",
         "tracing::error",
-        "vec"
+        "vec",
+        "write"
       ]
     },
     {
@@ -2430,6 +2430,27 @@
         "tokio::select",
         "vec",
         "write"
+      ]
+    },
+    {
+      "id": "dim_app_server::web::network::test_dns",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::web::network",
+      "file": "crates/dim-app-server/src/web/network.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_app_server::web::network::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::web::network",
+      "file": "crates/dim-app-server/src/web/network.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "panic",
+        "tokio::select",
+        "vec"
       ]
     },
     {
@@ -12164,6 +12185,7 @@
         "path AgentHost::Private",
         "path AgentHost::Within",
         "path Assembly",
+        "path AssemblyFinding",
         "path BuiltSession",
         "path Extension",
         "path Owned",
@@ -12175,11 +12197,15 @@
         "path SessionInitialization::Restore",
         "path assembly",
         "path build_session",
+        "path check_scope",
         "path crate::assembly::with_copies",
         "path group",
         "path own_placement",
         "path release",
+        "path required",
+        "path rows",
         "path scope_diagnostics",
+        "path scope_rows",
         "path shutdown_scope",
         "use crate::assembly::AgentHost",
         "use crate::assembly::Assembly",
@@ -12189,6 +12215,7 @@
         "use crate::assembly::Placement",
         "use crate::assembly::SessionInitialization",
         "use crate::assembly::build_session",
+        "use crate::assembly::check_scope",
         "use crate::assembly::own_placement",
         "use crate::assembly::release",
         "use crate::assembly::scope_diagnostics",
@@ -12280,6 +12307,13 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path crate::names::in_group"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::agent",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path parts"
       ]
     },
     {
@@ -12435,7 +12469,8 @@
         "path crate::parts::PartMounter::is_row",
         "path crate::parts::PartMounter::module",
         "path crate::parts::PartRegistry",
-        "path crate::parts::PartRegistryPlugin"
+        "path crate::parts::PartRegistryPlugin",
+        "path parts"
       ]
     },
     {
@@ -12997,6 +13032,7 @@
         "path crate::assembly::retain_scope",
         "path crate::assembly::shutdown_scope",
         "path crate::assembly::with_copies",
+        "path required",
         "path rows"
       ]
     },
@@ -13094,7 +13130,8 @@
       "from": "dim_agent_runtime::timeline_context",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path crate::parts::Copies"
+        "path crate::parts::Copies",
+        "path parts"
       ]
     },
     {
@@ -18758,13 +18795,6 @@
     },
     {
       "from": "dim_app_server::provider::editing",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path model"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path FieldUpdate",
@@ -18800,6 +18830,7 @@
         "path failure",
         "path optional_non_null",
         "path read_static",
+        "path reject_user_model_conflicts",
         "path validate_static_record"
       ]
     },
@@ -19181,6 +19212,7 @@
         "path StaticRecordKind::Builtin",
         "path failure",
         "path read_static",
+        "path reject_user_model_conflicts",
         "path static_catalog",
         "path validate_static_record"
       ]
@@ -21056,6 +21088,42 @@
         "path WebError::new",
         "use super::network::Diagnostic",
         "use super::network::WebError"
+      ]
+    },
+    {
+      "from": "dim_app_server::web::network",
+      "to": "dim_app_server::web::network::test_dns",
+      "references": [
+        "mod test_dns",
+        "path test_dns::Answer::Hang",
+        "path test_dns::Answer::Ips",
+        "path test_dns::lookup"
+      ]
+    },
+    {
+      "from": "dim_app_server::web::network",
+      "to": "dim_app_server::web::network::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::web::network::tests",
+      "to": "dim_app_server::web::network",
+      "references": [
+        "path NetworkConfig",
+        "path get",
+        "path proxy_url"
+      ]
+    },
+    {
+      "from": "dim_app_server::web::network::tests",
+      "to": "dim_app_server::web::network::test_dns",
+      "references": [
+        "path test_dns::Answer::Hang",
+        "path test_dns::Answer::Ips",
+        "path test_dns::insert",
+        "path test_dns::remove"
       ]
     },
     {
@@ -26903,7 +26971,9 @@
       "from": "dim_cli::ui::render::fullscreen",
       "to": "dim_cli::ui::text",
       "references": [
+        "path MARGIN_MARKS",
         "path display_width",
+        "use crate::ui::text::MARGIN_MARKS",
         "use crate::ui::text::display_width"
       ]
     },
@@ -28532,6 +28602,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::block::tests",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path crate::ui::text::RUNNING_MARK"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block::tests",
       "to": "dim_cli::ui::theme",
       "references": [
         "path Theme::system",
@@ -28650,10 +28727,31 @@
       "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::ui::text",
       "references": [
+        "path DONE_MARK",
+        "path ERROR_MARK",
+        "path FAILED_MARK",
+        "path LINE_MARK",
+        "path LOAD_MORE_MARK",
+        "path RUNNING_MARK",
+        "path SHELL_MARK",
+        "path STATUS_MARK",
+        "path THINKING_BAR",
+        "path USER_MARK",
         "path display_width",
         "path gutter_width",
         "path truncate_cells",
         "path wrap_cells",
+        "use crate::ui::text::ASSISTANT_MARK",
+        "use crate::ui::text::DONE_MARK",
+        "use crate::ui::text::ERROR_MARK",
+        "use crate::ui::text::FAILED_MARK",
+        "use crate::ui::text::LINE_MARK",
+        "use crate::ui::text::LOAD_MORE_MARK",
+        "use crate::ui::text::RUNNING_MARK",
+        "use crate::ui::text::SHELL_MARK",
+        "use crate::ui::text::STATUS_MARK",
+        "use crate::ui::text::THINKING_BAR",
+        "use crate::ui::text::USER_MARK",
         "use crate::ui::text::display_width",
         "use crate::ui::text::gutter_width",
         "use crate::ui::text::truncate_cells",
@@ -28842,8 +28940,16 @@
       "from": "dim_cli::ui::transcript::tool_group",
       "to": "dim_cli::ui::text",
       "references": [
+        "path DONE_MARK",
+        "path FAILED_MARK",
+        "path RUNNING_MARK",
+        "path SHELL_MARK",
         "path crate::ui::text::expand_tabs",
         "path display_width",
+        "use crate::ui::text::DONE_MARK",
+        "use crate::ui::text::FAILED_MARK",
+        "use crate::ui::text::RUNNING_MARK",
+        "use crate::ui::text::SHELL_MARK",
         "use crate::ui::text::display_width"
       ]
     },
@@ -29496,8 +29602,12 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::text",
       "references": [
+        "path RUNNING_MARK",
+        "path STATUS_MARK",
         "path display_width",
         "path truncate_cells",
+        "use crate::ui::text::RUNNING_MARK",
+        "use crate::ui::text::STATUS_MARK",
         "use crate::ui::text::display_width",
         "use crate::ui::text::truncate_cells"
       ]

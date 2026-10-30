@@ -236,7 +236,7 @@ mod tests {
         let Block::ToolGroup(group) = project_row(&shared(rows), 0, detail) else {
             panic!("not a group");
         };
-        render_group(&group, width, &theme.palette, "·")
+        render_group(&group, width, &theme.palette, crate::ui::text::RUNNING_MARK)
             .iter()
             .map(|r| {
                 let mut out = String::new();
@@ -327,7 +327,8 @@ mod tests {
             panic!("tool group")
         };
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
-        let rendered = render_group(&group, 80, &theme.palette, "·").join("\n");
+        let rendered =
+            render_group(&group, 80, &theme.palette, crate::ui::text::RUNNING_MARK).join("\n");
         for control in [
             "\x1b]",
             "\x1b[2J",

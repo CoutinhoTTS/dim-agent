@@ -41,7 +41,7 @@ use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{
     InputEvent, KeyCode, KeyEvent, Modifiers, Terminal, TerminalError, Wait,
 };
-use crate::ui::text::{display_width, truncate_cells};
+use crate::ui::text::{RUNNING_MARK, STATUS_MARK, display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
@@ -2983,7 +2983,7 @@ impl App {
             } else {
                 &self.palette.muted
             };
-            let rows = gutter_text("◦", &notice, width, tone);
+            let rows = gutter_text(STATUS_MARK, &notice, width, tone);
             let text = chunk(&rows);
             let tone = if interrupted {
                 Tone::Warning
@@ -2999,7 +2999,7 @@ impl App {
                 Tone::Warning => &self.palette.warning,
                 Tone::Danger => &self.palette.danger,
             };
-            let rows = gutter_text("◦", &text, width, color);
+            let rows = gutter_text(STATUS_MARK, &text, width, color);
             let chunk_text = chunk(&rows);
             self.record(Block::Status { text, tone });
             frame.commits.push(chunk_text);
@@ -3610,7 +3610,7 @@ impl App {
                         &project_group(&group_rows(&snapshot.rows, *index), detail_of(*index)),
                         width,
                         p,
-                        "·",
+                        RUNNING_MARK,
                     )
                 }
                 LiveItem::Compaction(index) => render_block(

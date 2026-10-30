@@ -492,6 +492,30 @@ fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
     count(events, "step/tool-result")
 }
 
+/// The local execution profile is sound once its Session and a branch are
+/// live: the assembly check reports nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_local_execution_assembly_passes_the_assembly_check() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "check".into(),
+                source: BranchSource::Host {
+                    operation_id: "check".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = harness.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    harness.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd() {
     let home = scratch("isolation-policy");

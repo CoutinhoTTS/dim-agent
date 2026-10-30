@@ -363,12 +363,7 @@ WorkspaceTools 不变。
 上面的文本是初版，归 TimelineTree 插件所有。下面这些事项属于面向模型的提示词层：
 
 - `main` 怎样给一条线写说明，以及协调对 `main` 意味着什么：分配区域、回应 steer、结束自己的等待、不重做线上的工作。
-- **Goal 的措辞（归 Goal）。** 下面这些文本把子分支当作被委派的工作，与 §1 矛盾：
-  - 目标文本 "If you are working on a delegated sub-task started from branch X, treat this goal as background and do not call goal_update."（`runtime/plugins/goal/goal.ts:98`）；
-  - 续跑文本（`goal.ts:131`）；
-  - [Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标) 和 Goal §5 子分支那一行里的 "delegated work"。
-
-  替换为 "on another line of this Session"。本设计不改这些文本，它们归 Goal。
+- **Goal 的措辞（归 Goal）。** 一条线不是被委派的工作（§1）：目标块的句子、续跑块的句子，以及 [Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标) 和 Goal §5 子分支那一行的陈述。这些文本见 [Goal §A.5](plugins/Goal.md#a5-模型可见文本)；任一句的改动都是一次策略改动，按 [Goal §A.5.2](plugins/Goal.md#a52-评估) 判定。这些文本归 Goal。
 
 回答这些事项的需求见 [面向模型的提示词](model-prompts.md)。
 
