@@ -164,7 +164,7 @@ impl<'a> Names<'a> {
     pub fn key<T: ?Sized + 'static>(&self) -> Result<Key<T>, Error> {
         let name = name_of::<T>();
         let failed = |message: String| rutis::Error::from(ErrorKind::PluginFailed(message.into()));
-        let group = match registered_key(self.catalog, &name) {
+        let group = match self.catalog.key_in(&name, &Build::default()) {
             Ok(key) => {
                 self.check_type::<T>(&name, &key)?;
                 return Ok(Key::of());

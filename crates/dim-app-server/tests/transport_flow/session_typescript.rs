@@ -1252,6 +1252,19 @@ pub(super) async fn when_served(client: &mut Client, method: &str, params: Value
     .unwrap_or_else(|_| panic!("{method} is served"))
 }
 
+/// Reconciles the loader's layers with a fixture layer `name` of
+/// `patches` last, or without it.
+pub(super) async fn fixture_layer(
+    loader: &rutis_loader::Loader,
+    name: &str,
+    patches: Option<Vec<rutis_loader::Patch>>,
+) -> rutis_loader::report::ReconcileReport {
+    let mut layers = loader.layers();
+    layers.retain(|layer| layer.name != name);
+    layers.extend(patches.map(|patches| rutis_loader::Layer::new(name, patches)));
+    loader.reconcile(layers, None).await.unwrap()
+}
+
 /// Whether `reply` says the row that serves its method is not serving yet.
 pub(super) fn waiting(reply: &Value) -> bool {
     ["unknown_method", "service_reloading"].contains(
@@ -1671,7 +1684,7 @@ pub(super) struct ControlledGate {
     instance: InstanceId,
     controls: tokio::sync::mpsc::UnboundedSender<Control>,
     loader: rutis::host::Key<rutis_loader::Loader>,
-    rows: rutis::host::Key<rutis_loader::runtime::RuntimeRows>,
+    rows: rutis::host::Key<rutis_loader::runtime::SessionRows>,
     registry: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
 }
 impl ControlledGate {
@@ -1683,7 +1696,7 @@ impl ControlledGate {
             instance: names.instance(SESSION_GROUP)?,
             controls,
             loader: names.key()?,
-            rows: rutis::host::Key::dynamic("session-node"),
+            rows: rutis_loader::runtime::SessionRows::key("session-node"),
             registry: names.key()?,
         })
     }

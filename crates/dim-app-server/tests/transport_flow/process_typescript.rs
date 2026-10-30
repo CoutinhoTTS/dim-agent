@@ -1116,10 +1116,9 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         json!({"id":"workflow-reader","config":{"packages":[{"id":"unlisted","root":unlisted}]}}),
     )
     .unwrap();
-    let report = loader
-        .set_overlay("workflow-package-roots", Some(vec![patch]))
-        .await
-        .unwrap();
+    let report =
+        session_typescript::fixture_layer(&loader, "workflow-package-roots", Some(vec![patch]))
+            .await;
     assert!(
         report
             .failures

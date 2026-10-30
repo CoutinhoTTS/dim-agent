@@ -1263,7 +1263,7 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
         let counts = (diagnostics.plugins.len(), diagnostics.bindings.len());
         assert_eq!(*baseline.get_or_insert(counts), counts, "round {round}");
     }
-    assert_eq!(baseline, Some((19, 5)));
+    assert_eq!(baseline, Some((19, 8)));
     agent.close().await.unwrap();
 }
 
@@ -1483,7 +1483,7 @@ impl Plugin for OptionalResource {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_close_with_the_scope()
  {
-    use rutis_loader::runtime::RuntimeResolver;
+    use rutis_loader::runtime::SessionResolver;
     use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin};
     use serde_json::json;
     use std::sync::{
@@ -1533,17 +1533,13 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
         .join("../..")
         .canonicalize()
         .unwrap();
-    let runtime = rutis_bridge::runtime::LocalRuntime::node(
-        workspace.join("runtime/node_modules/@arcships/rutis-runtime"),
-        workspace.join("runtime/package.json"),
-    );
     let external = |prefix: &str| {
         vec![
             json!({"id":format!("{prefix}-pending"),"name":pending}),
             json!({"id":format!("{prefix}-failed"),"name":failed}),
             json!({"id":format!("{prefix}-resource"),"name":resource}),
             json!({"id":format!("{prefix}-unresolved"),"name":"missing-optional-module"}),
-            json!({"id":format!("{prefix}-runtime"),"name":workspace.join("runtime/spikes/session-part.ts")}),
+            json!({"id":format!("{prefix}-runtime"),"name":format!("session-node:{}", workspace.join("runtime/spikes/session-part.ts").display())}),
         ]
     };
     let parts = session_row["config"].as_array_mut().unwrap();
@@ -1556,15 +1552,16 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
         .unwrap()
         .extend(external("optional-branch"));
     parts.extend(external("optional-session"));
-    let resolver = RuntimeResolver::node(runtime.handle());
+    let resolver = SessionResolver::new(b.catalog());
     let plugin = LoaderPlugin::new(
-        Chain::new().with(builtins).with(resolver),
+        Chain::new().with(builtins).with(resolver.clone()),
         LoaderOptions {
             catalog: b.catalog().clone(),
             ..Default::default()
         },
     );
     let loader = plugin.handle();
+    resolver.attach(&loader);
     (&root.plugin(plugin)).await.unwrap();
     let mut rows = plugins;
     rows.push(b.agent_row([json!({"id":anchor,"name":anchor}), session_row]));

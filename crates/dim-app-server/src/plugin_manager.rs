@@ -19,7 +19,7 @@ use record::{Choice, Installed, Kind, Manifest, Record, Source};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::report::{EntryInfo, EntryStatus};
-use rutis_loader::{Loader, LoaderError, Patch, ServiceCatalog, resolve::Build};
+use rutis_loader::{Loader, LoaderError, Patch, ServiceCatalog};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{
@@ -135,8 +135,6 @@ pub(crate) struct State {
     builtins: OnceLock<BTreeSet<String>>,
     /// The catalog the runtime started with (§4 `instanceNames`).
     catalog: OnceLock<ServiceCatalog>,
-    /// The Node rows' resolver, told to forget a module before a reload.
-    node: OnceLock<Option<Arc<rutis_loader::runtime::RuntimeResolver>>>,
     /// Held while the layer is derived from the record and reconciled, so
     /// the layer reconciled last is derived from the latest record.
     applying: tokio::sync::Mutex<()>,
@@ -193,7 +191,6 @@ impl State {
             record: Mutex::new(record),
             builtins: OnceLock::new(),
             catalog: OnceLock::new(),
-            node: OnceLock::new(),
             applying: tokio::sync::Mutex::new(()),
         }))
     }
@@ -206,7 +203,6 @@ impl State {
         &self,
         builtins: BTreeSet<String>,
         catalog: ServiceCatalog,
-        node: Option<Arc<rutis_loader::runtime::RuntimeResolver>>,
     ) -> Result<StartupLayer, String> {
         let mut locked_rows = Vec::new();
         for name in &self.defaults.locked {
@@ -218,7 +214,6 @@ impl State {
         }
         let _ = self.builtins.set(builtins);
         let _ = self.catalog.set(catalog);
-        let _ = self.node.set(node);
         let record = self.record.lock().unwrap().clone();
         let (patches, off) = self.derive(&record);
         Ok(StartupLayer {
@@ -391,7 +386,9 @@ fn register_names(catalog: &mut ServiceCatalog, code: &record::Code) {
         }
     }
     for service in code.provides.keys() {
-        if let Err(LoaderError::UnknownService(_)) = dim_agent_runtime::names::registered_key(catalog, service) {
+        if let Err(LoaderError::UnknownService(_)) =
+            dim_agent_runtime::names::registered_key(catalog, service)
+        {
             catalog.register_shared(service);
         }
     }
@@ -1184,9 +1181,6 @@ impl Manager {
                             == Some(&self.state.config_of(name, &code.config))
                 });
                 if same {
-                    if let Some(Some(node)) = self.state.node.get() {
-                        node.invalidate(&module);
-                    }
                     if let Err(error) = self.loader.reload(&row).await {
                         tracing::warn!(%row, %error, "plugin reload refused");
                     }
@@ -1503,7 +1497,14 @@ fn object(value: Value) -> Map<String, Value> {
 const CONTENT: [Kind; 2] = [Kind::Skills, Kind::Mcp];
 
 fn status_value(loader: &Loader, entry: &EntryInfo) -> Value {
-    let pending = || json!({"status": "pending", "waitingFor": loader.waiting_for(entry)});
+    let pending = || {
+        let waiting: Vec<_> = loader
+            .waits(entry)
+            .into_iter()
+            .map(|wait| wait.service)
+            .collect();
+        json!({"status": "pending", "waitingFor": waiting})
+    };
     match &entry.status {
         EntryStatus::Disabled => json!({"status": "off"}),
         EntryStatus::Inactive => pending(),
