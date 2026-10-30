@@ -436,12 +436,15 @@ impl Prompt {
     }
 
     /// Listens for guide registrations over the watch and composition the
-    /// `Open` handler took before its adoption composed, and starts after
-    /// that adoption has run. A change that composes the same guide for
-    /// this branch, such as another branch's entry, costs one composition
-    /// and no read of the branch's context. The listener ends when the
-    /// branch starts closing: an entry that withdraws only because the
-    /// branch is shutting down must not move its System.
+    /// `Open` handler took before its adoption composed, and starts before
+    /// that adoption runs: a change during the adoption moves the
+    /// composition the listener compares against and is queued behind the
+    /// open's own arm, instead of finding a baseline taken afterwards. A
+    /// change that composes the same guide for this branch, such as another
+    /// branch's entry, costs one composition and no read of the branch's
+    /// context. The listener ends when the branch starts closing: an entry
+    /// that withdraws only because the branch is shutting down must not
+    /// move its System.
     fn listen_guide(self: &Arc<Self>, mut changes: watch::Receiver<u64>, mut composed: String) {
         let branch_id = self.identity.branch_id.clone();
         let branch_phase = self.branch_phase.clone();
@@ -815,11 +818,13 @@ impl DynPlugin for PromptPlugin {
                             // the branch carries; an unchanged System
                             // publishes nothing, and every successful open
                             // pays one context read whatever the configuration
-                            // it carries.
+                            // it carries. The listener starts before that
+                            // adoption, so a change made during it is queued
+                            // as an adoption behind this arm.
+                            owner.listen_guide(changes, composed);
                             if opened {
                                 owner.adopt_guide().await;
                             }
-                            owner.listen_guide(changes, composed);
                             let _ = reply.send(result);
                             continue;
                         }

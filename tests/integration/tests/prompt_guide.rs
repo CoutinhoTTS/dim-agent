@@ -1622,6 +1622,102 @@ async fn a_composition_that_moved_and_returned_while_its_branch_opens_is_adopted
     agent.close().await.unwrap();
 }
 
+/// #661: an entry that withdraws and registers again around the open's own
+/// adoption is adopted too. The listener compares against the composition
+/// taken before the open, so it has to be listening while the adoption runs:
+/// started afterwards, it composes the composition the entry returned to,
+/// reads it as its baseline and enqueues nothing, and the branch keeps the
+/// intermediate System without a loaded writer's entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_that_returns_during_the_open_adoption_is_adopted() {
+    let flag = Arc::new(AtomicBool::new(true));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(HoldingStore::default());
+    let target = PromptSourceTarget {
+        source: "rules".into(),
+        scope: PromptScope::Branch {
+            timeline: "main".into(),
+        },
+    };
+    let hosts = Arc::new(GatedPrompts {
+        entry: PromptEntry {
+            source: "rules".into(),
+            version: "1".into(),
+            body: "rules one".into(),
+            scope: PromptScope::Branch {
+                timeline: "main".into(),
+            },
+            delivery: PromptDelivery::System,
+            order: 0,
+        },
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let (flag_owner, views_owner) = (flag.clone(), views.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    builder.timeline_store(store.clone());
+    defaults::install_with_prompt(
+        &mut builder,
+        hosts.clone(),
+        Some(ConfigureUpdate {
+            sources: vec![target],
+            model: Some(configuration("configured")),
+        }),
+    );
+    builder.require_feature(Feature::new("GuideProbeOwner").session(
+        "GuideProbeOwner",
+        move |names| {
+            Ok(Box::new(GuideProbeOwner {
+                flag: flag_owner.clone(),
+                views: views_owner.clone(),
+                key: names.key()?,
+                scope: GuideScope::Session,
+            }))
+        },
+    ));
+    let agent = builder.build();
+
+    // The open loads and composes with the entry in force, and then waits
+    // for the publication. The entry withdraws while that publication is
+    // held, so the branch's own adoption composes the System without it;
+    // that adoption's publication is held in turn, and the entry returns
+    // before it is released, so the composition ends where the listener's
+    // baseline started.
+    store.hold_next_configuration_on("main");
+    let creation = agent.create_session(SessionConfig::default());
+    tokio::pin!(creation);
+    let session = tokio::select! {
+        _ = &mut creation => panic!("the Session opened before its publication was held"),
+        () = async {
+            hosts.started.notified().await;
+            hosts.release.notify_one();
+            store.entered.notified().await;
+            flag.store(false, Ordering::SeqCst);
+            let view = views.lock().unwrap().last().cloned().expect("a probe");
+            view.restart().await.unwrap();
+            store.hold_next_configuration_on("main");
+            store.release();
+            store.entered.notified().await;
+            flag.store(true, Ordering::SeqCst);
+            let view = views.lock().unwrap().last().cloned().expect("a probe");
+            view.restart().await.unwrap();
+            store.release();
+        } => creation.await.unwrap(),
+    };
+    drain_adoptions(&session, "main").await;
+    let published = configurations(&session, "main").await;
+    let adopted = published.last().expect("the adoption after the open");
+    let system = system_text(adopted.system.as_ref().expect("the adopted System"));
+    assert!(system.contains(PROBE_ENTRY), "{system:?}");
+    run(&session, "after the open").await;
+    assert!(
+        last_system(&session, "main").await.contains(PROBE_ENTRY),
+        "the request carries the entry its writer registered again"
+    );
+    agent.close().await.unwrap();
+}
+
 /// The channel rule states the handle a compaction appends to an input it
 /// shortened: the one case the "separate user messages" sentence is not
 /// true of, and therefore part of the protocol.
