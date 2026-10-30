@@ -51,8 +51,8 @@ The Agent group stays an instanced loader group: its row isolates the Agent's pr
 
 - Creation reads no loader entries, and `Loader::entries()` lists process rows and the Agent group's
   rows only.
-- Dim builds on rutis 0.19.1: foreign copies need rutis#948, and Rust copies need the `Build` of a
-  context, which the design asks for as the Rust half of rutis#948.
+- Dim builds on rutis 0.19.1: foreign copies need rutis#948. Rust copies qualify their keys with
+  their scopes' instance ids (`Key::instance(id)`), as they can today.
 - A part's nearest row is its Agent's anchor row.
 
 ## Alternatives

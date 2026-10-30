@@ -113,9 +113,11 @@ tree shows where their content sits.
   optional mounter, and the requested extension's plugins (below), with `ctx.plugin` as its own
   children. It hands their views to creation, as the mounters hand the copies they mount, and returns.
   It waits for none of them in `apply`: creation is the one place that waits, within its deadline.
-- **Names.** A mounter builds its copies' `Names` from the scope's position: the `Build` that the
-  scope's context gives (§5, R2). It holds the same groups as the `Build` a mounter row receives
-  today, so `Names` and every key keep their form.
+- **Names.** A Rust copy's keys are `Key::instance(id)` of its scopes: the Session scope's
+  `ctx.instance()` and, in a branch, the branch scope's. A mounter gives `Names` that group →
+  instance list instead of a loader `Build`, and `Names` qualifies keys itself, as its composition
+  check already does (`Names::check`). The catalog still says which group a name belongs to, so
+  every key keeps its form.
 - **Foreign copies** are mounted with `Definition::at` under a mounter, as today. The mounter of
   rutis#948 takes the copy's instances from `ctx.scope()`, so `session` and `branch` names resolve to
   the enclosing scopes, and each copy is isolated per instance as today.
@@ -195,16 +197,15 @@ durable identities, so Session and branch ids are unaffected.
 - **rutis:** `ctx.plugin`, fiber views and states, `ctx.scope()`, and the public `mark_scope`
   (rutis#948).
 - **rutis-loader:** `Definition::at` through its mounter, by the copy's position in the tree
-  (rutis#948); the `Build` of a context (R2); `ServiceCatalog::key_in`; the Agent group as an
-  instanced group.
+  (rutis#948); `ServiceCatalog::key_in`; the Agent group as an instanced group.
 - The part registry and the mounters, as in How Dim uses rutis §2.
 - The 0.19 upgrade (#677) lands first; this design builds on 0.19.1.
 
 ## 5. Cross-module requirements
 
 [Design rules §4 rule 8](../architecture/rust-agent/principles.md) has Dim solve within rutis's
-existing capabilities and raise nothing. The repository owner decided to raise R1 and to take it in
-0.19.1; R2 is its Rust half.
+existing capabilities and raise nothing. The repository owner decided to raise this one and to take
+it in 0.19.1. Rust parts need nothing from it: they qualify their keys with `Key::instance(id)`.
 
 ### R1. Foreign copies resolve instance names by their position in the tree
 
@@ -220,21 +221,6 @@ existing capabilities and raise nothing. The repository owner decided to raise R
 - **Sequence, batches, interruption, reload:** none.
 - **Owner:** rutis, [rutis#948](https://github.com/arcships/rutis/issues/948), accepted for 0.19.1.
 
-### R2. The `Build` of a context
-
-- **Blocked:** a Rust part's `Names` read `ServiceCatalog::key_in(name, &Build)` and
-  `Build::instance(group)` (`dim-agent-runtime/src/names.rs`). A `Build` is made only by the loader:
-  its fields are crate-private and `Loader::build_at` is `pub(crate)` (rutis-loader 0.19.0
-  `resolver.rs:118`, `loader/mod.rs:331`). A Rust copy under a plain-plugin scope gets none, and
-  `Build::default()` has no instances.
-- **Considered:** a loader row inside each scope only to receive its `Build`: the row this design
-  removes. Computing keys in Dim from `ctx.scope()`, `is_shared` and `host_key`: it copies the
-  catalog's rules, the instance names and the marked-service claims, into Dim
-  ([ADR 006](../adr/006-plugin-contract.md) D2).
-- **Capability:** the `Build` a context's position gives, the one R1's mounter computes, public.
-- **Sequence, batches, interruption, reload:** none.
-- **Owner:** rutis, the Rust half of rutis#948. It is not on the issue yet.
-
 ## 6. Rule check
 
 | Rule | Answer |
@@ -244,7 +230,7 @@ existing capabilities and raise nothing. The repository owner decided to raise R
 | §4 rules 2, 3, 5, 6, 9 | Not applicable: no handover, `before` transform, batch, context path or Timeline fact changes |
 | §4 rule 4 (core mechanisms without business meaning) | Creation and the scope treat every part and extension plugin alike. Skills contents and MCP connections are their parts' business; no core code knows them |
 | §4 rule 7 (public events and services) | No service is added; `SessionLoader` goes. Creation reads only the views the scope and the mounters hand it, not the loader's table |
-| §4 rule 8 (infrastructure unchanged by default) | The need is the assembly's own (#594's creation cost), and it closes inside the assembly. The rutis side is R1 and R2, raised by the owner's decision |
+| §4 rule 8 (infrastructure unchanged by default) | The need is the assembly's own (#594's creation cost), and it closes inside the assembly. The rutis side is R1, raised by the owner's decision |
 | ADR 002 D1–D5 | Parts stay in their Session or branch. No wiring module, configuration or language contract changes; foreign parts still resolve their names |
 | ADR 004 | Its ownership stands: connections belong to a Session, closing a Session closes only its generations, configuration stays private and immutable, and no second loader or lifecycle manager comes in. Its mechanism, a connection generation as an instanced group with the loader owning disposal, is superseded by [ADR 009](../adr/009-scopes-are-plugins.md) |
 | ADR 006 D3 | The instance still mounts the parts registered for it, from its scope. The scope and the mounters are the instance's mounting mechanism, built by Dim, with no configuration, enablement or reload of their own, so "a plugin is one row" does not cover them. "Inside a part" now holds literally for McpSession and Skills |
@@ -295,9 +281,12 @@ its wait model: this design changes what creation waits on, not for how long.
 ## Appendix A. Rust binding
 
 - `SessionScopePlugin::new(owner)` and `BranchScopePlugin::new(owner)` hold their assembly. `apply`
-  calls `ctx.mark_scope`, provides the services, builds the two `PartMounter`s from a `MountSite`
-  whose `build` is the context's `Build` (R2), mounts them (and, for a Session, the requested
-  extension's plugins) with `ctx.plugin`, and records the views in the owner's `Loaded`.
+  calls `ctx.mark_scope`, provides the services, and builds the two `PartMounter`s from a
+  `MountSite` that holds its instances (`session` → the Session scope's `ctx.instance()`, and in a
+  branch `branch` → its own). It mounts them (and, for a Session, the requested extension's plugins)
+  with `ctx.plugin` and records the views in the owner's `Loaded`.
+- `Names::copy(catalog, instances)` takes that group → instance list in place of a `Build`; its
+  keys are `Key::instance(id)`, as `Names::check` computes them.
 - Session creation mounts `host.plugin(SessionScopePlugin::new(owner))`; branch creation mounts
   `session.ctx.plugin(BranchScopePlugin::new(owner))`. One `wait` function runs the three steps of
   §2.2 on the returned view and the owner's record.
