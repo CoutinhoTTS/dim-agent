@@ -232,6 +232,10 @@
     "to": "dim-agent-types"
   },
   {
+    "from": "dimcode",
+    "to": "rutis"
+  },
+  {
     "from": "xtask",
     "to": "dim-agent-aimux"
   },
