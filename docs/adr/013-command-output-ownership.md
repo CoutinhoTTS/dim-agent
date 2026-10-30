@@ -25,10 +25,11 @@ Attachments keep `session_file_owners (session_id, file_id)`. Output uses
 the fact reads both tables.
 
 Two keys are deliberate. Output has no `session_files` row or id, is appended while running and
-is removed as a directory. A single polymorphic table would need a nullable key, could not use
-the `session_files` foreign key and would filter every sweep by kind. The second table exists so
-a fork can read output after the source is deleted; without that requirement the current
-directory rule is cheaper.
+is removed as a directory. A single polymorphic table would need a nullable key and a
+discriminator and would filter every sweep by kind. The second table exists so a fork can read
+output after the source is deleted; without that requirement the current directory rule is
+cheaper. An index on `path` supports the per-directory delete check; the primary key
+`(session_id, path)` does not.
 
 ### D2. Registration
 
@@ -59,13 +60,19 @@ A fork copies every current row in both tables at the fork's commit, including a
 by a command that was still running at the fork point. The fork owns those files; a file the
 source registers later is not owned.
 
-Delete releases the session's rows. Either output directory — `command-output/<session>/` or
-`.dim/exec/<session>/<branch>/` — is removed only when no row names any path under it; the last
-owner removes it. This replaces the unconditional directory removal in
-`session-deletion-and-fork.md`, which recorded the old rule because no row named the output.
+Delete removes an output directory in the pre-commit step, before it releases the session's
+rows. `command-output/<session>/` is removed only if this database has rows for that session and
+no row of another session — in this database or any other database sharing the directory —
+names a path under it. `.dim/exec/<session>/<branch>/` is removed by HostPlatform under the same
+rule; that directory is outside SessionStore's file storage. The check is against rows other
+than the deleting session's, so a fork's rows keep the directory. Keeping the removal before the
+row commit preserves the crash argument in `session-deletion-and-fork.md`: a leftover directory
+in a shared location cannot be found later.
 
-The new table is part of the next native storage format version; its upgrade creates it empty,
-and a failed upgrade rolls back.
+The new table is part of a native storage format version after the one #671 takes; the number is
+claimed in #596 by the implementation. Its upgrade creates the table empty and rolls back on
+failure. There is no backfill: output written before the upgrade is unowned, a resumed session
+may ask once, and a fork made after the upgrade inherits no output rows.
 
 Command output may grow after a fork. The fork owns the file and reads its current content; a
 point-in-time copy is a separate concern.
@@ -84,8 +91,9 @@ shell keeps the mounts it started with.
 - A new `session_output_owners` table, a native format version and `register`, `owns`,
   `owned_paths`.
 - `native-storage-format.md`, `session-deletion-and-fork.md`, `session-files.md` §11, the
-  Attachments, WorkspaceTools and shell-session designs, the CLI tables and the `session-owned`
-  source row in ADR 014 are updated under their owners after acceptance.
+  Attachments, WorkspaceTools and shell-session designs and the CLI tables are updated under
+  their owners after acceptance. The table has an index on `path`; `.dim/exec` is removed by
+  HostPlatform under the same last-owner rule.
 - No Timeline event is added; the table is storage state. The decision reverses the S5c rejection
   of keeping a source's output for its forks, as recorded in `session-deletion-and-fork.md`.
 
