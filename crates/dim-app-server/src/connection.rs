@@ -324,8 +324,11 @@ impl Connection {
                 "Connection request limit reached",
             ));
         }
-        let cancel = matches!(request.call, Call::Catalog(_) | Call::Summaries(_))
-            .then(|| self.closed.child_token());
+        let cancel = matches!(
+            request.call,
+            Call::Catalog(_) | Call::Summaries(_) | Call::List(_)
+        )
+        .then(|| self.closed.child_token());
         ids.insert(request.id.clone(), cancel);
         Ok(Inflight {
             connection: self.clone(),
@@ -761,9 +764,12 @@ impl Connection {
                         },
                     );
                 }
+                let cancel = self.ids.lock().expect("request identities")[&id]
+                    .clone()
+                    .expect("listing reads have cancellation");
                 let mut records = match rpc
                     .index
-                    .session_directory(filter.clone(), self.protocol_version())
+                    .session_directory(filter.clone(), self.protocol_version(), cancel)
                     .await
                 {
                     Ok(Some(records)) => records,
