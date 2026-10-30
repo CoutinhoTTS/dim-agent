@@ -22,16 +22,20 @@ the session's own artifact. The facts have to be named once, with an owner for e
 | --- | --- |
 | workspace | `SessionConfig` |
 | system roots | HostPlatform's platform-roots list, independent of the sandbox switch |
-| session-owned | ADR 013's ownership fact |
+| session-owned | ADR 013's ownership fact; `SessionFiles.owns` reads both ownership tables |
 | user grant | ADR 012's grants |
-| preset | the dispatched branch's permission mode |
 
-The platform-roots list is HostPlatform state; the facts service and the sandbox builder read the
-same list, so the fact is non-empty when the sandbox is off.
+The branch preset is a query argument, not a fact. The platform-roots list is HostPlatform state,
+fixed per OS: Linux uses `/usr`, `/bin`, `/sbin`, `/lib*` and `/etc`; macOS uses `/System`,
+`/Library`, `/usr`, `/bin`, `/sbin` and `/etc`. HostPlatform computes it once when it mounts, and
+the facts service and the sandbox builder read the same list, so the fact is non-empty when the
+sandbox is off. Per-process environment, `DEVELOPER_DIR` and git configuration do not enter the
+fact.
 
 The `FileAccessFacts` Session part registers the service `fileAccessFacts`. Its query is
 `facts(session_id, preset, path, mode) -> FileFacts`, with `workspace`, `system`, `owned` and
-`grant` fields; it calls `SessionFiles.owns` and `SessionGrants.lookup`. It does not import
+`grant` fields; it calls `SessionFiles.owns` (both ownership tables, including command output)
+and `SessionGrants.lookup`. It does not import
 SessionStore. `Permission` passes the branch preset and applies the table below. A query failure
 denies. The service holds no state; it reads at use time, so a restart changes nothing.
 
@@ -48,32 +52,33 @@ sandbox setting and the execute-process approval.
 
 - Under `read-only`, the workspace is read-only and a write grant is inert. Under
   `workspace-write`, the workspace and write grants are writable.
-- System roots and session-owned artifacts are read-only under `read-only` and `workspace-write`.
-  Under `full-access`, file-tool writes are admitted anywhere, including them. The process mounts
-  are owned by ADR 010 (workspace and platform roots), ADR 012 (grants) and ADR 013 (artifacts);
-  this decision changes none. The trust consequence is stated in ADRs 011 and 012.
+- System roots and session-owned artifacts are read-only under `read-only` and `workspace-write`;
+  a write to them is denied, not asked. Under `full-access`, file-tool writes are admitted
+  anywhere, including them. The process mounts are owned by ADR 010 (workspace and platform
+  roots), ADR 012 (grants) and ADR 013 (artifacts); this decision changes none. The trust
+  consequence is stated in ADRs 011 and 012.
 - A write grant also permits reads; a read grant never permits writes.
 
 ### D3. Matching
 
-Read and write calls resolve the path before admission, like `write` and `edit` do today: cwd,
-`~`, `..` and symlinks are settled, and `Permission` compares the canonical path. A workspace
+All file tools with a path input — `read`, `write`, `edit`, `grep` and `glob` — resolve the path
+before admission, like `write` and `edit` do today: cwd, `~`, `..` and symlinks are settled, and
+`Permission` compares the canonical path. A workspace
 symlink to a path outside the workspace does not match the workspace fact. The fact paths are
 compared resolved too, with the same longest-existing-prefix rule: a Session started through a
 symlinked directory still matches its workspace.
 
 The path check runs before the tool lists and `allowedTools`, so an allowed tool does not bypass
-a path fact. A directory operation is decided on the directory path; a prefix covers its
-children; `grep`/`glob` over a directory use that directory. ADR 012 owns the grant's directory
-rule and the grant mounts.
+a path fact. ADR 012 owns the grant's directory rule and the grant mounts.
 
 There are no path deny rules or glob patterns.
 
-### D4. The read change is visible
+### D4. The visible changes
 
 Reads outside the facts now ask under `read-only` and `workspace-write`, where today they never
-ask. A non-interactive run turns the prompt into the ordinary denial with exit code 3. The change
-is announced in the CLI documentation and release notes and tracked in #691.
+ask. A non-interactive run turns the prompt into the ordinary denial with exit code 3. The same
+release notes state the write tightening: a write to a system root or a session-owned artifact
+is now denied under `workspace-write`, where it used to ask. Both changes are tracked in #691.
 
 ## Consequences
 
@@ -81,8 +86,8 @@ is announced in the CLI documentation and release notes and tracked in #691.
   command tables, and their Chinese mirrors describe the fixed facts, the pre-admission read
   resolution and the read change. ADR 012's “outside the facts asks” is this decision's D2; 012
   cites it.
-- HostPlatform owns the platform-roots list used by both the facts service and the sandbox
-  builder.
+- HostPlatform owns the fixed platform-roots list used by both the facts service and the sandbox
+  builder; `SessionFiles.owns` reads both ownership tables, including command output.
 - AGENTS.md rule 11's “file-root authorization” clause is superseded: workspace, system-root,
   session-owned and grant facts now decide access.
 - No Timeline event or wire field is added; the facts service is Session configuration.
@@ -97,9 +102,11 @@ is announced in the CLI documentation and release notes and tracked in #691.
 
 ## Supersession
 
-Supersedes ADR 010's “file access is otherwise unchanged” and ADR 009's “file-root authorization
-is unchanged”, and AGENTS.md rule 11's “file-root authorization never confers authority”. It
-extends ADR 010 and depends on ADRs 012 and 013. ADR 003 remains as written.
+Supersedes ADR 010's “file access is otherwise unchanged”, ADR 009's “file-root authorization is
+unchanged”, ADR 003 D5's file-root sentence, `session-files.md` §11.2's “the read never asks”,
+and AGENTS.md rule 11's exact sentence “File-root authorization, tool permission presets and
+replay never confer authority.” It extends ADR 010 and depends on ADRs 012 and 013. ADR 003 is
+not edited.
 
 ## Rule check
 
@@ -113,7 +120,7 @@ extends ADR 010 and depends on ADRs 012 and 013. ADR 003 remains as written.
 | §4 rule 5 | No Timeline batch. |
 | §4 rule 6 | No context-input change. |
 | §4 rule 7 | `Permission` reads the facts service; no other plugin state. |
-| §4 rule 8 | **Raises two requirements**: HostPlatform's platform-roots list must be available independently of the sandbox, and read calls need the same pre-admission resolution as writes. |
+| §4 rule 8 | No infrastructure change: HostPlatform owns the platform-roots list, and the file tool owners resolve paths before admission. |
 | §4 rule 9 | No new Timeline fact. |
 | ADR 002 D2 | No wiring plugin. |
 | ADR 002 D3 | Facts are Session-scoped; `Permission` depends on them. |
