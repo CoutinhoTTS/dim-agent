@@ -756,10 +756,6 @@ mod tests {
     /// refused otherwise (ContextCompaction §13.3, §13.5).
     #[test]
     fn a_length_sentence_needs_one_target_placeholder() {
-        assert_eq!(
-            LengthSentence::render("Keep it under about {target} tokens.", 1_200.),
-            "Keep it under about 1200 tokens."
-        );
         assert!(LengthSentence::new("Keep it short.").is_err());
         assert!(LengthSentence::new("{target} and {target}").is_err());
     }

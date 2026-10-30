@@ -858,8 +858,7 @@
       "parent": "dim_agent_capabilities::summary_strategy",
       "file": "crates/dim-agent-capabilities/src/summary_strategy.rs",
       "unexpandedMacros": [
-        "assert",
-        "assert_eq"
+        "assert"
       ]
     },
     {

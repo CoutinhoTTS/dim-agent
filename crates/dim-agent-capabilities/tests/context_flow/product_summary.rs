@@ -8,7 +8,8 @@ use dim_agent_capabilities::{
     context_model::ProductContextModel,
     history::{context_messages, project_context_history},
     summary_strategy::{
-        ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin, SummaryReasoning,
+        LengthSentence, ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin,
+        SummaryReasoning, TargetRule,
     },
 };
 use serde_json::Value;
@@ -361,23 +362,33 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
     root.shutdown().await.unwrap();
 }
 
-/// A prompt much longer than `SYSTEM`, configured on the factory, reaches
-/// every summarizer request, and the request budget counts it
-/// (ContextCompaction §13.5).
+/// A prompt much longer than `SYSTEM` and a length sentence, configured on
+/// the factory, reach every summarizer request with the target the rule
+/// derives, and the request budget counts both (ContextCompaction §13.3,
+/// §13.5).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() {
     let prompt: Arc<str> = Arc::from(
         "Keep the summary factual and complete, and preserve the constraints in force. ".repeat(40),
     );
+    let sentence = "Aim for a summary of about {target} tokens.";
+    // The output allowance leaves an input budget of 3,800 tokens and puts
+    // S = min(0.5 × 200, 0.10 × 3800) = 100 in the template (§13.3).
+    let output = 200;
     let recorder = Arc::new(Recorder {
         prefix: prompt.clone(),
         ..Default::default()
     });
     let (root, agent, session) = product_session_with(
         recorder.clone(),
-        OUTPUT,
+        output,
         ProductSummaryStrategyConfig {
             system_prompt: Some(prompt.clone()),
+            target: Some(TargetRule {
+                output_share: 0.5,
+                input_share: 0.10,
+            }),
+            length_sentence: Some(LengthSentence::new(sentence).unwrap()),
             ..Default::default()
         },
     )
@@ -401,13 +412,15 @@ async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() 
     );
     let requests = recorder.requests.lock().unwrap().clone();
     assert!(!requests.is_empty());
+    let expected = format!("{prompt} {}", sentence.replace("{target}", "100"));
     for request in &requests {
         let Some(SystemPrompt::Text(system)) = request.system.as_deref() else {
             panic!("a summarizer request has no system prompt")
         };
-        assert!(
-            system.starts_with(prompt.as_ref()),
-            "a summarizer request does not use the configured prompt"
+        assert_eq!(
+            system,
+            expected.as_str(),
+            "a summarizer request does not carry the configured texts"
         );
         let model = ProductContextModel
             .resolve(request.clone(), CancellationToken::new())
@@ -415,7 +428,7 @@ async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() 
             .unwrap();
         let tokens = model.count_tokens(request);
         assert!(
-            tokens <= (WINDOW - OUTPUT) as f64,
+            tokens <= (WINDOW - output) as f64,
             "summary request of {tokens} tokens exceeds the input budget"
         );
     }
