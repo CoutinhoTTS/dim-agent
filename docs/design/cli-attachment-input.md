@@ -78,7 +78,9 @@ as it is keeps the plain marker. The marker is display text. A token's buffer ho
 name, its `@` path, or `[Image]` for a clipboard image, and never the numbered marker; what the
 token submits and the input history keeps is a file's link, or nothing for a clipboard image. So
 the marker never enters the message text, the input history or a model request, and a draft
-recalled with Up carries the image's link or nothing.
+recalled with Up carries the image's link or nothing. A draft set aside for the command palette
+(Ctrl+O or Ctrl+P) or for an older input-history entry comes back as its buffer text, so a
+clipboard image in it comes back as the literal `[Image]` without the image.
 
 ```text
 > What is this? [Image #1] [Image #2]
