@@ -128,14 +128,14 @@ Cancellation is not rollback of a tool's completed side effect.
 
 ### Model-facing texts
 
-The results of a call that never became one are protocol
+The results of a call that did not complete, and whether it ran, are protocol
 ([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
 `Tool was not executed: <reason>`, whose reasons include
-`progress admission failed` and `capability_reloading`;
-`Tool cancelled before execution`; and
-`Tool execution cancelled: capability_reloading`. Each states whether the work
-ran at all, so the model neither retries work that may have run nor reports work
-that never did.
+`progress admission failed` and `capability reloading`, and `Tool cancelled
+before execution` say the work did not run; `Tool execution cancelled:
+capability reloading` is the result of a call that may already have run. Each
+states whether the work ran at all, so the model neither retries work that may
+have run nor reports work that never did.
 
 ### Tests
 
