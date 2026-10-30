@@ -994,6 +994,95 @@ async fn a_fork_composes_its_own_entries_at_its_open() {
     agent.close().await.unwrap();
 }
 
+/// #661: the reconciliation is part of the open, so a fork's first request
+/// carries its own entry without anything waiting between the open and the
+/// turn. The branch's own initial prompt is its first turn, and it runs as
+/// soon as the branch reports itself open; an adoption the open merely
+/// queued would let that request assemble from the inherited System, which
+/// is the parent's. The flow holds the child's adoption read, so the open
+/// cannot report itself open before the reconciliation is published, and
+/// the ordering is pinned rather than raced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_fork_carries_its_own_entry_in_its_first_request() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let store = Arc::new(HoldingStore::default());
+    let flag = Arc::new(AtomicBool::new(true));
+    let text = Arc::new(Mutex::new(None));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let tables = Arc::new(Mutex::new(Vec::new()));
+    let agent = branch_probe_agent(
+        &dirs,
+        &root,
+        Some(store.clone()),
+        flag.clone(),
+        text.clone(),
+        None,
+        views.clone(),
+        tables.clone(),
+    );
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "on main").await;
+    let main_system = last_system(&session, "main").await;
+    let main_entry = branch_probe_entry("main");
+    assert!(main_system.contains(&main_entry), "{main_system:?}");
+
+    let at = session.sequence("main").unwrap();
+    // A fork's open composes nothing on the child, so the child's first read
+    // is its guide adoption's. Holding that read parks the reconciliation: an
+    // open that queued the adoption instead of running it reports itself open
+    // while this read is held, and its initial prompt assembles from the
+    // inherited System; the open that adopts before it replies does not. The
+    // flow runs on one worker thread so the adoption's read is issued before
+    // the opening receipt's reconcile read, which otherwise races it.
+    store.hold_read_of_the_next_branch(1);
+    let released = tokio::spawn({
+        let store = store.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            store.release_read();
+        }
+    });
+    let child = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "on the line".into(),
+                source: BranchSource::Host {
+                    operation_id: "child".into(),
+                },
+            },
+        )
+        .await
+        .expect("the second line starts");
+    // No wait before the turn: the creation submits the branch's initial
+    // prompt itself once the branch is open.
+    session.idle(&child).await.unwrap();
+    released.await.unwrap();
+    let child_entry = branch_probe_entry(&child);
+    let line = last_system(&session, &child).await;
+    assert!(
+        line.contains(&child_entry),
+        "the first request after the open carries the child's entry: {line:?}"
+    );
+    assert!(!line.contains(&main_entry), "{line:?}");
+    agent.close().await.unwrap();
+}
+
 /// #661: a Session restored after a writer joined or left its set converges at
 /// the restore's open. The baseline is the entries in force at load, so the
 /// restored branch's adopted System would otherwise stay what the previous
@@ -1049,6 +1138,58 @@ async fn a_restored_branch_converges_on_the_entries_its_writers_register() {
     assert!(!system.contains(PROBE_ENTRY), "{system:?}");
     run(&session, "third").await;
     assert!(!last_system(&session, "main").await.contains(PROBE_ENTRY));
+    agent.close().await.unwrap();
+}
+
+/// #661: the same ordering holds on a restore. The restored branch's first
+/// request carries the entry its writers registered at load, with no wait
+/// between the restore and the turn: the open adopts the guide before it
+/// reports itself open, so the request never assembles from the persisted
+/// System.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_branch_carries_its_entries_in_its_first_request() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let flag = Arc::new(AtomicBool::new(false));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "first").await;
+    assert!(!last_system(&session, "main").await.contains(PROBE_ENTRY));
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    // The writer joins the set. The restored branch's open adopts the guide
+    // before it reports itself open, and the first request runs with no idle
+    // between it and the open.
+    flag.store(true, Ordering::SeqCst);
+    let agent = restore_guide_agent(store.clone(), flag, views);
+    let session = agent.restore_session(id).await.unwrap();
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let system = last_system(&session, "main").await;
+    assert!(
+        system.contains(PROBE_ENTRY),
+        "the first request after the restore carries the entry: {system:?}"
+    );
     agent.close().await.unwrap();
 }
 

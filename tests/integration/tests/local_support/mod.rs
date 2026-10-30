@@ -577,8 +577,12 @@ pub struct HoldingStore {
     memory: MemoryTimelineStore,
     selected: Mutex<Option<String>>,
     held: Mutex<Option<PublishCallback>>,
-    /// The branch whose next read is held, and the gate it waits on.
-    read_branch: Mutex<Option<String>>,
+    /// The branch whose read is held, and how many matching reads pass
+    /// before it; `None` when no read hold is armed.
+    read_branch: Mutex<Option<(String, usize)>>,
+    /// The ordinal of the read to hold on the branch the next `BranchCreate`
+    /// names, while the flow has not created it yet.
+    next_branch_read: Mutex<Option<usize>>,
     gate: tokio::sync::Semaphore,
     /// The segments of every read, by branch.
     reads: Mutex<Vec<(String, std::ops::RangeInclusive<u64>)>>,
@@ -595,6 +599,7 @@ impl Default for HoldingStore {
             selected: Mutex::new(None),
             held: Mutex::new(None),
             read_branch: Mutex::new(None),
+            next_branch_read: Mutex::new(None),
             gate: tokio::sync::Semaphore::new(0),
             reads: Mutex::new(Vec::new()),
             entered: Notify::new(),
@@ -608,10 +613,34 @@ impl HoldingStore {
     pub fn hold_next_configuration_on(&self, branch: &str) {
         *self.selected.lock().unwrap() = Some(branch.to_string());
     }
-    /// Holds the next read of `branch`'s segments: the caller parks inside an
-    /// adoption, after it started reading and before it composed.
+    /// Holds the `nth` read of `branch`'s segments from now (1 is the next):
+    /// the caller parks inside an adoption, after it started reading and
+    /// before it composed.
+    ///
+    /// This keys the hold on the reads' order, not on which read it is: the
+    /// store sees a read as its branch and a range, and reads a flow makes
+    /// of one branch are not distinguishable by those, so a flow holds a
+    /// read by its position in the branch's read order. A fresh branch's
+    /// open composes nothing, so the branch's first read is its guide
+    /// adoption's, and a flow that means that read arms 1; the close flow
+    /// holds the next read of its branch while the read it means is the next
+    /// one. An unrelated read of the same branch would take the hold
+    /// instead; the flows contain that: their assertions still demand the
+    /// entry the branch ran with, so a hold an unrelated read took fails the
+    /// flow rather than passing it.
+    pub fn hold_read_of(&self, branch: &str, nth: usize) {
+        *self.read_branch.lock().unwrap() = Some((branch.to_string(), nth.max(1)));
+    }
+    /// Holds the next read of `branch`'s segments.
     pub fn hold_next_read_of(&self, branch: &str) {
-        *self.read_branch.lock().unwrap() = Some(branch.to_string());
+        self.hold_read_of(branch, 1);
+    }
+    /// Holds the `nth` read of the branch the next `BranchCreate` names: a
+    /// fork's child is created inside the call, so its id does not exist
+    /// when the hold is armed. The store learns the id from the batch that
+    /// creates the branch; reads of other branches pass untouched.
+    pub fn hold_read_of_the_next_branch(&self, nth: usize) {
+        *self.next_branch_read.lock().unwrap() = Some(nth.max(1));
     }
     /// Publishes the held batch; the test calls it once the work it wants
     /// inside the adoption's window is done.
@@ -659,6 +688,13 @@ impl TimelineStore for HoldingStore {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()> {
+        if let Some(created) = events.iter().find_map(|event| match &event.event.kind {
+            EventKind::BranchCreate(data) => Some(data.branch.clone()),
+            _ => None,
+        }) && let Some(nth) = self.next_branch_read.lock().unwrap().take()
+        {
+            self.hold_read_of(&created, nth);
+        }
         let hold = {
             let mut selected = self.selected.lock().unwrap();
             let hold = selected.as_deref() == Some(key.branch_id.as_str())
@@ -685,11 +721,18 @@ impl TimelineStore for HoldingStore {
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
         let hold = {
             let mut selected = self.read_branch.lock().unwrap();
-            let hold = selected
-                .as_deref()
-                .is_some_and(|branch| segments.iter().any(|(read, _)| read == branch));
+            let mut hold = false;
+            if let Some((branch, skip)) = selected.as_mut()
+                && segments.iter().any(|(read, _)| read == branch)
+            {
+                if *skip <= 1 {
+                    hold = true;
+                } else {
+                    *skip -= 1;
+                }
+            }
             if hold {
-                selected.take();
+                *selected = None;
             }
             hold
         };
