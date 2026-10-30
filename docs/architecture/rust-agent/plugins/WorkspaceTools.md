@@ -151,9 +151,11 @@ The model-facing texts and their classes
   re-encoded, `Animated <format>: only the first frame was sent.` for an
   animation, and `Offset and limit do not apply to images.` when either was
   given — the refusal sentences (unsupported format, too many pixels,
-  undecodable bytes) with their `binary_unsupported` code, and the tool
-  declaration's schema and image result format.
-- **Policy.** The description's guidance naming the formats it returns.
+  undecodable bytes) with their `binary_unsupported` code, the tool
+  declaration's schema and image result format, and the description's sentence
+  naming the formats `read` returns.
+- The declarations' marks are stated once, in [Model-facing
+  texts](#model-facing-texts).
 
 ### Declared effects
 
@@ -221,10 +223,47 @@ None (§4 rule 8). S7 uses the existing host and storage contracts.
 ### Model-facing texts
 
 The `read`, `write`, `edit`, `glob`, `grep`, `exec` and `exec_stop` declarations
-are built-in declarations and their marks are
-[#549](https://github.com/arcships/dim/issues/549)'s. Of their results, the
-texts that carry a handle or a status are protocol
+are the owner's, and their parts are marked here
 ([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+every schema is protocol; a description's sentence that states what the call
+does, what it returns or its reach is protocol; a sentence that advises when or
+how to use it is policy. A name that a policy sentence states stays protocol.
+
+- `read` — protocol: "Read a file from the filesystem.", "Text comes back with
+  line numbers" and "A PNG, JPEG, WebP or GIF image comes back as an image block
+  with one line giving its path and pixel size."; policy: "use offset and limit
+  for large files".
+- `write` — protocol throughout: it states what the call writes, that it creates
+  the file and that it overwrites the whole content.
+- `edit` — protocol: "Edit an existing file by replacing exact text matches."
+  and "Supports single replacement (default) or replacing all matches with
+  replaceAll."; policy: "Read the file first, then derive oldText and newText
+  from the latest read result." and "Use this tool for ordinary incremental text
+  edits instead of shell commands or Python."
+- `glob` — protocol: "Find files with a safe case-insensitive git-style glob."
+  and "Returns a bounded preview"; policy: "narrow path or pattern when
+  truncated".
+- `grep` — protocol throughout: it states what it searches and that it returns a
+  bounded preview with at most 5 matches per file.
+- `exec` — protocol: the environment and isolation lines and "Execute a command
+  using the shell shown in the environment context. stdout and stderr are
+  merged. Long-running commands automatically move to background."; policy: the
+  six bullets on which tool to use for text operations, which searches to keep
+  narrow, when to set `timeoutMs` or `runInBackground`, and waiting with `wait`
+  instead of `sleep`.
+- `exec_stop` — protocol throughout: it names the `Task ID` handle `exec`
+  returns, the terminal `{task_id, status, result}` format, the `cancelled` and
+  `failed` statuses, and that Collaboration's `agentId` and `sessionId` are not
+  exec task IDs.
+
+A policy change is judged against the current text by
+[§8](../../../design/model-prompts.md#8-judging-a-change); a protocol change
+lands with the behaviour and the flow test that assert it. Four descriptions
+carry policy sentences — `read`, `edit`, `glob` and `exec` — and none of them
+has a factory member yet; each gets one in the change that first evaluates a
+candidate for it.
+
+Of their results, the texts that carry a handle or a status are protocol:
 the `exec` result that moved to the background writes `Task ID: <id>`,
 `Output: <path>` and "Stop with exec_stop({"taskId":"<Task ID>"}); this is not a
 Collaboration agentId.", and a task whose owner restarted reports

@@ -29,8 +29,13 @@ tasks emit no wake and old arrivals are not replayed after WaitBranch reload.
 
 ### Model-facing texts
 
-The `wait` tool's result texts are protocol
-([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)).
+The `wait` declaration is protocol as well
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+its schema, and the description's two sentences — "Wait until a background task
+(like exec or agent) finishes, the user or a line of this session sends you a
+steer, or the timeout elapses." states when a wait ends, which the results
+repeat, and "Pass a taskId to wait for one specific task, or omit it to wake on
+any." states the call shape. Its result texts are protocol too.
 `wait ended: notification (<task ids>)` names the tasks that finished, and those
 ids are the task handles the model passes back to `wait` or `exec_stop`; `read`
 takes the output path from the `exec` result's `Output: <path>`. `wait ended:
