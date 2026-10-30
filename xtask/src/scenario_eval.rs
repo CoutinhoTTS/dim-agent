@@ -43,8 +43,9 @@
 //! part. On the product profile, until
 //! [#522](https://github.com/arcships/dim/issues/522) lands, a model whose
 //! limits are not declared carries the catalog's assumed pair (128,000 and
-//! 16,384 tokens): a judge whose real window is smaller leaves every run
-//! whose view does not fit unjudged with the estimate and the budget. The
+//! 16,384 tokens): only a view over the assumed budget is unjudged with the
+//! estimate and the budget, while a view between the real and the assumed
+//! budget is sent, refused by the provider, and a failed run. The
 //! `--model-config` file declares the window explicitly. A scenario's
 //! `budget.window` must equal the run model's declared window, so a model
 //! configuration whose run entry is narrowed for the scenarios declares the
