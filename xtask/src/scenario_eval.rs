@@ -3765,15 +3765,6 @@ mod tests {
         }
     }
 
-    /// A message that crosses the fixture's compaction threshold: the system
-    /// prompt and the product's tool catalog take about 7,200 tokens of the
-    /// 24,000-token window, compaction triggers at 80% of it (19,040), and
-    /// 56,000 bytes count as 14,000 tokens at the product's 4 bytes per
-    /// token, so the request fits the window and still crosses the trigger.
-    fn compaction_message() -> String {
-        format!("first {}", "x".repeat(56_000))
-    }
-
     /// The relative path from the process's working directory to `target`:
     /// one `..` per component of the working directory, then the target's own
     /// components after its root.
@@ -3796,8 +3787,8 @@ mod tests {
             "candidate",
             summaries_and_judgements,
             json!({
-                "message": compaction_message(),
-                "steers": [{"afterSeconds": 1.0, "text": "second"}],
+                "message": format!("first {}", "x".repeat(24_000)),
+                "steers": [{"afterSeconds": 1.0, "text": format!("second {}", "y".repeat(36_000))}],
                 "budget": {"turns": 6, "seconds": 120, "window": 24000},
                 "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
             }),
@@ -3810,6 +3801,10 @@ mod tests {
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
+            assert_eq!(
+                record["failed"], false,
+                "the compaction fixture must fit the run model: {record}"
+            );
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
