@@ -1168,19 +1168,32 @@ async fn file_tools_declare_the_file_they_published() {
 // ── #656: `read` returns image files as image blocks ────────────────────────
 
 use base64::Engine as _;
+use dim_agent_capabilities::images;
 use dim_agent_types::{ContentBlock, ImageSource, ImageSourceType};
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
 
-fn png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> Rgba<u8>) -> Vec<u8> {
-    let mut image = RgbaImage::new(width, height);
-    for (x, y, value) in image.enumerate_pixels_mut() {
-        *value = pixel(x, y);
-    }
+fn png_bytes(image: RgbaImage) -> Vec<u8> {
     let mut encoded = std::io::Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(image)
         .write_to(&mut encoded, ImageFormat::Png)
         .unwrap();
     encoded.into_inner()
+}
+
+fn png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> Rgba<u8>) -> Vec<u8> {
+    png_bytes(RgbaImage::from_fn(width, height, pixel))
+}
+
+/// Deterministic noise: an image that compresses to neither PNG small nor JPEG
+/// small, so its byte size follows its pixel count.
+fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    png_bytes(RgbaImage::from_fn(width, height, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        Rgba([state as u8, (state >> 8) as u8, (state >> 16) as u8, 255])
+    }))
 }
 
 fn jpeg(image: &DynamicImage, quality: u8) -> Vec<u8> {
@@ -1311,9 +1324,9 @@ async fn read_scales_a_large_jpeg_within_the_limits() {
     }
     let bytes = jpeg(&DynamicImage::ImageRgb8(image), 95);
     assert!(
-        bytes.len() > 4 * 1024 * 1024,
-        "the fixture is above 4 MiB: {}",
-        bytes.len()
+        images::base64_len(bytes.len() as u64) > images::MAX_BASE64_BYTES,
+        "the fixture is over the base64 limit: {}",
+        images::base64_len(bytes.len() as u64)
     );
     workspace.put("photo.jpg", &bytes);
     let result = workspace.read(&reads, "photo.jpg").await;
@@ -1323,10 +1336,115 @@ async fn read_scales_a_large_jpeg_within_the_limits() {
     assert!(line.contains("as image/jpeg"), "{line}");
     assert!(line.contains("Sent 2048x1365 px"), "{line}");
     let sent = sent(source);
-    assert!(sent.len() <= 4 * 1024 * 1024, "{}", sent.len());
+    assert!(
+        images::base64_len(sent.len() as u64) <= images::MAX_BASE64_BYTES,
+        "{}",
+        images::base64_len(sent.len() as u64)
+    );
     assert!(line.contains(&format!("({} bytes)", sent.len())), "{line}");
     assert_eq!(decoded(source).dimensions(), (2048, 1365));
     assert_eq!(structured(&result)["sentWidth"], 2048);
+}
+
+/// The old limit measured raw bytes, so this image was sent unchanged and the
+/// request then exceeded the provider's per-image limit once base64-encoded.
+#[tokio::test]
+async fn read_reencodes_an_image_whose_base64_exceeds_the_limit() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let bytes = noise_png(1000, 1000);
+    assert!(
+        bytes.len() as u64 <= 4 * 1024 * 1024,
+        "within the 4 MiB of raw bytes the old limit measured: {}",
+        bytes.len()
+    );
+    assert!(
+        images::base64_len(bytes.len() as u64) > images::MAX_BASE64_BYTES,
+        "over the base64 limit: {}",
+        images::base64_len(bytes.len() as u64)
+    );
+    workspace.put("noise.png", &bytes);
+    let result = workspace.read(&reads, "noise.png").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("(1000x1000 px)"), "{line}");
+    assert!(line.contains("Sent 1000x1000 px as image/jpeg"), "{line}");
+    assert_ne!(sent(source), bytes, "the image is re-encoded");
+    assert!(
+        images::base64_len(sent(source).len() as u64) <= images::MAX_BASE64_BYTES,
+        "the re-encoded base64 fits: {}",
+        images::base64_len(sent(source).len() as u64)
+    );
+}
+
+/// Pad a PNG to exactly `target` bytes with a tEXt chunk before IEND.
+fn pad_png_to(mut bytes: Vec<u8>, target: u64) -> Vec<u8> {
+    assert!(target > bytes.len() as u64 + 12 + 8, "the padding fits");
+    let data_len = (target - bytes.len() as u64 - 12) as usize;
+    let mut data = b"Comment\0".to_vec();
+    data.resize(data_len, b'x');
+    let mut typed = b"tEXt".to_vec();
+    typed.extend_from_slice(&data);
+    let iend = bytes.split_off(bytes.len() - 12);
+    bytes.extend_from_slice(&(data_len as u32).to_be_bytes());
+    bytes.extend_from_slice(&typed);
+    bytes.extend_from_slice(&crc32(&typed).to_be_bytes());
+    bytes.extend_from_slice(&iend);
+    bytes
+}
+
+#[tokio::test]
+async fn read_sends_an_image_whose_base64_just_fits_byte_for_byte() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let fits_raw = images::MAX_BASE64_BYTES / 4 * 3;
+    assert_eq!(
+        fits_raw, 3_750_000,
+        "the raw length whose base64 is 5,000,000"
+    );
+    let bytes = pad_png_to(noise_png(900, 900), fits_raw);
+    assert_eq!(
+        images::base64_len(bytes.len() as u64),
+        images::MAX_BASE64_BYTES
+    );
+    workspace.put("exact.png", &bytes);
+    let result = workspace.read(&reads, "exact.png").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert_eq!(line, "Read image: exact.png (900x900 px).");
+    assert_eq!(
+        sent(source),
+        bytes,
+        "an image whose base64 exactly fits is sent as read"
+    );
+    assert_eq!(
+        source.data.as_deref().unwrap().len() as u64,
+        images::MAX_BASE64_BYTES
+    );
+}
+
+#[tokio::test]
+async fn read_reencodes_an_image_one_byte_over_the_raw_fit() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let over_raw = images::MAX_BASE64_BYTES / 4 * 3 + 1;
+    let bytes = pad_png_to(noise_png(900, 900), over_raw);
+    assert_eq!(bytes.len() as u64, 3_750_001);
+    assert_eq!(
+        images::base64_len(bytes.len() as u64),
+        images::MAX_BASE64_BYTES + 4
+    );
+    workspace.put("over.png", &bytes);
+    let result = workspace.read(&reads, "over.png").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("(900x900 px)"), "{line}");
+    assert_ne!(sent(source), bytes, "the image is re-encoded");
+    assert!(
+        images::base64_len(sent(source).len() as u64) <= images::MAX_BASE64_BYTES,
+        "the re-encoded base64 fits: {}",
+        images::base64_len(sent(source).len() as u64)
+    );
 }
 
 /// A TIFF block whose EXIF orientation tag holds `orientation`.

@@ -7,10 +7,15 @@ use image::{
 };
 use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
 
-/// The longest edge an image may have and still be sent as it is, in pixels.
+/// The longest edge an image may have and still be sent as it is, in pixels:
+/// within the 3,000 px the vision guide gives as safe for a many-image request
+/// on every platform.
 pub const MAX_EDGE: u32 = 2048;
-/// The largest encoding that is sent as it is, in bytes.
-pub const MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
+/// The largest base64 encoding of an image sent as it is, in bytes: 5,000,000,
+/// the lowest documented per-image limit; the guide does not define MB as 10^6
+/// or 2^20, and this value holds under either reading.
+/// Raw bytes `n` fit when `4 * ceil(n / 3) <= MAX_BASE64_BYTES`.
+pub const MAX_BASE64_BYTES: u64 = 5_000_000;
 /// The pixel guard: a header claiming more pixels is refused before decoding.
 pub const MAX_PIXELS: u64 = 100_000_000;
 /// The quality of a JPEG this module encodes.
@@ -154,12 +159,12 @@ pub enum ImageRefusal {
 /// The whole source is never buffered: the first bytes are read to recognize
 /// the format, the header is read from the same source and the pixel guard
 /// runs, and only then are the pixels decoded. An image sent as it is is read
-/// back in full only when the source's length is within [`MAX_ENCODED_BYTES`],
+/// back in full only when its base64 encoding is within [`MAX_BASE64_BYTES`],
 /// so memory stays within that bound and the pixel guard.
 ///
-/// A PNG or GIF that fits both limits is returned unchanged. An image whose
-/// longest edge exceeds [`MAX_EDGE`], whose encoding exceeds
-/// [`MAX_ENCODED_BYTES`], whose EXIF orientation is not the identity, or which
+/// An image that fits both limits is returned unchanged. An image whose longest
+/// edge exceeds [`MAX_EDGE`], whose base64 encoding exceeds
+/// [`MAX_BASE64_BYTES`], whose EXIF orientation is not the identity, or which
 /// is animated is decoded and re-encoded: a PNG source stays PNG while its
 /// scaled PNG fits, and everything else becomes JPEG at quality 85, its long
 /// edge stepping down until the encoding fits. The EXIF orientation is applied
@@ -289,8 +294,9 @@ fn first_frame(
     Ok((DynamicImage::ImageRgba8(first.into_buffer()), animated))
 }
 
-/// The source's own bytes when nothing has to change and its length is within
-/// [`MAX_ENCODED_BYTES`]; `None` when the image has to be re-encoded instead.
+/// The source's own bytes when nothing has to change and its base64 encoding
+/// is within [`MAX_BASE64_BYTES`]; `None` when the image has to be re-encoded
+/// instead.
 fn unchanged<R: BufRead + Seek>(
     source: &mut R,
     kind: ImageKind,
@@ -298,24 +304,26 @@ fn unchanged<R: BufRead + Seek>(
     orientation: Orientation,
     animated: bool,
 ) -> Result<Option<ScaledImage>, ImageRefusal> {
+    let length = source
+        .seek(SeekFrom::End(0))
+        .map_err(|error| invalid(kind, error))?;
     let fits = !animated
         && orientation == Orientation::NoTransforms
         && stored.width <= MAX_EDGE
         && stored.height <= MAX_EDGE
-        && source
-            .seek(SeekFrom::End(0))
-            .map_err(|error| invalid(kind, error))?
-            <= MAX_ENCODED_BYTES as u64;
+        && fits_base64(length);
     if !fits {
         return Ok(None);
     }
     rewind(source, kind)?;
     let mut bytes = Vec::new();
     (&mut *source)
-        .take(MAX_ENCODED_BYTES as u64 + 1)
+        .take(length + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| invalid(kind, error))?;
-    if bytes.len() > MAX_ENCODED_BYTES {
+    // The source grew while it was read: the header no longer describes the
+    // bytes, so re-encode from what the decoder sees now.
+    if bytes.len() as u64 > length {
         return Ok(None);
     }
     Ok(Some(ScaledImage {
@@ -352,6 +360,17 @@ fn reencoded(
     })
 }
 
+/// The length of `raw` bytes once base64-encoded, padding included.
+pub fn base64_len(raw: u64) -> u64 {
+    raw.div_ceil(3) * 4
+}
+
+/// Whether `raw` bytes of an image encode within [`MAX_BASE64_BYTES`], padding
+/// included.
+fn fits_base64(raw: u64) -> bool {
+    base64_len(raw) <= MAX_BASE64_BYTES
+}
+
 /// Rewinds the source to its first byte.
 fn rewind<R: Seek>(source: &mut R, kind: ImageKind) -> Result<(), ImageRefusal> {
     source
@@ -370,13 +389,13 @@ fn encode(
     let mut fitted = fit(image);
     if kind == ImageKind::Png {
         let encoded = png(&fitted).map_err(|error| invalid(kind, error))?;
-        if encoded.len() <= MAX_ENCODED_BYTES {
+        if fits_base64(encoded.len() as u64) {
             return Ok((encoded, "image/png", size(fitted.dimensions())));
         }
     }
     loop {
         let encoded = jpeg(&fitted)?;
-        if encoded.len() <= MAX_ENCODED_BYTES {
+        if fits_base64(encoded.len() as u64) {
             return Ok((encoded, "image/jpeg", size(fitted.dimensions())));
         }
         let (width, height) = fitted.dimensions();
