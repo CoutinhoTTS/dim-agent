@@ -309,7 +309,7 @@ mod tests {
             let tx = connection.transaction().map_err(error)?;
             for index in 0..2300 {
                 let id = format!("catalog-{index:04}");
-                tx.execute("INSERT INTO agent_sessions SELECT ?1, config, created_at_ms FROM agent_sessions WHERE session_id=?2", params![id,seed]).map_err(error)?;
+                tx.execute("INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) SELECT ?1, config, created_at_ms, leader_session_id FROM agent_sessions WHERE session_id=?2", params![id,seed]).map_err(error)?;
                 tx.execute("INSERT INTO session_owners SELECT ?1,agent_id,protocol_version FROM session_owners WHERE session_id=?2", params![id,seed]).map_err(error)?;
                 tx.execute("INSERT INTO timeline_branches VALUES (?1,'main','{\"id\":\"main\"}',0)", [&id]).map_err(error)?;
                 create(&tx, &id)?;

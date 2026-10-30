@@ -1,15 +1,17 @@
 # Rust 会话存储格式
 
-The current native format is **v25**, with source-owned `settings_documents`,
+The current native format is **v26**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
 branch end events, the tool-effect and digest fields, and tool schemas that may
-omit `type`, the Session catalog projection and a configuration's System source. Startup requires the
-exact v25 SQL schema and a single format marker of 25 before writable PRAGMAs,
-or the exact v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v25 one step after
-another ([S5a v15 decision](#s5a-v15-格式决定),
+omit `type`, the Session catalog projection, a configuration's System source,
+and a delegation's Agent owner and member leader. Startup requires the
+exact v26 SQL schema and a single format marker of 26 before writable PRAGMAs,
+or the exact v25, v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
+which the same startup transaction upgrades in place to v26 one step after
+another ([#593 v26 decision](#593-v26-格式决定),
+[S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
 [#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定),
@@ -20,11 +22,11 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v25, and v16 request rows stay readable as written.
+valid in v26, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v25 tables
+## Current v26 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
@@ -50,6 +52,7 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `agents.agent_id` | `TEXT` | **SQL 允许** | — | 主键；正常写入必须是非空 Agent ID |
 | `agents.profile` | `TEXT` | 否 | — | `AgentProfile` JSON，创建后固定 |
 | `agents.is_default` | `INTEGER` | 否 | — | `CHECK(is_default IN (0, 1))`；唯一的 1 由 `agents_default_unique` 保证至多一个，至少一个由目录校验保证 |
+| `agents.owner_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`；非空表示该 leader Session 拥有这个私有 Agent，NULL 表示公开 Agent；写入后不变 |
 | `session_catalog.session_id` | `TEXT` | No | — | Primary key, foreign key to `agent_sessions`; one row from creation |
 | `session_catalog.updated_at_ms` | `INTEGER` | No | — | Last committed `main` event time, or creation time for an empty Session |
 | `session_catalog.preview` | `TEXT` | Yes | — | First user text in the batch-complete preview window |
@@ -57,6 +60,7 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `agent_sessions.session_id` | `TEXT` | 否 | — | 主键，原 Session ID |
 | `agent_sessions.created_at_ms` | `INTEGER` | 否 | — | `CHECK(created_at_ms >= 0)`；创建事务写入真实 Unix 毫秒 |
 | `agent_sessions.config` | `TEXT` | 否 | — | `SessionConfig` JSON，创建时的配置 |
+| `agent_sessions.leader_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`；非空表示这个 Session 是那个 leader Session 的委派成员，NULL 表示不是成员 |
 | `session_owners.session_id` | `TEXT` | **SQL 允许** | — | 主键，外键到 `agent_sessions(session_id)`；业务要求每个 Session 恰有一条非空 owner |
 | `session_owners.agent_id` | `TEXT` | 否 | — | 外键到 `agents(agent_id)` |
 | `session_owners.protocol_version` | `INTEGER` | 否 | — | `CHECK(protocol_version IN (1, 2, 3))`；Session 所属协议版本 |
@@ -424,6 +428,18 @@ ProjectionCheckpoint = {
 - **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
 
+### #593 v26 格式决定
+
+[Collaboration](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)（#593）的格式决定：升级到 **v26**，从 v25 原地升级。
+
+- **只加两个可空列与两个索引**：`agents.owner_session_id TEXT REFERENCES agent_sessions(session_id)` 与 `agent_sessions.leader_session_id TEXT REFERENCES agent_sessions(session_id)`，以及 `agents_by_owner`、`agent_sessions_by_leader`。其他表、列、持久化 JSON、内容寻址与既有索引不变。
+  - `agents.owner_session_id` 非空表示该 leader Session 拥有这个私有 Agent；NULL 表示公开 Agent（默认 Agent 与 `agent.create` 创建的）。它就是"临时 Agent"的唯一标志，不另设布尔列。
+  - `agent_sessions.leader_session_id` 非空表示这个 Session 是那个 leader Session 的委派成员；公开 Agent 下的私有成员同样靠它。`session_owners` 仍只表示"Session 属于哪个 Agent"，不是委派归属。
+- **为什么必须落盘**：成员 Session 的 `session_owners.agent_id` 要求 `agents` 行存在，所以私有 Agent 不能"不落盘"，只能记住归属和寿命；归属原在进程内存，重启后丢失，而读取方把"查不到归属"当成公开。
+- **升级**：空库直接建 v26。精确的 v25 库在同一启动准入事务内先 `ALTER TABLE` 两列，再建两个索引并重建标记写入 26；精确的 v13、v15–v24 库先执行已有步骤，再执行本步。启动门禁比较精确 SQL 结构，因此 v25 与更早版本的表结构单独识别；v25 守护进程拒绝 v26 库并保留数据。
+- **旧行**：升级不写业务行，v25 及更早写入的 `agents`、`agent_sessions` 行两列均为 NULL。旧委派的创建者只存在于当时的进程内存，无法恢复，因此这些 Agent 升级后仍是公开、无主，只能显式删除。不做一次性清理：`agent.create` 创建的公开 Agent 可能同样没有 Session，无法与旧委派区分。
+- **验证**：一次性 v25 库升级后结构恰为 v26、标记为 26、业务行逐行不变，重复打开不再升级；v13 起的各版一次升级到 v26；`agents` 与 `agent_sessions` 的写入都使用显式列名，分叉与目录副本显式复制或不复制这两列。见 `storage_flow.rs` 的 `a_v25_store_upgrades_in_place_once` 及同组各步测试。
+
 ### #596 v25 格式决定
 
 [SessionStore #596](https://github.com/arcships/dim/issues/596) 的格式决定：升级到 **v25**，从 v24 原地升级。
@@ -502,6 +518,8 @@ ProjectionCheckpoint = {
 | v1 主键 `timeline_events` | `(session_id, branch_id, sequence)` | 追加前读取最后一行、单分支顺序恢复、从起点读取历史 |
 | v1 主键 `timeline_content` | `(session_id, hash)` | 请求引用的定点读取和 Session 内去重；v17 列表节点逐个加载与分叉复制的节点闭包 |
 | v1 唯一 `agents_default_unique` | `(is_default) WHERE is_default = 1` | 至多一个默认 Agent；不保证其存在 |
+| v26 `agents_by_owner` | `(owner_session_id)` | 删除 owner 时定位它拥有的 Agent；启动时找出无成员或失去 owner 的私有 Agent |
+| v26 `agent_sessions_by_leader` | `(leader_session_id)` | 装载时重建 Team 关系 |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
@@ -522,9 +540,9 @@ ProjectionCheckpoint = {
 
 正向页的 `after` 与 `through` 须为批次边界；`limit` 为目标事件数，末批超出时完整返回。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放连接锁；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
 
-当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
+`session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v25）
+## 完整记录示例（v25；v26 未改动这些行）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 

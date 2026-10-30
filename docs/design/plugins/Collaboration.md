@@ -98,7 +98,7 @@ The producer keeps these invariants:
 
 - A restart restores Teams from the durable facts: owned Agents load owned, and member Sessions load with their leader. Nothing becomes public by being unloaded, unread or reloaded.
 - `close` settles the request and closes the member Session in this process. The Session records, its leader and its Agent's record stay, so a restart loads the member again as an ordinary Session that its leader may address; closed is process state and is not stored.
-- Deleting the owner Session deletes its owned Agents and their member Sessions, because an owned Agent has no meaning without its owner. This replaces the delete's former rule that members stay Sessions ([session deletion and fork](../appserver/session-deletion-and-fork.md) records the change).
+- Deleting a leader Session deletes its Team: the member Sessions it leads and the Agents it owns, because neither has a meaning without it. The team goes before the leader's own rows, which reference it, so a delete that then fails has already ended the team while the leader stays closed for a retry, as [session deletion and fork](../appserver/session-deletion-and-fork.md) states for a failed delete. This replaces the delete's former rule that members stay Sessions.
 - Deleting the last member Session of an owned Agent deletes the Agent record in the same operation. A public Agent is never deleted with a member Session.
 - Forking a member Session is refused: a member conversation is read-only, and a fork has no leader to keep. A fork of a leader leads no member, and the source's owned Agents and members stay with the source.
 - A delegation whose creation fails removes the Agent record it created, so no owned Agent survives without the member Session it was created for.
@@ -117,9 +117,9 @@ The producer keeps these invariants:
 
 ### 6.5 Requirements raised to other owners
 
-- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete a Session's owned Agents and the record of an owned Agent whose last member Session is deleted, in the delete's own transaction; expose ownership to Collaboration without adding it to the client protocol; remove an incomplete or orphaned owned Agent at startup.
+- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete a Session's members and owned Agents, and the record of an owned Agent whose last member Session is deleted, in the delete's own operation; expose ownership to Collaboration without adding it to the client protocol; remove an incomplete or orphaned owned Agent at startup.
 - **SessionStore and native storage.** Store `agent_sessions.leader_session_id`; decide both columns' format version, upgrade and indexes; delete a Session's owned Agents and member Sessions in the delete's own transaction.
-- **Session deletion and fork.** Record the ownership cascade and the last-member rule among a delete's effects (§6.3), replace the rule that a deleted leader keeps its members, and refuse `session.fork` on a member Session.
+- **Session deletion and fork.** Record the Team cascade and the last-member rule among a delete's effects (§6.3), replace the rule that a deleted leader keeps its members, and refuse `session.fork` on a member Session.
 
 ### 6.6 What this removes
 

@@ -181,6 +181,28 @@ fn changed(database: &Path, path: &Path, sql: &str) {
         .execute_batch(sql)
         .unwrap();
 }
+/// Removes what v26 adds from a copy, so that its schema is the v25 one: an
+/// older daemon's store, which the read-only export still reads.
+fn without_v26_columns(database: &Path) {
+    rusqlite::Connection::open(database)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
+             DROP TABLE agents;
+             CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)));
+             CREATE UNIQUE INDEX agents_default_unique ON agents(is_default) WHERE is_default = 1;
+             INSERT INTO agents(agent_id, profile, is_default) SELECT agent_id, profile, is_default FROM agents_rows;
+             DROP TABLE agents_rows;
+             CREATE TEMP TABLE sessions_rows AS SELECT * FROM agent_sessions;
+             DROP TABLE agent_sessions;
+             CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0));
+             INSERT INTO agent_sessions(session_id, config, created_at_ms) SELECT session_id, config, created_at_ms FROM sessions_rows;
+             DROP TABLE sessions_rows;",
+        )
+        .unwrap();
+}
+
 fn marker(database: &Path) -> i64 {
     rusqlite::Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap()
@@ -265,7 +287,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":25,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":26,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -342,6 +364,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             changed(&database, &older, &format!("{catalog} {dropped} CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
+            without_v26_columns(&older);
             let bytes = std::fs::read(&older).unwrap();
             let read = exported(&older, &session).await;
             assert_eq!(read[0]["store_format"], version, "v{version}");
@@ -352,8 +375,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26));
-                INSERT INTO agent_store_format VALUES (26);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 27));
+                INSERT INTO agent_store_format VALUES (27);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

@@ -972,7 +972,7 @@ impl Connection {
             .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
             Call::AgentCreate(params) => rpc
                 .index
-                .create(uuid::Uuid::new_v4(), params.profile)
+                .create(uuid::Uuid::new_v4(), params.profile, None)
                 .await
                 .map(|host| {
                     Reply::AgentCreated(AgentCreated {
@@ -1260,7 +1260,7 @@ impl Connection {
         }
         let session = rpc
             .index
-            .create_session(&host, config, self.protocol_version())
+            .create_session(&host, config, self.protocol_version(), None)
             .await
             .map_err(RpcError::from)?;
         rpc.index.retain_versions();

@@ -7,8 +7,8 @@ use crate::{
 };
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
-    AGENT_GROUP, Agent, AgentBuilder, AgentError, Modules, Names, NoConfig, Session, SessionConfig,
-    TimelineKey,
+    AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, Modules, Names, NoConfig,
+    Session, SessionConfig, TimelineKey,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
@@ -71,6 +71,9 @@ pub struct AgentHost {
     pub agent_id: String,
     pub default: bool,
     pub profile: AgentProfile,
+    /// The leader Session whose Team may address this Agent; `None` makes it
+    /// public. Stored with the Agent and restored with it.
+    pub owner: Option<String>,
     /// Host of the Agent's Session listeners. It unloads after the Agent scope
     /// has closed every Session.
     pub(crate) ctx: Ctx,
@@ -365,6 +368,25 @@ impl AgentIndex {
             .get(id)
             .map(|entry| entry.host.clone())
     }
+    /// The owner of a loaded Agent: `None` for an unknown Agent,
+    /// `Some(None)` for a public one, `Some(Some(leader))` for an owned one.
+    pub(crate) fn owner(&self, agent_id: &str) -> Option<Option<String>> {
+        self.directory
+            .inner
+            .lock()
+            .expect("agent index")
+            .agents
+            .get(agent_id)
+            .map(|entry| entry.host.owner.clone())
+    }
+    /// The leader of every stored member Session; `None` when the process has
+    /// no store, so the relations it holds are all there is.
+    pub(crate) async fn members(&self) -> dim_agent_runtime::Result<Option<Vec<(String, String)>>> {
+        match &self.records {
+            Some(records) => records.members().await.map(Some),
+            None => Ok(None),
+        }
+    }
     pub(crate) fn unavailable_agent(&self, id: &str) -> Option<String> {
         self.directory
             .inner
@@ -461,9 +483,13 @@ impl AgentIndex {
             .map(|host| host.agent.sessions().len())
             .sum()
     }
+    /// The public directory: the default Agent and the Agents
+    /// `agent.create` made. An owned Agent belongs to one Team and is reached
+    /// through Collaboration's tool.
     pub fn list(&self) -> Vec<AgentInfo> {
         self.hosts()
             .into_iter()
+            .filter(|host| host.owner.is_none())
             .map(|host| AgentInfo {
                 agent_id: host.agent_id.clone(),
                 default: host.default,
@@ -480,6 +506,9 @@ impl AgentIndex {
     /// as they are.
     async fn install_default(self: &Arc<Self>) -> Result<(), AgentOpError> {
         let agent_id = self.default_agent_id().to_owned();
+        if let Some(records) = &self.records {
+            self.remove_unfinished(records).await;
+        }
         let stored = match &self.records {
             Some(records) => records.agents().await?,
             None => vec![],
@@ -490,8 +519,13 @@ impl AgentIndex {
         };
         if stored.is_empty() {
             if !self.running(&agent_id) {
-                self.load(agent_id, true, process_default(&self.session_defaults))
-                    .await?;
+                self.load(
+                    agent_id,
+                    true,
+                    process_default(&self.session_defaults),
+                    None,
+                )
+                .await?;
             }
         } else {
             for record in stored
@@ -507,7 +541,12 @@ impl AgentIndex {
                     });
                 let loaded = match profile {
                     Ok(profile) => self
-                        .load(record.id.clone(), record.default, profile)
+                        .load(
+                            record.id.clone(),
+                            record.default,
+                            profile,
+                            record.owner.clone(),
+                        )
                         .await
                         .map(|_| ())
                         .map_err(|error| error.to_string()),
@@ -999,14 +1038,16 @@ impl AgentIndex {
         host: &AgentHost,
         config: &SessionConfig,
         version: u32,
+        leader: Option<&str>,
     ) -> Option<(String, BoxFuture<'static, dim_agent_runtime::Result<()>>)> {
         let store = self.session_store.clone()?;
         let stored = config.clone();
         let agent_id = host.agent_id.clone();
+        let leader = leader.map(str::to_owned);
         Some(self.prepared(config.cwd.clone(), move |id| {
             Box::pin(async move {
                 store
-                    .create_owned_session(&id, &stored, &agent_id, version)
+                    .create_owned_session(&id, &stored, &agent_id, version, leader.as_deref())
                     .await
             })
         }))
@@ -1045,8 +1086,9 @@ impl AgentIndex {
         host: &AgentHost,
         config: SessionConfig,
         version: u32,
+        leader: Option<&str>,
     ) -> dim_agent_runtime::Result<Session> {
-        match self.prepare_session(host, &config, version).await {
+        match self.prepare_session(host, &config, version, leader).await {
             Some((id, prepare)) => {
                 let creation = host
                     .agent
@@ -1106,6 +1148,15 @@ impl AgentIndex {
         }
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
+        if let Some(records) = &self.records {
+            for member in records.led_members(id).await? {
+                Box::pin(self.delete(&member)).await?;
+            }
+            for agent_id in records.owned_agents(id).await? {
+                let _ = self.close(&agent_id).await;
+                records.delete(&agent_id).await?;
+            }
+        }
         let loaded = self
             .host_by_session(id)
             .and_then(|host| host.agent.get_session(id));
@@ -1130,6 +1181,10 @@ impl AgentIndex {
             }
             owner
         };
+        if let Some((agent_id, _)) = &owner {
+            let agent_id = agent_id.clone();
+            self.release_owned(&agent_id).await;
+        }
         if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
             let (_, root) = self
                 .loader
@@ -1148,6 +1203,75 @@ impl AgentIndex {
         self.directory.inner.lock().expect("agent index").sweep();
         Ok(())
     }
+    /// An owned Agent with no open member Session closes; its record goes
+    /// when no stored member Session keeps it. A public Agent stays loaded.
+    pub(crate) async fn release_owned(&self, agent_id: &str) {
+        let owned = self.owner(agent_id).is_some_and(|owner| owner.is_some())
+            || match &self.records {
+                Some(records) => matches!(records.agent_owner(agent_id).await, Ok(Some(_))),
+                None => false,
+            };
+        if !owned {
+            return;
+        }
+        match &self.records {
+            Some(records) => {
+                if records
+                    .member_sessions(agent_id)
+                    .await
+                    .map(|members| !members.is_empty())
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                let _ = self.close(agent_id).await;
+                if let Err(error) = records.delete(agent_id).await {
+                    tracing::warn!(%error, agent_id, "Owned Agent record was not deleted");
+                }
+            }
+            None if !self.has_open_sessions(agent_id) => {
+                let _ = self.close(agent_id).await;
+            }
+            None => {}
+        }
+    }
+    fn has_open_sessions(&self, agent_id: &str) -> bool {
+        self.host(Some(agent_id)).is_some_and(|host| {
+            host.agent
+                .sessions()
+                .iter()
+                .any(|session| !session.is_closing())
+        }) || !self.unloaded_sessions(agent_id).is_empty()
+    }
+    /// Removes what a delegation cannot leave behind: an owned Agent with no
+    /// member Session, and one whose owner Session is gone with its members.
+    async fn remove_unfinished(&self, records: &AgentRecords) {
+        let (incomplete, orphaned) = match records.unfinished_owned().await {
+            Ok(unfinished) => unfinished,
+            Err(error) => {
+                tracing::error!(%error, "Unfinished delegations could not be read");
+                return;
+            }
+        };
+        for agent_id in incomplete {
+            if let Err(error) = records.delete(&agent_id).await {
+                tracing::error!(%error, %agent_id, "Incomplete delegation was not removed");
+            }
+        }
+        for agent_id in orphaned {
+            let members = records.member_sessions(&agent_id).await.unwrap_or_default();
+            if let Some(store) = &self.session_store {
+                for member in members {
+                    if let Err(error) = store.delete_session(&member).await {
+                        tracing::error!(%error, session_id = %member, "Orphaned member Session was not removed");
+                    }
+                }
+            }
+            if let Err(error) = records.delete(&agent_id).await {
+                tracing::error!(%error, %agent_id, "Orphaned owned Agent was not removed");
+            }
+        }
+    }
     /// `session.fork` ([S5c §6](../../../docs/design/appserver/session-deletion-and-fork.md#6-fork)):
     /// acquires the source, restoring it if needed, and checks the cut as
     /// `session.branch_create` does (at most the published `main` head, the
@@ -1162,6 +1286,11 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::InvalidInput("a fork needs the native store".into()))?;
         let usage = self.acquire(source).await?;
         let session = &usage.session;
+        if session.config().collaboration_role == CollaborationRole::Member {
+            return Err(AgentError::InvalidInput(
+                "a member conversation is read-only".into(),
+            ));
+        }
         let prefix = async {
             session.local_page("main", at, 1, at).await?;
             session.context("main", at).await
@@ -1198,6 +1327,7 @@ impl AgentIndex {
         &self,
         id: uuid::Uuid,
         profile: Option<AgentProfile>,
+        owner: Option<&str>,
     ) -> Result<Arc<AgentHost>, AgentOpError> {
         let profile = match profile {
             Some(profile) => {
@@ -1207,7 +1337,8 @@ impl AgentIndex {
             }
             None => process_default(&self.session_defaults),
         };
-        self.load(id.to_string(), false, profile).await
+        self.load(id.to_string(), false, profile, owner.map(str::to_owned))
+            .await
     }
     /// A profile from outside the process lists each tool of its mount list
     /// once. A tool that no part registers is reported when the Session
@@ -1279,6 +1410,7 @@ impl AgentIndex {
         agent_id: String,
         default: bool,
         profile: AgentProfile,
+        owner: Option<String>,
     ) -> Result<Arc<AgentHost>, AgentOpError> {
         let (loader, root) = self
             .loader
@@ -1290,6 +1422,7 @@ impl AgentIndex {
             agent_id: agent_id.clone(),
             default,
             profile,
+            owner,
         };
         let mut creation = tokio::spawn(async move {
             #[cfg(test)]
@@ -1360,7 +1493,9 @@ impl AgentIndex {
             )))
         })?;
         if let Some(records) = &self.records
-            && let Err(error) = records.save(&agent_id, &host.profile, default).await
+            && let Err(error) = records
+                .save(&agent_id, &host.profile, default, host.owner.as_deref())
+                .await
         {
             self.forget(&agent_id);
             let settled = host.agent.close().await;
@@ -1658,6 +1793,7 @@ struct AgentSpec {
     agent_id: String,
     default: bool,
     profile: AgentProfile,
+    owner: Option<String>,
 }
 
 /// Registers the module of the Agent instance's plugin.
@@ -1708,6 +1844,7 @@ impl Plugin for AgentScopePlugin {
             agent_id: spec.agent_id.clone(),
             default: spec.default,
             profile: spec.profile.clone(),
+            owner: spec.owner.clone(),
             ctx: sessions,
         });
         let owner = host.clone();

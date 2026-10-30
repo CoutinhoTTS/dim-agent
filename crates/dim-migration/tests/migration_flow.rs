@@ -676,7 +676,20 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     Connection::open(&native_path)
         .unwrap()
         .execute_batch(
-            "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE agent_store_format;
+            "PRAGMA foreign_keys=OFF;
+             CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
+             DROP TABLE agents;
+             CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)));
+             CREATE UNIQUE INDEX agents_default_unique ON agents(is_default) WHERE is_default = 1;
+             INSERT INTO agents(agent_id, profile, is_default) SELECT agent_id, profile, is_default FROM agents_rows;
+             DROP TABLE agents_rows;
+             CREATE TEMP TABLE sessions_rows AS SELECT * FROM agent_sessions;
+             DROP TABLE agent_sessions;
+             CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0));
+             INSERT INTO agent_sessions(session_id, config, created_at_ms) SELECT session_id, config, created_at_ms FROM sessions_rows;
+             DROP TABLE sessions_rows;
+             CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence);
+             DROP TABLE agent_store_format;
              CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
              INSERT INTO agent_store_format VALUES (23);",
         )
@@ -714,7 +727,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        25
+        26
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))

@@ -98,7 +98,7 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 - 重启从持久事实恢复 Team：被拥有的 Agent 以被拥有状态装载，成员 Session 连同 leader 一起装载。卸载、未被读取或重载都不会让任何记录变成公开。
 - `close` 在本进程内结算请求并关闭成员 Session。Session 记录、它的 leader 与它 Agent 的记录都保留，因此重启后该成员作为普通 Session 重新装载，leader 仍能寻址它；closed 是进程状态，不写入存储。
-- 删除 owner Session 会删除它拥有的 Agent 及其成员 Session，因为没有 owner 的 Agent 没有意义。这取代了删除原先“成员保留为 Session”的规则（[Session 删除与 fork](../appserver/session-deletion-and-fork.md) 记录这一变更）。
+- 删除 leader Session 会删除它的 Team：它领导的成员 Session 与它拥有的 Agent，因为二者离开它都没有意义。Team 先于 leader 自己的行被删除（那些行引用它），因此此后失败的删除已经结束了 Team，leader 仍保持关闭以便重试，与 [Session 删除与 fork](../appserver/session-deletion-and-fork.md) 对失败删除的陈述一致。这取代了删除原先“成员保留为 Session”的规则。
 - 删除被拥有 Agent 的最后一个成员 Session 时，在同一个操作里删除该 Agent 记录。公开 Agent 不会因为删除成员 Session 而被删。
 - 对成员 Session 做 fork 会被拒绝：成员会话是只读的，fork 也没有 leader 可继承。对 leader 做 fork 不领导任何成员，源的被拥有 Agent 与成员留在源。
 - 自身创建失败的委派会删掉它为这次请求创建的 Agent 记录，因此不会留下没有成员 Session 的被拥有 Agent。
@@ -117,9 +117,9 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 ### 6.5 向其他所有者提出的需求
 
-- **Agents。** 存储 `agents.owner_session_id`；以带 owner 的方式创建 Agent、删除 Agent 记录，作为具名操作；把被存储的 Agent 按被拥有状态装载；在删除 Session 的同一个事务里删除它拥有的 Agent，以及最后一个成员 Session 被删时的被拥有 Agent 记录；向 Collaboration 提供所有权，但不加入客户端协议；启动时清理未完成或失去 owner 的被拥有 Agent。
+- **Agents。** 存储 `agents.owner_session_id`；以带 owner 的方式创建 Agent、删除 Agent 记录，作为具名操作；把被存储的 Agent 按被拥有状态装载；在删除 Session 的同一个操作里删除它的成员与它拥有的 Agent，以及最后一个成员 Session 被删时的被拥有 Agent 记录；向 Collaboration 提供所有权，但不加入客户端协议；启动时清理未完成或失去 owner 的被拥有 Agent。
 - **SessionStore 与原生存储。** 存储 `agent_sessions.leader_session_id`；决定两列的格式版本、升级与索引；在删除 Session 的同一个事务里删除它拥有的 Agent 与成员 Session。
-- **Session 删除与 fork。** 把负责的级联与最后成员规则记入删除的效果（§6.3），替换“删除 leader 保留成员”的规则，并拒绝对成员 Session 执行 `session.fork`。
+- **Session 删除与 fork。** 把 Team 的级联与最后成员规则记入删除的效果（§6.3），替换“删除 leader 保留成员”的规则，并拒绝对成员 Session 执行 `session.fork`。
 
 ### 6.6 这次删掉什么
 

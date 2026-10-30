@@ -1117,7 +1117,8 @@ impl SessionStore {
                 };
                 let cut = sql_sequence(at)?;
                 tx.execute(
-                    "INSERT INTO agent_sessions VALUES (?1, ?2, ?3)",
+                    "INSERT INTO agent_sessions (session_id, config, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
                     params![
                         fork,
                         config,
@@ -1247,17 +1248,19 @@ impl SessionStore {
         config: &SessionConfig,
         agent_id: &str,
         protocol_version: u32,
+        leader: Option<&str>,
     ) -> Result<()> {
         let session = session_id.to_owned();
         let config = config.clone();
         let agent = agent_id.to_owned();
+        let leader = leader.map(str::to_owned);
         self.timeline
             .db
             .run(move |connection| {
                 let tx = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(error)?;
-                create_session(&tx, &session, &config)?;
+                create_session(&tx, &session, &config, leader.as_deref())?;
                 tx.execute(
                     "INSERT INTO session_owners VALUES (?1, ?2, ?3)",
                     params![session, agent, protocol_version],
@@ -1315,15 +1318,22 @@ impl DynPlugin for SessionStorePlugin {
     }
 }
 
-fn create_session(connection: &Connection, session: &str, config: &SessionConfig) -> Result<()> {
+fn create_session(
+    connection: &Connection,
+    session: &str,
+    config: &SessionConfig,
+    leader: Option<&str>,
+) -> Result<()> {
     let config = serde_json::to_string(config).map_err(error)?;
     connection
         .execute(
-            "INSERT INTO agent_sessions VALUES (?1, ?2, ?3)",
+            "INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) \
+             VALUES (?1, ?2, ?3, ?4)",
             params![
                 session,
                 config,
-                sql_sequence(dim_agent_runtime::core::unix_millis())?
+                sql_sequence(dim_agent_runtime::core::unix_millis())?,
+                leader
             ],
         )
         .map_err(error)?;
@@ -1884,7 +1894,7 @@ impl TimelineStore for SqliteTimelineStore {
                     let tx = connection
                         .transaction_with_behavior(TransactionBehavior::Immediate)
                         .map_err(error)?;
-                    create_session(&tx, &session, &config)?;
+                    create_session(&tx, &session, &config, None)?;
                     tx.commit().map_err(error)
                 })
                 .await

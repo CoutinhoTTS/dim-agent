@@ -11,7 +11,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 25;
+const FORMAT: u32 = 26;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -19,7 +19,7 @@ const LEGACY_BY_END: (&str, &str) = (
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26))",
     ),
     (
         "settings_documents",
@@ -39,15 +39,23 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "agent_sessions",
-        "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))",
+        "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))",
+    ),
+    (
+        "agent_sessions_by_leader",
+        "CREATE INDEX agent_sessions_by_leader ON agent_sessions(leader_session_id)",
     ),
     (
         "agents",
-        "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))",
+        "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)), owner_session_id TEXT REFERENCES agent_sessions(session_id))",
     ),
     (
         "agents_default_unique",
         "CREATE UNIQUE INDEX agents_default_unique ON agents(is_default) WHERE is_default = 1",
+    ),
+    (
+        "agents_by_owner",
+        "CREATE INDEX agents_by_owner ON agents(owner_session_id)",
     ),
     (
         "session_owners",
@@ -110,10 +118,18 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX session_catalog_with_preview ON session_catalog(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL",
     ),
 ];
+/// The v25 text of a table v26 adds a column to; `schema_of` uses it to
+/// recognize a v25 store.
+const AGENT_SESSIONS_V25: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))";
+const AGENTS_V25: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
+/// v26 adds a column to two tables, which `SCHEMA` cannot express as a new
+/// entry: the upgrade alters them before it creates the indexes on them.
+const V26_COLUMNS: &str = "ALTER TABLE agent_sessions ADD COLUMN leader_session_id TEXT REFERENCES agent_sessions(session_id);
+ALTER TABLE agents ADD COLUMN owner_session_id TEXT REFERENCES agent_sessions(session_id);";
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 11] = [
+const UPGRADES: [(u32, &[&str]); 12] = [
     (
         13,
         &[
@@ -150,6 +166,8 @@ const UPGRADES: [(u32, &[&str]); 11] = [
     // decode; the marker only.
     (23, &[]),
     (24, &[]),
+    // #593: a delegation's owner and a member Session's leader.
+    (25, &["agents_by_owner", "agent_sessions_by_leader"]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -168,9 +186,14 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                 .iter()
                 .any(|(from, added)| *from >= version && added.contains(name))
         })
-        .map(|&(name, sql)| match name {
-            "agent_store_format" => (name, format_table(version)),
-            _ => (name, sql.to_owned()),
+        .map(|&(name, sql)| {
+            let sql = match name {
+                "agent_store_format" => format_table(version),
+                "agent_sessions" if version < 26 => AGENT_SESSIONS_V25.to_owned(),
+                "agents" if version < 26 => AGENTS_V25.to_owned(),
+                _ => sql.to_owned(),
+            };
+            (name, sql)
         })
         .collect()
 }
@@ -324,6 +347,9 @@ impl SqliteStorage {
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
+                    if *from == 25 {
+                        tx.execute_batch(V26_COLUMNS).map_err(storage)?;
+                    }
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
                     }

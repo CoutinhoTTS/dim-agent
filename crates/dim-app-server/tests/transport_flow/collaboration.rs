@@ -1423,11 +1423,14 @@ async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
                 .rpc("session.close", json!({"sessionId":started["sessionId"]}))
                 .await,
         );
-        poll("temporary Agent removed", async || {
-            let listed = client.rpc("agent.list", json!({})).await;
-            (listed["result"].as_array().unwrap().len() == 1).then_some(())
-        })
-        .await;
+        assert_eq!(
+            client.rpc("agent.list", json!({})).await["result"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "the public directory never lists an owned Agent"
+        );
     }
     done.cancel();
     assert!(reader.await.unwrap() > 0);
@@ -1469,7 +1472,11 @@ async fn members_cancel_close_and_leave_the_team() {
     let member = started["sessionId"].as_str().unwrap().to_owned();
     assert_ne!(temporary, default_agent);
     let agents = client.rpc("agent.list", json!({})).await;
-    assert_eq!(agents["result"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        agents["result"].as_array().unwrap().len(),
+        1,
+        "an owned Agent belongs to its Team, not the public directory"
+    );
     say(
         &mut client,
         &lead,
@@ -1668,7 +1675,11 @@ async fn members_cancel_close_and_leave_the_team() {
     );
     assert_eq!(result_of(&timeline, &member).len(), 2);
     let agents = client.rpc("agent.list", json!({})).await;
-    assert_eq!(agents["result"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        agents["result"].as_array().unwrap().len(),
+        1,
+        "an owned Agent belongs to its Team, not the public directory"
+    );
     let listed = client.rpc("session.list", json!({})).await;
     assert!(
         listed["result"]
@@ -3879,12 +3890,7 @@ async fn unloaded_temporary_members(
     .await;
     returned(client, &lead, &lead_session, 1).await;
     let first = next_member(&lead_session, 0).await;
-    let temporary = client.rpc("agent.list", json!({})).await["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|agent| agent["default"] == false)
-        .unwrap()["agentId"]
+    let temporary = last_ok(&events(&lead_session).await)["agentId"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -3898,13 +3904,7 @@ async fn unloaded_temporary_members(
     returned(client, &lead, &lead_session, 2).await;
     let second = next_member(&lead_session, 1).await;
     poll("both members unload", async || {
-        let listed = client.rpc("agent.list", json!({})).await;
-        listed["result"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|agent| agent["agentId"] == temporary.as_str() && agent["sessions"] == 0)
-            .then_some(())
+        (agent.get_session(&first).is_none() && agent.get_session(&second).is_none()).then_some(())
     })
     .await;
     (lead, lead_session, temporary, first, second)
@@ -3922,10 +3922,11 @@ async fn team_of(client: &mut Client, lead: &str, lead_session: &Session) -> Vec
         .collect()
 }
 
-/// Whether `agent.list` lists Agent `id`.
-async fn listed(client: &mut Client, id: &str) -> bool {
-    let listed = client.rpc("agent.list", json!({})).await;
-    listed["result"]
+/// Whether the leader's `agent` tool lists Agent `id`.
+async fn listed(client: &mut Client, lead: &str, lead_session: &Session, id: &str) -> bool {
+    say(client, lead, tool(json!({"action": "list"})), "queue").await;
+    idle(client, lead).await;
+    last_ok(&events(lead_session).await)["agents"]
         .as_array()
         .unwrap()
         .iter()
@@ -3958,7 +3959,7 @@ async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
     })
     .await;
     assert!(
-        listed(&mut client, &temporary).await,
+        listed(&mut client, &lead, &lead_session, &temporary).await,
         "the temporary Agent stays with its unloaded member"
     );
     say(
@@ -3985,9 +3986,21 @@ async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
             .rpc("session.close", json!({"sessionId": first}))
             .await,
     );
-    poll("the temporary Agent closes", async || {
-        (!listed(&mut client, &temporary).await).then_some(())
-    })
+    assert!(
+        listed(&mut client, &lead, &lead_session, &temporary).await,
+        "a closed member keeps its Session and its Agent record"
+    );
+    for member in [&first, &second] {
+        assert_ok(
+            &client
+                .rpc("session.delete", json!({"sessionId": member}))
+                .await,
+        );
+    }
+    poll(
+        "the temporary Agent goes with its last member",
+        async || (!listed(&mut client, &lead, &lead_session, &temporary).await).then_some(()),
+    )
     .await;
     drop(lead_session);
     drop(client);
@@ -4023,7 +4036,7 @@ async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent(
     .await;
     assert_eq!(team, [lead.clone(), first.clone()]);
     assert!(
-        listed(&mut client, &temporary).await,
+        listed(&mut client, &lead, &lead_session, &temporary).await,
         "the temporary Agent stays with its unloaded member"
     );
 
@@ -4032,9 +4045,10 @@ async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent(
             .rpc("session.delete", json!({"sessionId": first}))
             .await,
     );
-    poll("the temporary Agent closes", async || {
-        (!listed(&mut client, &temporary).await).then_some(())
-    })
+    poll(
+        "the temporary Agent goes with its last member",
+        async || (!listed(&mut client, &lead, &lead_session, &temporary).await).then_some(()),
+    )
     .await;
     assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
     assert_eq!(loads.of(&first), (1, false));
@@ -4084,9 +4098,10 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
     for delete in deleting {
         assert_eq!(delete.await.unwrap(), json!({"ok": true, "value": {}}));
     }
-    poll("the temporary Agent closes", async || {
-        (!listed(&mut client, &temporary).await).then_some(())
-    })
+    poll(
+        "the temporary Agent goes with its last member",
+        async || (!listed(&mut client, &lead, &lead_session, &temporary).await).then_some(()),
+    )
     .await;
     assert!(team_of(&mut client, &lead, &lead_session).await.is_empty());
     assert_eq!(loads.of(&first), (1, false));
@@ -4417,4 +4432,105 @@ async fn parts_required_without_install_keep_the_builtin_descriptions() {
     );
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// A restart keeps a delegation private and restores its Team from the stored
+/// owner and leader: the owner addresses its member again, and no other leader
+/// sees the Agent. A member conversation is read-only, so a fork of it is
+/// refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_restores_a_delegation_and_keeps_it_private() {
+    let directory =
+        std::env::temp_dir().join(format!("dim-delegation-restart-{}", uuid::Uuid::new_v4()));
+    let config = ServerConfig {
+        database_path: Some(directory.join("dimcode.sqlite")),
+        ..Default::default()
+    };
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"request","prompt":"hello","profile":{
+            "name":"worker","description":"fixture","systemPrompt":"","tools":[]}})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let temporary = last_ok(&events(&lead_session).await)["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let forked = client
+        .rpc("session.fork", json!({"sessionId": member, "at": 1}))
+        .await;
+    assert_eq!(
+        forked["error"]["data"]["appError"], "session_invalid_input",
+        "{forked}"
+    );
+    assert!(
+        forked["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("read-only"),
+        "{forked}"
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        client.rpc("agent.list", json!({})).await["result"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "a restart serves the public directory only"
+    );
+    let foreign = leader(&mut client, allowed()).await;
+    let foreign_session = agent.get_session(&foreign).unwrap();
+    for action in [
+        json!({"action":"inspect","agentId":temporary}),
+        json!({"action":"request","agentId":temporary,"prompt":"x"}),
+    ] {
+        say(&mut client, &foreign, tool(action), "queue").await;
+        idle(&mut client, &foreign).await;
+        assert!(
+            last_error(&events(&foreign_session).await).starts_with("agent_not_found"),
+            "another leader cannot see an owned Agent"
+        );
+    }
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(&mut client, &lead, tool(json!({"action":"list"})), "queue").await;
+    idle(&mut client, &lead).await;
+    let listed = last_ok(&events(&lead_session).await);
+    assert!(
+        listed["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|participant| participant["sessionId"] == member.as_str()),
+        "{listed}"
+    );
+    assert!(
+        listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agentId"] == temporary.as_str()),
+        "{listed}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(directory);
 }

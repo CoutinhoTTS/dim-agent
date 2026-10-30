@@ -166,7 +166,7 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
         let id = format!("cold-catalog-{index:04}");
         let params = rusqlite::params![id, seed];
         for sql in [
-            "INSERT INTO agent_sessions SELECT ?1,config,created_at_ms FROM agent_sessions WHERE session_id=?2",
+            "INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) SELECT ?1, config, created_at_ms, leader_session_id FROM agent_sessions WHERE session_id=?2",
             "INSERT INTO session_owners SELECT ?1,agent_id,protocol_version FROM session_owners WHERE session_id=?2",
             "INSERT INTO timeline_branches SELECT ?1,branch_id,info,sequence FROM timeline_branches WHERE session_id=?2",
             "INSERT INTO timeline_content SELECT ?1,hash,kind,body FROM timeline_content WHERE session_id=?2",
