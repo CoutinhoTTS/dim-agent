@@ -9,11 +9,15 @@ import session from './session.ts'
 import { settings } from './settings.ts'
 import { bounded, RunStore, type Run } from './store.ts'
 
-/// `report_guidance` is one sentence: the entry names the report's last
-/// sentence as guidance, not part of the workflow's report.
+/// `report_guidance` is one line: the entry names the report's last line as
+/// guidance, not part of the workflow's account, so a value with a line
+/// break is refused.
+const guidance = z.string().min(1).refine(value => !/[\r\n]/.test(value), {
+  message: 'report_guidance must be one line: the entry names the report\'s last line as guidance',
+})
 const options = z.strictObject({
   packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })),
-  report_guidance: z.string().min(1).optional(),
+  report_guidance: guidance.optional(),
   invalid_definition_guidance: z.string().min(1).optional(),
 })
 const provides = { workflowRuns: { call: 'async' } } as const
@@ -32,6 +36,7 @@ export default definePlugin({
   inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods', 'partRegistry'],
   provides,
   async apply(ctx, config: z.infer<typeof options>) {
+    config = options.parse(config)
     await ctx.use<Settings>('settings').register(settings)
     const catalog = new Catalog(ctx.use<Settings>('settings'), ctx.use<WorkflowFiles>('workflowFiles'), config.packages)
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()

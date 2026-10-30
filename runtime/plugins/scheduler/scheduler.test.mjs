@@ -162,6 +162,7 @@ async function host(t, initial = {}) {
     },
   }
   h.owner = await load(processPlugin, { services, config: {} })
+  h.services = services
   const toolRegistry = { async register(declaration, execute) { h.contribution = { declaration, execute } } }
   assert.equal(h.part.scope, 'session')
   const guideEntries = { entries: [], async register(scope, entry) { this.entries.push({ scope, entry: copy(entry) }) } }
@@ -995,4 +996,31 @@ test('an uncertain lookup read retries without losing or resubmitting accepted i
   await until(() => h.runs()[0].state === 'completed', 'the next lookup finds the receipt')
   assert.equal(h.inputs.length, 1)
   assert.equal(h.launches.length, 1)
+})
+
+test('a report guidance with a line break is refused when the plugin loads', async t => {
+  const h = await host(t)
+  for (const report_guidance of ['Read the run history.\nThen decide.', 'Read the run history.\rThen decide.']) {
+    let unexpected
+    try {
+      await assert.rejects(async () => {
+        unexpected = await load(processPlugin, { services: h.services, config: { report_guidance } })
+      }, /report_guidance must be one line: the entry names the report's last line as guidance/)
+    } finally {
+      // Only reached when the load was not refused: unload it and move on.
+      void unexpected?.unload().catch(() => {})
+    }
+  }
+})
+
+test('the report guidance is the report body\'s own last line', async t => {
+  const h = await host(t)
+  const job = JSON.parse((await h.tool({ action: 'create', job: seed })).content).job
+  await h.call('run_now', { job_id: job.id })
+  await until(() => h.inputs.some(input => input.mode === 'steer'), 'report published')
+  const text = h.inputs.find(input => input.mode === 'steer').rawBlocks[0].text
+  const body = text.slice(text.indexOf('>') + 1, -'</dim-scheduler>'.length)
+  const lines = body.split('\n')
+  assert.equal(lines.at(-1), 'Inspect schedule.history for this job.')
+  assert.match(lines.at(-2), /^Scheduled job .*: completed \(.*\)\. Session .*\.$/)
 })

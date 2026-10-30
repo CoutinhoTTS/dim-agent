@@ -36,7 +36,7 @@ export class Workflow {
   pruning: Promise<void> | undefined
   maintenance: ReturnType<typeof setInterval> | undefined
 
-  /// The report's guidance sentence, with `{run_id}` substituted.
+  /// The report's guidance line, with `{run_id}` substituted.
   private readonly reportGuidance: string
 
   constructor(catalog: Catalog, sessions: Sessions, store: RunStore,

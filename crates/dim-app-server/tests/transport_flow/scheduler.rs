@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 /// The `dim-scheduler` entry (Scheduler §5.2), byte for byte.
-const SCHEDULER_ENTRY: &str = r#"<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last sentence is not part of that account: it is guidance on what to do next."#;
+const SCHEDULER_ENTRY: &str = r#"<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next."#;
 
 struct AppliedInputGate {
     held: Arc<AtomicBool>,
@@ -2130,7 +2130,7 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                     "{text}"
                 );
                 assert!(
-                    text.ends_with("Inspect schedule.history for this job.</dim-scheduler>"),
+                    text.ends_with("\nInspect schedule.history for this job.</dim-scheduler>"),
                     "{text}"
                 );
                 assert!(text.contains(job.as_str().unwrap()));
@@ -3953,7 +3953,7 @@ async fn node_scheduler_factory_texts_reach_the_declaration_and_the_report() {
         .expect("the report reaches the saving branch");
         if configured {
             assert!(
-                text.ends_with(&format!("{GUIDANCE}</dim-scheduler>")),
+                text.ends_with(&format!("\n{GUIDANCE}</dim-scheduler>")),
                 "{text}"
             );
             assert!(
@@ -3962,7 +3962,7 @@ async fn node_scheduler_factory_texts_reach_the_declaration_and_the_report() {
             );
         } else {
             assert!(
-                text.ends_with("Inspect schedule.history for this job.</dim-scheduler>"),
+                text.ends_with("\nInspect schedule.history for this job.</dim-scheduler>"),
                 "{text}"
             );
         }
