@@ -258,6 +258,55 @@ async fn sessions_never_fails_a_stored_session_while_its_owner_installs() {
     std::fs::remove_dir_all(stored.directory).unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_agent_creation_timeout_settles_during_progressing_startup() {
+    let stored = stored().await;
+    let mut held = HeldCreation::new(&stored.default_agent);
+    let mut progressing = builder();
+    let (completed, _) = tokio::sync::watch::channel(0);
+    progressing.plugin(move |names| {
+        Ok(Box::new(ProgressingProcess {
+            name: "test.stored-owner-progress".into(),
+            hub: names.key()?,
+            step: 0,
+            completed: completed.clone(),
+        }))
+    });
+    let mut starting = std::pin::pin!(crate::serve(
+        progressing,
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..config(&stored.directory)
+        },
+    ));
+    tokio::select! {
+        _ = held.arrived() => {}
+        result = &mut starting => panic!("startup ended unheld: {:?}", result.err()),
+    }
+    let server = tokio::time::timeout(Duration::from_secs(10), starting)
+        .await
+        .expect("the stored Agent's timeout settles initialization")
+        .unwrap();
+    let index = server.root.get::<AgentIndex>().unwrap();
+    let reason = index.unavailable_agent(&stored.default_agent).unwrap();
+    assert!(reason.contains("timed out"), "{reason}");
+    let reply = call(&server.root, "lookup", lookup(&stored.session)).await;
+    assert_eq!(reply["error"]["code"], "failed", "{reply}");
+    drop(held);
+    server.shutdown();
+    server.join().await.unwrap();
+    let server = crate::serve(builder(), config(&stored.directory))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&server.root, "lookup", lookup(&stored.session)).await,
+        stored.accepted
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(stored.directory).unwrap();
+}
+
 /// An execution-disabled host keeps its gate: it loads neither the default
 /// nor a stored Agent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
