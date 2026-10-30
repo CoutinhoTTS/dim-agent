@@ -1,6 +1,6 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
 use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, Sandbox, TemporaryDirectory};
-use super::{IsolationEscalation as Escalation, IsolationPolicy as PolicyFile};
+use super::IsolationPolicy as PolicyFile;
 use crate::file_storage::FileStorageError;
 use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 struct Policy {
     sandbox: Sandbox,
-    escalation: Escalation,
     read_only_paths: Option<Vec<PathBuf>>,
     writable_paths: Option<Vec<PathBuf>>,
     environment: Option<Vec<String>>,
@@ -18,7 +17,6 @@ impl Policy {
     fn default_policy() -> Self {
         Self {
             sandbox: Sandbox::Workspace,
-            escalation: Escalation::Ask,
             read_only_paths: None,
             writable_paths: None,
             environment: None,
@@ -39,34 +37,16 @@ impl Policy {
         let effective = super::isolation_policy::effective(&file)?;
         Ok(Self {
             sandbox: effective.sandbox,
-            escalation: effective.escalation,
             read_only_paths: file.read_only_paths,
             writable_paths: file.writable_paths,
             environment: file.environment,
         })
     }
 
-    /// A call may narrow the node's tier freely. Widening it is the node's
-    /// decision, so a wider request needs `escalation: "ask"`.
-    fn resolve(
-        &self,
-        requested: Option<Sandbox>,
-        location: &str,
-    ) -> Result<Sandbox, ProcessSpecError> {
-        let Some(requested) = requested else {
-            return Ok(self.sandbox);
-        };
-        if requested <= self.sandbox || self.escalation == Escalation::Ask {
-            return Ok(requested);
-        }
-        Err(ProcessSpecError {
-            code: "isolation_denied",
-            reason: format!(
-                "sandbox \"{}\" is wider than this node's \"{}\" isolation policy; use /settings > Command isolation to select wider requests: ask (policy: {location}).",
-                requested.name(),
-                self.sandbox.name(),
-            ),
-        })
+    /// The host enforces the boundary; it does not make a second admission
+    /// decision. A requested boundary is used as given.
+    fn resolve(&self, requested: Option<Sandbox>, _location: &str) -> Result<Sandbox, ProcessSpecError> {
+        Ok(requested.unwrap_or(self.sandbox))
     }
 }
 
@@ -582,21 +562,18 @@ async fn bubblewrap_binds_file_roots_after_the_directories_that_contain_them() {
 
 #[cfg(test)]
 #[test]
-fn policy_versions_name_the_sandbox_and_the_escalation() {
+fn policy_versions_name_the_sandbox() {
     let network = Policy::decode(br#"{"version":1,"network":true}"#).unwrap();
     assert_eq!(network.sandbox, Sandbox::Network);
-    assert_eq!(network.escalation, Escalation::Deny);
 
     let disabled = Policy::decode(br#"{"version":1,"enabled":false}"#).unwrap();
     assert_eq!(disabled.sandbox, Sandbox::Host);
 
     let ask = Policy::decode(br#"{"version":2,"sandbox":"network","escalation":"ask"}"#).unwrap();
     assert_eq!(ask.sandbox, Sandbox::Network);
-    assert_eq!(ask.escalation, Escalation::Ask);
 
     let defaults = Policy::decode(br#"{"version":2}"#).unwrap();
     assert_eq!(defaults.sandbox, Sandbox::Workspace);
-    assert_eq!(defaults.escalation, Escalation::Ask);
 
     assert!(Policy::decode(br#"{"version":1,"sandbox":"host"}"#).is_err());
     assert!(Policy::decode(br#"{"version":2,"enabled":false}"#).is_err());
@@ -605,24 +582,11 @@ fn policy_versions_name_the_sandbox_and_the_escalation() {
 
 #[cfg(test)]
 #[test]
-fn a_call_narrows_the_sandbox_and_needs_escalation_to_widen_it() {
+fn a_call_uses_the_node_sandbox_and_accepts_a_request() {
     let deny = Policy::decode(br#"{"version":2,"escalation":"deny"}"#).unwrap();
     assert_eq!(deny.resolve(None, "policy").unwrap(), Sandbox::Workspace);
     assert_eq!(
-        deny.resolve(Some(Sandbox::Workspace), "policy").unwrap(),
-        Sandbox::Workspace
-    );
-    let denied = deny.resolve(Some(Sandbox::Host), "policy").unwrap_err();
-    assert_eq!(denied.code, "isolation_denied");
-    assert!(
-        denied.reason.contains("/settings > Command isolation"),
-        "{}",
-        denied.reason
-    );
-
-    let ask = Policy::decode(br#"{"version":2,"escalation":"ask"}"#).unwrap();
-    assert_eq!(
-        ask.resolve(Some(Sandbox::Host), "policy").unwrap(),
+        deny.resolve(Some(Sandbox::Host), "policy").unwrap(),
         Sandbox::Host
     );
 
