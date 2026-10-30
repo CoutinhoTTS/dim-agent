@@ -54,7 +54,7 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 | 0.17.2 | No API change. A bad value fails only its call; a runtime exit blames no other row; `StillWaiting` after 10 s |
 | 0.18 | Error texts carry codes (`session::Error::Binding`); the default error sink writes to standard error; configurations are validated against their schema and filled with defaults; `reconcile` no longer waits for a runtime still starting; objects with methods cross to every language |
 | 0.19 | A local runtime is the far end of a session; the link, peer, transport and identity layer is gone; the catalog shares every unregistered name; runtime rows honour `isolate`; every runtime emit goes through the host; `LoaderPlugin` provides the service `loader`; one `rutis/row` listener per loader instead of one per row ([rutis#808](https://github.com/arcships/rutis/pull/808), the fix [#518](https://github.com/arcships/dim/issues/518) waits for); the SDK test tools run on a real `rutis-host`; Python 3.12 or later; `CordisError` is `Error` on the wire |
-| 0.19.1 | The synchronous waterfall is back as `waterfall(event).sync(terminal)` (M2); foreign definition copies resolve in a host's own instances, and `mark_scope` is public (rutis#948, used by #684); `Loader::instance_rows`; a `reconcile` after a runtime's `ready()` loads its rows; a runtime plugin is Starting from when it is made (rutis#964, M4) |
+| 0.19.1 | The synchronous waterfall is back as `waterfall(event).sync(terminal)` (M2); foreign definition copies resolve in a host's own instances, and `mark_scope` is public (rutis#948, used by #684); `Loader::instance_rows`; a `reconcile` after a runtime's `ready()` loads its rows; rutis-host's runtime plugin is Starting from when it is made (rutis#964; Dim does not use it, M4) |
 
 ### 2.1 Kernel APIs Dim calls
 
@@ -72,10 +72,10 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 
 | 0.17.1 | 0.19.1 |
 | --- | --- |
-| `rutis_bridge::runtime::LocalRuntime` (`node`, `python`, `named`, `interpreter`, `python_path`, stdio, `handle`) | A connection plugin of the host's own: `rutis_bridge::runtime::Launcher`, `pipe::greeted`, `Session::new`, `RuntimeStates`. The guide's `rutis_host::connect::SpawnPlugin` composes the same parts; Dim does not link it (M4) |
-| `RuntimePlugin`, the service `runtime::Runtime` | Removed; state through `RuntimeHandle::state()`, same variants |
+| `rutis_bridge::runtime::LocalRuntime` (`node`, `python`, `named`, `interpreter`, `python_path`, stdio, `handle`) | A connection row of the host's own: `rutis_bridge::runtime::Launcher`, `pipe::greeted`, `Session::new`, `pipe::Processes`. The guide's `rutis_host::connect::SpawnPlugin` is not used (M4) |
+| `RuntimePlugin`, the service `runtime::Runtime` | Removed; a runtime's state is its connection row's, in `Loader::status()` (M4) |
 | `Stdio::Lines` | `pipe::Stdio::Pipe(factory)`; Dim's factory forwards lines to `tracing` |
-| `rutis_loader::runtime::RuntimeResolver::node` / `::modules`, `with_catalog`, `invalidate` | One `rutis_loader::runtime::SessionResolver` (`npm(&catalog, row)`, `runtime(handle)`, `attach(&loader)`, `follow_row(row)`); no cache to invalidate; Node resolves npm names |
+| `rutis_loader::runtime::RuntimeResolver::node` / `::modules`, `with_catalog`, `invalidate` | One `rutis_loader::runtime::SessionResolver` (`npm(&catalog, row)`, `attach(&loader)`, `follow_row(row)`); no cache to invalidate; Node resolves npm names |
 | `RuntimeRows`, `RowsSource`, `RuntimeRowsPlugin` | `SessionRows::key(row)`; `SessionResolver::follow_row` |
 | `ServiceCatalog::share_registered_only()` | Removed: every name not registered otherwise is shared by name |
 | `Loader::waiting_for(entry)` | `Loader::waits(entry)` |
@@ -192,60 +192,68 @@ injects that the catalog does not register now waits in rutis at its shared key,
 to the runtime. [How Dim uses rutis §3.4](rutis-usage.md#34-the-catalog) drops the sentence about
 `share_registered_only`.
 
-### M4. Local runtimes are sessions on Dim's own connection plugin
+### M4. A local runtime is a connection row
 
-0.19 makes a local runtime the far end of a session and moves the knowledge of how to start each
-language out of rutis-bridge. The migration guide names `rutis_host::connect::SpawnPlugin` as
-`LocalRuntime`'s replacement. Taking it would make Dim link the `rutis-host` application crate (its
-commands, its WebSocket and TLS stack, a second tokio-tungstenite, the loader's Go and Swift features)
-to start two processes.
+0.19 makes a local runtime the far end of a session and removes the runtime plugin and its state
+(`LocalRuntime`, `RuntimePlugin`, the `runtime::Runtime` service). The migration guide names
+rutis-host's `SpawnPlugin` as `LocalRuntime`'s replacement. That plugin serves rutis-host's own
+commands: it keeps `RuntimeStates` for rutis-host's `status` and `restart`, and reads the runtime's
+process through `SessionHandle::process()`, which rutis-bridge hides (`#[doc(hidden)]`; it is for
+rutis-loader). Dim is a host itself and needs neither. In 0.19 a runtime, local or remote, is a
+connection row: a connection of one's own is a plugin that hands a `Channel` to `Session::new`, and a
+runtime its host starts takes `<channel> --id <name> <project>`
+([0.19 migration](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.en.md) "Upgrade
+together"). Everything Dim needs to know about a runtime is its row's. Dim links no `rutis-host` and
+copies none of `SpawnPlugin`.
 
-Dim is a host itself, and starting the runtimes is already RuntimeManager's business. rutis documents
-both pieces this needs:
-
-- a connection of one's own is a connection plugin that hands a `Channel` to `Session::new`;
-- a runtime its host starts takes `<channel> --id <name> <project>` ([0.19 migration](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.en.md)
-  "Upgrade together").
-
-Every part `SpawnPlugin` composes is public in rutis-bridge. Dim therefore links no `rutis-host`.
-
-- **The runtime row.** Each runtime is a process row whose id is its name: `session-node` and `py`.
-  Its plugin, `RuntimeConnection`, is Dim's connection plugin. It does four things:
-  - it builds the process with `rutis_bridge::runtime::Launcher` from the runtime's launch command,
-    starts it on the inherited channel with `--id <name>`, and waits for its greeting
-    (`pipe::greeted`);
-  - it mounts `Session::new(channel)`. The loader marks the row, so the session provides its handle
-    at `session_key("session-node")` / `session_key("py")`, where the `SessionResolver` finds it. No
-    internal API is needed;
-  - it keeps the runtime's `RuntimeStates`: starting, ready, failed or stopped, and how the process
-    ended (`ended_status`). It calls `starting()` when it is made, before it is mounted, as 0.19.1's
-    `SpawnPlugin` does (rutis#964): `RuntimeHandle::ready()` waits only while the runtime is Starting
-    and answers `None` at `Idle`, so a `ready()` asked before `apply` would otherwise report no
-    runtime;
+- **The runtime is a connection row.** `session-node` and `py` are process rows. Their plugin,
+  `RuntimeConnection`, does what any connection plugin does, with rutis-bridge's public parts:
+  - it starts the process with `rutis_bridge::runtime::Launcher` from the runtime's launch command,
+    on a channel of its own with `--id <name>`, records it in a `pipe::Processes` of its own, and
+    waits for its greeting (`pipe::greeted`);
+  - it mounts `Session::new(channel)`. The loader marks the row, so the session's handle is at
+    `session_key(row)`;
+  - when the session ends on its own, the plugin fails with how the process ended
+    (`Processes::status()`, for example `exited with exit status: 1`). Unloading kills a process that
+    has not ended and waits for it (`Processes::kill`, `Processes::ended`);
   - it forwards standard error line by line to `tracing` through `pipe::Stdio::Pipe`. Standard input
     and output are null, as today.
+- **The far end's plugins are rows.** A TypeScript or Python plugin is the row
+  `session-node:<plugin>` or `py:<plugin>`. `SessionResolver` resolves it through that session, and
+  it waits for `SessionRows::key(row)` until the session is there. When the session ends, its rows wait
+  again. The loader holds all of them; Dim keeps no list of its own.
+- **A runtime's state is its row's.** Whether a runtime runs is its connection row's state in
+  `Loader::status()`. `runtime.list` keeps its statuses:
+  - `off`, `acquiring` and `failed` are RuntimeManager's own, for acquiring the runtime;
+  - once the launch command is provided, the row gives the rest: loading or waiting is `starting`,
+    Active is `ready`, and Failed is `down`, with the row's error (how the process ended) as `reason`.
+
+  `idle`, which only `RuntimeStates` reported, goes. Nothing in Dim holds a `RuntimeStates` or a
+  `RuntimeHandle`.
 - **Launch commands.** Dim keeps the two commands rutis-host's own launchers use for these packages
   (`languages/node.rs`, `languages/python.rs`), with the interpreters and paths Dim configures today:
   - Node: `node --import tsx src/runner.mjs` in the `@arcships/rutis-runtime` package;
   - Python: `python -m rutis` in its project, with the project and the plugin packages on
     `PYTHONPATH`, and `PYTHONUNBUFFERED=1` and `PYTHONDONTWRITEBYTECODE=1`.
-- **When a runtime starts.** The row injects a Rust-only process service carrying its launch command
-  (`nodeRuntime`, `pythonRuntime`), so rutis holds it until the command is there.
+- **When a runtime starts and restarts.** The row injects a Rust-only process service carrying its
+  launch command (`nodeRuntime`, `pythonRuntime`), so rutis holds it until the command is there.
   - With configured paths (`--node`, `--js-runtime`, `--python`), the App Server provides the command
     at startup, and the row is required, as today.
   - Under RuntimeManager, RuntimeManager provides it once it has acquired the runtime, instead of
     mounting a `LocalRuntime` as its child. The row is optional, so startup never waits for a
     download.
-  - `runtime.install` after a failure or an ended process provides the command again, and rutis
-    reloads the row with it. `runtime.list` reads `RuntimeHandle::state()` from the same
-    `RuntimeStates`.
+  - `runtime.install` of a runtime that is `down` drops the command's `Disposer` and provides the
+    command again. rutis restarts a row whose injected service is withdrawn and provided again, so
+    the row starts a new process. RuntimeManager mounts no children and holds no handle.
 - **Identity.** The App Server root provides `LocalId("dim-daemon")`. It is the id this kernel greets
   every session with, the runtimes' and the leaves' (M8). It does not mount `Session::service()`:
   that serves the name `sessions`, which is Dim's `AgentDirectory`.
 - **Resolving.** One `SessionResolver::npm(catalog, "session-node")` serves both runtimes, last in
   the chain.
-  - It gets `runtime(handle)` for each runtime's `RuntimeStates`, and `attach(&loader)` before the
-    loader mounts. `follow_row` is called for each runtime once the loader runs.
+  - `attach(&loader)` is called before the loader mounts, and `follow_row` for each runtime row once
+    the loader runs, so a runtime's rows are released as soon as its session is there.
+  - `runtime(handle)` is not called. It only adds a `RuntimeHandle`'s state to `Loader::status`,
+    which the row's own state already gives.
   - Dim's own wrapper is renamed (`SnapshotResolver`). It keeps checking each row's `provides`
     snapshot and adding `workflowFiles`, and it no longer routes `py:` names.
   - A runtime that is not running is recognised the way the loader recognises it: no schema, and a
@@ -456,7 +464,9 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
 ### M9. Smaller replacements
 
 - `plugin_manager.rs`: `waitingFor` lists the services of `Loader::waits(entry)`. A row waiting for
-  its runtime names the runtime.
+  its runtime's session names the runtime's row (`session-node` or `py`), which is how `Loader::waits`
+  reports it (`WaitReason::OwnRuntime`). The runtime rows themselves are not plugin rows, so their own
+  wait for a launch command is not in `plugin.list`.
 - The nine `set_overlay` test calls write their fixture rows in a layer of their own and reconcile with
   it.
 - `tests/integration/tests/extensions.rs` keeps its unresolved-module case with a name that does not
@@ -536,8 +546,9 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 - **Runtime rows (M4):**
   - the `session-node` and `py` rows wait until their launch command is provided, and start once
     RuntimeManager has acquired the runtime;
-  - a TypeScript and a Python row start, are listed by `runtime.list` and survive a
-    `runtime.install` restart;
+  - a TypeScript and a Python row start, and `runtime.list` shows their runtimes `ready`;
+  - a runtime whose process exits shows `down` with how it ended, its rows wait again, and
+    `runtime.install` starts a new process that runs them;
   - admission waits for the runtime's rows;
   - `plugin.reload` picks up a changed module.
 - **Snapshot rows (M4):** a row resolved while its runtime is down is accepted against its `provides`
@@ -580,7 +591,10 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   the `ui.open` reply, the `hello` feature paragraph, Later), §8, §9 and §10 (M8).
 - [RuntimeManager](plugins/RuntimeManager.md), §1–§3 and §5 (M4):
   - it provides the launch commands (`nodeRuntime`, `pythonRuntime`) instead of mounting
-    `LocalRuntime`;
+    `LocalRuntime`, and `runtime.install` provides them again;
+  - it reads a runtime's state from its row (`Loader::status()`) and holds no handle: §2.4's "whether
+    a runtime is running is rutis' state (`RuntimeHandle::state`)" and §3.3's "rutis' runtime state"
+    become the row's state, and §5's `runtime.list` statuses lose `idle`;
   - the `session-node` and `py` rows replace the `Runtime#…` names;
   - the Python requirement.
 - [PluginManager](plugins/PluginManager.md): `waitingFor` and reload (M9, M4), and its rutis 0.17.1
@@ -635,9 +649,9 @@ The upgrade adds no part, event or fact.
 | Rule | Answer |
 | --- | --- |
 | Principles §4 rules 1–3, 5–7, 9 | Unchanged: no command, handover, `before` contract, batch, context path or fact changes; M2 keeps the `before` contract, its order and its failure rule |
-| §4 rule 4 (state ownership) | PluginManager stays the only writer of rows: without an editable layer, a plugin can reload a row through `loader` but not add or remove one (M5). Runtime state stays `RuntimeManager`'s, read from rutis's handle |
+| AGENTS rule 4 (state ownership) | PluginManager stays the only writer of rows: without an editable layer, a plugin can reload a row through `loader` but not add or remove one (M5). A runtime's state is its connection row's, which the loader holds; RuntimeManager reads it and keeps only the state of acquiring the runtime (M4) |
 | §4 rule 8 (infrastructure unchanged by default) | The changes come from the dependency upgrade and close inside the runtime crate, the App Server and the CLI; the one requirement on rutis is M2's, answered by rutis#947 in 0.19.1 (§9) |
-| §4 rule 11 (trusted plugins, explicit boundaries) | M8 states what the leaf link exposes and keeps the boundary at the local user; no approval or permission changes |
+| AGENTS rule 11 (trusted plugins, explicit boundaries) | M8 states what the leaf link exposes and keeps the boundary at the local user; no approval or permission changes |
 | AGENTS rule 6 (frozen fixtures) | `crates/dim-agent-types/tests/fixtures/` is not touched |
 | ADR 002 D1–D5 | No scope placement, wiring, dependency or configuration change: the runtimes stay process parts and the leaf stays the CLI process's. M6 changes the Agent placement API to one `build(loader, anchor)`, following [ADR 004](../adr/004-loader-plugin-management.md)'s "No second loader" |
 | ADR 006 D2 | Dim uses rutis's sessions and resolver directly. It starts its runtimes with rutis's documented form for a host's own connection, and adds no wrapper for removed APIs |
@@ -656,8 +670,9 @@ The upgrade adds no part, event or fact.
   on a stale file.
 - Dim keeps its own resolver wrapper only for what rutis does not do: the `provides` snapshot check
   and `workflowFiles`.
-- No compatibility shim and no host application. The runtimes start in Dim's own connection plugin,
-  the form rutis documents for a host's own connection, from rutis-bridge's public parts. The
-  `rutis-host` crate is not linked for the two launch commands it would provide. `RuntimeManager`
-  no longer mounts children: it provides the launch command, and rutis's gating starts the row.
+- No compatibility shim and no host application. A runtime is a connection row, the form rutis
+  documents for a host's own connection, built from rutis-bridge's public parts. Dim keeps no runtime
+  state of its own: the row's state is the runtime's. The `rutis-host` crate is not linked, and its
+  `SpawnPlugin` and `RuntimeStates` are not copied. `RuntimeManager` no longer mounts children: it
+  provides the launch command, and rutis's gating starts the row.
 - `ui.leaf.2` reuses the existing feature fallback and adds no version check.
