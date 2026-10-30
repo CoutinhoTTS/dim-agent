@@ -3086,7 +3086,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "format"
+        "format",
+        "panic"
       ]
     },
     {

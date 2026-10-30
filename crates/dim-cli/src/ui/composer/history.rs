@@ -172,4 +172,66 @@ mod tests {
             assert_eq!(entries, expected_sorted, "round {round}");
         }
     }
+
+    /// Set on the children a cross-process test re-executes, with the home
+    /// and the writer number they write.
+    const CHILD_HOME: &str = "DIM_TEST_ATOMIC_CHILD_HOME";
+    const CHILD_WRITER: &str = "DIM_TEST_ATOMIC_CHILD_WRITER";
+
+    /// Two processes writing one home keep every key and every entry, so the
+    /// exclusion is a file lock and not one of this process's own. This is
+    /// tested here because both home files are written through the same
+    /// helper, and the layers let only the composer's modules reach both.
+    #[test]
+    fn the_lock_holds_across_processes() {
+        let Some(home) = std::env::var_os(CHILD_HOME) else {
+            return across_processes();
+        };
+        let home = PathBuf::from(home);
+        let writer: usize = std::env::var(CHILD_WRITER).unwrap().parse().unwrap();
+        for value in 0..40 {
+            let key = format!("key{writer}");
+            assert_eq!(crate::ui::config::write(&home, &key, value.into()), None);
+            if value < 4 {
+                append(&home, "/work", &format!("entry {writer} {value}")).unwrap();
+            }
+        }
+    }
+
+    /// Starts the children of `the_lock_holds_across_processes` and checks
+    /// what they wrote: every key, and every history entry.
+    fn across_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let test = std::env::current_exe().unwrap();
+        let children: Vec<_> = (0..2)
+            .map(|writer| {
+                std::process::Command::new(&test)
+                    .arg("--exact")
+                    .arg("ui::composer::history::tests::the_lock_holds_across_processes")
+                    .env(CHILD_HOME, home)
+                    .env(CHILD_WRITER, writer.to_string())
+                    .spawn()
+                    .unwrap_or_else(|error| panic!("writer {writer}: {error}"))
+            })
+            .collect();
+        for mut child in children {
+            assert!(child.wait().unwrap().success(), "a writer failed");
+        }
+        for writer in 0..2 {
+            let key = format!("key{writer}");
+            assert_eq!(
+                crate::ui::config::read(home, &key),
+                Some(39.into()),
+                "{key} lost"
+            );
+        }
+        let mut entries = load(home, "/work");
+        entries.sort();
+        let mut expected: Vec<String> = (0..2)
+            .flat_map(|writer| (0..4).map(move |value| format!("entry {writer} {value}")))
+            .collect();
+        expected.sort();
+        assert_eq!(entries, expected);
+    }
 }
