@@ -249,7 +249,7 @@ Dispatcher、before 与 Session 广播统一使用显式 `EventKey<E>`：
 | 事件范围 | 键与调用 |
 | --- | --- |
 | 分支已提交事件 | 分支私有名 `dim/timeline/{instance}/committed`，只由 Dispatcher 构造；`on(ctx, &key, listener)` / `serial(ctx, &key, Arc::new(event)).await` |
-| 分支 before | 分支私有名 `dim/timeline/{instance}/before`，只由 Timeline 构造；`on_sync` / `waterfall_sync` |
+| 分支 before | 分支私有名 `dim/timeline/{instance}/before`，只由 Timeline 构造；`on_sync` / `waterfall(..).sync(..)` |
 | Session 活事件 | `session_channel(session_id) -> EventKey<SessionBroadcastEvent>`；`emit(ctx, &key, Arc::new(event))` / `on(ctx, &key, listener)` |
 | 进程通知 | 所属 Plugin 导出的 `EventKey<E>::of()`、静态 `named` 键或动态键构造函数 |
 
@@ -263,7 +263,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ### 同步 before
 
-`Timeline::before(ctx, name, keys, handler)` 在分支的 before 通道注册 `on_sync`，监听随注册 Plugin 卸载；提交锁内调用 `waterfall_sync`，不维护独立注册表或生命周期。`BeforeCommit` 是 runtime 内的调用载荷，trace 步骤不参与序列化，不写入 Timeline，不启动 future 或任务。
+`Timeline::before(ctx, name, keys, handler)` 在分支的 before 通道注册 `on_sync`，监听随注册 Plugin 卸载；提交锁内调用 `waterfall(..).sync(..)`，不维护独立注册表或生命周期。`BeforeCommit` 是 runtime 内的调用载荷，trace 步骤不参与序列化，不写入 Timeline，不启动 future 或任务。
 
 - handler 签名为 `Fn(EventDraft) -> Result<EventDraft>`。包装层固定先调用 `call.next()`，再变形下游结果；先注册者在外层，后注册者先变形，trace 按实际顺序保留 original 与 steps。handler 不能拦截下游。
 - handler 报错、panic（`SyncEventPanicked`）或改变事件 kind 时整链回退，原样提交并清空轨迹。
@@ -326,7 +326,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | --- | --- |
 | 实例键 | `Ctx::instance()`、`TypeKey::instance`/`with_instance`；provide、读取、门控与诊断按作用域子树校验，越界返回 `InstanceOutOfScope` |
 | 事件键 | `EventKey<E>` 与统一的 `on` / `emit` / `serial` / `parallel`；同名的全部监听方都收到，同一进程同名事件按 emit 顺序开始，`serial` 按监听注册顺序等待 |
-| 同步事件 | `on_sync`、`bail_sync` / `waterfall_sync`；监听方经 `call.next()` 调用下游；卸载等待运行中的调用退出，不包含返回后的业务提交 |
+| 同步事件 | `on_sync`、`bail_sync` / `waterfall(..).sync(..)`；监听方经 `call.next()` 调用下游；卸载等待运行中的调用退出，不包含返回后的业务提交 |
 | 严格服务读取 | `Ctx::require` / `require_as` 返回带调用位置的 `ServiceReadError`；不取代 `injects` 门控或产品装配预检 |
 | 子树永久卸载 | `FiberView::shutdown()`：子树内消费者先于提供者 dispose 且不进入 Pending，子树外消费者重载；回收父级、依赖索引与总线记录；结果共享、不可重启 |
 | 就绪观察 | `FiberView::watch()` 观察各作用域子插件状态 |

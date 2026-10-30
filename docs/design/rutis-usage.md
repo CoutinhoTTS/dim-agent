@@ -170,8 +170,7 @@ hand-written adapter layer.
 
 Each name is declared once. A service that crosses languages declares its name on its Rust type with
 `#[rutis::service]`. A Rust-only service, or a name a foreign part provides, is registered in the
-host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask graph`
-writes the authoritative table from the real assembly, the
+host's loader catalog. `xtask graph` writes the authoritative table from the real assembly, the
 [generated catalog](../architecture/rust-agent/generated/catalog.md), and `xtask check` fails when it is
 stale (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
 

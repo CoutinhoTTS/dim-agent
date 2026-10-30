@@ -125,7 +125,7 @@ builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
 ### 3.4 服务目录
 
 每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
-或由外来部件提供的名称，注册在宿主的 loader 服务目录中。服务目录只共享这些名称（`share_registered_only`）。
+或由外来部件提供的名称，注册在宿主的 loader 服务目录中。
 `xtask graph` 从真实装配写出权威的表，即[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，
 表过期时 `xtask check` 失败（R4）。Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
 

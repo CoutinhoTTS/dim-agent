@@ -211,7 +211,7 @@ impl Parts {
                     }
                 };
                 if !matches!(
-                    builder.catalog().key_in(service, &Build::default()),
+                    dim_agent_runtime::names::registered_key(builder.catalog(), service),
                     Err(LoaderError::UnknownService(_))
                 ) {
                     return Err(ServerError::Configuration(format!(
@@ -251,7 +251,7 @@ impl Parts {
                     )));
                 }
                 if let Err(LoaderError::UnknownService(_)) =
-                    builder.catalog().key_in(service, &Build::default())
+                    dim_agent_runtime::names::registered_key(builder.catalog(), service)
                 {
                     builder.catalog_mut().register_shared(service);
                 }

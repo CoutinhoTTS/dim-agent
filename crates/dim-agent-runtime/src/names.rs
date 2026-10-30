@@ -65,7 +65,7 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
     group: Option<&str>,
 ) {
     let name = name_of::<T>();
-    let known = match catalog.key_in(&name, &Build::default()) {
+    let known = match registered_key(catalog, &name) {
         Err(LoaderError::UnknownService(_)) => None,
         Ok(key) if group.is_some() && key.type_id() != TypeId::of::<T>() => None,
         Ok(_) => Some(None),
@@ -88,11 +88,10 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
     };
 }
 
-/// A catalog for an assembly: it shares only the names registered as shared
-/// (`share_registered_only`), and holds the runtime's own names.
+/// A catalog for an assembly, holding the runtime's own names. Every name it
+/// does not register is shared across languages.
 pub fn catalog() -> ServiceCatalog {
     let mut catalog = ServiceCatalog::new();
-    catalog.share_registered_only();
     register::<crate::PartRegistry>(&mut catalog, None);
     let session = Some(SESSION_GROUP);
     register::<SessionConfig>(&mut catalog, session);
@@ -165,7 +164,7 @@ impl<'a> Names<'a> {
     pub fn key<T: ?Sized + 'static>(&self) -> Result<Key<T>, Error> {
         let name = name_of::<T>();
         let failed = |message: String| rutis::Error::from(ErrorKind::PluginFailed(message.into()));
-        let group = match self.catalog.key_in(&name, &Build::default()) {
+        let group = match registered_key(self.catalog, &name) {
             Ok(key) => {
                 self.check_type::<T>(&name, &key)?;
                 return Ok(Key::of());
@@ -198,7 +197,7 @@ impl<'a> Names<'a> {
     /// optional includes it only then ([`Self::when`]).
     pub fn registered<T: ?Sized + 'static>(&self) -> bool {
         !matches!(
-            self.catalog.key_in(&name_of::<T>(), &Build::default()),
+            registered_key(self.catalog, &name_of::<T>()),
             Err(LoaderError::UnknownService(_))
         )
     }
@@ -283,6 +282,21 @@ impl<'a> Names<'a> {
             )
             .into(),
         )))
+    }
+}
+/// The catalog's key for `name` outside any instance, or `UnknownService`
+/// when the host did not register the name: rutis shares every name it does
+/// not register, at `host_key(name)`, so that key alone says nothing was
+/// registered. A name Dim registers as shared is read with [`Names::named`].
+pub fn registered_key(
+    catalog: &ServiceCatalog,
+    name: &str,
+) -> std::result::Result<rutis::host::TypeKey, LoaderError> {
+    match catalog.key_in(name, &Build::default()) {
+        Ok(key) if key == rutis_bridge::session::host_key(name).erase() => {
+            Err(LoaderError::UnknownService(vec![name.to_owned()]))
+        }
+        other => other,
     }
 }
 fn outside(group: &str) -> Error {

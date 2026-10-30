@@ -384,14 +384,14 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
 fn register_names(catalog: &mut ServiceCatalog, code: &record::Code) {
     for (service, group) in &code.instance_names {
         if matches!(
-            catalog.key_in(service, &Build::default()),
+            dim_agent_runtime::names::registered_key(catalog, service),
             Err(LoaderError::UnknownService(_))
         ) {
             catalog.register_shared_instance(service, group.as_str().unwrap_or_default());
         }
     }
     for service in code.provides.keys() {
-        if let Err(LoaderError::UnknownService(_)) = catalog.key_in(service, &Build::default()) {
+        if let Err(LoaderError::UnknownService(_)) = dim_agent_runtime::names::registered_key(catalog, service) {
             catalog.register_shared(service);
         }
     }
@@ -403,7 +403,7 @@ fn missing_instance_names(catalog: &ServiceCatalog, code: &record::Code) -> Vec<
         .iter()
         .filter(|(service, group)| {
             !matches!(
-                catalog.key_in(service, &Build::default()),
+                dim_agent_runtime::names::registered_key(catalog, service),
                 Err(LoaderError::OutsideInstance { group: held, .. }) if Some(held.as_str()) == group.as_str()
             )
         })
