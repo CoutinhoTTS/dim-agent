@@ -2209,6 +2209,13 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         split_call,
         "a page must start with a result of an earlier call"
     );
+    assert!(
+        paged
+            .iter()
+            .filter(|item| item["type"] == "tool_result")
+            .all(|item| item["name"].is_string()),
+        "a result names its call however far before the page it is"
+    );
     assert_eq!(after, end);
     assert_eq!(&paged, full["events"].as_array().unwrap());
 
@@ -2469,15 +2476,16 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
             );
         }
         Box::pin(async move {
-            let started = futures_util::stream::iter(vec![
-                Ok(ModelChunk::MessageStart {
-                    message_id: "partial".into(),
-                }),
+            let mut started = vec![Ok(ModelChunk::MessageStart {
+                message_id: "partial".into(),
+            })];
+            started.extend((0..UNFINISHED_CALLS).map(|at| {
                 Ok(ModelChunk::ToolStart {
-                    id: "unfinished".into(),
+                    id: format!("unfinished-{at}"),
                     name: "echo".into(),
-                }),
-            ]);
+                })
+            }));
+            let started = futures_util::stream::iter(started);
             let usage = futures_util::stream::iter((0..PARTIAL_USAGE).map(|_| {
                 Ok(ModelChunk::Usage(
                     serde_json::from_value(
@@ -2498,6 +2506,9 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
 
 /// More than one search step, and more than a read page holds.
 const PARTIAL_USAGE: u64 = 300;
+
+/// The calls one request starts and leaves undispatched.
+const UNFINISHED_CALLS: usize = 3;
 
 /// A result closing undispatched calls (ADR agent-029) names them from their
 /// `step/tool-use-start`, however far before the read page it is.
@@ -2596,6 +2607,10 @@ async fn undispatched_results_name_calls_from_their_starts() {
     .await;
     idle(&mut client, &lead).await;
     let after = start.sequence + PARTIAL_USAGE - 1;
+    let collaboration = server
+        .service::<dim_app_server::collaboration::Collaboration>()
+        .expect("the collaboration service");
+    collaboration.take_reads();
     say(
         &mut client,
         &lead,
@@ -2613,11 +2628,35 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|item| item["type"] == "tool_result" && item["callId"] == "unfinished")
+        .filter(|item| item["type"] == "tool_result")
         .collect();
-    assert_eq!(closed.len(), 1, "{read}");
-    assert_eq!(closed[0]["name"], "echo");
-    assert_eq!(closed[0]["status"], "error");
+    assert_eq!(closed.len(), UNFINISHED_CALLS, "{read}");
+    for (at, item) in closed.iter().enumerate() {
+        assert_eq!(item["callId"], format!("unfinished-{at}"));
+        assert_eq!(item["name"], "echo", "{item}");
+        assert_eq!(item["status"], "error", "{item}");
+    }
+    assert_eq!(
+        collaboration.take_reads(),
+        2,
+        "one page and one read of every start it names"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "read", "agentId": holder, "sessionId": member,
+            "after": through, "limit": 200}),
+        ),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    assert_eq!(
+        collaboration.take_reads(),
+        1,
+        "a page without results reads only itself"
+    );
     server.shutdown();
     server.join().await.unwrap();
 }

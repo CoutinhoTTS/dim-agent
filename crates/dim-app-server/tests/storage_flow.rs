@@ -8,6 +8,7 @@ use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -4290,9 +4291,10 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
             .is_empty()
     );
     let call = sessions
-        .read_event("paged", "event-1")
+        .read_events("paged", &["event-1".to_owned()])
         .await
         .unwrap()
+        .remove("event-1")
         .unwrap();
     assert!(matches!(&call.kind, EventKind::ToolCall(data) if data.calls[0].name == "echo"));
     let connection = Connection::open(&database.0).unwrap();
@@ -4353,19 +4355,29 @@ async fn tool_use_starts_are_found_by_request_and_call_id() {
         )
         .unwrap();
     wait.await.unwrap().unwrap();
-    let name = async |request_id, call_id| {
-        sessions
-            .read_tool_use_start("starts", request_id, call_id)
-            .await
-            .unwrap()
-            .map(|event| match &event.kind {
-                EventKind::ToolUseStart(data) => data.name.clone(),
-                kind => panic!("unexpected {}", kind.key()),
-            })
+    let wanted = [
+        ("request".to_owned(), "call".to_owned()),
+        ("other".to_owned(), "call".to_owned()),
+        ("request".to_owned(), "missing".to_owned()),
+    ];
+    let names: HashMap<_, _> = sessions
+        .read_tool_use_starts("starts", &wanted)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, event)| match &event.kind {
+            EventKind::ToolUseStart(data) => (key, data.name.clone()),
+            kind => panic!("unexpected {}", kind.key()),
+        })
+        .collect();
+    let name = |request_id: &str, call_id: &str| {
+        names
+            .get(&(request_id.to_owned(), call_id.to_owned()))
+            .map(String::as_str)
     };
-    assert_eq!(name("request", "call").await.as_deref(), Some("echo"));
-    assert_eq!(name("other", "call").await.as_deref(), Some("wait"));
-    assert_eq!(name("request", "missing").await, None);
+    assert_eq!(name("request", "call"), Some("echo"));
+    assert_eq!(name("other", "call"), Some("wait"));
+    assert_eq!(name("request", "missing"), None);
     let connection = Connection::open(&database.0).unwrap();
     let plan: String = connection.query_row(
         "EXPLAIN QUERY PLAN SELECT sequence FROM timeline_events WHERE session_id='starts' AND branch_id='main' AND kind='step/tool-use-start' AND json_extract(body, '$.record.event.data.request_id')='request' AND json_extract(body, '$.record.event.data.call_id')='call'",

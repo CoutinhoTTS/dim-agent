@@ -619,13 +619,15 @@ impl AgentIndex {
             session.local_page("main", after, limit, through).await?,
         ))
     }
-    pub(crate) async fn read_event(
+    /// The stored events of `event_ids` in one read; ids the store does not
+    /// hold are absent.
+    pub(crate) async fn read_events(
         &self,
         id: &str,
-        event_id: &str,
-    ) -> dim_agent_runtime::Result<Option<Arc<dim_agent_types::AgentEvent>>> {
+        event_ids: &[String],
+    ) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
         if let Some(store) = &self.session_store {
-            return store.read_event(id, event_id).await;
+            return store.read_events(id, event_ids).await;
         }
         let (_, session) = self
             .session(id)
@@ -634,30 +636,35 @@ impl AgentIndex {
             .history("main", None)
             .await?
             .into_iter()
-            .find(|event| event.id == event_id))
+            .filter(|event| event_ids.contains(&event.id))
+            .map(|event| (event.id.clone(), event))
+            .collect())
     }
-    /// The main-branch `step/tool-use-start` of call `call_id` in request
-    /// `request_id`.
-    pub(crate) async fn read_tool_use_start(
+    /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
+    /// in one read; calls the store does not hold are absent.
+    pub(crate) async fn read_tool_use_starts(
         &self,
         id: &str,
-        request_id: &str,
-        call_id: &str,
-    ) -> dim_agent_runtime::Result<Option<Arc<dim_agent_types::AgentEvent>>> {
+        keys: &[(String, String)],
+    ) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>>
+    {
         if let Some(store) = &self.session_store {
-            return store.read_tool_use_start(id, request_id, call_id).await;
+            return store.read_tool_use_starts(id, keys).await;
         }
         let (_, session) = self
             .session(id)
             .ok_or_else(|| AgentError::Closed(id.into()))?;
-        Ok(session
-            .history("main", None)
-            .await?
-            .into_iter()
-            .find(|event| {
-                matches!(&event.kind, dim_agent_types::EventKind::ToolUseStart(start)
-                    if start.request_id == request_id && start.call_id == call_id)
-            }))
+        let mut starts = HashMap::with_capacity(keys.len());
+        for event in session.history("main", None).await? {
+            let key = match &event.kind {
+                EventKind::ToolUseStart(start) => (start.request_id.clone(), start.call_id.clone()),
+                _ => continue,
+            };
+            if keys.contains(&key) {
+                starts.insert(key, event);
+            }
+        }
+        Ok(starts)
     }
     fn slot(&self, id: &str) -> Arc<SessionSlot> {
         self.directory
