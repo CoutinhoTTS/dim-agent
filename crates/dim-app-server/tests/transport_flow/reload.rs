@@ -954,7 +954,6 @@ struct GuideProbeOwner {
     flag: Arc<std::sync::atomic::AtomicBool>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
     guide: rutis::host::Key<dim_agent_capabilities::prompt_guide::GuideEntries>,
-    timeout: Option<std::time::Duration>,
 }
 impl rutis::Plugin for GuideProbeOwner {
     type Deps = ();
@@ -965,7 +964,6 @@ impl rutis::Plugin for GuideProbeOwner {
                 flag: self.flag.clone(),
                 guide: self.guide.clone(),
             },
-            self.timeout,
         )
         .await?;
         self.views.lock().unwrap().push(view);
@@ -1027,7 +1025,6 @@ async fn an_entry_leaves_with_its_contributor() {
                         flag: install_flag.clone(),
                         views: install_views.clone(),
                         guide: names.key()?,
-                        timeout: names.startup_timeout(),
                     }))
                 },
             ));

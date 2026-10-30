@@ -161,18 +161,6 @@ impl<'a> Names<'a> {
             Place::Check { .. } => Err(outside(group)),
         }
     }
-    /// The startup timeout of the scope instance this copy is built for: what
-    /// a row passes to [`mount_active`](crate::mount_active) for the child it
-    /// mounts. It is counted from the start of that wait and renewed by the
-    /// child's progress, so a re-apply or an instance created after its scope
-    /// waits with the assembly's startup timeout from then. Absent where a
-    /// composition check builds a copy without an instance.
-    pub fn startup_timeout(&self) -> Option<std::time::Duration> {
-        match &self.place {
-            Place::Copy(build) => build.value::<StartupTimeout>().map(|timeout| timeout.0),
-            Place::Check { .. } => None,
-        }
-    }
     /// The key of `T`'s name for this copy.
     pub fn key<T: ?Sized + 'static>(&self) -> Result<Key<T>, Error> {
         let name = name_of::<T>();

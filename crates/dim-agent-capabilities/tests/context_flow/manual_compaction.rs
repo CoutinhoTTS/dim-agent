@@ -155,7 +155,6 @@ struct StrategyOwner {
     key: rutis::host::Key<CompactionStrategyHost>,
     strategy: Arc<Scripted>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
-    timeout: Option<std::time::Duration>,
 }
 impl Plugin for StrategyOwner {
     type Deps = ();
@@ -166,7 +165,6 @@ impl Plugin for StrategyOwner {
         let view = mount_active(
             ctx,
             StrategyProvider(self.key.clone(), self.strategy.clone()),
-            self.timeout,
         )
         .await?;
         self.views.lock().unwrap().push(view);
@@ -221,7 +219,6 @@ fn builder_with_strategy(
                         key: names.key()?,
                         strategy: strategy.clone(),
                         views: views.clone(),
-                        timeout: names.startup_timeout(),
                     }))
                 },
             ));

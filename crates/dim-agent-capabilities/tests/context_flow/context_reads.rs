@@ -57,7 +57,6 @@ impl ModelReload {
                     keys: (names.key()?, names.key()?, names.key()?),
                     model: model.clone(),
                     views: views.clone(),
-                    timeout: names.startup_timeout(),
                 }))
             },
         ));
@@ -79,7 +78,6 @@ struct ContextHostsOwner {
     keys: HostKeys,
     model: Arc<CancelThenEcho>,
     views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
-    timeout: Option<std::time::Duration>,
 }
 impl Plugin for ContextHostsOwner {
     type Deps = ();
@@ -88,12 +86,8 @@ impl Plugin for ContextHostsOwner {
     }
 
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
-        let view = mount_active(
-            ctx,
-            TestContextHosts(self.keys.clone(), self.model.clone()),
-            self.timeout,
-        )
-        .await?;
+        let view =
+            mount_active(ctx, TestContextHosts(self.keys.clone(), self.model.clone())).await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

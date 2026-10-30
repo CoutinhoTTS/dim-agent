@@ -257,14 +257,12 @@ struct NotesOwner {
     notes: Notes,
 
     methods: rutis::host::Key<SessionMethods>,
-    timeout: Option<std::time::Duration>,
 }
 impl NotesOwner {
     fn new(names: &dim_agent_runtime::Names<'_>, notes: Notes) -> rutis::Result<Self> {
         Ok(Self {
             notes,
             methods: names.key()?,
-            timeout: names.startup_timeout(),
         })
     }
 }
@@ -287,7 +285,6 @@ impl rutis::host::DynPlugin for NotesOwner {
                     methods,
                     notes: self.notes.clone(),
                 },
-                self.timeout,
             )
             .await?;
             self.notes.0.views.lock().unwrap().push(view);
