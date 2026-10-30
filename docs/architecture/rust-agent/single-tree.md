@@ -200,6 +200,8 @@ Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchSc
 
 `SessionConfig.collaboration_role: Leader | Member` 是 Session 创建时确定的协作角色，缺省 `Leader`，创建后不变。只有 `CollaborationPlugin` 创建成员 Session 时写入 `Member`；`session.create` 不接受该字段。
 
+`agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 不需要目标。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
+
 `SessionConfig.interactive: bool` 表示 Session 有可交互的对象，能回答它的提问和审批，在创建时由 `session.create` 的 `interactive` 参数确定（缺省 `true`），创建后不变。装配从不读取它；关心它的 Session 部件经 `Keyed<SessionConfig>` 或 `Session::config()` 读取（[Session 访问 A.3](../../design/contracts/session-access.md#a3-sessionconfig-fields)）。
 
 Session 能力向 `ToolRegistry` 贡献工具的方式见[工具贡献](tool-contributions.md)。

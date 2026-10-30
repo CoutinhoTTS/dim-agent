@@ -11022,7 +11022,9 @@
       "references": [
         "mod exec",
         "path exec::definition_for",
-        "path exec::execute"
+        "path exec::execute",
+        "path exec::stop",
+        "path exec::stop_definition"
       ]
     },
     {
@@ -11241,6 +11243,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::exec",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path crate::context_policy::check_cancel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::exec",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -11285,6 +11294,7 @@
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path WorkspaceTools",
+        "path super::host_error",
         "use super::WorkspaceTools"
       ]
     },
@@ -11297,6 +11307,8 @@
         "path StartError::Termination",
         "path StartError::Timeline",
         "path StartRequest",
+        "path super::background::TaskError::Closed",
+        "path super::background::TaskError::Unknown",
         "use super::background::BackgroundExec",
         "use super::background::StartError",
         "use super::background::StartRequest"
@@ -11308,6 +11320,13 @@
       "references": [
         "path Branch",
         "use dim_agent_runtime::Branch"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::exec",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path dim_agent_runtime::CAPABILITY_RELOADING"
       ]
     },
     {
@@ -11356,7 +11375,8 @@
         "path ToolResult",
         "path ToolResult::default",
         "path ToolResult::error",
-        "path ToolResult::text"
+        "path ToolResult::text",
+        "path tool"
       ]
     },
     {
