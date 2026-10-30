@@ -123,7 +123,8 @@ insertion; removing a marker never deletes the original file. A rejected file gr
 leaves the draft unchanged. File references retain separate ordered text content blocks.
 
 Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
-macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+macOS uses AppKit and resolves native file-reference URLs to real paths before image
+classification or file linking; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
 X11. Missing or failed clipboard access reports an inline error and retains the draft.
 The CLI reads only on that action and never changes the clipboard. A terminal that
 intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while

@@ -47,6 +47,8 @@ pub enum RowTone {
 pub struct ViewRow {
     pub row_id: String,
     pub kind: RowKind,
+    /// Presentation of an image message; `text` remains editable text only.
+    pub display: Option<String>,
     pub text: String,
     pub streaming: bool,
     /// A settled thought: how long it ran, in milliseconds.
@@ -210,6 +212,8 @@ pub struct ApprovalView {
 pub struct QueuedInput {
     pub id: String,
     pub text: String,
+    /// Presentation of an image message; never restored into a draft.
+    pub display: Option<String>,
 }
 
 /// Work of the session that runs apart from the turn: a command the `exec`

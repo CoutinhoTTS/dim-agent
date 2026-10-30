@@ -23208,6 +23208,15 @@
     },
     {
       "from": "dim_cli::projection::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn",
+        "path crate::ui::i18n::active",
+        "path crate::ui::i18n::set"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::tests",
       "to": "dim_client::wire",
       "references": [
         "path Event",
@@ -30029,6 +30038,7 @@
         "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::SaveIsolation",
+        "path Command::Submit",
         "path SessionPort",
         "path SwitchKind::Forked",
         "path Update",
@@ -30060,6 +30070,13 @@
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::Projection::default"
       ]
     },
     {
@@ -30129,6 +30146,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::timeline_panel",
+      "references": [
+        "path TimelineAction::Branch",
+        "path TimelineAction::Edit",
+        "path TimelineAction::Fork",
+        "path TimelineAction::Quote"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::transcript::block",
       "references": [
         "path Block::Shell"
@@ -30174,6 +30201,13 @@
       "to": "dim_client::question",
       "references": [
         "path crate::question::Call"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_client::wire",
+      "references": [
+        "path crate::wire::Event"
       ]
     },
     {
@@ -32112,6 +32146,14 @@
       "path": "Container::Object"
     },
     {
+      "module": "dim_cli::attachments",
+      "path": "NSString::from_str"
+    },
+    {
+      "module": "dim_cli::attachments",
+      "path": "NSURL::URLWithString"
+    },
+    {
       "module": "dim_cli::browser",
       "path": "char::is_control"
     },
@@ -32130,6 +32172,30 @@
     {
       "module": "dim_cli::clipboard::copy",
       "path": "Stdio::piped"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "Composer::new"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "KeyCode::Enter"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "KeyEvent::new"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "Modifiers::NONE"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "NSURL::fileURLWithPath"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "Outcome::SubmitDraft"
     },
     {
       "module": "dim_cli::composer",
