@@ -8,6 +8,34 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 多行/粘贴编辑器、无头 exec 的图片参数、剪贴板/文件插入、补全和拖入路径已实现。附件合同记录了
 各原生平台的验收证据和尚未完成的检查。
 
+## 命令菜单
+
+scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令名按其英文标识的字母顺序排列。
+搜索时匹配程度优先，同等匹配按分类和命令名排序。
+退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
+完整输入的命令（包括隐藏命令）仍走各自的处理流程。
+菜单中的权限入口为 `/approvals`；`/approval` 隐藏，但完整输入后仍可打开自己的菜单。
+菜单只列出斜杠命令，移除中断、steer、选择较早消息、滚动到顶部或底部等仅由按键触发的操作。
+`/keys` 仍列出这些快捷键：两种模式均支持 `Esc` 和 `Ctrl+S`；fullscreen 还支持
+`Tab`、`Home`、`End`，其中 `Home/End` 仅在草稿为空时滚动历史。
+
+```text
+Commands
+  app     /exit        exit
+  app     /keys        show the key bindings
+  model   /approvals   set the session's permission preset
+
+/ + Enter          -> /exit (completion only)
+/exit + Enter      -> exit
+/approval + Enter  -> Ask / Full access menu
+
+Esc     interrupt the run
+Ctrl+S  steer with the next queued message
+Tab     pick an earlier message to edit or quote (fullscreen)
+Home    scroll to the top (fullscreen, empty draft)
+End     scroll to the bottom (fullscreen, empty draft)
+```
+
 ## 命令隔离设置
 
 现有 `/settings` 面板在 Permissions 下、`Tool approvals` 旁增加独立的 `Command isolation` 行。
