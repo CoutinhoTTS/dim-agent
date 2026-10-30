@@ -1748,6 +1748,21 @@ mod tests {
         );
     }
 
+    /// An image-only send records no empty input-history entry, so the first
+    /// Up after it recalls the entry before it.
+    #[test]
+    fn an_image_only_send_leaves_the_first_up_working() {
+        let mut c = Composer::new(vec!["previous".into()]);
+        c.attach_image(bitmap()).unwrap();
+        let Outcome::SubmitDraft { text, .. } = c.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the image to submit as a draft")
+        };
+        assert_eq!(text, "");
+        c.push_history(text.trim());
+        c.handle_key(key(KeyCode::Up));
+        assert_eq!(c.text(), "previous");
+    }
+
     /// A shell command is text: Enter on a draft holding only an image runs
     /// no command and records none, and the draft stays.
     #[test]
