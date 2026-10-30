@@ -313,10 +313,17 @@ impl SettingsService {
 - Both registrations are effects of the plugin owning `ctx`, withdrawn when it unloads, and are
   checked under one registry state (§3.1). `register_declared` compiles the schema with
   `jsonschema`. The process owners register in their `apply`: Mcp (`mcp`, `mcp-projects`, `mcp-plugins`),
-  SkillsCatalog (`skills`), PermissionRules (`permission`) and CollaborationModelPolicy
-  (`collaboration`). Readers in other plugins only read; `read::<D>`/`update::<D>` of a type that
-  is not the registered one for its name is `UnknownSource`. The `settings` service's
-  `register` calls `register_declared` with the calling row's context.
+  SkillsCatalog (`skills`), PermissionRules (`permission`), CollaborationModelPolicy
+  (`collaboration`) and the App Server's ExecutionSettings (`execution`). Readers in other plugins
+  only read; `read::<D>`/`update::<D>` of a type that is not the registered one for its name is
+  `UnknownSource`. The `settings` service's `register` calls `register_declared` with the calling
+  row's context.
+- `execution` is user scope only: it declares no project file, so a project-scope read or write is
+  refused. It holds two booleans, `sandbox` and `network`, both defaulting to `false`, and its
+  revisions are the ordinary CAS ones. `/settings > Execution` and any local management client use
+  `settings.read`/`settings.update`; the owner's reader reaches the document through the
+  `ExecutionSettingsHost` port, which is an in-process read contract and not a management method
+  ([ADR 011](../../adr/011-execution-settings.md) D1).
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
 - `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and

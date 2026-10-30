@@ -348,7 +348,7 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 
 The App Server decides each tool call by the branch's preset and the user's command rules; the
 CLI selects them through existing methods and never decides a call itself. A preset or approval
-decides whether a command runs; [command isolation](#command-isolation) limits what it can
+decides whether a command runs; the user's [sandbox switch](#execution-boundary) limits what it can
 reach once it runs, and neither one widens the other.
 
 | Preset | Reads | File writes | Commands, network, unclassified tools |
@@ -398,20 +398,23 @@ conflict, and then answers allow. If the write fails it prints `[rule not saved]
 `Allow once? [y/N]` for the same request. See
 [permission controls](../../docs/design/cli-commands.md#permission-controls).
 
-## Command isolation
+## Execution boundary
 
-On macOS and Linux, commands the model runs with `exec` start in a sandbox: Seatbelt on macOS,
-bubblewrap on Linux. Without a policy file, a command can write only inside the session
-workspace, read only the workspace and system directories, and has no network access. The
-[defaults table](../../docs/design/host-platform-isolation.md#scope-and-policy) lists each
-platform's directories and the environment variables passed through. Approving a command or
-choosing `full-access` does not widen the sandbox by itself. The model can request a wider
-boundary with the `exec` `sandbox` argument. Missing policies and version 2 policies omitting
-`escalation` use `ask`, which delegates that request to Permission/Approval: the ordinary default
-`workspace-write` preset asks, while `full-access`, an allowed tool or an applicable allow rule
-can admit it without prompting. An explicit node `escalation: "deny"` still refuses wider requests.
+The sandbox is a setting, and it is off by default. `/settings > Execution` has two switches,
+`Sandbox` and `Network`; both start off, and Network applies only while Sandbox is on. The switch
+is read whenever a command starts, so it applies to the next command or new persistent shell
+without restarting the daemon, and a running process keeps the boundary it started with. Approving
+a command and choosing `full-access` do not change the boundary; the model cannot change it at all.
+`exec` has no `sandbox` argument, and a call that still sends one is rejected instead of ignored.
 
-On macOS only, the default also lets common developer tools run:
+With the sandbox off, commands run as your user with your environment, home and network. With it
+on, a command can write only inside the session workspace, read only the workspace and the
+platform's system directories, and has no network access until you also turn Network on. The
+[process isolation design](../../docs/design/host-platform-isolation.md) lists each platform's
+directories and the environment variables passed through. The same switch governs the persistent
+shell, whose output directory is writable besides the workspace.
+
+On macOS only, the sandbox also lets common developer tools run:
 
 - Each command gets its own empty temporary directory as `TMPDIR`, writable and removed after the
   command ends. `/tmp` and your own `TMPDIR` are not granted.
@@ -419,117 +422,32 @@ On macOS only, the default also lets common developer tools run:
   developer directory: `DEVELOPER_DIR` when the daemon's environment sets it, otherwise the one
   `xcode-select -p` prints. The Command Line Tools work; an Xcode.app selection is not supported.
   On such a Mac, run `xcode-select -s /Library/Developer/CommandLineTools`, start dimcode with
-  `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, or turn isolation off.
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools`, or leave the sandbox off.
 - Git can read its global configuration: `~/.gitconfig`, and `config`, `ignore` and `attributes`
   in `$XDG_CONFIG_HOME/git` (`~/.config/git` when unset). Each file is granted on its own, so
   `~/.git-credentials`, the `credentials` file beside them, `~/.ssh` and the rest of your home stay
   unreadable. Files pulled in with `include.path` or `includeIf` are not granted, and git then
-  fails with `Operation not permitted`; list them in `readOnlyPaths` as shown below.
+  fails with `Operation not permitted`.
 
 A denied operation fails inside the command as an ordinary error: `Operation not permitted` on
 macOS; on Linux, `No such file or directory` for an ungranted path and `Read-only file system`
-for a read-only one. When an isolated command fails with a typical denial, its result tells the
-model that isolation may be the cause and names the policy file and `/settings > Command isolation`.
-That settings panel displays the effective tier, wider-request policy, source and actual execution-node
-path separately from the Permission preset. It lets you change the tier and `ask`/`deny`, edit
-advanced read/write path lists and environment names, save, or reset to product defaults.
-Omitted lists use defaults; explicit empty lists grant nothing. Environment values are never shown.
-Conflicting edits require reloading rather than overwriting another client's changes.
+for a read-only one. When a sandboxed command fails with a typical denial, its result tells the
+model that the sandbox may be the cause and that you change the switches in
+`/settings > Execution`.
 
-### Policy file
+There is no policy file, and the `host-isolation.json` that earlier releases read is ignored. If
+you have one, delete it; an upgrade diagnostic is tracked in
+[#691](https://github.com/arcships/dim/issues/691). The switches are stored as the user-scope
+`execution` settings source and written by the panel with revision conflict detection, so a
+conflicting edit requires reloading rather than overwriting another client's change.
 
-The daemon reads `host-isolation.json` from its home:
+Two failures stop a command before it starts:
 
-| Profile | Policy file |
-| --- | --- |
-| Product (`dimcode`, `--home PATH`) | `<home>/host-isolation.json`, by default `~/.dimcode/host-isolation.json` |
-| API-key configuration (`--model-config`) | `<home>/rust/host-isolation.json`, because this profile starts the daemon with `--home <home>/rust` |
-
-Reading absent-file defaults never creates the file. Saving or resetting in `/settings > Command isolation`
-atomically writes it with revision conflict detection; reset saves an explicit version 2 default policy.
-It is read each time a command starts, so an edit applies to the next command or new persistent shell
-without restarting the daemon; a running process keeps its original boundary. An invalid file makes
-model commands fail with `isolation_config_invalid`; settings remains accessible independently of exec.
-
-Only `version` is required. Version 2 is current; an existing version 1 file keeps working.
-Each other field replaces its default:
-
-| Field | Meaning | Default |
-| --- | --- | --- |
-| `sandbox` | `workspace`, `network` or `host`: the boundary commands run in | `workspace` |
-| `escalation` | `ask` delegates wider requests to Permission/Approval; explicit `deny` refuses them | `ask` |
-| `readOnlyPaths` | Directories and files commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
-| `writablePaths` | Directories commands can read and write | The session workspace; on macOS also each command's `TMPDIR` |
-| `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
-
-`workspace` writes only inside the session workspace and has no network; `network` adds host
-networking; `host` runs commands as your user with no sandbox at all. A model command names a
-tier with its `sandbox` argument. A tier at or below the file's runs directly; a wider one runs
-only when the effective escalation is `ask`, and an explicit `deny` fails with `isolation_denied`. The
-approval prompt shows the requested boundary; under `full-access`, for a tool in `allowedTools`
-or for a command you allowed always, a wider tier runs without a prompt. An approval never widens
-the boundary by itself. Version 1 spelled the tier as `enabled` and
-`network` (`false` runs commands as ordinary processes, `true` allows networking) and never
-allowed escalation. Network access does not grant executable or credential access: Homebrew-installed
-`gh` may need an authorized `host` request or explicit Homebrew read roots as well as networking,
-then its normal authentication source. Dim does not synthesize GitHub credentials.
-
-Paths must be absolute and must exist; `~` is not expanded. `readOnlyPaths` takes directories
-and regular files: a file entry grants that file alone, not the directory around it, and an
-entry that is a symlink also grants the file it points to. `writablePaths` takes directories
-only. A list replaces its default completely, and `[]` grants nothing, so an explicit
-`writablePaths` must name every workspace that should stay writable. A read-only entry cannot be
-inside a writable one. Unknown fields are errors.
-
-On macOS a written list also drops the macOS additions above. With `writablePaths`, commands get
-no `TMPDIR` of their own; a `TMPDIR` named in `environment` passes through and needs its own
-grant. With `readOnlyPaths`, list `/var/select`, the developer directory and git's
-configuration files yourself, as in the example below. Without them, git exits with
-`Operation not permitted` while `~/.gitconfig` or the XDG `config` exists, and skips `ignore` and
-`attributes` with a warning. List each of these files that exists as its own entry:
-`~/.gitconfig`; `config`, `ignore` and `attributes` in `$XDG_CONFIG_HOME/git` (`~/.config/git`
-when unset); and every file that `include.path` or `includeIf` pulls in. Listing a file that does
-not exist makes the policy invalid. Prefer the files to their directory: listing `~/.config/git`
-also exposes every other file in it, including a `credentials` file if git keeps one there.
-
-To turn isolation off, select the `host` tier in `/settings > Command isolation`, or write the file yourself:
-
-```json
-{"version": 2, "sandbox": "host"}
-```
-
-Commands then have your user's ordinary access. On Linux without bubblewrap, every command fails
-with `isolation_unavailable` until bubblewrap is installed or the file names the `host` tier.
-
-### Toolchains outside system directories
-
-Homebrew, rustup, nvm and similar toolchains are not readable by default. Grant them in
-`readOnlyPaths`, repeating the system directories because the list replaces them, and list only
-paths that exist. On macOS with the Command Line Tools, git's configuration in `~/.gitconfig` and
-`~/.config/git/ignore`, Homebrew in `/opt/homebrew`, rustup and nvm:
-
-```json
-{
-  "version": 2,
-  "readOnlyPaths": [
-    "/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc",
-    "/var/select", "/Library/Developer/CommandLineTools",
-    "/Users/you/.gitconfig", "/Users/you/.config/git/ignore",
-    "/opt/homebrew",
-    "/Users/you/.cargo",
-    "/Users/you/.rustup",
-    "/Users/you/.nvm"
-  ]
-}
-```
-
-On Linux, start from `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` and `/etc`, leaving out any that do
-not exist, and add directories such as `/home/linuxbrew/.linuxbrew` or `/home/you/.cargo`. Git
-reads no global configuration there by default; add `/home/you/.gitconfig` and the other files
-above to let it. A tool
-that writes caches or locks in its directory needs it in `writablePaths` instead, next to the
-workspace, and downloads need the `network` tier. A granted directory exposes everything in it; `~/.cargo`, for example,
-can hold registry tokens.
+- `isolation_unavailable`: the sandbox is on and the platform has no backend. That is always the
+  case on Windows, and on Linux when bubblewrap is not on the daemon's `PATH`. Install bubblewrap
+  or turn Sandbox off.
+- `isolation_config_invalid`: the daemon could not read the switch. Fix that settings source; a
+  command never runs unsandboxed because the switch could not be read.
 
 ### Not covered
 
@@ -537,7 +455,7 @@ can hold registry tokens.
   sandbox. Presets and approvals govern them, and
   [#294](https://github.com/arcships/dim/issues/294) tracks limiting the paths they write.
 - Commands you type with `!` or `!!` run as ordinary processes.
-- Windows has no sandbox: commands run as ordinary processes and the file is not read.
+- Windows has no sandbox: commands run as ordinary processes.
 - MCP servers, plugins and the daemon itself are outside the sandbox.
 
 ## Questions
