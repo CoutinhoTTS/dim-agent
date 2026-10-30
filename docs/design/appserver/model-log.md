@@ -38,7 +38,8 @@ The line client and the terminal UI carry the switch:
 
 - `dimcode recording` prints whether it is on; `dimcode recording on|off`
   switches it and prints the resulting state (the file path when on).
-- `/recording` and `/recording on|off` do the same from the terminal UI.
+- `/settings recording` and `/settings recording on|off` do the same from the
+  terminal UI, under the settings command.
 
 Both read the current revision, write the new document and report the state the
 daemon stored; a daemon without the source reports the settings error.
@@ -79,5 +80,5 @@ read back into Dim.
 - `cli_flow::recording_on_switches_the_model_log` and
   `recording_reports_whether_it_is_on`: the line client reads and writes the
   source and prints the state.
-- `ui::tui::tests::recording_command_sends_its_words`: `/recording` reaches the
-  session host with its arguments.
+- `ui::tui::tests::settings_recording_sends_its_words`: `/settings recording`
+  reaches the session host with its arguments.

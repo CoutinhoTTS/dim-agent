@@ -1819,7 +1819,7 @@ impl Worker {
             None => None,
             Some("on") => Some(true),
             Some("off") => Some(false),
-            Some(_) => return Err("Usage: /recording [on|off]".into()),
+            Some(_) => return Err("Usage: /settings recording [on|off]".into()),
         };
         let state = match enabled {
             Some(enabled) => crate::recording::set(&mut self.client, enabled).await?,

@@ -2511,6 +2511,19 @@ impl App {
         crate::ui::title::topic(snapshot.main_topic.as_deref()?)
     }
 
+    /// Opens `/settings`: the panel, or a second-level switch it carries.
+    fn settings(&mut self, args: &str) {
+        let mut words = args.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (None, _, _) => self.open_settings(Setting::Theme),
+            (Some("recording"), None, _) => self.host.send(Command::Recording(String::new())),
+            (Some("recording"), Some(on @ ("on" | "off")), None) => {
+                self.host.send(Command::Recording(on.to_owned()));
+            }
+            _ => self.set_notice("Usage: /settings [recording [on|off]]".to_owned()),
+        }
+    }
+
     /// Opens `/settings` with `select` picked, showing the current values.
     fn open_settings(&mut self, select: Setting) {
         let theme = self
@@ -2699,10 +2712,6 @@ impl App {
                 self.host.send(Command::Mcp(args.to_owned()));
                 Outcome::Continue
             }
-            "recording" => {
-                self.host.send(Command::Recording(args.to_owned()));
-                Outcome::Continue
-            }
             "effort" | "fast" | "agent" => {
                 let text = format!("/{name} {args}");
                 self.host
@@ -2815,7 +2824,7 @@ impl App {
                 Outcome::Continue
             }
             "settings" => {
-                self.open_settings(Setting::Theme);
+                self.settings(args);
                 Outcome::Continue
             }
             "language" => {
@@ -6387,7 +6396,7 @@ mod tests {
     }
 
     #[test]
-    fn recording_command_sends_its_words() {
+    fn settings_recording_sends_its_words() {
         let home = tempfile::tempdir().unwrap();
         let theme = test_theme();
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -6398,9 +6407,9 @@ mod tests {
             home.path().to_path_buf(),
             "/work".into(),
         );
-        app.run_command("recording", "on");
+        app.run_command("settings", "recording on");
         assert!(matches!(sent.borrow().last(), Some(Command::Recording(words)) if words == "on"));
-        app.run_command("recording", "");
+        app.run_command("settings", "recording");
         assert!(
             matches!(sent.borrow().last(), Some(Command::Recording(words)) if words.is_empty())
         );
