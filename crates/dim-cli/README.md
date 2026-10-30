@@ -1092,6 +1092,7 @@ Session, turn and request identities.
 
 ```text
 exec -> [failed] local: Model local/model stopped at max_tokens. Increase the output token limit and retry.
+TUI  -> model failed: Model local/model stopped at max_tokens. Increase the output token limit and retry.
 ACP  -> stopReason: max_tokens -> next prompt on the same Session
 ```
 

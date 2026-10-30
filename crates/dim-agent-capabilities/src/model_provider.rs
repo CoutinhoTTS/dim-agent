@@ -74,7 +74,7 @@ impl ModelProvider {
                 presentation,
                 ..
             }) => {
-                tracing::warn!(
+                tracing::error!(
                     session_id = %self.identity.session_id,
                     branch_id = %self.identity.branch_id,
                     turn_id = %call.turn_id,

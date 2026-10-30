@@ -28,6 +28,7 @@ pub struct Display {
     tools: HashMap<String, String>,
     finished: HashSet<String>,
     completed_tools: HashSet<String>,
+    presented_failure: bool,
 }
 impl Display {
     pub fn new(interactive: bool, json: bool) -> Self {
@@ -45,6 +46,7 @@ impl Display {
             tools: HashMap::new(),
             finished: HashSet::new(),
             completed_tools: HashSet::new(),
+            presented_failure: false,
         }
     }
     pub fn record(&mut self, message: &str) -> Result<()> {
@@ -175,6 +177,7 @@ impl Display {
                                 .map(|action| format!(". {action}"))
                                 .unwrap_or_default(),
                         ))?;
+                        self.presented_failure = true;
                     }
                 }
             }
@@ -183,14 +186,17 @@ impl Display {
                 match data.outcome {
                     TurnOutcome::Failed { .. } => {
                         self.failed = true;
-                        self.record(
-                            "[failed] Model or turn failed; see the private daemon log for details",
-                        )?;
+                        if !self.presented_failure {
+                            self.record(
+                                "[failed] Model or turn failed; see the private daemon log for details",
+                            )?;
+                        }
                     }
                     TurnOutcome::Cancelled { .. } => self.record("[stopped]")?,
                     _ => {}
                 }
                 self.requests.clear();
+                self.presented_failure = false;
             }
             _ => {}
         }

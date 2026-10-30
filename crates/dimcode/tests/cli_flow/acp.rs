@@ -1722,7 +1722,8 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     let mut command = home.command();
     command
         .args(["--model-config", config.to_str().unwrap(), "acp"])
-        .env("ACP_STICKY_SESSION", "true");
+        .env("ACP_STICKY_SESSION", "true")
+        .env_remove("RUST_LOG");
     let mut peer = Peer::spawn(&mut command);
     peer.initialize();
     peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
@@ -1826,6 +1827,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     peer.close();
     let limited = home
         .command()
+        .env_remove("RUST_LOG")
         .args([
             "--model-config",
             config.to_str().unwrap(),
@@ -1845,6 +1847,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         stderr.contains("Increase the output token limit and retry"),
         "{stderr}"
     );
+    assert_eq!(stderr.matches("[failed]").count(), 1, "{stderr}");
     let log = fs::read_to_string(home.0.join("rust/daemon.log")).unwrap();
     assert!(
         log.contains("Model request failed")
@@ -2037,5 +2040,48 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
     peer.send(5, "session/prompt", json!({"sessionId":"saved","prompt":[{"type":"audio","data":"AA==","mimeType":"audio/wav"}]}));
     assert!(peer.response(5).get("error").is_some());
     peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[
+            {"id":"limited-model","sequence":9,"create_at":1,"type":"step","name":"model-output-end","data":{"turn_id":"limited","request_id":"limited-request","status":"failed","error":"private model detail","presentation":{"source":"local","reason":"max_tokens","serverMessage":"local/model stopped at max_tokens","action":"Increase the output token limit and retry"}}},
+            {"id":"limited-turn","sequence":10,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"limited","status":"failed","error":"private turn detail"}}
+        ],"through":10,"nextAfter":10,"done":true}));
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.reply(&request, Value::Null),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "try again");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.event(11, "text", json!({"turn_id":"next","request_id":"next-request","delta":"the next turn answers"}));
+        wire.end(json!({"turn_id":"next","status":"completed","reason":"fixture"}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Increase the output token");
+    terminal.until("limit and retry");
+    assert!(!terminal.transcript.contains("private model detail"));
+    terminal.write(b"try again\r");
+    terminal.until("the next turn answers");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
     daemon.join().unwrap();
 }

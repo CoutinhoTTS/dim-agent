@@ -579,8 +579,22 @@ impl Projection {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
-                if let ModelOutputOutcome::Failed { error, .. } = &data.outcome {
-                    self.push_error(format!("model failed: {error}"));
+                if let ModelOutputOutcome::Failed {
+                    error,
+                    presentation,
+                    ..
+                } = &data.outcome
+                {
+                    let message = presentation
+                        .as_ref()
+                        .and_then(|value| value.server_message.as_deref())
+                        .unwrap_or(error);
+                    let action = presentation
+                        .as_ref()
+                        .and_then(|value| value.action.as_deref())
+                        .map(|action| format!(". {action}"))
+                        .unwrap_or_default();
+                    self.push_error(format!("model failed: {message}{action}"));
                 }
             }
             EventContent::TurnEnd(data) => {
