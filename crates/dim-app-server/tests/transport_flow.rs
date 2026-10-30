@@ -77,6 +77,9 @@ mod management;
 #[path = "transport_flow/permission_rules.rs"]
 mod permission_rules;
 
+#[path = "transport_flow/execution_settings.rs"]
+mod execution_settings;
+
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
 
