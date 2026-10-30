@@ -618,7 +618,7 @@ impl ProviderService {
                             items.push(ImportItem { kind, id: source.id, status: ImportStatus::AlreadyImported, reason: Some(if digest == source.digest { "Source row was already imported" } else { "Previously imported identity changed; automatic replay refused" }.into()), omitted: None });
                             continue;
                         }
-                        let result: Result<Vec<String>, String> = if kind == "provider" {
+                        let result: Result<Option<Vec<String>>, String> = if kind == "provider" {
                             let previous = tx.query_row("SELECT version,record FROM providers WHERE provider_id=?1", [&source.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))).optional().map_err(storage)?;
                             let previous = previous.map(|(version, body)| parse_static(&source.id, version, &body)).transpose().map_err(|_| "Target provider is unreadable; preserved".to_owned());
                             match previous.and_then(|previous| convert_legacy_provider(&source, previous, &bundled)) {
@@ -626,7 +626,7 @@ impl ProviderService {
                                 Ok(conversion) => {
                                     tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![source.id, conversion.record.version(), serde_json::to_string(&conversion.record).map_err(storage)?]).map_err(storage)?;
                                     imported.insert(source.id.clone(), conversion.record);
-                                    Ok(conversion.omitted)
+                                    Ok(Some(conversion.omitted))
                                 }
                             }
                         } else {
@@ -640,7 +640,7 @@ impl ProviderService {
                                         if existing { Err("Target selection already exists".into()) }
                                         else {
                                             tx.execute("INSERT INTO provider_selections(scope,version,provider_id,model_id) VALUES (?1,1,?2,?3)", params![selection.scope, selection.provider_id, selection.model_id]).map_err(storage)?;
-                                            Ok(Vec::new())
+                                            Ok(None)
                                         }
                                     }
                                 },
@@ -649,7 +649,7 @@ impl ProviderService {
                         match result {
                             Ok(omitted) => {
                                 tx.execute("INSERT INTO provider_imports(kind,id,source_schema,source_version,source_digest) VALUES (?1,?2,?3,?4,?5)", params![kind, source.id, snapshot.schema, source.version, source.digest]).map_err(storage)?;
-                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None, omitted: Some(omitted) });
+                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None, omitted });
                             }
                             Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason), omitted: None }),
                         }

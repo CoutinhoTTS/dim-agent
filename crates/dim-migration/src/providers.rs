@@ -98,11 +98,7 @@ pub(crate) async fn import(
     ] {
         for row in rows {
             crate::engine::check(owner, &task.id).await?;
-            let omitted = if kind == "provider" {
-                legacy_omitted_fields(&row).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let mut converted_omitted = None;
             let result = (|| -> MigrationResult<Outcome> {
                 let mut db = target.db.lock().unwrap();
                 let tx = db.transaction().map_err(crate::native::failure)?;
@@ -169,6 +165,7 @@ pub(crate) async fn import(
                                     current.is_builtin().then(|| current.with_version(1));
                                 let conversion = convert_legacy_provider(&row, previous, &bundled)
                                     .map_err(Error::Object)?;
+                                converted_omitted = Some(conversion.omitted);
                                 let converted = conversion.record.with_version(version);
                                 let converted_value = serde_json::to_value(&converted)
                                     .map_err(crate::native::failure)?;
@@ -204,6 +201,7 @@ pub(crate) async fn import(
                     }
                     let conversion =
                         convert_legacy_provider(&row, previous, &bundled).map_err(Error::Object)?;
+                    converted_omitted = Some(conversion.omitted);
                     let converted =
                         serde_json::to_value(&conversion.record).map_err(crate::native::failure)?;
                     tx.execute(
@@ -261,6 +259,13 @@ pub(crate) async fn import(
                 Err(Error::Object(reason)) => (Outcome::Unsupported, Some(reason)),
                 Err(e) => return Err(e),
             };
+            let omitted = converted_omitted.unwrap_or_else(|| {
+                if kind == "provider" {
+                    legacy_omitted_fields(&row).unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            });
             owner
                 .ledger
                 .object(

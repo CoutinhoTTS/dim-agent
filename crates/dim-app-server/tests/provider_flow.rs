@@ -5385,7 +5385,7 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
         "Conflicting enabled and disabled model IDs"
     );
     assert_eq!(item("scope-non-canonical")["status"], "imported");
-    assert_eq!(item("scope-non-canonical")["omitted"], json!([]));
+    assert!(item("scope-non-canonical").get("omitted").is_none());
     assert_eq!(item("scope-missing")["status"], "rejected");
     assert_eq!(
         item("scope-missing")["reason"],
