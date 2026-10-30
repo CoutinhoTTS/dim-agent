@@ -363,12 +363,7 @@ These texts replace the delegation wording in the code today: the `dim-branch-ta
 The texts above are first versions, owned by TimelineTree's plugin. These items belong to the model-facing prompt layer:
 
 - How `main` briefs a line, and what coordinating means for `main`: assigning areas, answering steers, ending its own wait, and not redoing a line's work.
-- **Goal's wording (owned by Goal).** These texts treat a child as delegated work, which contradicts §1:
-  - the objective text, "If you are working on a delegated sub-task started from branch X, treat this goal as background and do not call goal_update." (`runtime/plugins/goal/goal.ts:98`);
-  - the continuation text (`goal.ts:131`);
-  - "delegated work" in [Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal) and in Goal §5's row for child branches.
-
-  The replacement is "on another line of this Session". This design does not change that text; Goal owns it.
+- **Goal's wording (owned by Goal).** A line is not delegated work (§1): the objective block's sentence, the continuation block's sentence, and the statements in [Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal) and Goal §5's row for child branches. The texts are [Goal §A.5](plugins/Goal.md#a5-model-visible-texts)'s, and a change to either sentence is a policy change judged by [Goal §A.5.2](plugins/Goal.md#a52-evaluation). Goal owns these texts.
 
 The requirements that answer these items are in [Model-facing prompts](model-prompts.md).
 

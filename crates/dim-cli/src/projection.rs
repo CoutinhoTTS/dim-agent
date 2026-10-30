@@ -71,6 +71,7 @@ pub struct Projection {
     background: HashMap<TaskTarget, String>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
+    presented_failure: Option<String>,
     /// The call row carrying each delegation's card, by request event id.
     cards: HashMap<String, usize>,
     /// Native Agent names from `agent.list`, by Agent id.
@@ -579,8 +580,25 @@ impl Projection {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
-                if let ModelOutputOutcome::Failed { error, .. } = &data.outcome {
-                    self.push_error(format!("model failed: {error}"));
+                if let ModelOutputOutcome::Failed {
+                    error,
+                    presentation,
+                    ..
+                } = &data.outcome
+                {
+                    let message = presentation
+                        .as_ref()
+                        .and_then(|value| value.server_message.as_deref())
+                        .unwrap_or(error);
+                    let action = presentation
+                        .as_ref()
+                        .and_then(|value| value.action.as_deref())
+                        .map(|action| format!(". {action}"))
+                        .unwrap_or_default();
+                    self.push_error(format!("model failed: {message}{action}"));
+                    if presentation.is_some() {
+                        self.presented_failure = Some(error.clone());
+                    }
                 }
             }
             EventContent::TurnEnd(data) => {
@@ -618,9 +636,12 @@ impl Projection {
     }
 
     fn turn_end(&mut self, sequence: u64, outcome: &TurnOutcome) {
+        let presented = self.presented_failure.take();
         let end = match outcome {
             TurnOutcome::Failed { error } => {
-                self.push_error(format!("turn failed: {error}"));
+                if presented.as_deref() != Some(error.as_str()) {
+                    self.push_error(format!("turn failed: {error}"));
+                }
                 TurnEnd::Failed
             }
             TurnOutcome::Cancelled { .. } => {
