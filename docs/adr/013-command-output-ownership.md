@@ -2,42 +2,65 @@
 
 Decision status: Proposed.
 
-Extends [ADR 010](010-sandbox-opt-in.md) and the session-file ownership model in
-[`session-files.md`](../design/appserver/session-files.md) §11.2. Attachments are already
-session-owned; command output is not. This decision makes both readable by ownership rather than
-by the directory a path happens to be in. ADR 003 is unchanged.
+Extends ADR 010 and the session-file ownership model in
+[`session-files.md`](../design/appserver/session-files.md) §11.1. This decision makes command
+output, offloaded `read` results and background logs session-owned artifacts, so copied history
+can read them after the source session is deleted. ADR 003 is unchanged.
 
 ## Context
 
-Command output is a host-produced file handed to the model by path. It lives under the session's
-output directory, outside the workspace, and is not in `session_file_owners`. A fork inherits the
-history that quotes it, so ownership must follow the row, not the source directory.
+A host-produced output file is handed to the model by path under
+`<database dir>/command-output/<session>/`. It has no `session_files` row or id, it can grow while
+a command runs, and delete removes the directory. A fork's copied history quotes those paths, so
+ownership has to follow a row, not the source directory.
 
 ## Decision
 
 ### D1. Two tables, one fact
 
-Attachments keep `session_file_owners (session_id, file_id)`. Command output uses
-`session_output_owners (session_id, path)`. Both are the `session-owned` file-access fact.
+Attachments keep `session_file_owners (session_id, file_id)`. Output uses
+`session_output_owners (session_id, path)`. Both feed the `session-owned` fact defined by
+ADR 014.
+
+Two keys are deliberate. Output has no `session_files` row or id, is appended while running and
+is removed as a directory. A single polymorphic table would need a nullable key, could not use
+the `session_files` foreign key and would filter every sweep by kind. The second table exists so
+a fork can read output after the source is deleted; without that requirement the current
+directory rule is cheaper.
 
 ### D2. Registration
 
-The output owner calls `register(session_id, path)` when it hands the output to the model.
-`register` accepts only a path under the output directory the caller owns. It is not a general
-grant and cannot register `~/.ssh` or another session's output.
+The output owner calls `register(session_id, path)` before it returns the tool result that hands
+the path to the model. If registration fails, the call fails; a path with no row is unowned.
+Registration accepts only a canonical path under `<output root>/<session_id>/`; it guards misuse
+among trusted parts, not isolation.
 
-### D3. Queries
+`exec` output, offloaded `read` results and a running background log all register. A log may
+grow after registration; ownership is stable.
 
-`owns(session_id, path)` extracts an attachment's file id or uses the output path and does a
-primary-key lookup in the matching table. `owned_paths(session_id)` queries the rows and returns
-the attachment path from its file-id directory and the output path from its row; it is not one
-primary-key read. A query failure denies the operation.
+### D3. Queries and escapes
+
+`owns(session_id, path)` resolves the path, then:
+
+- an attachment requires the path to stay inside
+  `<db>.session-files/<fileId>/` for an owned file id;
+- output requires the exact registered path.
+
+`..`, symlinks and an unresolvable path are denied. `owned_paths(session_id)` queries the rows
+and returns the attachment path from its file-id directory and the output path from its row; it
+is not one primary-key read. A query failure denies.
 
 ### D4. Fork, delete and growth
 
 A fork copies the source's rows in both tables at the fork's commit. The fork owns those files; a
-file the source adds later is not owned. Deleting a session releases its rows; a file another
-session still owns remains.
+file the source adds later is not owned.
+
+Delete releases the session's rows. The output directory is removed only when no row names any
+path under it; the last owner removes it. This replaces the unconditional directory removal in
+`session-deletion-and-fork.md`, which recorded the old rule because no row named the output.
+
+The new table is part of the next native storage format version; its upgrade creates it empty,
+and a failed upgrade rolls back.
 
 Command output may grow after a fork. The fork owns the file and reads its current content; a
 point-in-time copy is a separate concern.
@@ -50,15 +73,16 @@ keeps the mounts it started with.
 
 ## Consequences
 
-- A new `session_output_owners` table, `register`, `owns` and `owned_paths` on the session-files
-  owner.
-- `session-files.md` §11, `session-deletion-and-fork.md`, the Attachments and WorkspaceTools
-  designs and the CLI tables are updated under their owners after acceptance.
-- No Timeline event or storage format beyond the new table is added.
+- A new `session_output_owners` table, a native format version and `register`, `owns`,
+  `owned_paths`.
+- `native-storage-format.md`, `session-deletion-and-fork.md`, `session-files.md` §11, the
+  Attachments and WorkspaceTools designs and the CLI tables are updated under their owners after
+  acceptance.
+- No Timeline event is added; the table is storage state.
 
 ## Non-goals
 
-- A new file-access rule for command output; it uses the existing `session-owned` fact.
+- A new file-access rule; output uses ADR 014's `session-owned` fact.
 - Copying output at fork; growth is a separate concern.
 - Registering paths outside the caller's output directory.
 
@@ -74,7 +98,7 @@ keeps the mounts it started with.
 | §4 rule 5 | No Timeline batch. |
 | §4 rule 6 | No context-input change. |
 | §4 rule 7 | Parts call the session-files owner; no other plugin state. |
-| §4 rule 8 | No infrastructure change. |
+| §4 rule 8 | No infrastructure change; the native table is a storage format version owned by SessionStore. |
 | §4 rule 9 | No new Timeline fact. |
 | ADR 002 D2 | No wiring plugin. |
 | ADR 002 D3 | Ownership is session-files state; file tools and process start read it. |
