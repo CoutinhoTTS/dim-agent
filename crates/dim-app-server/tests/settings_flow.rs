@@ -1188,6 +1188,14 @@ async fn model_log_switch_starts_the_recorder() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::fs::metadata(home.join("model-log")).unwrap();
+        assert_eq!(directory.permissions().mode() & 0o777, 0o700);
+        let file = std::fs::metadata(&recording).unwrap();
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+    }
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }
