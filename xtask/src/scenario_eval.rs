@@ -3060,7 +3060,7 @@ mod tests {
                 capabilities: dim_agent_types::ModelCapabilities {
                     context_window: 64_000,
                     max_output_tokens: 200,
-                    ..Default::default()
+                    ..dim_agent_types::ModelCapabilities::with_limits(64_000, 200)
                 },
                 reasoning: None,
                 service_tier: None,

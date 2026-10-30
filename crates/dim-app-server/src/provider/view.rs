@@ -89,6 +89,8 @@ pub struct ManagementModel {
     pub source: &'static str,
     pub enabled: bool,
     pub endpoint: Option<ModelProtocol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_limits: Vec<String>,
     pub unavailable_reason: Option<String>,
     pub actions: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +190,7 @@ impl ProviderService {
                         "default"
                     },
                     endpoint: effective.endpoint,
+                    missing_limits: effective.missing_limits,
                     unavailable_reason: effective.unavailable_reason,
                     actions,
                 }
@@ -242,6 +245,7 @@ impl ProviderService {
         descriptor: crate::managed_provider::ProviderDescriptor,
         account: AccountSnapshot,
         record: Option<ProviderRecord>,
+        bundled: &BundledCatalog,
     ) -> ManagementProvider {
         let unavailable = if account.account.is_none() {
             Some("account_required")
@@ -284,18 +288,25 @@ impl ProviderService {
                         if replacement.is_some() && unavailable.is_none() {
                             actions.push("reset");
                         }
+                        let mut model = match replacement {
+                            Some(replacement) => inherit_limits(replacement.clone(), &source.entry),
+                            None => source.entry.clone(),
+                        };
+                        fill_bundled_limits(bundled, &mut model);
+                        let missing_limits = model.capabilities.missing_limits();
                         ManagementModel {
-                            enabled: !record.disabled_model_ids.contains(&source.entry.model_id),
-                            model: replacement.cloned().unwrap_or(source.entry),
+                            enabled: !record.disabled_model_ids.contains(&model.model_id),
+                            model,
                             source: if replacement.is_some() {
                                 "override"
                             } else {
                                 "default"
                             },
                             endpoint: Some(source.protocol),
-                            unavailable_reason: unavailable
-                                .map(str::to_owned)
-                                .or(source.unavailable_reason),
+                            missing_limits: missing_limits.clone(),
+                            unavailable_reason: unavailable.map(str::to_owned).or_else(|| {
+                                limits_reason(source.unavailable_reason.clone(), &missing_limits)
+                            }),
                             actions,
                             endpoint_override: None,
                         }
@@ -393,9 +404,12 @@ impl ProviderService {
                         Some(index) => {
                             let descriptor = descriptors.remove(index);
                             match self.oauth.status(&id, cancel).await {
-                                Ok(account) => {
-                                    Ok(Self::managed_management(descriptor, account, Some(*record)))
-                                }
+                                Ok(account) => Ok(Self::managed_management(
+                                    descriptor,
+                                    account,
+                                    Some(*record),
+                                    &self.bundled,
+                                )),
                                 Err(error) => Err(error.into()),
                             }
                         }
@@ -425,7 +439,12 @@ impl ProviderService {
         }) {
             let id = descriptor.provider_id.clone();
             let result = match self.oauth.status(&id, cancel).await {
-                Ok(account) => Ok(Self::managed_management(descriptor, account, None)),
+                Ok(account) => Ok(Self::managed_management(
+                    descriptor,
+                    account,
+                    None,
+                    &self.bundled,
+                )),
                 Err(error) => Err(error.into()),
             };
             match result {

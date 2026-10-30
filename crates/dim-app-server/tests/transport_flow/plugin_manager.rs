@@ -1095,11 +1095,7 @@ fn product_builder() -> AgentBuilder {
 /// model host answers its requests.
 async fn select_fixture_model(client: &mut Client) {
     let provider = "018ec73f-0000-7000-8000-000000000493";
-    let capabilities = dim_agent_types::ModelCapabilities {
-        context_window: 32000,
-        max_output_tokens: 128,
-        ..Default::default()
-    };
+    let capabilities = dim_agent_types::CatalogCapabilities::with_limits(32000, 128);
     let model = json!({"modelId": "fixture", "displayName": "fixture", "status": "active",
         "capabilities": capabilities});
     assert_ok(

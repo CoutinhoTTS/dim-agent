@@ -164,6 +164,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     } else {
         let mut params = serde_json::json!({ "cwd": options.cwd });
         let mut preferences = None;
+        let mut target = None;
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
             params["model"] = serde_json::json!({
                 "provider": provider,
@@ -174,6 +175,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
+            target = Some((provider.clone(), model.clone()));
         }
         if let Some(preset) = options.permission {
             params["permissionPolicy"] = serde_json::json!({ "preset": preset });
@@ -190,7 +192,13 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
                 return run_tui_with_connection(root, options, link, connection).await;
             }
             Err(error) => {
-                let error = session_host::model_adoption_error(error, preferences.as_ref());
+                let error = model_adoption_error(
+                    &mut client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await;
                 return Err(format!(
                     "Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"
                 ).into());
@@ -344,6 +352,86 @@ fn plugin_error(error: Arc<rutis::host::ErrorKind>) -> Error {
         rutis::host::ErrorKind::PluginFailed(source) => source.to_string().into(),
         other => other.to_string().into(),
     }
+}
+
+/// The failure of adopting `target` into a Session. When the target's
+/// catalog entry reports missing limits, the declaration command is appended;
+/// the catalog is read only on this failure path, never from the message.
+pub(crate) async fn model_adoption_error(
+    client: &mut client::Client,
+    target: Option<(&str, &str)>,
+    error: Error,
+    preferences: Option<&serde_json::Value>,
+) -> Error {
+    let error: Error = match preferences {
+        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Clear them with Ctrl+X in /models or dimcode models PROVIDER --clear-preferences MODEL; saved preferences were kept.").into(),
+        None => error,
+    };
+    let Some((provider_id, model_id)) = target else {
+        return error;
+    };
+    let Some(hint) = declaration_hint(client, provider_id, model_id).await else {
+        return error;
+    };
+    format!("{error} {hint}").into()
+}
+
+/// The command that declares both limits of one model, when its catalog
+/// entry says no source declares them.
+async fn declaration_hint(
+    client: &mut client::Client,
+    provider_id: &str,
+    model_id: &str,
+) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        catalog: Option<Catalog>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        models: Vec<CatalogModel>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CatalogModel {
+        id: String,
+        #[serde(default)]
+        missing_limits: Vec<String>,
+    }
+    let snapshot: Snapshot = client
+        .typed(
+            "provider.catalog",
+            serde_json::json!({"providerId": provider_id}),
+        )
+        .await
+        .ok()?;
+    let undeclared = snapshot.catalog.is_some_and(|catalog| {
+        catalog
+            .models
+            .into_iter()
+            .any(|model| model.id == model_id && !model.missing_limits.is_empty())
+    });
+    undeclared.then(|| {
+        crate::ui::i18n::tf(
+            "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N.",
+            &[("provider", provider_id), ("model", model_id)],
+        )
+    })
+}
+
+/// A model this crate marks `undeclared`: it has no declared limit and no
+/// other reason to be unavailable, so declaring the limits is the one thing
+/// that unblocks it. A disabled model or one unavailable for another reason
+/// keeps that state. `dimcode models` and the `/models` picker share this
+/// predicate for both the mark and the count.
+pub(crate) fn limits_undeclared(
+    missing_limits: &[String],
+    unavailable_reason: Option<&str>,
+    disabled: bool,
+) -> bool {
+    !disabled
+        && !missing_limits.is_empty()
+        && unavailable_reason.is_none_or(|reason| reason == "limits_undeclared")
 }
 
 fn prepare() -> Result<Option<Options>> {
@@ -574,6 +662,28 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 println!("{}", crate::ui::i18n::t("Saved model preferences cleared"));
                 return Ok(0);
             }
+            if options.set_limits.is_some() || options.set_missing_limits {
+                let (Some(context_window), Some(max_output_tokens)) =
+                    (options.context_window, options.max_output_tokens)
+                else {
+                    return Err(
+                        "--set-limits and --set-missing-limits require --context-window and --max-output-tokens"
+                            .into(),
+                    );
+                };
+                let target = match &options.set_limits {
+                    Some(model) => session_host::LimitTarget::Model(model.clone()),
+                    None => session_host::LimitTarget::Missing,
+                };
+                session_host::declare_model_limits(
+                    &mut client,
+                    provider,
+                    target,
+                    context_window,
+                    max_output_tokens,
+                )
+                .await?;
+            }
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Catalog {
@@ -586,6 +696,8 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 id: String,
                 name: String,
                 unavailable_reason: Option<String>,
+                #[serde(default)]
+                missing_limits: Vec<String>,
             }
             let params = serde_json::json!({"providerId":provider});
             let catalog = if options.refresh {
@@ -612,9 +724,25 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                     };
                     eprintln!("{notice}");
                 }
+                // Undeclared limits are the only blocker of a model this
+                // command can fix, so those are the ones it marks and names
+                // the declaring command for; a disabled model or one
+                // unavailable for another reason keeps that state.
+                let mut undeclared = 0;
                 for model in catalog.models {
-                    let availability = if catalog.disabled_model_ids.contains(&model.id) {
+                    let disabled = catalog.disabled_model_ids.contains(&model.id);
+                    let limits_only = limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        disabled,
+                    );
+                    if limits_only {
+                        undeclared += 1;
+                    }
+                    let availability = if disabled {
                         "disabled"
+                    } else if limits_only {
+                        "undeclared"
                     } else if model.unavailable_reason.is_some() {
                         "unavailable"
                     } else {
@@ -624,6 +752,15 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                         "{}\t{}\t{availability}",
                         crate::sanitize::safe(&model.id).replace(['\n', '\t'], " "),
                         crate::sanitize::safe(&model.name).replace(['\n', '\t'], " "),
+                    );
+                }
+                if undeclared > 0 {
+                    eprintln!(
+                        "{}",
+                        crate::ui::i18n::tf(
+                            "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N.",
+                            &[("id", provider)],
+                        )
                     );
                 }
             } else {

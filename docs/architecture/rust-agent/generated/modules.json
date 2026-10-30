@@ -16831,6 +16831,7 @@
       "references": [
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
+        "path crate::model_catalog::limits_valid",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEntry"
       ]
@@ -18129,10 +18130,12 @@
       "from": "dim_app_server::model_catalog",
       "to": "dim_agent_types::model",
       "references": [
-        "path ModelCapabilities",
+        "path CatalogCapabilities",
+        "path CatalogCapabilities::default",
         "path ModelReasoning",
         "path ModelServiceTier",
         "path ReasoningOff",
+        "use dim_agent_types::CatalogCapabilities",
         "use dim_agent_types::ModelCapabilities",
         "use dim_agent_types::ModelReasoning",
         "use dim_agent_types::ModelServiceTier",
@@ -18798,13 +18801,13 @@
       "from": "dim_app_server::provider",
       "to": "dim_agent_types::model",
       "references": [
-        "path ModelCapabilities",
+        "path CatalogCapabilities",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelRequest",
         "path dim_agent_types::RequestMetadata",
         "path model",
-        "use crate::model_catalog::ModelCapabilities",
+        "use crate::model_catalog::CatalogCapabilities",
         "use dim_agent_types::ModelCapabilitySnapshot",
         "use dim_agent_types::ModelConfig",
         "use dim_agent_types::ModelRequest"
@@ -18881,7 +18884,6 @@
         "path BundledCatalog",
         "path BundledCatalog::load",
         "path CatalogProvider",
-        "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelMetadata",
         "path ModelSource::Builtin",
@@ -18889,6 +18891,11 @@
         "path NewApiEndpoint",
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
+        "path declarations_hold",
+        "path declare_supplied_limits",
+        "path drop_undeclared_limits",
+        "path inherit_limits",
+        "path limits_valid",
         "use crate::model_catalog::BundledCatalog",
         "use crate::model_catalog::CatalogProvider",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
@@ -18897,7 +18904,14 @@
         "use crate::model_catalog::ModelMetadata",
         "use crate::model_catalog::ModelSource",
         "use crate::model_catalog::NewApiEndpoint",
-        "use crate::model_catalog::ProviderProjection"
+        "use crate::model_catalog::ProviderProjection",
+        "use crate::model_catalog::declarations_hold",
+        "use crate::model_catalog::declare",
+        "use crate::model_catalog::declare_supplied_limits",
+        "use crate::model_catalog::declared_limit_values",
+        "use crate::model_catalog::drop_undeclared_limits",
+        "use crate::model_catalog::inherit_limits",
+        "use crate::model_catalog::limits_valid"
       ]
     },
     {
@@ -19146,12 +19160,20 @@
     },
     {
       "from": "dim_app_server::provider::editing",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path FieldUpdate",
         "path FieldUpdate::Clear",
         "path FieldUpdate::Set",
         "path ModelEntry",
+        "path declare",
         "use crate::model_catalog::FieldUpdate"
       ]
     },
@@ -19251,7 +19273,9 @@
       "to": "dim_app_server::model_catalog",
       "references": [
         "path BundledCatalog",
-        "path ModelEntry"
+        "path ModelEntry",
+        "path declare_supplied_limits",
+        "path drop_undeclared_limits"
       ]
     },
     {
@@ -19407,6 +19431,7 @@
         "path MAX_MODEL_TOKENS",
         "path ModelEdit",
         "path ModelEntry",
+        "path declare",
         "use crate::model_catalog::FieldUpdate"
       ]
     },
@@ -19540,7 +19565,8 @@
         "path ModelEntry",
         "path ModelSource::Builtin",
         "path ModelSource::Custom",
-        "path ProviderProjection"
+        "path ProviderProjection",
+        "path declared_limit_values"
       ]
     },
     {
@@ -19656,8 +19682,10 @@
       "from": "dim_app_server::provider::view",
       "to": "dim_app_server::model_catalog",
       "references": [
+        "path BundledCatalog",
         "path ModelEntry",
-        "path NewApiEndpoint"
+        "path NewApiEndpoint",
+        "path inherit_limits"
       ]
     },
     {
@@ -19681,6 +19709,8 @@
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
         "path bundled_seeds",
+        "path fill_bundled_limits",
+        "path limits_reason",
         "path parse_provider_row",
         "path reseed_candidate",
         "path same_account",
@@ -20410,6 +20440,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
+        "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin"
       ]
@@ -20891,6 +20922,13 @@
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
         "use dim_agent_runtime::panic_message"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path crate::provider::rewrite_stored_limits"
       ]
     },
     {
@@ -21853,8 +21891,10 @@
       "to": "dim_cli::session_host",
       "references": [
         "mod session_host",
+        "path session_host::LimitTarget::Missing",
+        "path session_host::LimitTarget::Model",
         "path session_host::clear_saved_model_preferences",
-        "path session_host::model_adoption_error",
+        "path session_host::declare_model_limits",
         "path session_host::saved_model_preferences"
       ]
     },
@@ -21931,6 +21971,13 @@
       "references": [
         "path client::Client",
         "path client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
       ]
     },
     {
@@ -22305,10 +22352,10 @@
       "from": "dim_cli::configure",
       "to": "dim_agent_types::model",
       "references": [
-        "path ModelCapabilities",
+        "path CatalogCapabilities",
         "path ModelReasoning",
         "path ModelServiceTier",
-        "use dim_agent_types::ModelCapabilities",
+        "use dim_agent_types::CatalogCapabilities",
         "use dim_agent_types::ModelReasoning",
         "use dim_agent_types::ModelServiceTier"
       ]
@@ -23640,6 +23687,7 @@
       "to": "dim_cli",
       "references": [
         "path Result",
+        "path crate::model_adoption_error",
         "use crate::Result"
       ]
     },
@@ -23752,7 +23800,6 @@
       "from": "dim_cli::session",
       "to": "dim_cli::session_host",
       "references": [
-        "path crate::session_host::model_adoption_error",
         "path crate::session_host::saved_model_preferences"
       ]
     },
@@ -23804,7 +23851,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_agent_types::model",
       "references": [
-        "path dim_agent_types::ModelCapabilities",
+        "path dim_agent_types::CatalogCapabilities",
         "path dim_agent_types::ModelReasoning",
         "path dim_agent_types::ModelServiceTier"
       ]
@@ -23822,7 +23869,9 @@
       "to": "dim_cli",
       "references": [
         "path crate::Error",
-        "path crate::Result"
+        "path crate::Result",
+        "path crate::limits_undeclared",
+        "path crate::model_adoption_error"
       ]
     },
     {
@@ -23958,6 +24007,7 @@
         "path ModelPolicyUpdate::Conflict",
         "path ModelPolicyUpdate::Failed",
         "path ModelPolicyUpdate::Read",
+        "path NeedsLimitsProvider",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -24019,6 +24069,7 @@
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
+        "use crate::model::session::NeedsLimitsProvider",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
         "use crate::model::session::PluginItem",
@@ -26379,6 +26430,7 @@
         "path ModelPolicyUpdate::Conflict",
         "path ModelPolicyUpdate::Failed",
         "path ModelPolicyUpdate::Read",
+        "path NeedsLimitsProvider",
         "path SubagentModelPolicy",
         "path SubagentModelPolicy::Agent",
         "path SubagentModelPolicy::Fixed",
@@ -26388,6 +26440,7 @@
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
+        "use crate::model::session::NeedsLimitsProvider",
         "use crate::model::session::SubagentModelPolicy"
       ]
     },
@@ -31412,6 +31465,7 @@
       "references": [
         "path SqliteStorage::open",
         "path SqliteStorage::open_read_only",
+        "path dim_app_server::storage::STORE_FORMAT",
         "use dim_app_server::storage::SqliteStorage"
       ]
     },

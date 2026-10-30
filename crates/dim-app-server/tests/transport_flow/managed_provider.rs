@@ -115,8 +115,8 @@ impl ManagedProvider for Provider {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
             "displayName":"Fixture model","status":"active",
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
-            "capabilities":dim_agent_types::ModelCapabilities {
-                context_window: 32_000, max_output_tokens: 128, reasoning: true, ..Default::default() }}))
+            "capabilities":dim_agent_types::CatalogCapabilities {
+                reasoning: true, ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128) }}))
         .unwrap();
         ready(Ok(ManagedCatalog {
             account: self.0.account.lock().unwrap().clone(),

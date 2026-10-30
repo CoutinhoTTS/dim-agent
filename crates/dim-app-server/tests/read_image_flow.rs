@@ -56,7 +56,7 @@ fn snapshot(vision: bool) -> ModelCapabilitySnapshot {
         },
         capabilities: ModelCapabilities {
             vision,
-            ..Default::default()
+            ..ModelCapabilities::with_limits(128_000, 16_384)
         },
         reasoning: None,
         service_tier: None,
