@@ -325,7 +325,7 @@ already records:
 | --- | --- | --- |
 | Provider descriptor | `capabilityOverrideFields` on the stored descriptor; a non-positive descriptor value reads as absent | The model that descriptor describes |
 | Bundled catalog | `metadataSource` naming the matched bundled provider, which declares both limits, or that provider's `contextWindowOverride` and `contextWindowFallback` metadata | The models the lookup matches, or every model of the provider |
-| User | The same `capabilityOverrideFields` field on the descriptor override or user model that `models.edit` writes | The model the override names |
+| User | The same `capabilityOverrideFields` field on the descriptor override or user model: `models.edit` writes it for each limit it edits, and either legacy importer for an imported value it keeps | The model the override names |
 
 Absence is a value of the type, not a number. The catalog carries
 `CatalogCapabilities`, whose two limits are optional and absent when no source
@@ -380,18 +380,28 @@ declares nothing, the model is undeclared again.
 Format v24 stored what a client supplied without a mark, and its probe filled
 each missing field with the assumed pair (128000 context, 16384 output). The
 format upgrade and both legacy importers therefore decide each field of a user
-model or a custom provider's own model alone, through one function: a limit
-`capabilityOverrideFields` marks or `metadata.raw` declares is a declaration; an
-unmarked limit equal to the assumed default is removed, because it may be the
-probe's fill; any other value can only have been typed or listed, so it is kept
-and marked. The rule prefers asking again over keeping a possible assumption: a
-user who typed exactly 128000 or 16384 sees that field listed as undeclared
-after the upgrade and declares it again with `--set-missing-limits` or
-`/models`.
+model, a static record's descriptor override or a custom provider's own model
+alone, through one function: a limit `capabilityOverrideFields` marks or
+`metadata.raw` declares is a declaration; an unmarked limit equal to the
+assumed default is removed, because it may be the probe's fill; any other value
+can only have been typed or listed, so it is kept and marked. The rule prefers
+asking again over keeping a possible assumption: a user who typed exactly
+128000 or 16384 sees that field listed as undeclared after the upgrade and
+declares it again with `--set-missing-limits` or `/models`.
+
+These writers set the mark: `models.edit` for each limit it edits, and both
+legacy importers for each imported value they keep, descriptor overrides
+included. `provider.create`, `provider.models.create` and the earlier probe set
+none. A static record's descriptor overrides take the per-field rule because
+the importers copy the legacy `modelConfigOverrides` as they are, without a
+mark, and those values are user input; a managed record's overrides take the
+strict rule because only `models.edit` writes them and it marks every limit it
+edits.
 
 The same split applies in both legacy importers: the `models` of a `bundled` or
 `remote` legacy row are listing output and take the strict rule, while user
-models and the `models` of a `user` row keep the per-field rule.
+models, the `models` of a `user` row and the row's descriptor overrides keep the
+per-field rule.
 
 A Session keeps its adopted capability snapshot. One whose model becomes
 undeclared resumes and stays readable; its next request fails in the resolver with
@@ -633,7 +643,7 @@ The frozen legacy schema uses `modelsSource` to distinguish model origins:
 | --- | --- |
 | `modelsSource: bundled/remote`, `models` | Default descriptors; only `remote` sets `remoteModels` |
 | `modelsSource: user`, `models` | `userModels`; an existing builtin keeps its native bundled defaults, and collisions reject the entry |
-| `modelConfigOverrides` | Matching user descriptors replace that user entry; remaining items stay descriptor overrides, including disappeared defaults, and never become user models |
+| `modelConfigOverrides` | Matching user descriptors replace that user entry; remaining items stay descriptor overrides, including disappeared defaults, and never become user models; every limit one states keeps its value and gains the mark (§3.5) |
 | `metadata.enabledModelIds/disabledModelIds` | Explicit disables over defaults and user models; conflicting lists reject the entry |
 | `metadata.modelPreferences` | The strict existing `ModelPreferences` map |
 | `activeModelId` | A per-Provider hint; no authority to create or overwrite a scoped selection |

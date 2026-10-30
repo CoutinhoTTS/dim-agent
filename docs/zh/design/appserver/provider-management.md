@@ -251,7 +251,7 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 | --- | --- | --- |
 | Provider 描述 | 存储描述上的 `capabilityOverrideFields`；描述中的非正值视为未声明 | 该描述所述的模型 |
 | 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider（两项上限都由它声明），或该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据 | 匹配到的模型，或该 Provider 的全部模型 |
-| 用户 | 同一 `capabilityOverrideFields` 字段，由 `models.edit` 写入描述覆盖或用户模型 | 覆盖所指的模型 |
+| 用户 | 同一 `capabilityOverrideFields` 字段，写在描述覆盖或用户模型上：`models.edit` 为它编辑的每项上限写入，两个旧版导入器为导入时保留的每项值写入 | 覆盖所指的模型 |
 
 缺失是类型上的值，不是数字。目录侧使用 `CatalogCapabilities`：两项上限都是可选的，没有来源
 声明时缺省；存储描述、其覆盖、用户模型、投影结果和托管目录的模型都用它。面向 Session 的
@@ -286,14 +286,20 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 让模型回到发现结果，发现结果没有声明时它重新变为未声明。
 
 格式 v24 保存客户端给出的上限却不写标记，其探测也为每个缺失字段补上假定值（窗口 128000、输出
-16384）。因此格式升级与两个旧版导入器都通过同一个函数，对用户模型与自建 Provider 自有模型的
-每项上限单独判定：已列入 `capabilityOverrideFields` 或由 `metadata.raw` 声明的上限是声明；未标记
-且恰等于假定值的上限删除，因为它可能是探测填充；其余数值只可能来自输入或清单，保留并补上标记。
-该规则宁可再次询问，也不保留可能的假定值：用户若恰好输入 128000 或 16384，升级后该项显示为
-未声明，用 `--set-missing-limits` 或 `/models` 重新声明即可。
+16384）。因此格式升级与两个旧版导入器都通过同一个函数，对用户模型、静态记录的描述覆盖与自建
+Provider 自有模型的每项上限单独判定：已列入 `capabilityOverrideFields` 或由 `metadata.raw` 声明的
+上限是声明；未标记且恰等于假定值的上限删除，因为它可能是探测填充；其余数值只可能来自输入或
+清单，保留并补上标记。该规则宁可再次询问，也不保留可能的假定值：用户若恰好输入 128000 或
+16384，升级后该项显示为未声明，用 `--set-missing-limits` 或 `/models` 重新声明即可。
+
+这些写入者会写标记：`models.edit` 为它编辑的每项上限写；两个旧版导入器为导入时保留的每项值写，
+描述覆盖同样写。`provider.create`、`provider.models.create` 与旧版探测都不写。静态记录的描述覆盖
+按逐字段规则，因为两个旧版导入器把旧库的 `modelConfigOverrides` 原样复制、不写标记，其中的值是
+用户输入；托管记录的描述覆盖按严格规则，因为它只由 `models.edit` 写入，而后者为它编辑的每项上限
+写标记。
 
 两个旧版导入器沿用同一划分：旧记录中 `bundled`/`remote` 行的 `models` 属于投影输出，按严格
-规则处理；用户模型与 `modelsSource` 为 `user` 的行按逐字段规则处理。
+规则处理；用户模型、`modelsSource` 为 `user` 的行与该行的描述覆盖按逐字段规则处理。
 
 Session 保留已采用的能力快照。模型变为未声明的 Session 仍可恢复并保持可读；下一次请求在
 解析器处失败，错误指出缺失的上限，且发生在凭据或网络 I/O 之前。两项都声明后再选择该模型
@@ -470,7 +476,7 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | --- | --- |
 | `modelsSource: bundled/remote`、`models` | 默认描述；只有 `remote` 设置 `remoteModels` |
 | `modelsSource: user`、`models` | `userModels`；已有内置项保留原生捆绑默认，ID 冲突则拒绝该项 |
-| `modelConfigOverrides` | 匹配用户模型的描述替换该用户项；其余保留为描述覆盖，已消失的默认也不会变成用户模型 |
+| `modelConfigOverrides` | 匹配用户模型的描述替换该用户项；其余保留为描述覆盖，已消失的默认也不会变成用户模型；其中每项上限保留取值并补上标记（§3.5） |
 | `metadata.enabledModelIds/disabledModelIds` | 默认和用户模型的显式禁用；列表冲突则拒绝 |
 | `metadata.modelPreferences` | 既有严格 `ModelPreferences` 字典 |
 | `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
