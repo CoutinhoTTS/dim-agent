@@ -537,6 +537,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::images",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/images.rs",
+      "unexpandedMacros": [
+        "matches"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::input_queue",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -6033,6 +6042,13 @@
       "references": [
         "mod host_platform",
         "path host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "mod images"
       ]
     },
     {
@@ -11751,6 +11767,29 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files::read",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "path ImageKind",
+        "path ImageRefusal::Invalid",
+        "path ImageRefusal::NotAnImage",
+        "path ImageRefusal::TooManyPixels",
+        "path ImageRefusal::UnsupportedFormat",
+        "path ImageSize",
+        "path ScaledImage",
+        "path Sniffed::Image",
+        "path Sniffed::Unsupported",
+        "path images::scale_image",
+        "path images::sniff",
+        "use crate::images",
+        "use crate::images::ImageKind",
+        "use crate::images::ImageRefusal",
+        "use crate::images::ImageSize",
+        "use crate::images::ScaledImage",
+        "use crate::images::Sniffed"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::read",
       "to": "dim_agent_capabilities::workspace_tools::file_reads",
       "references": [
         "path FileReads",
@@ -11781,6 +11820,7 @@
         "path invalid_input",
         "path js_len",
         "path not_regular",
+        "path object",
         "path open_regular",
         "path resolve_path",
         "path succeeded",
@@ -11795,6 +11835,7 @@
         "use super::invalid_input",
         "use super::js_len",
         "use super::not_regular",
+        "use super::object",
         "use super::open_regular",
         "use super::resolve_path",
         "use super::succeeded"
@@ -11827,7 +11868,13 @@
       "from": "dim_agent_capabilities::workspace_tools::files::read",
       "to": "dim_agent_types::content",
       "references": [
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "path ToolContent::Blocks",
         "path ToolContent::Text",
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSource",
+        "use dim_agent_types::ImageSourceType",
         "use dim_agent_types::ToolContent"
       ]
     },

@@ -470,7 +470,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 远程访问 | VS Code | CLI |
 | CLI 命令 | 子命令、`exec --json`、`exec --verify` | CLI，调用各插件的 RPC |
 | 多模态 | `image generate/edit/enhance`、`modality`、`modality task` | 新增：Modality |
-| 多模态 | `image read` | 现有：视觉模型通过 `read` 读取图像 |
+| 多模态 | `image read` | 现有：视觉模型通过 `read` 读取图像（[WorkspaceTools](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images)） |
 | 多模态 | `video`、`speech`、`music`、`audio`、`asset`、`motion`、`realtime` | 新增：Modality（由 provider 执行） |
 | 多模态 | `ocr` | 新增：Modality（由宿主执行；OCR 运行时组件） |
 
