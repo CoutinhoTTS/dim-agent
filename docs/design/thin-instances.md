@@ -8,10 +8,9 @@ Rules: [design rules](../architecture/rust-agent/principles.md), [ADR 002](../ad
 [ADR 004](../adr/004-loader-plugin-management.md), [ADR 006](../adr/006-plugin-contract.md) D3, D4 and D6,
 [How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts).
 
-Depends on: rutis 0.19.1, with [rutis#947](https://github.com/arcships/rutis/pull/947) and
-[rutis#948](https://github.com/arcships/rutis/issues/948), and the 0.19 upgrade
-([#677](https://github.com/arcships/dim/pull/677)). It supersedes [#645](https://github.com/arcships/dim/pull/645)
-and the "one row per instance" draft of this design.
+Builds on: rutis 0.19.1, which the 0.19 upgrade ([#677](https://github.com/arcships/dim/pull/677)) pins;
+#677 lands first. It supersedes [#645](https://github.com/arcships/dim/pull/645) and the "one row per
+instance" draft of this design.
 Decision: [ADR 009](../adr/009-scopes-are-plugins.md) (Proposed).
 
 ## 1. Scope and non-goals
@@ -36,10 +35,11 @@ costs this:
   the Session scope row through `SessionLoader`, because the loader creates an instance only from a
   row's context.
 
-rutis#948, accepted for 0.19.1, removes the reason. rutis-loader's mounter computes a copy's
-instances from its position in the plugin tree (`ctx.scope()`), and `mark_scope(group)` becomes a
-public method on `Ctx`. A host can then mount a plain plugin with `ctx.plugin`, mark it as the scope
-of a group, and foreign copies inside it resolve that group's names to it.
+rutis 0.19.1 removes the reason ([rutis#948](https://github.com/arcships/rutis/issues/948),
+[rutis#961](https://github.com/arcships/rutis/pull/961)). `Definition::at` takes a copy's instances
+from its position in the plugin tree (`ctx.scope()`), and `mark_scope(group)` is a public method on
+`Ctx`. A host mounts a plain plugin with `ctx.plugin`, marks it as the scope of a group, and foreign
+copies inside it resolve that group's names to it.
 
 This design makes the Session and branch plain plugins that mark their group, and the per-Session
 content plain plugins of the parts that own it. Nothing of a Session is a loader row.
@@ -48,7 +48,7 @@ Non-goals:
 
 - **The Agent group.** It stays an instanced loader group: its row isolates the Agent's process values
   (`AgentBuilder::agent_row`), and `agent.create` places Agents as its instances
-  (`dim-app-server/src/agents.rs:1289`). Nothing in it scans the loader's entries.
+  (`dim-app-server/src/agents.rs:1297`). Nothing in it scans the loader's entries.
 - **Names and the catalog.** The catalog's groups (`session`, `branch`), `Names`, the keys a part
   gets, and the `instanceNames` a foreign process row declares stay as they are.
 - **The mounters' contract.** They call the generators, follow the registry and hand what they mount
@@ -58,11 +58,11 @@ Non-goals:
 
 ### 2.1 Now
 
-On main (rutis 0.17.1):
+On main at 08d78bca (rutis 0.17.1, with #666):
 
 ```text
 agent group (instanced)
-  AgentAnchor
+  AgentScope (AgentAnchor when an Agent places itself)
   session group (instanced)                    branch group (instanced, nested)
     SessionScope                                 BranchScope
     SessionExtension (when extensions exist)     required mounter
@@ -77,9 +77,12 @@ agent group (instanced)
   their own `apply`.
 - Creation then finds the instance's rows by scanning `Loader::entries()`: to report the required
   rows' failures, to wait for them to be Active, and to let the optional rows settle
-  (`dim-agent-runtime/src/assembly.rs:1492`, `:1504`, `:1508`). Locating an instance after a timeout
-  (`locate`, `:1575`) and the assembly check (`scope_rows`, `:2018`) scan the same way.
-- The extension launcher creates a requested extension from its own row context (`:1123`). The
+  (`dim-agent-runtime/src/assembly.rs:1597`, `:1609`, `:1615`). The assembly check scans the same
+  way (`scope_rows`, `:2145`).
+- Creation is bounded by `StartupProgress`: it gives up after no progress in its roots' subtrees for
+  the startup timeout (`:37-118`, #666). Its roots closure finds the instance by scanning too
+  (`locate`, `:1548`, `:1689`).
+- The extension launcher creates a requested extension from its own row context (`:1231`). The
   Skills and MCP parts create their content through `SessionLoader`, which creates instances from the
   Session scope row (`skills/content.rs:160`, `mcp/publication.rs:613`).
 
@@ -87,7 +90,7 @@ agent group (instanced)
 
 ```text
 agent group (instanced)
-  AgentAnchor
+  AgentScope (or AgentAnchor)
     └─ SessionScope (mark_scope "session")
          ├─ required mounter ── required parts
          │     ├─ Skills ── SkillContent …
@@ -112,15 +115,19 @@ tree shows where their content sits.
 - **The scope mounts the rest.** After providing its services, the scope mounts the required and the
   optional mounter, and the requested extension's plugins (below), with `ctx.plugin` as its own
   children. It hands their views to creation, as the mounters hand the copies they mount, and returns.
-  It waits for none of them in `apply`: creation is the one place that waits, within its deadline.
-- **Names.** A Rust copy's keys are `Key::instance(id)` of its scopes: the Session scope's
+  It waits for none of them in `apply`: creation is the one place that waits.
+- **Names.** A Rust copy's keys are qualified with its scopes' instances: the Session scope's
   `ctx.instance()` and, in a branch, the branch scope's. A mounter gives `Names` that group →
   instance list instead of a loader `Build`, and `Names` qualifies keys itself, as its composition
-  check already does (`Names::check`). The catalog still says which group a name belongs to, so
-  every key keeps its form.
-- **Foreign copies** are mounted with `Definition::at` under a mounter, as today. The mounter of
-  rutis#948 takes the copy's instances from `ctx.scope()`, so `session` and `branch` names resolve to
-  the enclosing scopes, and each copy is isolated per instance as today.
+  check already does (`Names::check`). The catalog still says which group a name belongs to.
+  - `key::<T>()` gives `Key::<T>::of().instance(id)`, as today (`names.rs:195`).
+  - `named(name)` gives `host_key_in(name, id)` for a shared instance name, which is the key the
+    catalog gives it today (`host_key` is `Key::dynamic(name)`, rutis-bridge 0.19.0
+    `session/services.rs:48-54`). A Rust-typed instance name is read with `key::<T>()`, and `named`
+    refuses one, naming `key::<T>()`. Every `named` caller today reads a shared name.
+- **Foreign copies** are mounted with `Definition::at` under a mounter, as today. In 0.19.1 it takes
+  the copy's instances from `ctx.scope()`, so `session` and `branch` names resolve to the enclosing
+  scopes, and each copy is isolated per instance as today.
 - **Creation waits in three steps.** Without the loader's `settle`, nothing waits unless creation
   does:
   1. The scope must be Active. A failed `apply` is the creation's error.
@@ -134,14 +141,16 @@ tree shows where their content sits.
      end of its `apply`, `parts.rs:512-517`): required copies must be Active, optional copies must
      settle.
 
-  Creation holds the scope's view from the moment `ctx.plugin` returns. On a timeout or a
-  cancellation it shuts that view down. `locate`, the task that disposed of a creation still running,
-  `rows`, `scope_entries` and `scope_rows` go.
+  `StartupProgress` bounds the three steps as it bounds creation today. Its root is the scope view's
+  id, known as soon as `ctx.plugin` returns, so nothing has to find the instance: `locate` goes.
+  When `StartupProgress` gives up, or on cancellation, creation shuts the scope's view down. The task
+  that disposed of a creation still running, `rows`, `scope_entries` and `scope_rows` go too.
 - **Requested extensions.** `Agent::create_session_with_extension(config, name, value)` keeps its
   contract: the plugins registered for `name` (`AgentBuilder::session_extension_part`) are built from
   `value` with the Session's `Names` and must be Active before the Session publishes. The Session
   scope builds and mounts them as its children and hands them to creation as required (step 2). A
-  value of the wrong type fails creation; a plugin that stays Pending holds it until the deadline.
+  value of the wrong type fails creation; a plugin that stays Pending holds it until
+  `StartupProgress` gives up.
   The launcher row, `ExtensionRequest` and the extension groups go. An extension name is no longer a
   loader group, so it can no longer shadow a row, and the "reserved extension group" check goes.
 - **Per-Session content is its part's children.** Each Skills content and each MCP connection
@@ -164,15 +173,21 @@ tree shows where their content sits.
   - The assembly check reads each live scope's record: its required handed views and its required
     copies must still be Active, and an unawaited child is reported as today.
 - **Install.** `AgentBuilder::install` registers no Session, branch, mounter or extension module and
-  returns no Session group. The Agent group row holds the Agent's own rows (`AgentAnchor`, process
-  values). The scopes construct their mounters.
+  returns no Session group. The Agent group row holds the Agent's own rows (`AgentScope` or
+  `AgentAnchor`, process values). The scopes construct their mounters.
 
 ### 2.3 Observable changes
 
-- **Fiber tree:** a Session is a child of its Agent's anchor row, a branch of its Session scope, and
+- **Fiber tree:** a Session is a child of its Agent's anchor row (`AgentScope`, or `AgentAnchor` when
+  an Agent places itself), a branch of its Session scope, and
   the mounters of their scope. Skills contents and MCP connections sit under their parts. The
   `session` and `main` subgraphs of the generated graphs regenerate. The `SessionLoader` service and
   its edges go; no other service or edge changes.
+- **The anchor must not reload.** Today a Session is a sibling of the anchor in the Agent group;
+  now it is the anchor's child. A reload of the anchor would dispose every Session of that Agent
+  without `Agent::close`'s settlement. It does not reload today: `AgentScope` depends only on the
+  directory and the loader, which do not reload (`dim-app-server/src/agents.rs:1677`). A dependency
+  added to it, or to `AgentAnchor`, must keep that.
 - **Loader entries:** `Loader::entries()` no longer lists any Session, branch, mounter or extension
   row. PluginManager lists process rows only, so `plugin.list` does not change.
 - **Creation cost:** nothing scans the loader's entries, which is #594's own proposal. `xtask measure`
@@ -194,32 +209,19 @@ durable identities, so Session and branch ids are unaffected.
 
 ## 4. Dependencies
 
-- **rutis:** `ctx.plugin`, fiber views and states, `ctx.scope()`, and the public `mark_scope`
-  (rutis#948).
-- **rutis-loader:** `Definition::at` through its mounter, by the copy's position in the tree
-  (rutis#948); `ServiceCatalog::key_in`; the Agent group as an instanced group.
+- **rutis 0.19.1:** `ctx.plugin`, fiber views and states, `ctx.scope()`, and the public `mark_scope`.
+- **rutis-loader 0.19.1:** `Definition::at` through its mounter, by the copy's position in the tree;
+  `ServiceCatalog::key_in`, to tell a name's group; the Agent group as an instanced group.
+- **rutis-bridge:** `host_key_in`.
 - The part registry and the mounters, as in How Dim uses rutis §2.
-- The 0.19 upgrade (#677) lands first; this design builds on 0.19.1.
+- The 0.19 upgrade (#677), which pins 0.19.1, lands first.
 
 ## 5. Cross-module requirements
 
-[Design rules §4 rule 8](../architecture/rust-agent/principles.md) has Dim solve within rutis's
-existing capabilities and raise nothing. The repository owner decided to raise this one and to take
-it in 0.19.1. Rust parts need nothing from it: they qualify their keys with `Key::instance(id)`.
-
-### R1. Foreign copies resolve instance names by their position in the tree
-
-- **Blocked:** foreign Session and branch parts ([ADR 006](../adr/006-plugin-contract.md) D3, D4)
-  resolve instance names only inside a loader instance (§1).
-- **Considered:** keeping the loader instance and thinning it to one row (the earlier draft of this
-  design): the mounters, the launcher and the extensions still had to be rows or rows' children, and
-  creation still read the loader's report. A host-side `PluginMounter`: the trait is public, but the
-  types it needs (`JsFactory`, `RowRuntime`, `RowEntry`) are crate-private. `ctx.isolate`: a copy's
-  keys come from the mounter's instance table, so a group name outside it fails (`OutsideInstance`).
-- **Capability:** the mounter computes a copy's instances from `ctx.scope()`, and a host marks a
-  plain plugin as the scope of a group with a public `mark_scope`.
-- **Sequence, batches, interruption, reload:** none.
-- **Owner:** rutis, [rutis#948](https://github.com/arcships/rutis/issues/948), accepted for 0.19.1.
+None. rutis 0.19.1, which #677 pins, has everything this design uses: a foreign copy resolves its
+instances from its position in the tree, and a host marks its own scopes with `mark_scope`
+([rutis#948](https://github.com/arcships/rutis/issues/948), raised for this design and released in
+0.19.1). Rust parts qualify their keys themselves.
 
 ## 6. Rule check
 
@@ -230,7 +232,7 @@ it in 0.19.1. Rust parts need nothing from it: they qualify their keys with `Key
 | §4 rules 2, 3, 5, 6, 9 | Not applicable: no handover, `before` transform, batch, context path or Timeline fact changes |
 | §4 rule 4 (core mechanisms without business meaning) | Creation and the scope treat every part and extension plugin alike. Skills contents and MCP connections are their parts' business; no core code knows them |
 | §4 rule 7 (public events and services) | No service is added; `SessionLoader` goes. Creation reads only the views the scope and the mounters hand it, not the loader's table |
-| §4 rule 8 (infrastructure unchanged by default) | The need is the assembly's own (#594's creation cost), and it closes inside the assembly. The rutis side is R1, raised by the owner's decision |
+| §4 rule 8 (infrastructure unchanged by default) | The need is the assembly's own (#594's creation cost), and it closes inside the assembly, using rutis 0.19.1 as #677 pins it. Nothing is asked of rutis (§5) |
 | ADR 002 D1–D5 | Parts stay in their Session or branch. No wiring module, configuration or language contract changes; foreign parts still resolve their names |
 | ADR 004 | Its ownership stands: connections belong to a Session, closing a Session closes only its generations, configuration stays private and immutable, and no second loader or lifecycle manager comes in. Its mechanism, a connection generation as an instanced group with the loader owning disposal, is superseded by [ADR 009](../adr/009-scopes-are-plugins.md) |
 | ADR 006 D3 | The instance still mounts the parts registered for it, from its scope. The scope and the mounters are the instance's mounting mechanism, built by Dim, with no configuration, enablement or reload of their own, so "a plugin is one row" does not cover them. "Inside a part" now holds literally for McpSession and Skills |
@@ -272,11 +274,27 @@ it in 0.19.1. Rust parts need nothing from it: they qualify their keys with `Key
   `InstanceId` note and the assembly section's required rows.
 - [Skills](../architecture/rust-agent/plugins/Skills.md): `S:SessionLoader` and the
   `SkillContentInstances` template; [MCP OAuth](appserver/mcp-oauth.md): the `McpServer` row.
+- [single-tree](../architecture/rust-agent/single-tree.md) `:111`: "nested instances belong to the
+  Session group, not to the row that created them" becomes "a Session's content belongs to the part
+  that mounts it".
+- [Plugin pages index](../architecture/rust-agent/plugins/README.md) `:15-17` and
+  `xtask/src/plugins.rs:45-55`: the excluded infrastructure list drops `SessionExtension`, `session`
+  and `branch`; the scopes and mounters stay.
+- [Session TypeScript](session-typescript.md) `:20`: "loader instances isolate their services"
+  becomes "the Session and branch scopes isolate their services".
+- [ADR 005](../adr/005-observability.md) `:101` (Proposed): the `SessionExtension` mechanism it lists
+  as unchanged is removed.
+- `crates/dim-app-server/README.md:205-214`: `McpOwner::new(ctx)`, no `standalone_template` (the
+  standalone `McpConnections` template, `mcp/publication.rs:216-226`, goes) and no "declared Session
+  loader".
+- `AgentScopePlugin`'s doc comment (`dim-app-server/src/agents.rs:1677`): its Sessions are its
+  children, which is why it must not reload.
+- The Chinese mirrors: [How Dim uses rutis](../zh/design/rutis-usage.md) `:359` and
+  [Plugin contract](../zh/design/plugin-contract.md) `:52`.
 - The generated graphs, through `xtask graph`.
-- #645 is closed; its Git pin and its build.md paragraph do not land.
-
-If [#666](https://github.com/arcships/dim/pull/666) (`StartupProgress`) lands first, creation keeps
-its wait model: this design changes what creation waits on, not for how long.
+- #645 is closed. 0.19.1 has the `Loader::instance_rows` it pinned
+  ([rutis#941](https://github.com/arcships/rutis/issues/941)), but this design removes the instance
+  rows it reads. Its Git pin and its build.md paragraph do not land.
 
 ## Appendix A. Rust binding
 
@@ -285,8 +303,9 @@ its wait model: this design changes what creation waits on, not for how long.
   `MountSite` that holds its instances (`session` → the Session scope's `ctx.instance()`, and in a
   branch `branch` → its own). It mounts them (and, for a Session, the requested extension's plugins)
   with `ctx.plugin` and records the views in the owner's `Loaded`.
-- `Names::copy(catalog, instances)` takes that group → instance list in place of a `Build`; its
-  keys are `Key::instance(id)`, as `Names::check` computes them.
+- `Names::copy(catalog, instances)` takes that group → instance list in place of a `Build`.
+  `key::<T>()` qualifies `Key::<T>::of()` with the instance; `named` gives `host_key_in(name, id)`
+  for a shared instance name and refuses a Rust-typed one.
 - Session creation mounts `host.plugin(SessionScopePlugin::new(owner))`; branch creation mounts
   `session.ctx.plugin(BranchScopePlugin::new(owner))`. One `wait` function runs the three steps of
   §2.2 on the returned view and the owner's record.
