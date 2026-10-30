@@ -1,176 +1,311 @@
-# Session and branch instances hold one row
+# Sessions and branches are plugins, not loader instances
 
 Status: Draft.
 
 Scope: Session, branch.
-
+Issue: [#594](https://github.com/arcships/dim/issues/594).
 Rules: [design rules](../architecture/rust-agent/principles.md), [ADR 002](../adr/002-plugin-scope.md),
-[ADR 006](../adr/006-plugin-contract.md) D3 and D4, [How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts).
+[ADR 004](../adr/004-loader-plugin-management.md), [ADR 006](../adr/006-plugin-contract.md) D3, D4 and D6,
+[How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts).
+
+Depends on: rutis 0.19.1, with [rutis#947](https://github.com/arcships/rutis/pull/947) and
+[rutis#948](https://github.com/arcships/rutis/issues/948), and the 0.19 upgrade
+([#677](https://github.com/arcships/dim/pull/677)). It supersedes [#645](https://github.com/arcships/dim/pull/645)
+and the "one row per instance" draft of this design.
+Decision: [ADR 009](../adr/009-scopes-are-plugins.md) (Proposed).
 
 ## 1. Scope and non-goals
 
-The loader's job is the rows a configuration names. A Session or branch is also a loader instance,
-and the reason is narrow. When a part of another language is mounted, rutis resolves the instance
-names it injects (`sessionMethods`, `toolRegistry`, `dispatcher`, …) by finding the copy's instance in
-the loader's own instance table:
+A Session or branch is a loader instance today for one reason. When a part of another language is
+mounted, rutis resolves the instance names it injects (`sessionMethods`, `toolRegistry`,
+`dispatcher`, …) by finding the copy's instance in the loader's own instance table:
 
 - `Definition::at` needs the loader's `PluginMounter` ("needs rutis-loader in the tree",
   rutis-bridge `runtime/definitions.rs:83`);
 - the mounter calls `Loader::build_at`, which matches the copy's scope chain against the loader's
-  instances (rutis-loader `loader/mod.rs:331`).
+  instances (rutis-loader 0.17.1 `loader/mod.rs:287`, 0.19.0 `:331`).
 
-Everything else an instance does is Dim's:
+Everything else an instance does is Dim's: the mounters mount parts with `ctx.plugin`, creation waits
+for the required parts, closing goes through rutis's ownership of children. Being a loader instance
+costs this:
 
-- the mounters mount parts with `ctx.plugin` and follow the part registry ([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts) "Mounting");
-- creation waits for the required parts and lets the optional ones settle;
-- closing goes through rutis's ownership of children.
+- the mounters, the extension launcher and the extension plugins are rows of the instance, and
+  creation finds them, and judges readiness, by scanning every loader entry
+  ([#594](https://github.com/arcships/dim/issues/594));
+- per-Session content (Skills contents, MCP connections) is a nested loader instance, created from
+  the Session scope row through `SessionLoader`, because the loader creates an instance only from a
+  row's context.
 
-Today the instance is more than that identity. Its mounters are rows of its group, and creation finds
-them, and judges readiness, by scanning every loader entry
-([#594](https://github.com/arcships/dim/issues/594)). This design keeps the loader instance for what
-needs it, the identity that foreign copies resolve names against, and moves the rest under the
-scope's own fiber.
+rutis#948, accepted for 0.19.1, removes the reason. rutis-loader's mounter computes a copy's
+instances from its position in the plugin tree (`ctx.scope()`), and `mark_scope(group)` becomes a
+public method on `Ctx`. A host can then mount a plain plugin with `ctx.plugin`, mark it as the scope
+of a group, and foreign copies inside it resolve that group's names to it.
+
+This design makes the Session and branch plain plugins that mark their group, and the per-Session
+content plain plugins of the parts that own it. Nothing of a Session is a loader row.
 
 Non-goals:
 
-- **Removing the loader instance.** Foreign copies would then need to resolve instance names without
-  one, and rutis 0.19 does not offer that. Following
-  [design rules §4 rule 8](../architecture/rust-agent/principles.md), this design depends on no
-  change to rutis.
-- **Extension instances.** The nested groups created for Sessions that ask for them (Skills content,
-  MCP publication) keep their rows. Only the launcher that creates them moves (§2.2).
-- **Unchanged parts of the assembly:** the Agent group and its process values, the catalog's groups
-  and `Names`, and the reconcile that a name claimed in an instance starts.
+- **The Agent group.** It stays an instanced loader group: its row isolates the Agent's process values
+  (`AgentBuilder::agent_row`), and `agent.create` places Agents as its instances
+  (`dim-app-server/src/agents.rs:1289`). Nothing in it scans the loader's entries.
+- **Names and the catalog.** The catalog's groups (`session`, `branch`), `Names`, the keys a part
+  gets, and the `instanceNames` a foreign process row declares stay as they are.
+- **The mounters' contract.** They call the generators, follow the registry and hand what they mount
+  to creation (How Dim uses rutis §2 "Mounting").
 
 ## 2. Own contract
 
 ### 2.1 Now
 
+On main (rutis 0.17.1):
+
 ```text
-session group (instanced)                  branch group (instanced, nested)
-  SessionScope                               BranchScope
-  SessionExtension (when extensions exist)   required mounter
-  required mounter                           optional mounter
-  optional mounter
-  branch group
-  extension groups
+agent group (instanced)
+  AgentAnchor
+  session group (instanced)                    branch group (instanced, nested)
+    SessionScope                                 BranchScope
+    SessionExtension (when extensions exist)     required mounter
+    required mounter                             optional mounter
+    optional mounter
+    branch group
+    extension groups (SkillContentInstances, McpConnections, requested ones)
 ```
 
-Creation calls `create_instance`, then finds the instance's rows by scanning `Loader::entries()`:
-
-- to report the required rows' failures;
-- to wait for them to be Active;
-- to let the optional rows settle (`dim-agent-runtime/src/assembly.rs:1492`, `:1504`, `:1508`).
-
-Locating an instance after a timeout (`locate`, `:1575`) and the assembly check (`scope_rows`,
-`:2018`) scan the same way.
+- Creation calls `create_instance`. The loader's `settle` awaits every row of the instance before it
+  returns (rutis-loader 0.17.1 `loader/reconcile.rs:1020`), which is why the mounters do not wait in
+  their own `apply`.
+- Creation then finds the instance's rows by scanning `Loader::entries()`: to report the required
+  rows' failures, to wait for them to be Active, and to let the optional rows settle
+  (`dim-agent-runtime/src/assembly.rs:1492`, `:1504`, `:1508`). Locating an instance after a timeout
+  (`locate`, `:1575`) and the assembly check (`scope_rows`, `:2018`) scan the same way.
+- The extension launcher creates a requested extension from its own row context (`:1123`). The
+  Skills and MCP parts create their content through `SessionLoader`, which creates instances from the
+  Session scope row (`skills/content.rs:160`, `mcp/publication.rs:613`).
 
 ### 2.2 Target
 
 ```text
-session group (instanced)                  branch group (instanced, nested)
-  SessionScope ─ ctx.plugin ─┐               BranchScope ─ ctx.plugin ─┐
-    required mounter  ◄──────┤                 required mounter ◄──────┤
-    optional mounter  ◄──────┤                 optional mounter ◄──────┘
-    extension launcher ◄─────┘
-  branch group
-  extension groups
+agent group (instanced)
+  AgentAnchor
+    └─ SessionScope (mark_scope "session")
+         ├─ required mounter ── required parts
+         │     ├─ Skills ── SkillContent …
+         │     └─ McpSession ── McpServer …
+         ├─ optional mounter ── optional parts
+         ├─ requested extension plugins
+         └─ BranchScope (mark_scope "branch")
+              ├─ required mounter ── required parts
+              └─ optional mounter ── optional parts
 ```
 
-- **One row per instance.** The Session group holds the `SessionScope` row, the branch group and the
-  extension groups. The branch group holds the `BranchScope` row. No mounter or launcher is a row.
-- **The scope mounts the rest.** After providing its services, the scope's `apply` mounts the required
-  mounter and the optional mounter as its own children with `ctx.plugin`. The Session scope also
-  mounts the extension launcher (today's `SessionExtension` row), which is unchanged otherwise. The
-  scope then returns. It waits for none of them in `apply`, as a row did not.
-- **Mounters keep their contract.** They call the generators, mount parts with `ctx.plugin`, follow the
-  registry, and hand the copies they mount when the instance opens to its creation (How Dim uses
-  rutis §2 "Mounting"). The scope gives them its `Build`, the one each mounter row receives today, so
-  `Names` and every key stay the same.
-- **Foreign copies keep resolving.** A copy is mounted under a mounter, one level deeper than today but
-  still inside the instance. A context's scope chain follows its parent fibers (rutis `ctx.rs:1302`),
-  so `build_at` finds the same instance.
-- **Creation.** `create_instance` loads one row. Creation then waits as it does today:
-  - the scope must be Active;
-  - the copies the mounters hand must be Active if required, and must settle if optional.
+Skills and McpSession are required parts in the profiles that install them (`require_part`); the
+tree shows where their content sits.
 
-  Nothing scans the loader's entries. A failure is the scope row's report or a handed copy's state.
-- **Timeouts and the assembly check** read the scope's children and the copies its mounters hand,
-  instead of the loader's entries. `scope_rows`, `locate` and `rows` go.
-- **Closing** is unchanged: the scope's children close with it.
+- **The scope is a plugin.** The Agent mounts a Session's `SessionScope` with `ctx.plugin` from its
+  anchor. Its `apply` first calls `ctx.mark_scope("session")`, then provides the Session's services
+  at keys qualified with `ctx.instance()`, as today. The scope's own fiber id is the Session's instance:
+  the kernel admits instance keys for every fiber below it (rutis `ctx.rs` `in_instance`), and
+  `ctx.scope()` reports it to every copy below it. The Session's owner (`SessionAssembly`) is the
+  plugin's own field, not a value given to `create_instance().with`. A branch is the same:
+  `BranchScope`, mounted from the Session scope's context, marks `"branch"`.
+- **The scope mounts the rest.** After providing its services, the scope mounts the required and the
+  optional mounter, and the requested extension's plugins (below), with `ctx.plugin` as its own
+  children. It hands their views to creation, as the mounters hand the copies they mount, and returns.
+  It waits for none of them in `apply`: creation is the one place that waits, within its deadline.
+- **Names.** A mounter builds its copies' `Names` from the scope's position: the `Build` that the
+  scope's context gives (§5, R2). It holds the same groups as the `Build` a mounter row receives
+  today, so `Names` and every key keep their form.
+- **Foreign copies** are mounted with `Definition::at` under a mounter, as today. The mounter of
+  rutis#948 takes the copy's instances from `ctx.scope()`, so `session` and `branch` names resolve to
+  the enclosing scopes, and each copy is isolated per instance as today.
+- **Creation waits in three steps.** Without the loader's `settle`, nothing waits unless creation
+  does:
+  1. The scope must be Active. A failed `apply` is the creation's error.
+  2. The views the scope handed: the required mounter must be Active, the optional mounter must
+     settle, and the requested extension's plugins must be Active. The required mounter is Active
+     only once every required part is registered and mounted (`parts.rs:461-480`). A required part
+     that fails to build fails the required mounter (`parts.rs:378-381`), and that failure fails
+     creation with its own error. A failed optional mounter stays local, as an optional row's
+     failure does today.
+  3. Only then does creation read what the mounters handed (`Opened`, which a mounter fills at the
+     end of its `apply`, `parts.rs:512-517`): required copies must be Active, optional copies must
+     settle.
+
+  Creation holds the scope's view from the moment `ctx.plugin` returns. On a timeout or a
+  cancellation it shuts that view down. `locate`, the task that disposed of a creation still running,
+  `rows`, `scope_entries` and `scope_rows` go.
+- **Requested extensions.** `Agent::create_session_with_extension(config, name, value)` keeps its
+  contract: the plugins registered for `name` (`AgentBuilder::session_extension_part`) are built from
+  `value` with the Session's `Names` and must be Active before the Session publishes. The Session
+  scope builds and mounts them as its children and hands them to creation as required (step 2). A
+  value of the wrong type fails creation; a plugin that stays Pending holds it until the deadline.
+  The launcher row, `ExtensionRequest` and the extension groups go. An extension name is no longer a
+  loader group, so it can no longer shadow a row, and the "reserved extension group" check goes.
+- **Per-Session content is its part's children.** Each Skills content and each MCP connection
+  generation is a plain plugin its part mounts with `ctx.plugin` from its own context, as ADR 006 D3
+  "Inside a part" already describes. The private immutable value (`ContentConfig`,
+  `ConnectionConfig`) is the plugin's constructor argument, not a loader value. The part closes them
+  as it does today: Skills' effect closes every content; McpSession releases its bindings, and a
+  generation no lease uses closes (ADR 004). They also close with the part. Where an owner awaited
+  `create_instance` and read its report, it awaits the view `ctx.plugin` returns. `SessionLoader`
+  goes, and `McpOwner::new` takes only a context.
+- **What a scope's record holds.** `Loaded::children` holds the views the scope handed (its mounters
+  and the requested extension's plugins); `Loaded::required` holds the required ones among them,
+  views rather than row ids; `Loaded::parts` keeps the required copies.
+  - Session diagnostics are the Session scope's subtree without its branches' subtrees, which report
+    separately, as today. Branch diagnostics are the branch scope's subtree. Both use the existing
+    `subtree`; `retain_scope`'s filter for mounter modules goes.
+  - Closing is the scope's shutdown, and its children close with it. `shutdown_scope` drops the
+    errors already reported by the scope, the handed views and the copies, as today, so a failed
+    mounter's error does not come back as a cleanup failure.
+  - The assembly check reads each live scope's record: its required handed views and its required
+    copies must still be Active, and an unawaited child is reported as today.
+- **Install.** `AgentBuilder::install` registers no Session, branch, mounter or extension module and
+  returns no Session group. The Agent group row holds the Agent's own rows (`AgentAnchor`, process
+  values). The scopes construct their mounters.
 
 ### 2.3 Observable changes
 
-- **Fiber tree:** the mounters and the extension launcher sit under the scope instead of beside it.
-  The `session` and `main` subgraphs of the generated graphs regenerate; no service or edge changes.
-- **Loader entries:** `Loader::entries()` no longer lists mounters. PluginManager lists process rows
-  only, so `plugin.list` does not change.
-- **Creation cost:** the scans of #594 are gone, which is #594's own proposal (the scope and the
-  mounters know what they mounted). `xtask measure` at 1, 10, 100 and 1000 Sessions records the
-  effect.
+- **Fiber tree:** a Session is a child of its Agent's anchor row, a branch of its Session scope, and
+  the mounters of their scope. Skills contents and MCP connections sit under their parts. The
+  `session` and `main` subgraphs of the generated graphs regenerate. The `SessionLoader` service and
+  its edges go; no other service or edge changes.
+- **Loader entries:** `Loader::entries()` no longer lists any Session, branch, mounter or extension
+  row. PluginManager lists process rows only, so `plugin.list` does not change.
+- **Creation cost:** nothing scans the loader's entries, which is #594's own proposal. `xtask measure`
+  at 1, 10, 100 and 1000 Sessions records the effect.
+- **`ctx.row()` of a part:** a part's nearest row was its mounter row; it is now the Agent's anchor
+  row. `MethodTable::register` records it (`dim-agent-capabilities/src/methods.rs:525`). The Session
+  method router looked a withdrawn namespace's row up among the rows of this Session's instance
+  (`dim-app-server/src/methods.rs:218-235`). There are none now, so that lookup goes, and a withdrawn
+  Session namespace answers `service_reloading` until it is registered again. The row it found was a
+  mounter row, which is Active while the Session lives, so the answer is the same as today.
+  Management namespaces keep their lookup: they are registered by process rows.
+- **Errors:** the "reserved extension group" build error goes. Every other error keeps its kind and
+  text.
 
 ## 3. Events and state
 
-None. No Timeline fact, bus event or persisted state changes.
+None. No Timeline fact, bus event or persisted state changes. Instance ids are runtime handles, not
+durable identities, so Session and branch ids are unaffected.
 
 ## 4. Dependencies
 
-- **rutis-loader:** instanced groups, `create_instance` and its report, `Build`. The loader's
-  `PluginMounter` mounts foreign copies.
-- **rutis:** `ctx.plugin`, fiber states and the scope chain of a context.
+- **rutis:** `ctx.plugin`, fiber views and states, `ctx.scope()`, and the public `mark_scope`
+  (rutis#948).
+- **rutis-loader:** `Definition::at` through its mounter, by the copy's position in the tree
+  (rutis#948); the `Build` of a context (R2); `ServiceCatalog::key_in`; the Agent group as an
+  instanced group.
 - The part registry and the mounters, as in How Dim uses rutis §2.
+- The 0.19 upgrade (#677) lands first; this design builds on 0.19.1.
 
 ## 5. Cross-module requirements
 
-None. A Session or branch that is a plain plugin, with no loader instance at all, would need foreign
-copies to resolve instance names without one. That is not available in rutis 0.19, and this design
-does not depend on it.
+[Design rules §4 rule 8](../architecture/rust-agent/principles.md) has Dim solve within rutis's
+existing capabilities and raise nothing. The repository owner decided to raise R1 and to take it in
+0.19.1; R2 is its Rust half.
+
+### R1. Foreign copies resolve instance names by their position in the tree
+
+- **Blocked:** foreign Session and branch parts ([ADR 006](../adr/006-plugin-contract.md) D3, D4)
+  resolve instance names only inside a loader instance (§1).
+- **Considered:** keeping the loader instance and thinning it to one row (the earlier draft of this
+  design): the mounters, the launcher and the extensions still had to be rows or rows' children, and
+  creation still read the loader's report. A host-side `PluginMounter`: the trait is public, but the
+  types it needs (`JsFactory`, `RowRuntime`, `RowEntry`) are crate-private. `ctx.isolate`: a copy's
+  keys come from the mounter's instance table, so a group name outside it fails (`OutsideInstance`).
+- **Capability:** the mounter computes a copy's instances from `ctx.scope()`, and a host marks a
+  plain plugin as the scope of a group with a public `mark_scope`.
+- **Sequence, batches, interruption, reload:** none.
+- **Owner:** rutis, [rutis#948](https://github.com/arcships/rutis/issues/948), accepted for 0.19.1.
+
+### R2. The `Build` of a context
+
+- **Blocked:** a Rust part's `Names` read `ServiceCatalog::key_in(name, &Build)` and
+  `Build::instance(group)` (`dim-agent-runtime/src/names.rs`). A `Build` is made only by the loader:
+  its fields are crate-private and `Loader::build_at` is `pub(crate)` (rutis-loader 0.19.0
+  `resolver.rs:118`, `loader/mod.rs:331`). A Rust copy under a plain-plugin scope gets none, and
+  `Build::default()` has no instances.
+- **Considered:** a loader row inside each scope only to receive its `Build`: the row this design
+  removes. Computing keys in Dim from `ctx.scope()`, `is_shared` and `host_key`: it copies the
+  catalog's rules, the instance names and the marked-service claims, into Dim
+  ([ADR 006](../adr/006-plugin-contract.md) D2).
+- **Capability:** the `Build` a context's position gives, the one R1's mounter computes, public.
+- **Sequence, batches, interruption, reload:** none.
+- **Owner:** rutis, the Rust half of rutis#948. It is not on the issue yet.
 
 ## 6. Rule check
 
 | Rule | Answer |
 | --- | --- |
-| §4 rule 1 (placement, `apply`, effects) | The scope mounts its mounters from `apply` after providing its services and returns. Children close with it. Mounters still start background work only after publication |
-| §4 rules 2, 3, 5, 6, 9 | Not applicable: no fact, handler, batch, context path or Timeline write changes |
-| §4 rule 4 (state ownership) | Readiness is read from the views the scope and its mounters own, not from another owner's table |
-| §4 rule 7 (reuse mechanisms) | Uses the mounters, `ctx.plugin` and rutis's children; adds no mechanism |
-| §4 rule 8 (infrastructure unchanged by default) | The change closes inside Dim's assembly. The loader is used as it is, and nothing is asked of rutis |
-| ADR 002 D1–D5 | No placement, wiring, dependency or configuration change. Parts stay in their Session or branch |
-| ADR 006 D3 | Unchanged: the instance mounts the parts registered for it, now from its scope |
-| ADR 006 D4 | Unchanged: names resolve to the nearest enclosing instance of their group, through the same `Build` and the same loader instance |
+| §1 (Capabilities) | No Capability is added or changed, and no part is added. The scopes and the mounters are mechanisms (ADR 006 D6: "the scope roots") |
+| §4 rule 1 (command events) | Not applicable: no module changes state another module owns |
+| §4 rules 2, 3, 5, 6, 9 | Not applicable: no handover, `before` transform, batch, context path or Timeline fact changes |
+| §4 rule 4 (core mechanisms without business meaning) | Creation and the scope treat every part and extension plugin alike. Skills contents and MCP connections are their parts' business; no core code knows them |
+| §4 rule 7 (public events and services) | No service is added; `SessionLoader` goes. Creation reads only the views the scope and the mounters hand it, not the loader's table |
+| §4 rule 8 (infrastructure unchanged by default) | The need is the assembly's own (#594's creation cost), and it closes inside the assembly. The rutis side is R1 and R2, raised by the owner's decision |
+| ADR 002 D1–D5 | Parts stay in their Session or branch. No wiring module, configuration or language contract changes; foreign parts still resolve their names |
+| ADR 004 | Its ownership stands: connections belong to a Session, closing a Session closes only its generations, configuration stays private and immutable, and no second loader or lifecycle manager comes in. Its mechanism, a connection generation as an instanced group with the loader owning disposal, is superseded by [ADR 009](../adr/009-scopes-are-plugins.md) |
+| ADR 006 D3 | The instance still mounts the parts registered for it, from its scope. The scope and the mounters are the instance's mounting mechanism, built by Dim, with no configuration, enablement or reload of their own, so "a plugin is one row" does not cover them. "Inside a part" now holds literally for McpSession and Skills |
+| ADR 006 D4 | Names resolve to the nearest enclosing instance of their group, now the nearest scope marked with it, through the same catalog |
 
 ## 7. Verification
 
-- The Session and branch flows of `dim-agent-capabilities` and `tests/integration`, unchanged in their
-  assertions:
-  - required parts hold creation until Active;
-  - a failed required part fails creation;
-  - optional parts settle;
+- The Session and branch flows of `dim-agent-capabilities` and `tests/integration`, with their
+  assertions unchanged:
+  - a required part registered late holds creation until it is Active;
+  - a required part that fails to build fails creation with its own error;
+  - a failed optional mounter or part stays local, and optional parts settle before publication;
   - registrations follow open instances.
 - The foreign part flows (SessionTitle, Scheduler, Workflow and Goal, and the Node-backed App Server
-  flows): copies resolve `session` and `branch` names inside their instance.
-- Extensions: an extension instance is created for a Session that asks for it, and not for others.
-- `Agent::check_assembly()` reports an unawaited child, as today.
-- `xtask graph`: only the `session` and `main` subgraphs change, by the mounters moving under the
-  scope.
-- `xtask measure` before and after.
+  flows) on rutis 0.19.1: copies resolve `session` and `branch` names inside their scope.
+- Requested extensions (`tests/integration/tests/extensions.rs:884-974`): Active, Failed, Pending and
+  a wrong value type keep their outcomes. `transport_flow/reload.rs` drops its "reserved extension
+  group" assertion.
+- Skills contents and MCP connections: created, replaced and retired as today, and closed with their
+  Session. ADR 004's flows (independent connections, retained bindings, Session close, cross-Session
+  disconnect, cleanup reporting) are unchanged.
+- `Session::diagnostics()` lists the scope, the mounters and the parts and no branch;
+  `branch_diagnostics` lists the branch's. `Agent::check_assembly()` reports an unawaited child, as
+  today.
+- A withdrawn Session namespace answers `service_reloading`.
+- `xtask graph`: only the `session` and `main` subgraphs change. `xtask measure` before and after.
 
 ## 8. Documentation to update with the implementation
 
 - [How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts) "Mounting":
-  "Every Session and branch instance holds two mounter rows, the only rows of its group besides the
-  scope's own mechanisms" becomes "holds one row, its scope, which mounts the two mounters as its
-  children". Appendix A follows.
-- [single-tree](../architecture/rust-agent/single-tree.md): the assembly section's description of
-  required rows and mounter rows.
+  "holds two mounter rows" becomes "mounts two mounters as the scope's children", and "It does not
+  wait in its own `apply`, because the loader's instance creation waits for every Loading row"
+  becomes "Creation waits for the mounters, then for what they hand". Appendix A.2's `SessionLoader`
+  sentence goes.
+- [Plugin contract](plugin-contract.md): the scope row of the terms table and the instance tree
+  (`session ⟨instanced⟩`, `branch ⟨instanced⟩`).
+- [single-tree](../architecture/rust-agent/single-tree.md): the tree (`session`, `McpConnections`,
+  `branch`), the `create_instance` note, the `rutis-loader` row, the MCP generations row, the
+  `InstanceId` note and the assembly section's required rows.
+- [Skills](../architecture/rust-agent/plugins/Skills.md): `S:SessionLoader` and the
+  `SkillContentInstances` template; [MCP OAuth](appserver/mcp-oauth.md): the `McpServer` row.
 - The generated graphs, through `xtask graph`.
+- #645 is closed; its Git pin and its build.md paragraph do not land.
+
+If [#666](https://github.com/arcships/dim/pull/666) (`StartupProgress`) lands first, creation keeps
+its wait model: this design changes what creation waits on, not for how long.
 
 ## Appendix A. Rust binding
 
-- `AgentBuilder::install` registers only the scope modules and returns `SESSION_GROUP` with
-  `[SessionScope, branch group, extension groups]` and `BRANCH_GROUP` with `[BranchScope]`.
-- `SessionScopePlugin` and `BranchScopePlugin` build their two `PartMounter`s from their own `Build`
-  and `MountSite`, and mount them with `ctx.plugin`. The Session scope also mounts
-  `SessionExtensionPlugin` when the assembly has extensions.
-- `create_instance` in `assembly.rs` waits on the scope's view and the copies in `Opened`, and takes
-  no `required` row list.
+- `SessionScopePlugin::new(owner)` and `BranchScopePlugin::new(owner)` hold their assembly. `apply`
+  calls `ctx.mark_scope`, provides the services, builds the two `PartMounter`s from a `MountSite`
+  whose `build` is the context's `Build` (R2), mounts them (and, for a Session, the requested
+  extension's plugins) with `ctx.plugin`, and records the views in the owner's `Loaded`.
+- Session creation mounts `host.plugin(SessionScopePlugin::new(owner))`; branch creation mounts
+  `session.ctx.plugin(BranchScopePlugin::new(owner))`. One `wait` function runs the three steps of
+  §2.2 on the returned view and the owner's record.
+- `AgentBuilder::install` keeps only the process values' registration and returns no group; the App
+  Server's Agent group row (`agents::group_row`) takes no Session row.
+- `session_extension_part(name, plugin, make)` stays, read by the Session scope for requested
+  extensions. Skills and MCP no longer call it: `ContentPlugin(config)` and
+  `ConnectionPlugin::new(config)` are mounted by their owners with `ctx.plugin`.
+- These go: `create_instance` in `assembly.rs`, `locate`, `rows`, `scope_entries`, `scope_rows`,
+  `SessionExtensionPlugin`, `ExtensionRequest`, `SessionLoader` and its catalog name, and the loader
+  lookup in `session_provider`.
