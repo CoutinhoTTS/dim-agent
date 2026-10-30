@@ -35,10 +35,15 @@
 //! failed on its own is a failed run, scored as before, whatever its judge
 //! did.
 //!
-//! The view is cut into parts against the judge's own declared window: the
-//! runner reads it from the judge's selection, or from the `--model-config`
-//! file when the selection carries none, and an evaluation whose judge
-//! declares no window fails before its first call. A scenario's
+//! The view is cut into parts against the judge's window, read from the
+//! judge's selection snapshot or from the `--model-config` file, and an
+//! evaluation whose judge declares no window fails before its first call. On
+//! the product profile, until
+//! [#522](https://github.com/arcships/dim/issues/522) lands, a model whose
+//! limits are not declared carries the catalog's assumed pair (128,000 and
+//! 16,384 tokens): a judge whose real window is smaller has its parts refused,
+//! and those runs are reported unjudged with the judge's error, not scored.
+//! The `--model-config` file declares the window explicitly. A scenario's
 //! `budget.window` must equal the run model's declared window, so a model
 //! configuration whose run entry is narrowed for the scenarios declares the
 //! judge as a second provider entry beside it: the same `baseUrl` and
@@ -1544,9 +1549,10 @@ fn rendered_request(request: &Value, previous: Option<&Value>) -> Value {
     Value::Object(rendered)
 }
 
-/// The judge's declared limits (model-prompts §8.1, #522): its context window
-/// and its output limit. A window is declared, never assumed, so a judge
-/// without one fails the evaluation before its first call.
+/// The judge's limits (model-prompts §8.1, #522): its context window and its
+/// output limit, read from its selection snapshot or from the model
+/// configuration. A judge that declares neither fails the evaluation before
+/// its first call.
 #[derive(Clone, Copy, Debug)]
 struct JudgeWindow {
     window: u64,
@@ -1585,7 +1591,7 @@ async fn judge_window(
         }
     }
     Err(format!(
-        "the judge {}/{} declares no context window; a window is declared, never assumed",
+        "the judge {}/{} declares no context window in its selection or the model configuration",
         judge.provider_id, judge.model_id
     )
     .into())
