@@ -155,6 +155,7 @@ use dim_agent_capabilities::{
     context_model::window_facts,
     host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver, ResolveContextModel},
 };
+use dim_agent_runtime::AgentBuilder;
 use dim_agent_types::{
     Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
 };
@@ -246,15 +247,18 @@ const TEXTS: &[(&str, TextMember)] = &[
 
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
-    let report = evaluate(&options).await?;
+    let report = evaluate(&options, |_| {}).await?;
     println!("{report}");
     println!("wrote {}", options.out.join("scenario.md").display());
     Ok(())
 }
 
 /// Runs the evaluation and writes `runs.jsonl` and `scenario.md`; returns the
-/// report.
-async fn evaluate(options: &Options) -> Result<String> {
+/// report. `observe` sees every run's App Server builder before it is served,
+/// the seam [`app_server::serve_home`] gives a caller that places its own
+/// values; the flow tests point a run's process facts at a home of their own
+/// instead of the developer's.
+async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Result<String> {
     if options.defaults.is_some() {
         if options.node.is_none() {
             return Err("set DIM_TEST_NODE: the default plugins run in Node".into());
@@ -293,6 +297,7 @@ async fn evaluate(options: &Options) -> Result<String> {
                     &home,
                     arm,
                     &overrides,
+                    &observe,
                     scenario,
                     run,
                     &cancel,
@@ -758,6 +763,7 @@ async fn run_once(
     home: &Path,
     arm: &'static str,
     overrides: &Overrides,
+    observe: &dyn Fn(&mut AgentBuilder),
     scenario: &Scenario,
     run: usize,
     cancel: &CancellationToken,
@@ -794,7 +800,7 @@ async fn run_once(
         &workspace,
         options.out.join("command-output"),
         settings.clone(),
-        |_| {},
+        |builder| observe(builder),
     )
     .await?;
     let started = Instant::now();
@@ -2132,6 +2138,7 @@ mod tests {
         HostFuture, ModelConnection, ModelDriver, ModelStopReason, ResolveModelConnection,
         ResolvedModelConnection,
     };
+    use dim_agent_capabilities::host_platform::{HostPlatform, resolve_shell};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -3086,7 +3093,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         assert_eq!(fixture.judge().len(), 2, "one judge request per arm");
         let records = fixture.records(&options.out);
@@ -3130,7 +3137,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3197,7 +3204,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3250,7 +3257,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -3306,7 +3313,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -3451,6 +3458,10 @@ mod tests {
         home: PathBuf,
         models: PathBuf,
         scenarios: PathBuf,
+        /// The process facts a flow's runs see: the ones this process has,
+        /// with `home` pointed at the fixture's own empty directory, so a run
+        /// never reads the developer's `~/AGENTS.md`, Skills list or `<home>`.
+        platform: HostPlatform,
     }
     impl Fixture {
         /// `scenario` is the scenario file's content and `workspace` the
@@ -3536,6 +3547,12 @@ mod tests {
                 serde_json::to_string_pretty(&scenario).unwrap(),
             )
             .unwrap();
+            let platform_home = directory.join("platform-home");
+            std::fs::create_dir_all(&platform_home).unwrap();
+            let env: Vec<_> = std::env::vars_os().collect();
+            let shell = resolve_shell(Ok(None), &env).await;
+            let mut platform = HostPlatform::current(shell).unwrap();
+            platform.home = platform_home;
             Self {
                 directory,
                 provider,
@@ -3543,7 +3560,18 @@ mod tests {
                 home,
                 models,
                 scenarios,
+                platform,
             }
+        }
+        /// [`evaluate`] over this fixture's runs, whose process facts point at
+        /// the fixture's empty home: a flow that sizes a view or compacts a
+        /// context would otherwise measure the developer's machine (issue
+        /// #635).
+        async fn evaluate(&self, options: &Options) -> Result<String> {
+            evaluate(options, |builder| {
+                builder.process_value(Arc::new(self.platform.clone()));
+            })
+            .await
         }
         /// The options of one run per arm over this fixture, with `out`.
         fn options(&self, out: PathBuf) -> Options {
@@ -3667,6 +3695,9 @@ mod tests {
             &fixture.home,
             arm,
             overrides,
+            &|builder| {
+                builder.process_value(Arc::new(fixture.platform.clone()));
+            },
             &scenario,
             run,
             &CancellationToken::new(),
@@ -3732,7 +3763,7 @@ mod tests {
         )
         .await;
         let options = fixture.judge_options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3809,7 +3840,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3961,7 +3992,7 @@ mod tests {
         )
         .unwrap();
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 4, "one run per arm and scenario");
         for record in &records {
@@ -4028,7 +4059,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -4132,7 +4163,7 @@ mod tests {
             out.canonicalize().unwrap(),
             "the resolved --out is the fixture's output directory"
         );
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -4172,7 +4203,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -4239,7 +4270,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(
             report.contains("candidate passes"),
             "{report}\nrecords: {:?}",
@@ -4278,7 +4309,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(
             report.contains("candidate passes"),
             "{report}\nrecords: {:?}",
