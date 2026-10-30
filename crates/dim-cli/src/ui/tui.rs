@@ -5394,6 +5394,10 @@ mod tests {
             drawn.draw();
             drawn.key(KeyCode::Esc);
             drawn.key(KeyCode::Esc);
+            assert_eq!(
+                drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(t("Stopping"))
+            );
             assert!(!drawn.transcript().contains(INTERRUPT_REASON));
 
             for value in [
