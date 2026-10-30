@@ -16,7 +16,9 @@ member's approval is not a user.
 
 ### D1. The grant and its storage
 
-SessionStore owns a native `session_grants` table keyed `(session_id, path)`. A row is
+The `SessionGrants` Session part owns the service and registers `sessionGrants.add`, `remove`, `list`
+and `lookup` in the session method namespace. SessionStore owns the native `session_grants` table,
+keyed `(session_id, path)`. A row is
 `{session_id, path, kind, mode}`: `path` is a canonical file or directory, `kind` is `file` or
 `dir`, `mode` is `read` or `write`, and a write grant also permits reads. `add` upserts, and a
 `write` upgrade replaces `read`; `remove(session_id, path)` drops both modes. `list(session_id)`
@@ -32,10 +34,11 @@ damaged or unloaded session is still cleaned.
 
 ### D2. Permission applies the grant
 
-The grant is a `Permission` fact, not an `Approval` decision. `Permission` applies a matching
-grant only at the `Ask` step; it never turns a `Deny` into `Allow`, and a write grant is inert
-under `read-only`. `Approval` remains the one admission point and re-checks through `Permission`
-after the user answers.
+The grant is a `Permission` fact, not an `Approval` decision. `Permission` calls
+`lookup(session_id, path, mode)` and applies a matching grant only at the `Ask` step; it never
+turns a `Deny` into `Allow`, and a write grant is inert under `read-only`. A lookup failure
+denies. `Approval` remains the one admission point and re-checks through `Permission` after the
+user answers. At process start, a write grant is mounted writable and a read grant read-only.
 
 The client calls `add(session_id, path, mode)` and then answers allow; the re-check sees the
 grant. If `add` fails, the client answers allow-once. `ApprovalDecision` stays `Allow | Deny`.
@@ -60,13 +63,13 @@ canonical target as `write`.
 
 ### D5. Full access
 
-A full-access model can edit the table directly, through file tools or a shell; so can any model
-with an approved host write. That is the accepted trust consequence, not a property of this
-decision.
+The trust consequence is stated in ADR 011: a model that can write the store can edit this table
+too. It is not a property of this decision.
 
 ## Consequences
 
-- A native `session_grants` table, `add`/`remove`/`list` and a native format upgrade.
+- A native `session_grants` table, the `SessionGrants` part, `add`/`remove`/`list`/`lookup` and a
+  native format upgrade.
 - `native-storage-format.md`, `session-deletion-and-fork.md`, `session-boundary.md`,
   `session-files.md`, `overview.md` B.1/B.2, `Permission.md` and the CLI tables are updated under
   their owners after acceptance.
@@ -81,24 +84,26 @@ decision.
 
 ## Supersession
 
-Extends ADR 014's facts and adds the grant store. ADR 010's “file access is unchanged” is
-qualified by ADR 014, not this decision. ADR 003 remains as written.
+Extends ADR 014's facts and adds the grant store. It supersedes ADR 009 D3's “No new … stored
+grant” and its Consequences bullet “No … persisted grant is added”. ADR 010's “file access is
+unchanged” is qualified by ADR 014, not this decision. ADR 012, 013 and 014 land together; ADR 003
+remains as written.
 
 ## Rule check
 
 | Rule | Application |
 | --- | --- |
-| §1, ADR 002 D1 | `Permission` owns the grant fact; `Approval` remains the branch Capability and SessionStore owns the table. |
+| §1, ADR 002 D1 | `Permission` owns the grant fact; `Approval` remains the branch Capability; `SessionGrants` is the Session part and SessionStore owns the table. |
 | §4 rule 1 | Grants are configuration with typed owner operations; no command event. |
 | §4 rule 2 | A grant changes the next decision; this rule does not apply to stored configuration. |
 | §4 rule 3 | No `before` callback. |
 | §4 rule 4 | No core mechanism change. |
 | §4 rule 5 | No Timeline batch. |
 | §4 rule 6 | No context-input change. |
-| §4 rule 7 | `Permission` reads the grants service; `Approval` does not write it. |
+| §4 rule 7 | `Permission` calls `lookup`; `Approval` does not write the table. |
 | §4 rule 8 | No new infrastructure; the native table is a storage format change owned by SessionStore. |
 | §4 rule 9 | No new Timeline fact; grants stay outside the Timeline. |
 | ADR 002 D2 | No wiring plugin. |
 | ADR 002 D3 | Grants are Session-scoped; `Permission` depends on the service. |
 | ADR 002 D4 | Business configuration, read at use time. |
-| ADR 002 D5 | `add`/`remove`/`list` are language-neutral contracts carrying paths and modes. |
+| ADR 002 D5 | `add`/`remove`/`list`/`lookup` are language-neutral contracts carrying paths and modes. |
