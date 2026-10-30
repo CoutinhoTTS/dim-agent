@@ -787,12 +787,12 @@ async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
     agent.close().await.unwrap();
 }
 
-/// #661: an entry registered while the branch's open adoption runs is
-/// adopted. The listener takes the registrations watch and its composition
-/// before that adoption composes, so the entry moves the composition it
-/// compares against; taken afterwards, the baseline would already carry the
-/// entry and count it as seen, and the branch would keep a System composed
-/// without it.
+/// #661: an entry registered while its branch opens, after the open's own
+/// configuration composed and before its guide adoption reads, is adopted by
+/// that adoption: the branch reports itself open with the entry, and the
+/// request after the open carries it. The listener's baseline is a
+/// composition taken before the open too, so the item it enqueues settles on
+/// the System the open already published.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_entry_registered_while_its_branch_opens_is_adopted() {
     let dirs = Dirs::new();
@@ -838,19 +838,21 @@ async fn an_entry_registered_while_its_branch_opens_is_adopted() {
         _ = &mut creation => panic!("the Session opened before its publication was held"),
         () = async {
             store.entered.notified().await;
-            // The first adoption after the registration reads the context;
-            // holding that read lets the queue settle before the count below.
+            // The open adopts the guide after its own publication, and the
+            // adoption reads the context before it composes. Holding that
+            // read parks the adoption behind the registration, and the
+            // release below lets the open report itself open.
             store.hold_next_read_of("main");
             flag.store(true, Ordering::SeqCst);
             let view = views.lock().unwrap().last().cloned().expect("a probe");
             view.restart().await.unwrap();
             store.release();
+            tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
+                .await
+                .expect("the open's guide adoption reads the context");
+            store.release_read();
         } => creation.await.unwrap(),
     };
-    tokio::time::timeout(Duration::from_secs(10), store.read_entered.notified())
-        .await
-        .expect("the registration's adoption reads the context");
-    store.release_read();
     drain_adoptions(&session, "main").await;
     let published = configurations(&session, "main").await;
     assert_eq!(

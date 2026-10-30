@@ -471,6 +471,24 @@ impl Prompt {
         });
     }
 
+    /// Runs one guide adoption and reports a failure the way the queue
+    /// reports it: a branch that closed while the adoption ran is not a
+    /// fault, so the item is dropped with the others.
+    async fn adopt_guide(&self) {
+        let result = AssertUnwindSafe(self.publisher.adopt_guide())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(AgentError::fault("Prompt", panic_message(panic))));
+        if let Err(error) = result
+            && !matches!(
+                error,
+                AgentError::Storage(_) | AgentError::Closed(_) | AgentError::Cancelled(_)
+            )
+        {
+            self.faults.report(error);
+        }
+    }
+
     fn schedule_adoption(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
         match self.adoption.send(Adoption::Event(event)) {
             Ok(()) => Ok(()),
@@ -787,41 +805,26 @@ impl DynPlugin for PromptPlugin {
                                 });
                             let opened = result.is_ok();
                             owner.opened.send_replace(Some(result.clone()));
-                            let _ = reply.send(result);
-                            owner.listen_guide(changes, composed);
-                            // The baseline the listener compares against is a
-                            // composition, not the System the branch carries:
-                            // a fork inherits its parent's configuration, and a
+                            // The reconciliation is part of the open: a fork
+                            // inherits its parent's configuration and a
                             // restore finds whatever its writers registered at
-                            // load. One adoption here converges the branch on
-                            // the entries in force; an unchanged System
-                            // publishes nothing. It costs one context read per
-                            // open when the branch carries a configuration.
+                            // load, so the branch reports itself open only
+                            // once it has adopted the entries in force, and
+                            // the first request after the open carries them.
+                            // The baseline is a composition, not the System
+                            // the branch carries; an unchanged System
+                            // publishes nothing, and every successful open
+                            // pays one context read whatever the configuration
+                            // it carries.
                             if opened {
-                                let _ = owner.adoption.send(Adoption::Guide);
+                                owner.adopt_guide().await;
                             }
+                            owner.listen_guide(changes, composed);
+                            let _ = reply.send(result);
                             continue;
                         }
                         Some(Adoption::Guide) => {
-                            let result = AssertUnwindSafe(owner.publisher.adopt_guide())
-                                .catch_unwind()
-                                .await
-                                .unwrap_or_else(|panic| {
-                                    Err(AgentError::fault("Prompt", panic_message(panic)))
-                                });
-                            // A branch that closed while the adoption waited on
-                            // the queue is not a fault: the item is dropped
-                            // with the others.
-                            if let Err(error) = result
-                                && !matches!(
-                                    error,
-                                    AgentError::Storage(_)
-                                        | AgentError::Closed(_)
-                                        | AgentError::Cancelled(_)
-                                )
-                            {
-                                owner.faults.report(error);
-                            }
+                            owner.adopt_guide().await;
                             continue;
                         }
                         Some(Adoption::Tools {
