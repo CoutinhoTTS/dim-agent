@@ -74,9 +74,9 @@ Prompt 组合出一段文字：框架的头、该分支生效的条目、框架�
 
 ### 3.2 顺序
 
-条目按 `order` 排序，同 `order` 的按第一个标记名排序；两者都是贡献者声明的事实，所以顺序从不取决于哪个部件先装载或先登记。内建条目用 `10` 到 `90`，步长十（§4），把中间的数留给需要插进某一组之内的贡献。
+条目按 `order` 排序，同 `order` 的按第一个标记名排序；两者都是贡献者声明的事实，所以顺序从不取决于哪个部件先装载或先登记。内建条目用 `10` 到 `120`，步长十（§4），把中间的数留给需要插进某一组之内的贡献。
 
-内建集合组合出来的文字，除通道规则的那个例外外，与指南还是一份文件时的文字逐字节相同。今天的顺序——exec、两个 agent 标记、两条分支条目、state、rule、summary、digest——由 §4 的数字复现；措辞和位置都不变，所以这个改动不带任何策略评测（[面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定)）。
+`10` 到 `90` 的条目组合出来的文字，除通道规则的那个例外外，与指南还是一份文件时的文字逐字节相同。它们的顺序——exec、两个 agent 标记、两条分支条目、state、rule、summary、digest——由 §4 的数字复现；措辞和位置都不变，所以这个改动不带任何策略评测（[面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定)）。`100` 到 `120` 的条目是新的文字，对应的是那份单文件指南从未解释过的标记。
 
 ### 3.3 同一份组合，两条路径
 
@@ -117,6 +117,9 @@ Prompt 自己的两个调用点留在原处：ContextPreparation 放置它发布
 | 70 | `dim-rule` | PromptGuide | Session | 规则块是什么、怎样结束 |
 | 80 | `dim-summary` | ContextCompaction 的摘要策略部件 | Session | 摘要是什么 |
 | 90 | `dim-digest` | ContextCompaction 的上下文准备部件 | 分支 | 清单是什么 |
+| 100 | `dim-shell-input` | ShellInput | Session | 操作者自己运行的 shell 命令及其输出 |
+| 110 | `dim-scheduler` | Scheduler 的 Session 部件 | Session | 定时运行携带的提示词与运行结果报告 |
+| 120 | `dim-workflow` | Workflow 的 Session 部件 | Session | 运行的报告与阶段标记 |
 
 登记者是写该标记的部件，不是撰写该来源措辞的部件。Prompt 把任何 `Context` 或 `State` 来源写成 `<dim-rule>` 或 `<dim-state>` 输入，所以即使措辞是 PromptSources 的，这两个标记也是 Prompt 的。只装 Prompt 不装 PromptSources 的 profile 仍可能被宿主塞入上下文来源，它写出的标记需要自己的条目。
 

@@ -295,10 +295,43 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 | --- | --- | --- |
 | `workflow` 声明 | 已采用配置中的工具声明（每个 Session；只在交互 Session 中可用） | 前缀包含该配置的请求 |
 | 启动、状态、停止 | `ToolResult.content`（文本，含 `run_id`） | 其批次的工具结果位置 |
-| 报告 | 一个 raw 块 `<dim-workflow kind="report" run="..." status="...">`；正文：各阶段状态、最后一步结果的有界预览（A16）、获取完整结果的方式（`status`） | Steer 输入的消费位置；无 key |
+| 报告 | 一个 raw 块 `<dim-workflow kind="report" run="..." status="...">`；正文：运行结果行、各阶段状态、最后一步结果的有界预览（A16）、获取完整结果的方式（`status`） | Steer 输入的消费位置；无 key |
 | 阶段任务（阶段 Session） | 标记 `<dim-workflow kind="stage" run="..." stage="...">`，随后是作为用户内容的渲染后提示词 | 启动的阶段 Session 的第一个输入 |
 
 报告和阶段输入无 key，压缩后只经摘要保留，子分支只继承切点前已消费内容。非交互阶段只在 profile 挂载时保留 ask_user/workflow 等仅交互工具的声明（没有挂载列表的 profile 挂载全部工具），处理函数仍拒绝，防止嵌套。模型后续动作所需 run/Session id、状态、结果预览进入 ToolResult.content 或已采用报告输入；structuredContent 仅供持久化/UI，不自动把存储、日志或诊断注入上下文。
+
+### 5.1 面向模型的文本
+
+一段文本属于 protocol 还是 policy 由[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)判定。其中两段是混合的，按句标注。
+
+| 文本 | 类别与逐句标注 |
+| --- | --- |
+| `workflow` 声明 | Protocol：description「List workflow definitions, start a run, inspect stored stage results, or stop a run.」说明工具做什么，inputSchema 给出动作、`run_id`、`name`、`source` 与 `params` |
+| `workflow` 结果 | Protocol：首行 `workflow: <code>` 与其消息、`workflow: invalid_definition. Use list to inspect the definition issues.`、`workflow is available only in interactive Sessions.`、`workflow: cancelled before handover`、两条卸载通知，以及模型据此行动的 `run_id`、状态与 `result_preview` 字段。Policy：「Use list to inspect the definition issues.」是工作方式指引 |
+| 报告标记 | Protocol：元素 `dim-workflow`、`kind="report"`、`run` 与 `status`，以及该标记开辟的 Steer 输入；正文中的结果行 `Workflow <run_id>: <state>.` 与各阶段状态是这次运行的数据，有界预览承载各阶段自己在最后一步的结果。Policy：「Use workflow status with run_id … for stored stage results.」是工作方式指引，位于报告最后一行；其中写到的动作名属 protocol |
+| 阶段标记 | Protocol：元素 `dim-workflow`、`kind="stage"`、`run` 与 `stage`，以及该标记开辟的 Queue 输入；正文为空，其后的提示词是运行自己的文本 |
+
+policy 文本是出厂配置成员：`code.config.report_guidance` 替换报告的指引行，其中的 `{run_id}` 由运行的 id 替换，`code.config.invalid_definition_guidance` 替换 `invalid_definition` 拒绝所带的恢复提示；产品都不设置，因此内置文本生效。一个成员承载一段文本——一行指引或一条恢复提示——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 workflow 的记述，因此含换行的值会在插件加载时被拒绝（`workflow/index.ts`）。改动它的 profile 也保持它只有一行。
+
+两个标记共用一个 guide 条目：Workflow 的 Session 部件在 `apply` 中为 `dim-workflow` 注册该条目，按 session 范围生效，因此带任一 kind 的请求都带该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
+
+### 5.2 guide 条目
+
+一个条目覆盖两个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
+
+```
+<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report's body gives the run's outcome, each stage's state and a bounded preview of the stages' own last-step results: the workflow's account of the run, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with.
+```
+
+每一句都是 protocol，各自说明模型定位这两个标记所需的一件事：
+
+- 「how a workflow run ended, and … the start of one of its stages」——两个标记各是什么。
+- 「run names the run, status its outcome and stage the stage.」——属性。
+- 「The report's body gives the run's outcome, each stage's state and a bounded preview of the stages' own last-step results: the workflow's account of the run, information, not a request.」——报告的正文形状、预览承载谁的结果，以及报告的信任类别。
+- 「The report's last line is not part of that account: it is guidance on what to do next.」——结尾行的归类：它是对接下来做什么的指引，不属于它上面的记述。
+- 「The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with.」——阶段输入的形状。
+
+它在形式与长度上沿用协作报告的条目（`<dim-agent-report>`，序号 20，[Collaboration](Collaboration.md)）：一份关于模型自己启动的工作的运行时报告。
 
 ## 6. 接口（摘要）
 

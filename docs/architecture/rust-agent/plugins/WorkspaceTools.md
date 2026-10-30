@@ -218,6 +218,39 @@ events, acquire Session holds or start background work.
 
 None (§4 rule 8). S7 uses the existing host and storage contracts.
 
+### Model-facing texts
+
+The `read`, `write`, `edit`, `glob`, `grep`, `exec` and `exec_stop` declarations
+are built-in declarations and their marks are
+[#549](https://github.com/arcships/dim/issues/549)'s. Of their results, the
+texts that carry a handle or a status are protocol
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+the `exec` result that moved to the background writes `Task ID: <id>`,
+`Output: <path>` and "Stop with exec_stop({"taskId":"<Task ID>"}); this is not a
+Collaboration agentId.", and a task whose owner restarted reports
+"Background task <id> did not survive a restart of its owner; its final result is
+unknown. Output so far: <path>." The model carries the task id to `wait` and
+`exec_stop` and the path to `read`, so a change to either format changes what the
+model can do.
+
+`exec_stop`'s result is the task's terminal `{task_id, status, result}` JSON, and
+it is protocol too: the model reads `status`, and only `cancelled` confirms the
+stop, while `failed` stays an error. `exec_stop`'s refusals are protocol, as
+Wait's are, because each names the input or the handle it refused: "exec_stop
+requires the taskId returned by exec: <error>", "exec_stop taskId must not be
+empty." and "Command is not a task of this branch. Use the Task ID returned by
+exec on this branch; use agent for Collaboration members. No command was
+stopped."
+
+The other tools' refusal codes (`invalid_input`, `not_regular_file`,
+`is_directory`, `file_modified_since_read`, `text_binding_required`,
+`permission_denied`, `write_error`, `exec_invalid_request`,
+`exec_task_unknown`, `exec_terminate_failed`, `exec_wait_failed`,
+`exec_output_offload_failed`) reach clients and persistence in
+`structuredContent`; `ToolResult.content` carries the sentence the model reads,
+and HistoryRenderer renders the content alone, so no code reaches the model. A
+tool that starts writing one into `content` moves that text into this section.
+
 ### Tests
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs),
@@ -340,6 +373,21 @@ terminal append attempt settles, including on failure. `output(task_id)` reads
 that preview after releasing the task-table guard. Ended and replayed entries
 have no capture; a historical path never reconstructs one. WorkspaceTools exposes
 this finite read through its existing Session methods contribution.
+
+### Model-facing texts
+
+One text reaches the model, and it is mixed
+([model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+the notice's element `dim-notification`, its attributes `source="exec"` and `task`,
+the `Background command "<name>" <status>.` line, the `Output preview:` line and
+the full-result hint are protocol; "It is information, not a new request." and
+"If the work it belongs to is no longer wanted, note the result and do not restart
+that work." are policy. The entry's text stays code
+([Prompt §5](../../../design/plugins/Prompt.md#5-facts-that-reproduce-it)).
+
+The notice carries its guide entry: this part registers it from `apply`,
+branch-scoped, and a request on that branch after the notice carries the entry
+([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)).
 
 ### Tests
 

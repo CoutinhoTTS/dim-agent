@@ -153,6 +153,24 @@ stays inside its owning service and is excluded from catalog replies, notificati
 A stdio server's stderr is discarded: arbitrary server output may contain secrets, so it never
 reaches tracing or the daemon log.
 
+### MCP tool declarations
+
+A server's tools are its author's. Mcp registers each as it was discovered: the
+declaration carries the server's `description` and `inputSchema` unchanged, and a
+call's `content` reaches the model as the server returned it. The server's author
+marks the declaration's protocol and policy parts ([model-facing prompts §4](../../docs/design/model-prompts.md#4-protocol-and-policy));
+Dim carries them and owns none of their words.
+
+Two refusals are Dim's, and each is mixed, marked sentence by sentence
+([model-facing prompts §4](../../docs/design/model-prompts.md#4-protocol-and-policy)):
+in "The MCP server \"<id>\" requires the user to sign in. Ask the user to sign in
+to it with /mcp." and the insufficient-scope form's "needs additional permissions
+for this tool …", the first sentence is protocol — it names the server and the
+condition, and the scopes in the second form. The closing "Ask the user to sign
+in to it with /mcp." ("again" in the second form) is policy: it is guidance, and
+the runtime does not depend on its words. A server's tools write no marker, so
+they contribute no guide entry.
+
 ### MCP OAuth
 
 HTTP and SSE servers that answer `401` use OAuth ([design](../../docs/design/appserver/mcp-oauth.md)).

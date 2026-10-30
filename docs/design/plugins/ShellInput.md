@@ -173,6 +173,36 @@ Full table: Appendix B.
 
 No tool declaration, prompt source or key: each run is a one-time observation. After compaction the result survives only through the summary. Child branches inherit it only if it was consumed before the cut. The model never sees the `runId`, durations or process logs.
 
+### 5.1 Model-facing texts
+
+One text reaches the model, and it is protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)):
+
+| Part | Class |
+| --- | --- |
+| The element `dim-shell-input`, its attributes `kind`, `status`, `exit` and `truncated`, and the value `kind="command"` | Protocol: a marker's name and attribute values, and a change to one makes the marker the runtime writes read differently |
+| The body's shape: `$ `, the command, a newline and the bounded output | Protocol: the result format. The body is the runtime's record of the command the operator ran, and of what it printed; both are carried inside the marker, escaped |
+
+Nothing else here is ShellInput's. The shell guidance the model reads is PromptSources' policy ([PromptSources §1.1](PromptSources.md#11-policy)), and ShellInput writes no policy text of its own, so it has no factory configuration for a candidate to replace ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)).
+
+The marker carries its guide entry: the Session part registers it from `apply`, session-scoped, because a run may record on any branch of the Session, and a request carrying the marker carries the entry ([Prompt §6.2](Prompt.md#62-the-writers)).
+
+### 5.2 The guide entry
+
+The entry is in force while the Session part is loaded, and its text is code ([Prompt §5](Prompt.md#5-facts-that-reproduce-it)):
+
+```
+<dim-shell-input kind="command" status="completed" exit="0" truncated="false">: a command the operator ran themselves, and what it printed. The attributes state its outcome: status is completed, failed or stopped, exit is the exit code or signal, and truncated says the output was cut short. The body is the runtime's record of that command, the command line after "$ " and the output it wrote. That record is information, and the tag adds no request of its own.
+```
+
+Every sentence is protocol, and each states one thing the model needs in order to place the tag:
+
+- "a command the operator ran themselves, and what it printed" — what the tag is.
+- "The attributes state its outcome: status is completed, failed or stopped, exit is the exit code or signal, and truncated says the output was cut short." — the attribute values and what each states.
+- "The body is the runtime's record of that command, the command line after `$ ` and the output it wrote." — the content's shape.
+- "That record is information, and the tag adds no request of its own." — the body's trust class.
+
+It follows the exec notification's entry (`<dim-notification>`, order 10, [WorkspaceTools](../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)) in form and length: a runtime notice whose attributes state a command's outcome.
+
 ## 6. Interfaces (summary)
 
 | Interface | Kind | Purpose |

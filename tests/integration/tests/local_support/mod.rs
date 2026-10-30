@@ -374,6 +374,13 @@ pub struct Options {
     pub timezone: &'static str,
     pub hold: Option<Arc<AssemblyHold>>,
     pub probe: Option<Arc<LifecycleProbe>>,
+    /// Skills' factory configuration: the text replacing the built-in
+    /// instructions.
+    pub instructions: Option<Arc<str>>,
+    /// Register the Skills parts in the profile without installing the
+    /// capability, as a host whose profile takes them by name does: the
+    /// catalog plugin registers them either way.
+    pub require_without_install: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -384,6 +391,8 @@ impl Default for Options {
             timezone: "Asia/Shanghai",
             hold: None,
             probe: None,
+            instructions: None,
+            require_without_install: false,
         }
     }
 }
@@ -424,7 +433,20 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(move || today.lock().unwrap().clone()),
         std::time::Duration::from_millis(10),
     );
-    skills::install(&mut builder);
+    if options.require_without_install {
+        for part in ["Skills", "SkillsBranch"] {
+            builder.require_part(part);
+        }
+    } else if let Some(instructions) = options.instructions {
+        skills::install_with_config(
+            &mut builder,
+            skills::SkillsConfig {
+                instructions: Some(instructions),
+            },
+        );
+    } else {
+        skills::install(&mut builder);
+    }
     if let Some(hold) = options.hold {
         builder.require_feature(
             Feature::new("AssemblyHold").session("AssemblyHold", move |_| {
