@@ -324,7 +324,7 @@ already records:
 | Source | Recorded by | Scope |
 | --- | --- | --- |
 | Provider descriptor | `capabilityOverrideFields` on the stored descriptor; a non-positive descriptor value reads as absent | The model that descriptor describes |
-| Bundled catalog | `metadataSource` naming the matched bundled provider, which declares both limits, or that provider's `contextWindowOverride` and `contextWindowFallback` metadata | The models the lookup matches, or every model of the provider |
+| Bundled catalog | `metadataSource` naming the matched bundled provider: an entry declares a limit only where its `metadata.raw` does, and the bundle drops every other limit when it is loaded; that provider's `contextWindowOverride` and `contextWindowFallback` metadata stay declarations | The models the lookup matches, or every model of the provider |
 | User | The same `capabilityOverrideFields` field on the descriptor override or user model: `models.edit` writes it for each limit it edits, and either legacy importer for an imported value it keeps | The model the override names |
 
 Absence is a value of the type, not a number. The catalog carries
@@ -404,7 +404,7 @@ models and the row's descriptor overrides take the per-field rule. The `models`
 of a `user` row is not the row's input but the seed the record starts from — the
 previous record's models or, without a target, the bundled definition's — so the
 import leaves it exactly as that seed states it, with no mark and nothing
-dropped.
+dropped; a bundled definition's seed is already strict where the bundle loads.
 
 A Session keeps its adopted capability snapshot. One whose model becomes
 undeclared resumes and stays readable; its next request fails in the resolver with

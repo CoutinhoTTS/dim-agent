@@ -250,7 +250,7 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 | 来源 | 记录方式 | 作用范围 |
 | --- | --- | --- |
 | Provider 描述 | 存储描述上的 `capabilityOverrideFields`；描述中的非正值视为未声明 | 该描述所述的模型 |
-| 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider（两项上限都由它声明），或该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据 | 匹配到的模型，或该 Provider 的全部模型 |
+| 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider：条目仅在其 `metadata.raw` 声明处才有上限，其余取值在捆绑加载时删除；该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据仍是声明 | 匹配到的模型，或该 Provider 的全部模型 |
 | 用户 | 同一 `capabilityOverrideFields` 字段，写在描述覆盖或用户模型上：`models.edit` 为它编辑的每项上限写入，两个旧版导入器为导入时保留的每项值写入 | 覆盖所指的模型 |
 
 缺失是类型上的值，不是数字。目录侧使用 `CatalogCapabilities`：两项上限都是可选的，没有来源
@@ -301,7 +301,7 @@ Provider 自有模型的每项上限单独判定：已列入 `capabilityOverride
 两个旧版导入器沿用同一划分：旧记录中 `bundled`/`remote` 行的 `models` 属于投影输出，按严格
 规则处理；用户模型与该行的描述覆盖按逐字段规则处理。`modelsSource` 为 `user` 的行的 `models`
 不是该行的输入，而是记录起步的种子（既有记录的 models，或没有目标时捆绑定义），导入保持它的
-原样，不加标记也不删除。
+原样，不加标记也不删除；捆绑定义的种子在捆绑加载处就已按严格规则处理。
 
 Session 保留已采用的能力快照。模型变为未声明的 Session 仍可恢复并保持可读；下一次请求在
 解析器处失败，错误指出缺失的上限，且发生在凭据或网络 I/O 之前。两项都声明后再选择该模型

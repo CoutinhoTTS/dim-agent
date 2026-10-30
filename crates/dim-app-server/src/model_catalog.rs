@@ -246,7 +246,13 @@ pub struct BundledCatalog {
 
 impl BundledCatalog {
     pub fn load() -> Result<Self, ProjectionError> {
-        let file: CatalogFile = serde_json::from_str(CATALOG)?;
+        let mut file: CatalogFile = serde_json::from_str(CATALOG)?;
+        // #522: a bundled entry keeps only the limits its metadata.raw declares.
+        for provider in &mut file.providers {
+            for model in &mut provider.models {
+                drop_undeclared_limits(model);
+            }
+        }
         let by_provider = file
             .providers
             .iter()

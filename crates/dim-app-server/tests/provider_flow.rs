@@ -5443,8 +5443,10 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
         .iter()
         .find(|model| model["modelId"] == "whisper-1")
         .unwrap();
-    assert_eq!(whisper["capabilities"]["contextWindow"], 128_000);
-    assert_eq!(whisper["capabilities"]["maxOutputTokens"], 16_384);
+    // The bundle declares no limit for `whisper-1`, so neither the seed nor
+    // the import carries one.
+    assert!(whisper["capabilities"].get("contextWindow").is_none());
+    assert!(whisper["capabilities"].get("maxOutputTokens").is_none());
     assert!(
         whisper["metadata"]
             .get("capabilityOverrideFields")
@@ -6407,8 +6409,8 @@ fn legacy_import_leaves_the_builtin_seed_as_the_record_has_it() {
         );
     };
     // Without a target the seed is the bundled definition; it holds entries
-    // that declare their limits in `metadata.raw` and entries whose
-    // 128000/16384 comes from provider-level metadata.
+    // that declare their limits in `metadata.raw` and entries the bundle
+    // declares nothing for, which keep no limit.
     let seeded = convert_legacy_provider(&row(), None, &bundled).unwrap();
     let record = stored(&seeded);
     assert_eq!(
@@ -6421,8 +6423,8 @@ fn legacy_import_leaves_the_builtin_seed_as_the_record_has_it() {
         .iter()
         .find(|model| model["modelId"] == "whisper-1")
         .unwrap();
-    assert_eq!(whisper["capabilities"]["contextWindow"], 128_000);
-    assert_eq!(whisper["capabilities"]["maxOutputTokens"], 16_384);
+    assert!(whisper["capabilities"].get("contextWindow").is_none());
+    assert!(whisper["capabilities"].get("maxOutputTokens").is_none());
     assert!(declared(whisper).is_null());
     check_row_entries(&record, "no target");
     // Over a pristine target the seed is that record's models, unchanged.
@@ -6608,5 +6610,216 @@ async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
     }
     drop(native);
     restarted.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #522: the bundle is a listing, so an entry declares a limit only where its
+/// `metadata.raw` does. The 128000/16384 pair earlier formats assumed for the
+/// entries that declare nothing is not a declaration: the model is listed with
+/// both limits missing and cannot be selected.
+#[tokio::test]
+async fn a_bundled_entry_that_declares_no_limit_reports_it_missing() {
+    let home = std::env::temp_dir().join(format!("provider-bundle-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let view = provider
+        .management(Some("siliconflow".into()), &cancel)
+        .await
+        .unwrap();
+    provider
+        .update(
+            "siliconflow".into(),
+            view.providers[0].version.unwrap(),
+            serde_json::from_value(json!({
+                "credential":{"action":"set","value":"fixture-key"},"enabled":true
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    for (provider_id, model_id, reason) in [
+        ("openai", "whisper-1", "provider_unavailable"),
+        (
+            "siliconflow",
+            "Qwen/Qwen3-VL-235B-A22B-Instruct",
+            "limits_undeclared",
+        ),
+    ] {
+        let catalog = provider
+            .catalog_for(provider_id.into(), &cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .unwrap();
+        assert_eq!(model.capabilities.context_window, None, "{model_id}");
+        assert_eq!(model.capabilities.max_output_tokens, None, "{model_id}");
+        assert_eq!(
+            model.missing_limits,
+            ["contextWindow", "maxOutputTokens"],
+            "{model_id}"
+        );
+        assert_eq!(
+            model.unavailable_reason.as_deref(),
+            Some(reason),
+            "{model_id}"
+        );
+        match provider
+            .select(
+                None,
+                ModelId {
+                    provider_id: provider_id.into(),
+                    model_id: model_id.into(),
+                },
+                None,
+                &cancel,
+            )
+            .await
+        {
+            Err(ProviderError::InvalidConfig(message)) => assert_eq!(
+                message, "Model has no declared contextWindow or maxOutputTokens",
+                "{model_id}"
+            ),
+            other => panic!("{model_id}: {other:?}"),
+        }
+    }
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #522: a v25 store holds the seed with the assumed pair, because its daemon
+/// copied the bundle as it was. The v26 upgrade and the next start's reseed
+/// leave the same record a fresh home seeds: the bundle's current models and
+/// its definition fingerprint, once.
+#[tokio::test]
+async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
+    let home = std::env::temp_dir().join(format!("provider-v25-seed-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let start = |home: PathBuf| {
+        let root = Ctx::root().unwrap();
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
+        let plugins = [
+            root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+            root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+            root.plugin(ManagedProvidersPlugin),
+            root.plugin(
+                dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap(),
+            ),
+            root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+            root.plugin(provider_part(ProviderPlugin::new)),
+            root.plugin(dim_agent_aimux::AimuxPlugin),
+        ];
+        (root, plugins)
+    };
+    let record = |id: &str| -> Value {
+        let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let (root, plugins) = start(home.clone());
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let fresh = record("openai");
+    root.shutdown().await.unwrap();
+    // A v25 daemon wrote its seed from the bundle as it was: the entries with
+    // no `metadata.raw` limit carry the assumed pair, and the definition
+    // fingerprint predates the bundle that declares nothing for them.
+    {
+        let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        let mut v25 = fresh.clone();
+        for model in v25["models"].as_array_mut().unwrap() {
+            let raw = model["metadata"]["raw"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let declares = [
+                "inputTokenLimit",
+                "outputTokenLimit",
+                "contextWindow",
+                "maxOutputTokens",
+            ]
+            .iter()
+            .any(|key| raw.contains_key(*key))
+                || raw
+                    .get("limit")
+                    .and_then(|limit| limit.get("context"))
+                    .is_some();
+            if !declares {
+                model["capabilities"]["contextWindow"] = json!(128_000);
+                model["capabilities"]["maxOutputTokens"] = json!(16_384);
+            }
+        }
+        v25["definitionFingerprint"] = json!("v25-bundle");
+        native
+            .execute(
+                "UPDATE providers SET record=?2 WHERE provider_id=?1",
+                rusqlite::params!["openai", v25.to_string()],
+            )
+            .unwrap();
+        native
+            .execute_batch(
+                "DROP TABLE agent_store_format;
+                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25));
+                 INSERT INTO agent_store_format VALUES (25);",
+            )
+            .unwrap();
+    }
+    let (root, plugins) = start(home.clone());
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let upgraded = record("openai");
+    assert_eq!(upgraded["version"], 2, "the reseed bumps the version once");
+    assert_eq!(upgraded["models"], fresh["models"]);
+    assert_eq!(
+        upgraded["definitionFingerprint"],
+        fresh["definitionFingerprint"]
+    );
+    // And the record both homes hold declares no limit the bundle does not.
+    let whisper = upgraded["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "whisper-1")
+        .unwrap();
+    assert_eq!(whisper["capabilities"]["contextWindow"], Value::Null);
+    assert_eq!(whisper["capabilities"]["maxOutputTokens"], Value::Null);
+    root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
