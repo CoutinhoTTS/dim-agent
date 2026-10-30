@@ -554,8 +554,8 @@ through a constant of its own.
    that keeps something, and under budget recovery it may also be the boundary that replaces
    everything (#169). If there is still none, or nothing lies before it: `Skipped {reason:
    "nothing_to_compact"}`, with no model call. The automatic threshold trigger settles the
-   same skip, with the same reason and no call, when the cut the policy selects cannot shrink
-   the request at the planned size (§5.3 step 2).
+   same skip, with the same reason and no call, when the selected cut removes no more than
+   the replacement's planned size (§5.3 step 2).
 2. **Summary.** It summarizes the previous replacement's strategy and pinned parts (from
    `input.checkpoint`, located by `replacement_parts`; §4.3) plus the entries placed by events
    before `retain_from`, and nothing earlier: the fixed context begins at the previous cut, so
@@ -680,18 +680,19 @@ How the summary is produced:
    every part the compaction cannot shrink fits.
 2. **Start.** It appends `context/compaction-start` with the caller's ids, `command`,
    `through`, `trigger` and `strategy.name()`. The automatic threshold trigger stops here,
-   before the strategy is called, when its cut cannot make the request smaller at the
-   replacement's planned size: when the entries the selected cut replaces — less the pinned
-   inputs the replacement carries instead of dropping them (§5.9), plus the previous
-   replacement's strategy part, which the next summary reads and replaces — remove no more
-   than `replacement_size`, it appends `context/compaction` with `skipped`
-   (`nothing_to_compact`) and `modelCallCount` 0, as a strategy with no cut does. Step 4's
-   acceptance can only reject such a result, so the summarizer call it would spend is not
-   made; a skip only defers, because regrowth (§5.6) gates the next attempt and budget
-   recovery still covers a request that does not fit. A manual compaction and budget
-   recovery always call the strategy: `replacement_size` is the planned upper bound, so a
-   smaller actual summary can still shrink the request a manual step was asked to compact,
-   and recovery has no alternative.
+   before the strategy is called, on a conservative planned-size heuristic: when the entries
+   the selected cut replaces — less the pinned inputs the replacement carries instead of
+   dropping them (§5.9), plus the previous replacement's strategy part, which the next
+   summary reads and replaces — remove no more than `replacement_size` (§4.2), it appends
+   `context/compaction` with `skipped` (`nothing_to_compact`) and `modelCallCount` 0, as a
+   strategy with no cut does. `replacement_size` is a planned target, not a bound on the
+   reply: an actual summary may come out smaller or larger, so a compaction skipped here is
+   one whose planned removal does not pay for its summarizer call, and an actual summary
+   small enough to pass step 4's acceptance may be deferred. Regrowth (§5.6) gates the next
+   attempt and budget recovery still covers a request that does not fit, so the deferral is
+   bounded. A manual compaction and budget recovery always call the strategy: a manual step
+   was asked for, and an actual summary smaller than planned can still shrink the request it
+   was asked to compact, while recovery has no alternative.
 3. **Strategy and composition.** It calls `strategy.compact` with `retain_limit`, the legal
    `cuts` and `trigger`. If it is cancelled before the strategy returns, it appends the
    `cancelled` result for the start and returns `Cancelled`; a `Failed` outcome is written as a
@@ -1283,13 +1284,18 @@ window, and the same App Server on a `--models` file whose entry declares a smal
 
 1. **Automatic.** Past the threshold, and with `0.25 × B` of new history since the previous
    compaction, the next preparation writes `context/budget`, then
-   `context/compaction-start {trigger: threshold}`, and sends one summarizer request. It commits
+   `context/compaction-start {trigger: threshold}`. When the selected cut removes more than
+   the replacement's planned size, it also sends one summarizer request and commits
    `context/compaction` `completed` with the request's ids, `start`, no `command`, `strategy: "summary"`, a one-message `replacement`, and `retain_from` = the
    earliest legal cut whose kept tail fits `min(0.25 × B, 0.5 × B − resident)` (§5.3). The model
    request starts with that message and keeps that tail verbatim. The product window facts give
    the reserve's cap, floor and ratio (32k/8k → 19,200; 128k/8k → 104,000; 1M/128k → 784,800).
    Many small turns after a large one are kept beyond two turns; a keyed block replayed after the
    cut keeps fewer of them than the same block unkeyed when the `0.5 × B` term is what binds.
+   When the selected cut removes no more than that planned size, no summarizer request is sent:
+   the same preparation writes `context/compaction` `skipped` with reason `nothing_to_compact`
+   and `modelCallCount` 0 (`an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_replacement`
+   in `transport_flow/compaction.rs`).
 2. **Budget recovery.** The retry compacts with `trigger: provider_output_budget_exhausted`.
    With a provider baseline, a request whose local count fits the window but whose baseline
    estimate exceeds `B` recovers; one whose baseline estimate fits does not.

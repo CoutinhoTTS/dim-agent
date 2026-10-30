@@ -700,12 +700,11 @@ impl ContextPolicy {
         self.commit(step, view, model, start, outcome).await
     }
 
-    /// Whether a compaction at `cut` removes more than the strategy's planned
-    /// replacement, so its result can make the request smaller
-    /// (ContextCompaction §5.3, step 2): the entries before the cut that the
-    /// replacement drops, less the pinned inputs it carries instead of
-    /// dropping them, plus the previous replacement's strategy part, which
-    /// the next summary reads and replaces.
+    /// Whether the entries a compaction at `cut` removes — less the pinned
+    /// inputs the replacement carries instead of dropping them, plus the
+    /// previous replacement's strategy part, which the next summary reads and
+    /// replaces — exceed the strategy's planned replacement size
+    /// (ContextCompaction §5.3, step 2).
     fn shrinks(
         &self,
         view: &View,
