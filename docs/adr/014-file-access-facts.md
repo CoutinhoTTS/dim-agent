@@ -4,7 +4,7 @@ Decision status: Proposed.
 
 Extends ADR 010. It uses the grants of ADR 012 and the host-artifact ownership of ADR 013
 (sibling PRs). This decision gives `Permission` one fixed set of facts for file reads and writes.
-ADR 003 is unchanged.
+ADR 003's file is not edited; its D5 file-root sentence is superseded below.
 
 ## Context
 
@@ -25,12 +25,13 @@ the session's own artifact. The facts have to be named once, with an owner for e
 | session-owned | ADR 013's ownership fact; `SessionFiles.owns` reads both ownership tables |
 | user grant | ADR 012's grants |
 
-The branch preset is a query argument, not a fact. The platform-roots list is HostPlatform state,
-fixed per OS: Linux uses `/usr`, `/bin`, `/sbin`, `/lib*` and `/etc`; macOS uses `/System`,
-`/Library`, `/usr`, `/bin`, `/sbin` and `/etc`. HostPlatform computes it once when it mounts, and
-the facts service and the sandbox builder read the same list, so the fact is non-empty when the
-sandbox is off. Per-process environment, `DEVELOPER_DIR` and git configuration do not enter the
-fact.
+The branch preset is a query argument, not a fact. The platform-roots list is HostPlatform state.
+Linux uses `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64` and `/etc`; macOS uses `/System`, `/usr`,
+`/bin`, `/sbin`, `/Library/Apple`, `/private/etc` (with the `/etc` alias) and `/var/select`.
+HostPlatform computes it once when it mounts, and the facts service and the sandbox builder use
+the same fixed list, so the fact is non-empty when the sandbox is off. The builder adds the
+effective developer directory and git's global configuration separately, per process; those are
+not facts.
 
 The `FileAccessFacts` Session part registers the service `fileAccessFacts`. Its query is
 `facts(session_id, preset, path, mode) -> FileFacts`, with `workspace`, `system`, `owned` and
@@ -43,7 +44,7 @@ denies. The service holds no state; it reads at use time, so a restart changes n
 
 | Mode | Inside the facts | Outside the facts |
 | --- | --- | --- |
-| `read-only` | reads allowed | reads ask; writes, processes and network denied |
+| `read-only` | reads allowed | reads ask; writes denied |
 | `workspace-write` | reads allowed; writes only in the workspace and write grants | reads and writes ask |
 | `full-access` | file-tool writes allowed | reads and writes allowed without a prompt |
 
@@ -103,10 +104,10 @@ is now denied under `workspace-write`, where it used to ask. Both changes are tr
 ## Supersession
 
 Supersedes ADR 010's “file access is otherwise unchanged”, ADR 009's “file-root authorization is
-unchanged”, ADR 003 D5's file-root sentence, `session-files.md` §11.2's “the read never asks”,
-and AGENTS.md rule 11's exact sentence “File-root authorization, tool permission presets and
-replay never confer authority.” It extends ADR 010 and depends on ADRs 012 and 013. ADR 003 is
-not edited.
+unchanged”, ADR 003 D5's file-root sentence, `session-files.md` §11.1's “Permission, Approval and
+WorkspaceTools stay unchanged”, and AGENTS.md rule 11's exact sentence “File-root authorization,
+tool permission presets and replay never confer authority.” §11.2's two properties are kept. It
+extends ADR 010 and depends on ADRs 012 and 013. ADR 003's file is not edited.
 
 ## Rule check
 
@@ -120,7 +121,7 @@ not edited.
 | §4 rule 5 | No Timeline batch. |
 | §4 rule 6 | No context-input change. |
 | §4 rule 7 | `Permission` reads the facts service; no other plugin state. |
-| §4 rule 8 | No infrastructure change: HostPlatform owns the platform-roots list, and the file tool owners resolve paths before admission. |
+| §4 rule 8 | No core mechanism change: HostPlatform exposes the fixed platform-roots list as capability state, and the file tool owners resolve paths before admission. |
 | §4 rule 9 | No new Timeline fact. |
 | ADR 002 D2 | No wiring plugin. |
 | ADR 002 D3 | Facts are Session-scoped; `Permission` depends on them. |
