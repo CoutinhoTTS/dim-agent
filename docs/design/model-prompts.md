@@ -111,7 +111,7 @@ Today it is one fixed text — the frame and the entries of the built-in markers
 
 - A writer that is not loaded contributes no entry, so no entry outlives its writer.
 - An entry appears where its writer loads: at the guide adoption that the load triggers for a request built from an adopted configuration, and at the load itself on the host-prepared path; no request assembles a guide of its own.
-- A branch adopts the guide once at its open, because a fork inherits its parent's configuration and a restore carries the System it persisted: the branch runs with the entries its writers registered at load, at the cost of one context read per open.
+- A branch adopts the guide once at its open, because a fork inherits its parent's configuration and a restore carries the System it persisted: the adoption is part of the open, so the branch runs with the entries its writers registered at load from its first request on, at the cost of one context read per open.
 - A closing branch adopts nothing: its writers withdraw because the branch is shutting down, so a System the branch never ran with is never recorded.
 - A loaded writer's own flow asserts that a request carrying its marker carries its entry.
 - Removing or changing a marker changes its entry in the same change.
