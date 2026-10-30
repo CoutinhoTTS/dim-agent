@@ -146,7 +146,8 @@ jobs:
           # callback and a fake call interleave (rutis#987), stops ending the
           # host on one failed provide (rutis#988), and leaves `sessions` to the
           # host (rutis#986). The Node-backed Rust flows below still load these
-          # plugins for real; `tsc` still checks them.
+          # plugins for real. `tsc` checks session-title, scheduler and
+          # workflow; goal has no tsconfig.
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/session-title/tsconfig.json
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/scheduler/tsconfig.json
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/workflow/tsconfig.json
