@@ -4063,6 +4063,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     "branch",
                     "edit",
                     "exec",
+                    "exec_stop",
                     "glob",
                     "grep",
                     "plugin",
@@ -7664,8 +7665,9 @@ fn tui_models_picker_cycles_reasoning_effort() {
 /// `/models` sends `provider.refresh` for a usable provider whose catalog is
 /// empty when the daemon says its models can be listed, draws its rows without
 /// waiting for that listing, shows the models a late listing returns in the
-/// same open picker, keeps the row of a refresh that fails, and asks no
-/// provider twice in one connection.
+/// same open picker, keeps the row of a refresh that fails, and asks an
+/// unchanged catalog once in a connection while a written record asks once
+/// more.
 #[test]
 fn tui_models_picker_refills_an_empty_provider_catalog() {
     let home = Home::new();
@@ -7678,6 +7680,7 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
         Value,
     >::new()));
     let kept = stored.clone();
+    let changed = stored.clone();
     let (release, wait_release) = std::sync::mpsc::channel::<()>();
     let daemon = home.daemon(move |wire| {
         // One writer at a time: the listing a provider is slow to give is
@@ -7776,13 +7779,31 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
     }
     terminal.until("Broken: no models · dimcode models broken --refresh");
     terminal.until("Fresh / vendor/model-a");
+    // Another client writes the record (an enable or a re-point), which moves
+    // its catalog version: the same empty catalog is asked once more.
+    changed.lock().unwrap().insert(
+        "broken".to_owned(),
+        json!({"version":3,"disabledModelIds":[],"models":[]}),
+    );
+    terminal.write(b"\x1b");
+    thread::sleep(Duration::from_millis(500));
+    terminal.write(b"/models\r");
+    let deadline = Instant::now() + PATIENCE;
+    while *listed.lock().unwrap() < 4 {
+        assert!(
+            Instant::now() < deadline,
+            "the picker did not open after the write"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    terminal.until("Broken: no models · dimcode models broken --refresh");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
     assert_eq!(
         *refreshed.lock().unwrap(),
-        ["fresh".to_owned(), "broken".to_owned()],
-        "one refresh per provider that can be listed in the connection, none on the reopen"
+        ["fresh".to_owned(), "broken".to_owned(), "broken".to_owned()],
+        "one refresh per catalog version that can be listed, none on an unchanged reopen"
     );
 }
 

@@ -229,9 +229,13 @@ impl DynPlugin for ProbePlugin {
                     Ok(())
                 })?;
                 probe.child_entered.notify_one();
+                // Holds the child's build open until the test releases it, then
+                // fails the apply: creation fails in debug and release alike.
                 if probe.delay_child.load(Ordering::SeqCst) {
                     tokio::select! { _ = probe.child_release.notified() => {}, _ = ctx.cancelled() => {} }
-                    ctx.provide(Arc::new("late child binding"))?;
+                    return Err(rutis::Error::from(ErrorKind::PluginFailed(
+                        "test.branch-probe: the held child fails its apply".into(),
+                    )));
                 }
                 if probe.fail_child.load(Ordering::SeqCst) {
                     tokio::select! { _ = probe.writer_ready.notified() => {}, _ = ctx.cancelled() => {} }

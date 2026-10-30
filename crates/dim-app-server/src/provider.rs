@@ -826,6 +826,33 @@ fn can_list_models(
             .is_some_and(|metadata| metadata.remote_model_list == Some(false))
 }
 
+/// The conflict a listing raises when a discovered ID belongs to a user model.
+/// `provider.refresh` and an update that lists both fail with it — the catalog
+/// is never renamed or merged — and it names every colliding ID and the fix,
+/// so the user can delete them and retry.
+fn reject_user_model_conflicts(
+    record: &StaticProviderRecord,
+    models: &[ModelEntry],
+) -> Result<(), ProviderError> {
+    let colliding: Vec<&str> = models
+        .iter()
+        .filter(|model| {
+            record
+                .user_models
+                .iter()
+                .any(|user| user.model_id == model.model_id)
+        })
+        .map(|model| model.model_id.as_str())
+        .collect();
+    if colliding.is_empty() {
+        return Ok(());
+    }
+    Err(ProviderError::Conflict(format!(
+        "Discovered models conflict with user-added models: {}. Delete them through provider.models.delete, then retry.",
+        colliding.join(", ")
+    )))
+}
+
 fn static_summary(
     bundled: &BundledCatalog,
     provider_id: String,

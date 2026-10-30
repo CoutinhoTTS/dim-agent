@@ -570,6 +570,7 @@
       "file": "crates/dim-agent-capabilities/src/model_provider.rs",
       "unexpandedMacros": [
         "matches",
+        "tracing::error",
         "tracing::info_span",
         "unreachable",
         "vec"
@@ -588,6 +589,7 @@
       "parent": "dim_agent_capabilities::model_provider",
       "file": "crates/dim-agent-capabilities/src/model_provider/recovery.rs",
       "unexpandedMacros": [
+        "matches",
         "tokio::select"
       ]
     },
@@ -1118,7 +1120,6 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/assembly.rs",
       "unexpandedMacros": [
-        "cfg",
         "format",
         "json",
         "matches",
@@ -1126,7 +1127,8 @@
         "tokio::pin",
         "tokio::select",
         "tracing::error",
-        "vec"
+        "vec",
+        "write"
       ]
     },
     {
@@ -4984,6 +4986,7 @@
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::ModelEnd",
         "path EventContent::PermissionChanged",
         "path EventContent::ToolCall",
         "path EventContent::ToolResult",
@@ -6949,6 +6952,7 @@
         "path CompactionDiagnosticsRecord",
         "path CompactionReason::Auto",
         "path CompactionReason::Manual",
+        "path CompactionStrategyRecord",
         "path CompactionTrigger",
         "path CompactionTrigger::Manual",
         "path CompactionTrigger::ProviderOutputBudgetExhausted",
@@ -8410,6 +8414,7 @@
         "path HostError::Cancelled",
         "path HostError::Failed",
         "path HostError::failed",
+        "path HostErrorKind::Other",
         "path ModelChunk",
         "path ModelChunk::Content",
         "path ModelChunk::MessageStart",
@@ -8495,6 +8500,7 @@
         "path ModelCallData",
         "path ModelContentData",
         "path ModelUsageData",
+        "path ProviderPresentation",
         "path TextData",
         "path ThinkingData",
         "path ToolCallResult",
@@ -11022,7 +11028,9 @@
       "references": [
         "mod exec",
         "path exec::definition_for",
-        "path exec::execute"
+        "path exec::execute",
+        "path exec::stop",
+        "path exec::stop_definition"
       ]
     },
     {
@@ -11241,6 +11249,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::exec",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path crate::context_policy::check_cancel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::exec",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -11285,6 +11300,7 @@
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path WorkspaceTools",
+        "path super::host_error",
         "use super::WorkspaceTools"
       ]
     },
@@ -11297,6 +11313,8 @@
         "path StartError::Termination",
         "path StartError::Timeline",
         "path StartRequest",
+        "path super::background::TaskError::Closed",
+        "path super::background::TaskError::Unknown",
         "use super::background::BackgroundExec",
         "use super::background::StartError",
         "use super::background::StartRequest"
@@ -11308,6 +11326,13 @@
       "references": [
         "path Branch",
         "use dim_agent_runtime::Branch"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::exec",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path dim_agent_runtime::CAPABILITY_RELOADING"
       ]
     },
     {
@@ -11356,7 +11381,8 @@
         "path ToolResult",
         "path ToolResult::default",
         "path ToolResult::error",
-        "path ToolResult::text"
+        "path ToolResult::text",
+        "path tool"
       ]
     },
     {
@@ -12185,6 +12211,7 @@
         "path AgentHost::Private",
         "path AgentHost::Within",
         "path Assembly",
+        "path AssemblyFinding",
         "path BuiltSession",
         "path Extension",
         "path Owned",
@@ -12196,11 +12223,15 @@
         "path SessionInitialization::Restore",
         "path assembly",
         "path build_session",
+        "path check_scope",
         "path crate::assembly::with_copies",
         "path group",
         "path own_placement",
         "path release",
+        "path required",
+        "path rows",
         "path scope_diagnostics",
+        "path scope_rows",
         "path shutdown_scope",
         "use crate::assembly::AgentHost",
         "use crate::assembly::Assembly",
@@ -12210,6 +12241,7 @@
         "use crate::assembly::Placement",
         "use crate::assembly::SessionInitialization",
         "use crate::assembly::build_session",
+        "use crate::assembly::check_scope",
         "use crate::assembly::own_placement",
         "use crate::assembly::release",
         "use crate::assembly::scope_diagnostics",
@@ -12301,6 +12333,13 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path crate::names::in_group"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::agent",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path parts"
       ]
     },
     {
@@ -12456,7 +12495,8 @@
         "path crate::parts::PartMounter::is_row",
         "path crate::parts::PartMounter::module",
         "path crate::parts::PartRegistry",
-        "path crate::parts::PartRegistryPlugin"
+        "path crate::parts::PartRegistryPlugin",
+        "path parts"
       ]
     },
     {
@@ -13018,6 +13058,7 @@
         "path crate::assembly::retain_scope",
         "path crate::assembly::shutdown_scope",
         "path crate::assembly::with_copies",
+        "path required",
         "path rows"
       ]
     },
@@ -13115,7 +13156,8 @@
       "from": "dim_agent_runtime::timeline_context",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path crate::parts::Copies"
+        "path crate::parts::Copies",
+        "path parts"
       ]
     },
     {
@@ -18536,7 +18578,7 @@
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
         "path declarations_hold",
-        "path declare",
+        "path declare_supplied_limits",
         "path declared_limits",
         "path inherit_limits",
         "path limits_valid",
@@ -18550,6 +18592,7 @@
         "use crate::model_catalog::ProviderProjection",
         "use crate::model_catalog::declarations_hold",
         "use crate::model_catalog::declare",
+        "use crate::model_catalog::declare_supplied_limits",
         "use crate::model_catalog::declared_limit_values",
         "use crate::model_catalog::declared_limits",
         "use crate::model_catalog::inherit_limits",
@@ -18835,6 +18878,7 @@
         "path failure",
         "path optional_non_null",
         "path read_static",
+        "path reject_user_model_conflicts",
         "path validate_static_record"
       ]
     },
@@ -18904,7 +18948,7 @@
       "to": "dim_app_server::model_catalog",
       "references": [
         "path ModelEntry",
-        "path declare"
+        "path declare_supplied_limits"
       ]
     },
     {
@@ -19219,6 +19263,7 @@
         "path StaticRecordKind::Builtin",
         "path failure",
         "path read_static",
+        "path reject_user_model_conflicts",
         "path static_catalog",
         "path validate_static_record"
       ]
@@ -19336,6 +19381,8 @@
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
         "path bundled_seeds",
+        "path fill_bundled_limits",
+        "path limits_reason",
         "path parse_provider_row",
         "path reseed_candidate",
         "path same_account",
@@ -30909,7 +30956,7 @@
         "path NewApiEndpoint::OpenaiResponse",
         "path ProviderProjection",
         "path declarations_hold",
-        "path declare",
+        "path declare_supplied_limits",
         "path limits_valid",
         "use dim_app_server::model_catalog::BundledCatalog",
         "use dim_app_server::model_catalog::ModelEntry",
@@ -30918,7 +30965,7 @@
         "use dim_app_server::model_catalog::NewApiEndpoint",
         "use dim_app_server::model_catalog::ProviderProjection",
         "use dim_app_server::model_catalog::declarations_hold",
-        "use dim_app_server::model_catalog::declare",
+        "use dim_app_server::model_catalog::declare_supplied_limits",
         "use dim_app_server::model_catalog::limits_valid"
       ]
     },

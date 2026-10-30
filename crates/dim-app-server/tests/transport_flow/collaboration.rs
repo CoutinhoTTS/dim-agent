@@ -1280,6 +1280,79 @@ async fn leader_delegates_and_team_members_communicate() {
             && guidance.contains("is not an agentId"),
         "{guidance}"
     );
+    let schema = serde_json::to_value(
+        &leader_tools
+            .iter()
+            .find(|tool| tool.name == "agent")
+            .unwrap()
+            .input_schema,
+    )
+    .unwrap();
+    for (action, required) in [
+        ("request", json!(["action", "prompt", "agentId"])),
+        ("cancel", json!(["action", "agentId", "sessionId"])),
+        ("close", json!(["action", "agentId", "sessionId"])),
+        (
+            "message",
+            json!(["action", "agentId", "sessionId", "content"]),
+        ),
+        ("read", json!(["action", "agentId", "sessionId"])),
+        ("inspect", json!(["action", "agentId"])),
+        ("result", json!(["action", "resultId"])),
+        ("list", json!(["action"])),
+    ] {
+        let variant = schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| variant["properties"]["action"]["enum"][0] == action)
+            .unwrap();
+        assert_eq!(variant["required"], required, "{action}");
+        for field in required.as_array().unwrap() {
+            assert!(
+                variant["properties"].get(field.as_str().unwrap()).is_some(),
+                "{variant}"
+            );
+        }
+    }
+    assert!(
+        schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|variant| variant["required"] == json!(["action", "prompt", "profile"]))
+    );
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(!validator.is_valid(&json!({"action":"cancel","agentId":"exec-unknown"})));
+    assert!(!validator.is_valid(&json!({"action":"list","agentId":"unexpected"})));
+    assert!(!validator.is_valid(&json!({"action":"request","prompt":"work","agentId":default_agent,"profile":{"name":"worker","description":"","systemPrompt":"work","tools":[]}})));
+    assert!(validator.is_valid(
+        &json!({"action":"request","prompt":"work","agentId":default_agent,"sessionId":member})
+    ));
+    assert!(validator.is_valid(
+        &json!({"action":"read","agentId":default_agent,"sessionId":member,"after":1,"limit":2})
+    ));
+    assert!(
+        validator.is_valid(&json!({"action":"cancel","agentId":default_agent,"sessionId":member}))
+    );
+    assert!(validator.is_valid(&json!({"action":"request","prompt":"work","profile":{"name":"worker","description":"","systemPrompt":"work","tools":[]}})));
+    let before = facts(&lead_session).await;
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"cancel","agentId":"exec-unknown"})),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let rejected = last_error(&events(&lead_session).await);
+    assert!(
+        rejected.contains("sessionId")
+            && rejected.contains("exec_stop")
+            && rejected.contains("no member action was performed"),
+        "{rejected}"
+    );
+    assert_eq!(facts(&lead_session).await, before);
 
     server.shutdown();
     server.join().await.unwrap();

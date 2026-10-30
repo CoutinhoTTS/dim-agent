@@ -137,6 +137,8 @@ bundled catalog（bundled 未定义该 Provider，或 `remoteModels` 已为真�
 新 endpoint 的模型，并与连接在同一次 CAS 写入中提交；用户模型冲突规则与 `refresh` 相同。
 非法 patch 在列举之前就被拒绝，返回带原因的 `provider_invalid_config`。列举
 失败则更新失败、不写入任何内容，重新指向不会把旧 endpoint 的模型留在新 endpoint 上。
+记录已停用而模型属于自身时，同一次写入丢弃这些模型、不发送请求：它们属于旧 endpoint，
+空的、可列举的 catalog 由记录启用后选择器的填充补齐。
 只改 `network`（代理或超时）时单独保存、不列举：它改变到达 endpoint 的方式而非其内容，
 若要求列举成功，列举失败时这些设置就无法保存。driver 不能列举时只保存连接。
 模型属于 bundled catalog 的记录在连接改动后仍保留它们，
@@ -341,9 +343,10 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。
 
 列表还会通过 `provider.refresh` 填充 catalog 无模型的静态 provider：`provider.list`
-说其模型可列举时，每个连接对每个 provider 只问一次，并显示刷新写入的 catalog。
-读取或刷新失败时该 provider 的提示行保留；面板关闭后才到达的回复只记录这次填充，
-下次打开再读。
+说其模型可列举时，每个连接对 catalog 的每个版本只问一次，并显示刷新写入的 catalog。
+刷新成功时记录它写入的版本，因此列举为空的结果不会再次询问；记录被写入（启停用、
+改端点）后再问一次。读取或刷新失败时该 provider 的提示行保留；面板关闭后才到达的
+回复只记录这次填充，下次打开再读。
 
 未声明的模型不是选择器行。每个至少有一个此类模型的 Provider 在模型行之后保留一行灰色提示：
 统计需要窗口的模型数量并给出声明命令；该 Provider 没有任何可选模型时，这条提示取代空 Provider
@@ -401,7 +404,8 @@ Settings 一起另行决定，不作为本方案前置。
 路由推导前应用 endpointOverrides。refresh、普通写入、bundled reseed 均保留新增字段；
 托管目录的偏好仅在同账号 refresh 时保留（§3.2）。
 用户 ID 不能与默认/覆盖 ID 冲突；refresh 引入冲突则失败，不替换已准入目录。
-解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh。
+列举新端点的 update 遵循同一规则：失败，点名冲突的用户模型，不写入任何内容。
+解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh 或该 update。
 
 bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。fingerprint 改变后的实际
 替换候选若与用户模型冲突，保留该记录已准入的定义、fingerprint 和 version，继续在既有
