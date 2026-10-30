@@ -439,7 +439,7 @@ ProjectionCheckpoint = {
 [Prompt](../plugins/Prompt.md)（#555）的格式决定：升级到 **v24**，从 v23 原地升级。
 
 - **只增一处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
-  - `ContextConfiguredData.system_source`：`context/configured` 上 `system` 所依据的源文本，即 System 中除去 guide 的部分。它是模型或工具单独的 adoption 重渲染 guide 的依据：这类 adoption 用当前 frame 和当前 entries 在 `system_source` 上重渲染 System，并照旧记录新的 `system_source`。此前写下的记录没有它，按缺失读取，保留其已采用的 System，不做重渲染。
+  - `ContextConfiguredData.system_source`：`context/configured` 上 `system` 所依据的源文本，即 System 中除去 guide 的部分。它是模型、工具或指南单独的 adoption 重渲染 guide 的依据：这类 adoption 用当前 frame 和当前 entries 在 `system_source` 上重渲染 System，并照旧记录新的 `system_source`。此前写下的记录没有它，按缺失读取，保留其已采用的 System，不做重渲染。
 - **不能留在 v23**：
   - `ContextConfiguredData` 拒绝未知字段，v23 读取器解不了 `system_source`。
   - 自 #193 的 v17 起，能打开某版本库的守护进程都能解码其中每一行；打开 Session 时还会解码每条已存事件（`validate_session`），所以留在 v23 会让含该字段的 Session 打不开。

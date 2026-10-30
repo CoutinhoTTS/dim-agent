@@ -7,7 +7,8 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline, TimelineIdentity,
+    AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
+    Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -36,6 +37,9 @@ pub struct ConfigurationPublisher {
     /// The Session's guide entries: the System it publishes carries the
     /// composition over the entries in force at that adoption.
     guide: Arc<GuideEntries>,
+    /// The branch's phase: a guide adoption on a closing branch is dropped
+    /// rather than recorded.
+    branch_phase: Arc<BranchLifecycle>,
 }
 
 impl ConfigurationPublisher {
@@ -182,22 +186,9 @@ impl ConfigurationPublisher {
                 .iter()
                 .any(|draft| matches!(draft.kind, EventKind::ContextConfigured(_)))
         {
-            let (system, system_source) = self.rerendered(&before, previous_configuration.as_ref());
-            drafts.push(
-                EventKind::ContextConfigured(ContextConfiguredData {
-                    timeline: self.identity.branch_id.clone(),
-                    revision: Uuid::new_v4().to_string(),
-                    previous: previous_configuration.as_ref().map(|data| PromptReference {
-                        timeline: data.timeline.clone(),
-                        revision: data.revision.clone(),
-                    }),
-                    prompt: before.system_revision.clone(),
-                    settings: Box::new(settings),
-                    system,
-                    system_source,
-                })
-                .into(),
-            );
+            let data =
+                self.rerendered_configuration(&before, previous_configuration.as_ref(), settings);
+            drafts.push(EventKind::ContextConfigured(data).into());
         }
         if drafts.is_empty() {
             register(&[])?;
@@ -208,6 +199,87 @@ impl ConfigurationPublisher {
             .last()
             .expect("non-empty publication batch")
             .sequence;
+        self.await_published(sequence).await.map(Some)
+    }
+
+    /// Publishes the System over the entries in force now when it differs
+    /// from the adopted one: a guide adoption, the settings it keeps —
+    /// model, tools and source text — unchanged. A branch that adopted no
+    /// configuration publishes nothing, and so does one whose composition
+    /// did not move. Nothing is recorded on a branch that is closing: its
+    /// writers are withdrawing because it is shutting down, and the System
+    /// they leave behind is not one the branch ever ran with.
+    pub(crate) async fn adopt_guide(&self) -> dim_agent_runtime::Result<()> {
+        if self.closing() {
+            return Ok(());
+        }
+        let context =
+            crate::history::read_context(&self.timeline, self.timeline.sequence()).await?;
+        let Some(previous) = context_configuration(&context) else {
+            return Ok(());
+        };
+        let before = PromptSnapshot::from_context(&context);
+        let data =
+            self.rerendered_configuration(&before, Some(&previous), (*previous.settings).clone());
+        if data.system == previous.system {
+            return Ok(());
+        }
+        // The append rechecks the phase under the commit lock: the branch may
+        // have started closing while the context was read.
+        let appended = self.timeline.append_batch_registered(
+            vec![EventKind::ContextConfigured(data).into()],
+            |_| {
+                if self.closing() {
+                    Err(AgentError::Cancelled(
+                        "the branch closed before its guide adoption".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        self.await_published(
+            appended
+                .last()
+                .expect("single-event batch returned one event")
+                .sequence,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Whether the branch is closing or closed.
+    fn closing(&self) -> bool {
+        self.branch_phase.phase() >= BranchPhase::Closing
+    }
+
+    /// The configuration that records an adoption changing no model and no
+    /// tool: the System re-rendered over the source text the branch adopted,
+    /// with `settings` as the adoption leaves them.
+    fn rerendered_configuration(
+        &self,
+        before: &PromptSnapshot,
+        previous: Option<&ContextConfiguredData>,
+        settings: ModelConfiguration,
+    ) -> ContextConfiguredData {
+        let (system, system_source) = self.rerendered(before, previous);
+        ContextConfiguredData {
+            timeline: self.identity.branch_id.clone(),
+            revision: Uuid::new_v4().to_string(),
+            previous: previous.map(|data| PromptReference {
+                timeline: data.timeline.clone(),
+                revision: data.revision.clone(),
+            }),
+            prompt: before.system_revision.clone(),
+            settings: Box::new(settings),
+            system,
+            system_source,
+        }
+    }
+
+    /// Waits until the batch ending at `sequence` is published, so a commit
+    /// failure reaches the caller before the next adoption runs.
+    async fn await_published(&self, sequence: u64) -> dim_agent_runtime::Result<u64> {
         let mut publication = self.timeline.watch();
         while publication.borrow().0 < sequence {
             if let Some(error) = self.timeline.failure() {
@@ -217,7 +289,7 @@ impl ConfigurationPublisher {
                 AgentError::fault("ConfigurationPublisher", "publication channel ended")
             })?;
         }
-        Ok(Some(sequence))
+        Ok(sequence)
     }
 
     /// The System and its source text for a model- or tool-only adoption:
@@ -602,6 +674,7 @@ pub struct ContextPreparationPlugin {
     history: Key<HistoryRenderer>,
     identity: Key<TimelineIdentity>,
     guide: Key<GuideEntries>,
+    branch_phase: Key<BranchLifecycle>,
 }
 impl ContextPreparationPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -616,6 +689,7 @@ impl ContextPreparationPlugin {
             history: names.key()?,
             identity: names.key()?,
             guide: names.key()?,
+            branch_phase: names.key()?,
         })
     }
 }
@@ -633,6 +707,7 @@ impl DynPlugin for ContextPreparationPlugin {
             self.history.erase(),
             self.identity.erase(),
             self.guide.erase(),
+            self.branch_phase.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -645,6 +720,7 @@ impl DynPlugin for ContextPreparationPlugin {
             let history = ctx.require_at(&self.history)?;
             let identity = ctx.require_at(&self.identity)?;
             let guide = ctx.require_at(&self.guide)?;
+            let branch_phase = ctx.require_at(&self.branch_phase)?;
             if strategy.0.is_some() {
                 guide.register(
                     ctx,
@@ -660,6 +736,7 @@ impl DynPlugin for ContextPreparationPlugin {
                 timeline: timeline.clone(),
                 identity: (*identity).clone(),
                 guide: guide.clone(),
+                branch_phase,
             });
             ctx.provide_at(self.publisher.clone(), publisher)?;
             let service = Arc::new(ContextPreparation {

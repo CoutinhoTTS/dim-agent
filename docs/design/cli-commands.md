@@ -12,6 +12,37 @@ local image sources and paste handling. The multiline/paste editor and headless 
 arguments, clipboard/file insertion, completion and dropped paths are implemented. The attachment
 contract records the native platform acceptance evidence and outstanding checks.
 
+## Command menu
+
+In both scrollback and fullscreen TUI, group commands by category and sort
+categories and command names alphabetically by their canonical English identifiers.
+Search relevance takes priority; equally ranked matches use the same category/name order.
+Exit and suspend require their exact name or alias before dispatch: choosing an
+incomplete match fills the command name and keeps the composer open. Exact typed
+commands, including hidden commands, retain their own dispatch behavior.
+The command menu lists `/approvals` as the permission entry. `/approval`
+remains available when typed directly. Interrupt and steer are reached through
+`Esc` and `Ctrl+S` and are omitted from the menu. The menu only lists slash
+commands: the view actions for picking an earlier message and scrolling to the
+top or bottom are also omitted; `Tab`, `Home` and `End` retain their bindings.
+
+```text
+Commands
+  app     /exit        exit
+  app     /keys        show the key bindings
+  model   /approvals   set the session's permission preset
+
+/ + Enter          -> /exit (completion only)
+/exit + Enter      -> exit
+/approval + Enter  -> Ask / Full access menu
+
+Esc     interrupt the run
+Ctrl+S  steer with the next queued message
+Tab     pick an earlier message to edit or quote
+Home    scroll to the top (fullscreen, empty draft)
+End     scroll to the bottom (fullscreen, empty draft)
+```
+
 ## Command isolation settings
 
 The existing `/settings` panel adds a separate `Command isolation` row under Permissions,

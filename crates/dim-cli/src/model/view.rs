@@ -4,6 +4,9 @@
 //! read them without backend handles. Questions reuse the shared client
 //! contract in `question`; the session worker and wire decoder own backend I/O.
 
+/// The cancellation reason used when the terminal user interrupts a turn.
+pub const INTERRUPT_REASON: &str = "User interrupted the run.";
+
 /// The kind of one transcript row, as far as drawing is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -39,7 +42,6 @@ impl RowKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowTone {
     Danger,
-    #[allow(dead_code)]
     Warning,
 }
 

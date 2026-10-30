@@ -367,6 +367,11 @@ keep historical preferences until this explicit user action.
 adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
 with the model's other saved preferences.
 
+Models whose catalog entry has `zdr: true` show a `ZDR` tag before the
+reasoning effort, including in the fixed subagent model picker. Searching
+`zdr` includes these models. Missing or false values show no tag; replacing
+the catalog list replaces the tag with the latest server value.
+
 The picker also fills a static provider whose catalog holds no models through
 `provider.refresh`, once per version of its catalog in a connection, when
 `provider.list` says its models can be listed, and shows what the refresh
@@ -378,7 +383,7 @@ records the fill: the next open reads it.
 
 ```text
 Select a model
-> Provider / model          ‹ high ›
+> Provider / model          ZDR  ‹ high ›
 Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 

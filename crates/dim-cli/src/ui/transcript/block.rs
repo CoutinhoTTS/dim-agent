@@ -123,7 +123,11 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
         },
         RowKind::Error => Block::Error(row.text.clone()),
         RowKind::StreamingAssistant | RowKind::Status | RowKind::Other => Block::Status {
-            text: row.text.clone(),
+            text: if row.text == crate::model::view::INTERRUPT_REASON {
+                crate::ui::i18n::t(crate::model::view::INTERRUPT_REASON).to_owned()
+            } else {
+                row.text.clone()
+            },
             tone: match row.tone {
                 Some(RowTone::Danger) => Tone::Danger,
                 Some(RowTone::Warning) => Tone::Warning,
