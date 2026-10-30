@@ -200,6 +200,7 @@
         "format",
         "json",
         "matches",
+        "tracing::warn",
         "unreachable",
         "vec"
       ]
@@ -3601,6 +3602,7 @@
       "parent": "dim_cli::ui::keys",
       "file": "crates/dim-cli/src/ui/keys.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -4459,6 +4461,7 @@
         "assert",
         "assert_eq",
         "format",
+        "json",
         "matches",
         "panic",
         "serde_json::json",
@@ -4502,19 +4505,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/usage.rs",
       "unexpandedMacros": [
-        "format",
-        "vec"
-      ]
-    },
-    {
-      "id": "dim_cli::usage::tests",
-      "crate": "dim_cli",
-      "parent": "dim_cli::usage",
-      "file": "crates/dim-cli/src/usage.rs",
-      "unexpandedMacros": [
-        "assert",
-        "assert_eq",
-        "json"
+        "format"
       ]
     },
     {
@@ -7131,7 +7122,11 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path BranchLifecycle",
+        "path BranchPhase::Closing",
         "path TimelineIdentity",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::BranchPhase",
         "use dim_agent_runtime::TimelineIdentity"
       ]
     },
@@ -8754,6 +8749,14 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "use crate::prompt_guide::GuideEntries"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",
@@ -8767,6 +8770,7 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
+        "path BranchPhase::Closing",
         "path TimelineIdentity"
       ]
     },
@@ -23156,6 +23160,7 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path RowTone::Danger",
+        "path RowTone::Warning",
         "path TaskFinish",
         "path TaskKind::Command",
         "path TaskKind::Member",
@@ -23170,6 +23175,7 @@
         "path ViewSnapshot",
         "path ViewSnapshot::default",
         "path WorkflowView",
+        "path crate::model::view::INTERRUPT_REASON",
         "use crate::model::view::ApprovalView",
         "use crate::model::view::CompactionPart",
         "use crate::model::view::CompactionPartSize",
@@ -23283,6 +23289,15 @@
         "path Projection",
         "path Projection::default",
         "path Projection::for_branch"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn",
+        "path crate::ui::i18n::active",
+        "path crate::ui::i18n::set"
       ]
     },
     {
@@ -25702,7 +25717,8 @@
       "from": "dim_cli::ui::keys::tests",
       "to": "dim_cli::ui::keys",
       "references": [
-        "path history"
+        "path history",
+        "path report"
       ]
     },
     {
@@ -28869,11 +28885,19 @@
         "path RowTone::Danger",
         "path RowTone::Warning",
         "path ViewRow",
+        "path crate::model::view::INTERRUPT_REASON",
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
         "use crate::model::view::ViewRow"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::t"
       ]
     },
     {
@@ -29474,7 +29498,6 @@
         "path LineView",
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
-        "path RowKind::Status",
         "path RowKind::StreamingAssistant",
         "path RowKind::Thinking",
         "path RowKind::ToolCall",
@@ -30163,6 +30186,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::clipboard",
+      "references": [
+        "path crate::clipboard::Source::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::session",
       "references": [
         "path Command",
@@ -30171,6 +30201,7 @@
         "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::SaveIsolation",
+        "path Command::Submit",
         "path SessionPort",
         "path SwitchKind::Forked",
         "path Update",
@@ -30202,6 +30233,13 @@
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::Projection::default"
       ]
     },
     {
@@ -30271,6 +30309,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::timeline_panel",
+      "references": [
+        "path TimelineAction::Branch",
+        "path TimelineAction::Edit",
+        "path TimelineAction::Fork",
+        "path TimelineAction::Quote"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::transcript::block",
       "references": [
         "path Block::Shell"
@@ -30299,6 +30347,7 @@
       "references": [
         "path App",
         "path App::new",
+        "path ClipboardRead::Native",
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path WebOpened",
@@ -30316,6 +30365,13 @@
       "to": "dim_client::question",
       "references": [
         "path crate::question::Call"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_client::wire",
+      "references": [
+        "path crate::wire::Event"
       ]
     },
     {
@@ -30393,20 +30449,6 @@
       "references": [
         "path ALPHA_PACKAGE",
         "path installer"
-      ]
-    },
-    {
-      "from": "dim_cli::usage",
-      "to": "dim_cli::usage::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_cli::usage::tests",
-      "to": "dim_cli::usage",
-      "references": [
-        "path format_report"
       ]
     },
     {
@@ -32261,6 +32303,14 @@
       "path": "Container::Object"
     },
     {
+      "module": "dim_cli::attachments",
+      "path": "NSString::from_str"
+    },
+    {
+      "module": "dim_cli::attachments",
+      "path": "NSURL::URLWithString"
+    },
+    {
       "module": "dim_cli::browser",
       "path": "char::is_control"
     },
@@ -32279,6 +32329,30 @@
     {
       "module": "dim_cli::clipboard::copy",
       "path": "Stdio::piped"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "Composer::new"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "KeyCode::Enter"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "KeyEvent::new"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "Modifiers::NONE"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "NSURL::fileURLWithPath"
+    },
+    {
+      "module": "dim_cli::clipboard::native_flow",
+      "path": "Outcome::SubmitDraft"
     },
     {
       "module": "dim_cli::composer",
@@ -32551,6 +32625,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "PluginAction::Enable"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Projection::default"
     },
     {
       "module": "dim_cli::ui::tui::tests",

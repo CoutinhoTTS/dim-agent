@@ -480,8 +480,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C effacer, deux fois pour quitter · Ctrl+D quitter si brouillon vide"
         }
         "Fullscreen" => "Plein écran",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown défiler · Home/End haut ou bas · Tab choisir un message, e modifier, q citer"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown défiler · Home/End haut ou bas (brouillon vide) · Tab choisir un message, e modifier, q citer"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "molette défiler · glisser sélectionner et copier · clic: ouvrir un lien, déplier un groupe d'outils"

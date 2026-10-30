@@ -345,6 +345,10 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 `←` 与 `→` 在选中模型上循环其声明的推理强度。Enter 采用该模型；若强度被切换过，
 先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。
 
+catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，固定子代理模型选择器也一样。
+搜索 `zdr` 会包含这些模型；字段缺失或为 false 时不显示标签。替换模型列表时，
+标签随服务端最新字段更新，不保留已撤销的标记。
+
 列表还会通过 `provider.refresh` 填充 catalog 无模型的静态 provider：`provider.list`
 说其模型可列举时，每个连接对 catalog 的每个版本只问一次，并显示刷新写入的 catalog。
 刷新成功时记录它写入的版本，因此列举为空的结果不会再次询问；记录被写入（启停用、
@@ -364,7 +368,7 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 
 ```text
 Select a model
-> Provider / model          ‹ high ›
+> Provider / model          ZDR  ‹ high ›
 Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 

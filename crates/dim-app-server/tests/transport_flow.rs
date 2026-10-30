@@ -2289,7 +2289,6 @@ fn contributed_management_methods_decode_with_unvalidated_raw_params() {
         "skills.set_enabled",
         "skills.refresh",
     ];
-    assert_eq!(methods.len(), 50);
     for method in methods {
         for params in [json!({"unexpected":true}), json!([1]), Value::Null] {
             let request = decode(

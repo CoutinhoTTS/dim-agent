@@ -994,7 +994,7 @@ impl Worker {
                 let params = json!({
                     "sessionId": self.session_id,
                     "branchId": self.focus,
-                    "reason": "TUI interrupted",
+                    "reason": crate::model::view::INTERRUPT_REASON,
                 });
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
@@ -1394,7 +1394,7 @@ impl Worker {
             } => {
                 let main = stop_turn && branch_id != "main";
                 for branch in std::iter::once(branch_id.as_str()).chain(main.then_some("main")) {
-                    let result = self.client.rpc("session.stop", json!({"sessionId":session_id,"branchId":branch,"reason":"CLI interrupted question"})).await;
+                    let result = self.client.rpc("session.stop", json!({"sessionId":session_id,"branchId":branch,"reason":crate::model::view::INTERRUPT_REASON})).await;
                     self.report_failure(result);
                 }
             }
@@ -2212,6 +2212,8 @@ impl Worker {
             #[serde(default)]
             missing_limits: Vec<String>,
             #[serde(default)]
+            zdr: bool,
+            #[serde(default)]
             capabilities: dim_agent_types::CatalogCapabilities,
             #[serde(default)]
             metadata: Option<CatalogReasoning>,
@@ -2354,6 +2356,7 @@ impl Worker {
                             provider_version: catalog.version,
                             model_id: model.id,
                             display_name: model.name,
+                            zdr: model.zdr,
                             efforts,
                             default_effort,
                             saved_effort,

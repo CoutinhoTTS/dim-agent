@@ -123,7 +123,8 @@ insertion; removing a marker never deletes the original file. A rejected file gr
 leaves the draft unchanged. File references retain separate ordered text content blocks.
 
 Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
-macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+macOS uses AppKit and resolves native file-reference URLs to real paths before image
+classification or file linking; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
 X11. Missing or failed clipboard access reports an inline error and retains the draft.
 The CLI reads only on that action and never changes the clipboard. A terminal that
 intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while
@@ -697,6 +698,14 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
 
+Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening preserves this order for turns interrupted by this version of the TUI. Older cancellations and cancellations from the line client retain their existing `stopped` display.
+
+```text
+answer text (including its retained streaming tail)
+· User interrupted the run.
+· stopped
+```
+
 The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
 The context reading is the estimate the next request sends against its window, and a compaction threshold the server returned with it. It is read when a session is entered, after a model switch, when a run on `main` ends, and when a compaction result arrives on `main`, so a compaction outside a run does not leave it stale. At or above 90% of that threshold — the interface's `CONTEXT_WARNING_PERCENT`, applied to the returned `thresholdTokens` — the reading is drawn as a warning and says `near the compaction threshold`. The client never computes the threshold itself; the formula belongs to compaction.
@@ -744,7 +753,11 @@ Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/l
                       ╰────────────────────────────────────╯
 ```
 
-The palette lists what the interface runs: each row reads category, the action (a `/command` and its description, or an action a key reaches), and at the right edge the key that runs it (`Esc` interrupt, `Ctrl+S` steer, `Home` / `End` scroll, `Tab` pick a message, `Ctrl+C Ctrl+C` exit). An action that cannot run now (no session yet, nothing running, no queued message) is faint and marked `(unavailable)`; fullscreen-only actions are left out of the scrollback palette. Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count.
+Both scrollback and fullscreen palettes list slash commands, grouped by category and sorted alphabetically by canonical English category and command name. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Esc` interrupt, `Ctrl+S` steer, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
+
+`/approvals` is the visible permission entry; the hidden `/approval` still opens its own menu when typed exactly. Selecting an incomplete `exit` or `suspend` match only fills the command name; its exact name or alias is required before dispatch. Thus `/` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
+
+Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches use the category/name order. See the [command menu design](../../docs/design/cli-commands.md#command-menu).
 
 `/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`: expanded by default in both modes; collapsed shows each tool group as its header, folds thoughts and closes a compaction row's summary, digest and kept input, and `/tools` flips it too), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), tool approvals and the model. Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once.
 
