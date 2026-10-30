@@ -400,8 +400,11 @@ edits.
 
 The same split applies in both legacy importers: the `models` of a `bundled` or
 `remote` legacy row are listing output and take the strict rule, while user
-models, the `models` of a `user` row and the row's descriptor overrides keep the
-per-field rule.
+models and the row's descriptor overrides take the per-field rule. The `models`
+of a `user` row is not the row's input but the seed the record starts from — the
+previous record's models or, without a target, the bundled definition's — so the
+import leaves it exactly as that seed states it, with no mark and nothing
+dropped.
 
 A Session keeps its adopted capability snapshot. One whose model becomes
 undeclared resumes and stays readable; its next request fails in the resolver with

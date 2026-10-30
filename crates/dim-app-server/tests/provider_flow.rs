@@ -5374,6 +5374,14 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
         for (id, source) in [("legacy-remote", "remote"), ("legacy-bundled", "bundled")] {
             db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES (?1,'custom',?2,'openai-responses','https://model.example/v1',?3,?4,?5,?6,1,1)", rusqlite::params![id, format!("Legacy {source}"), json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), listing.to_string(), source]).unwrap();
         }
+        // A builtin `user` row starts from the seeded builtin: the seed's
+        // entries stay as the record has them, while the row's own model and
+        // override still declare their limits.
+        let user = json!([{"modelId":"user-model","displayName":"User model","status":"active",
+             "capabilities":limits(64_000, 4_000)}]);
+        let overrides = json!([{"modelId":"override-model","displayName":"Override model",
+             "status":"active","capabilities":limits(200_000, 20_000)}]);
+        db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelConfigOverrides,modelsSource,enabled,version) VALUES ('openai','builtin','OpenAI','openai-responses','https://api.openai.com/v1',?1,?2,?3,?4,'user',1,1)", rusqlite::params![json!({"type":"api_key","headerName":"Authorization","prefix":"Bearer "}).to_string(), json!({"type":"apiKey","apiKey":"legacy-openai-key"}).to_string(), user.to_string(), overrides.to_string()]).unwrap();
     }
     let root = Ctx::root().unwrap();
     root.plugin(
@@ -5394,6 +5402,21 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
     }
     let provider = root.get::<ProviderService>().unwrap();
     let cancel = CancellationToken::new();
+    let stored = |id: &str| -> Value {
+        let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let seeded = stored("openai");
+    assert_eq!(seeded["version"], 1);
     let result = serde_json::to_value(
         provider
             .import_legacy(source.clone(), &cancel)
@@ -5408,8 +5431,32 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
             .iter()
             .filter(|item| item["status"] == "imported")
             .count(),
-        3,
+        4,
         "{result}"
+    );
+    let builtin = stored("openai");
+    assert_eq!(builtin["version"], 2);
+    assert_eq!(builtin["models"], seeded["models"], "the seed changed");
+    let whisper = builtin["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "whisper-1")
+        .unwrap();
+    assert_eq!(whisper["capabilities"]["contextWindow"], 128_000);
+    assert_eq!(whisper["capabilities"]["maxOutputTokens"], 16_384);
+    assert!(
+        whisper["metadata"]
+            .get("capabilityOverrideFields")
+            .is_none()
+    );
+    assert_eq!(
+        builtin["userModels"][0]["metadata"]["capabilityOverrideFields"],
+        json!(["contextWindow", "maxOutputTokens"])
+    );
+    assert_eq!(
+        builtin["modelConfigOverrides"][0]["metadata"]["capabilityOverrideFields"],
+        json!(["contextWindow", "maxOutputTokens"])
     );
     let imported = provider
         .management(Some("legacy-limits".into()), &cancel)
@@ -6257,5 +6304,309 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     assert_eq!(error.code, AuxiliaryErrorCode::Cancelled);
     root.shutdown().await.unwrap();
     server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #522: with `modelsSource: user`, `models` is the seed the record starts
+/// from — the previous record's or, without a target, the bundled
+/// definition's — not the row's input, so the per-field rule leaves it as the
+/// seed states it. The row's own models and overrides still declare their
+/// limits.
+#[test]
+fn legacy_import_leaves_the_builtin_seed_as_the_record_has_it() {
+    let bundled = BundledCatalog::load().unwrap();
+    let limits = |context: u64, output: u64| {
+        json!({"modalities":["text"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
+            "contextWindow":context,"maxOutputTokens":output})
+    };
+    let row = || LegacyRow {
+        id: "openai".into(),
+        version: 1,
+        digest: "digest".into(),
+        fields: [
+            ("accountUsageSettings".to_string(), Value::Null),
+            ("activeModelId".into(), Value::Null),
+            (
+                "auth".into(),
+                Value::String(
+                    json!({"type":"api_key","headerName":"Authorization","prefix":"Bearer "})
+                        .to_string(),
+                ),
+            ),
+            (
+                "baseUrl".into(),
+                Value::String("https://api.openai.com/v1".into()),
+            ),
+            ("capabilityDefaults".into(), Value::Null),
+            (
+                "credential".into(),
+                Value::String(json!({"type":"apiKey","apiKey":"legacy-openai-key"}).to_string()),
+            ),
+            ("defaultBaseUrl".into(), Value::Null),
+            ("displayName".into(), Value::String("OpenAI".into())),
+            (
+                "driverKind".into(),
+                Value::String("openai-responses".into()),
+            ),
+            ("enabled".into(), Value::from(1)),
+            ("headers".into(), Value::Null),
+            ("metadata".into(), Value::String("{}".into())),
+            (
+                "modelConfigOverrides".into(),
+                Value::String(
+                    json!([{"modelId":"override-model","displayName":"Override model",
+                        "status":"active","capabilities":limits(200_000, 20_000)}])
+                    .to_string(),
+                ),
+            ),
+            (
+                "models".into(),
+                Value::String(
+                    json!([{"modelId":"user-model","displayName":"User model",
+                        "status":"active","capabilities":limits(64_000, 4_000)}])
+                    .to_string(),
+                ),
+            ),
+            ("modelsSource".into(), Value::String("user".into())),
+            ("proxy".into(), Value::Null),
+            ("retryConfig".into(), Value::Null),
+            ("source".into(), Value::String("builtin".into())),
+            ("timeoutMs".into(), Value::Null),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let seed = serde_json::to_value(bundled.bundled_models("openai").unwrap()).unwrap();
+    let stored = |conversion: &dim_app_server::provider::LegacyConversion| {
+        serde_json::to_value(&conversion.record).unwrap()
+    };
+    let declared = |entry: &Value| entry["metadata"]["capabilityOverrideFields"].clone();
+    let check_row_entries = |record: &Value, case: &str| {
+        assert_eq!(
+            record["userModels"][0]["capabilities"]["contextWindow"], 64_000,
+            "{case}"
+        );
+        assert_eq!(
+            record["userModels"][0]["capabilities"]["maxOutputTokens"], 4_000,
+            "{case}"
+        );
+        assert_eq!(
+            declared(&record["userModels"][0]),
+            json!(["contextWindow", "maxOutputTokens"]),
+            "{case}"
+        );
+        assert_eq!(
+            record["modelConfigOverrides"][0]["capabilities"]["contextWindow"], 200_000,
+            "{case}"
+        );
+        assert_eq!(
+            declared(&record["modelConfigOverrides"][0]),
+            json!(["contextWindow", "maxOutputTokens"]),
+            "{case}"
+        );
+    };
+    // Without a target the seed is the bundled definition; it holds entries
+    // that declare their limits in `metadata.raw` and entries whose
+    // 128000/16384 comes from provider-level metadata.
+    let seeded = convert_legacy_provider(&row(), None, &bundled).unwrap();
+    let record = stored(&seeded);
+    assert_eq!(
+        record["models"], seed,
+        "the seed gained a mark or lost a limit"
+    );
+    let whisper = record["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "whisper-1")
+        .unwrap();
+    assert_eq!(whisper["capabilities"]["contextWindow"], 128_000);
+    assert_eq!(whisper["capabilities"]["maxOutputTokens"], 16_384);
+    assert!(declared(whisper).is_null());
+    check_row_entries(&record, "no target");
+    // Over a pristine target the seed is that record's models, unchanged.
+    let mut pristine = record.clone();
+    pristine["version"] = json!(1);
+    let pristine =
+        dim_app_server::provider::parse_static("openai", 1, &pristine.to_string()).unwrap();
+    let targeted = convert_legacy_provider(&row(), Some(pristine), &bundled).unwrap();
+    let record = stored(&targeted);
+    assert_eq!(record["models"], seed, "the target's seed changed");
+    assert_eq!(record["version"], 2);
+    check_row_entries(&record, "pristine target");
+}
+
+/// #522: a builtin `user` row's `models` is the store's own seed — the
+/// previous record's models or, without a target, the bundled definition's.
+/// The import keeps it exactly as the store states it, and the next start
+/// neither rewrites nor re-versions the record.
+#[tokio::test]
+async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
+    let home = std::env::temp_dir().join(format!("provider-seed-restart-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let source = home.join("legacy.sqlite");
+    {
+        let db = rusqlite::Connection::open(&source).unwrap();
+        db.execute_batch(
+            "CREATE TABLE providers (
+            providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT,
+            defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT,
+            accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER,
+            retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT,
+            activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT,
+            metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER);
+            CREATE TABLE provider_selections (
+            selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT,
+            createdAt TEXT, updatedAt TEXT, version INTEGER);",
+        )
+        .unwrap();
+        let limits = |context: u64, output: u64| {
+            json!({"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
+                "contextWindow":context,"maxOutputTokens":output})
+        };
+        let user = json!([{"modelId":"user-model","displayName":"User model","status":"active",
+             "capabilities":limits(64_000, 4_000)}]);
+        let overrides = json!([{"modelId":"override-model","displayName":"Override model",
+             "status":"active","capabilities":limits(200_000, 20_000)}]);
+        for (id, display_name, driver, base_url) in [
+            (
+                "openai",
+                "OpenAI",
+                "openai-responses",
+                "https://api.openai.com/v1",
+            ),
+            (
+                "deepseek",
+                "DeepSeek",
+                "openai-compatible",
+                "https://api.deepseek.com",
+            ),
+        ] {
+            db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelConfigOverrides,modelsSource,enabled,version) VALUES (?1,'builtin',?2,?3,?4,?5,?6,?7,?8,'user',1,1)", rusqlite::params![id, display_name, driver, base_url, json!({"type":"api_key","headerName":"Authorization","prefix":"Bearer "}).to_string(), json!({"type":"apiKey","apiKey":"legacy-openai-key"}).to_string(), user.to_string(), overrides.to_string()]).unwrap();
+        }
+    }
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let record = |id: &str| -> Value {
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    // The store's own seed for each id, captured before the import replaces
+    // it; `deepseek` is removed so the row has no target and goes through
+    // `bundled_seed_for`.
+    let seeded_openai = record("openai");
+    let seeded_deepseek = record("deepseek");
+    native
+        .execute("DELETE FROM providers WHERE provider_id='deepseek'", [])
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let result = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["status"] == "imported")
+            .count(),
+        2,
+        "{result}"
+    );
+    let imported =
+        [("openai", &seeded_openai), ("deepseek", &seeded_deepseek)].map(|(id, seeded)| {
+            let record = record(id);
+            assert_eq!(record["version"], 2, "{id}");
+            assert_eq!(record["models"], seeded["models"], "{id}: the seed changed");
+            assert!(record["enabled"].as_bool().unwrap(), "{id}");
+            assert!(!record["credential"].is_null(), "{id}");
+            for model in record["models"].as_array().unwrap() {
+                assert!(
+                    model["metadata"].get("capabilityOverrideFields").is_none(),
+                    "{id}: {} gained a mark",
+                    model["modelId"]
+                );
+            }
+            assert_eq!(
+                record["userModels"][0]["metadata"]["capabilityOverrideFields"],
+                json!(["contextWindow", "maxOutputTokens"]),
+                "{id}"
+            );
+            assert_eq!(
+                record["modelConfigOverrides"][0]["metadata"]["capabilityOverrideFields"],
+                json!(["contextWindow", "maxOutputTokens"]),
+                "{id}"
+            );
+            (id, record)
+        });
+    drop(native);
+    root.shutdown().await.unwrap();
+
+    let restarted = Ctx::root().unwrap();
+    restarted.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        restarted.plugin(ManagedProvidersPlugin),
+        restarted
+            .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(provider_part(ProviderPlugin::new)),
+        restarted.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    for (id, before) in imported {
+        let after: Value = serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after, before, "{id}: the start rewrote the imported record");
+    }
+    drop(native);
+    restarted.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
