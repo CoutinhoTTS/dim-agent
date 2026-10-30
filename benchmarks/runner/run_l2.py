@@ -27,7 +27,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 HERE = Path(__file__).resolve().parent
 BENCHMARKS = HERE.parent
@@ -110,6 +110,92 @@ def _env(name: str, default: str | None = None) -> str:
     return value
 
 
+#: Loopback always bypasses the proxy: verifiers connect to servers the agent
+#: started in the same container. ``host.docker.internal`` covers a verifier
+#: running outside that container. Additional service names belong in
+#: ``DIM_EVAL_VERIFIER_NO_PROXY`` and are recorded with the run condition.
+DEFAULT_VERIFIER_NO_PROXY = "localhost,127.0.0.1,::1,host.docker.internal"
+
+
+def verifier_proxy_url() -> str | None:
+    """The validated verifier proxy URL, or None when no proxy is configured.
+
+    Credentials are refused rather than written down. The URL goes into
+    harbor's job config and may be copied into trial records, so a
+    ``user:password@host`` proxy would put a secret in a file this harness does
+    not fetch or delete. Authenticate the eval machine to the proxy by network,
+    not by embedding a password in a URL. Error messages deliberately do not
+    repeat the value: a rejected URL may itself contain the secret.
+    """
+    raw = os.environ.get("DIM_EVAL_VERIFIER_PROXY")
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        _ = parsed.port  # validate the port, if present
+    except ValueError as error:
+        raise RuntimeError(
+            "DIM_EVAL_VERIFIER_PROXY is not a valid HTTP(S) proxy URL"
+        ) from error
+    if scheme not in {"http", "https"}:
+        raise RuntimeError(
+            "DIM_EVAL_VERIFIER_PROXY must use http:// or https://"
+        )
+    if not host:
+        raise RuntimeError(
+            "DIM_EVAL_VERIFIER_PROXY must name a proxy host"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError(
+            "DIM_EVAL_VERIFIER_PROXY must not contain credentials; "
+            "authenticate the eval machine to the proxy by network policy"
+        )
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise RuntimeError(
+            "DIM_EVAL_VERIFIER_PROXY must be only scheme, host, and optional port"
+        )
+    return raw
+
+
+def verifier_no_proxy() -> str | None:
+    """The effective verifier ``NO_PROXY`` list, or None when no proxy is used.
+
+    Loopback (and ``host.docker.internal``) are always present. Docker Compose
+    service names are site-specific, so they are added through
+    ``DIM_EVAL_VERIFIER_NO_PROXY`` rather than guessed here. The exact string is
+    recorded with the run because changing what bypasses the proxy changes the
+    experiment just as much as turning the proxy on or off.
+    """
+    if verifier_proxy_url() is None:
+        return None
+    extra = os.environ.get("DIM_EVAL_VERIFIER_NO_PROXY", "")
+    entries = [entry for entry in re.split(r"[,\s]+", extra) if entry]
+    for entry in entries:
+        if "://" in entry or "/" in entry or "@" in entry:
+            raise RuntimeError(
+                "DIM_EVAL_VERIFIER_NO_PROXY entries must be hostnames or "
+                "addresses, not URLs or credentials"
+            )
+    ordered = [DEFAULT_VERIFIER_NO_PROXY, *entries]
+    # Deduplicate without changing the documented order.
+    return ",".join(dict.fromkeys(
+        item for entry in ordered for item in entry.split(",") if item
+    ))
+
+
+def verifier_proxy_enabled() -> bool:
+    """Whether the verifier phase will run behind ``DIM_EVAL_VERIFIER_PROXY``.
+
+    This is the run-level fact daily_run records in run.json and in a baseline's
+    params. It is kept beside ``verifier_env`` so the flag and the environment
+    are derived from the same variable: recording one condition while running
+    another is exactly what makes two arms silently incomparable.
+    """
+    return verifier_proxy_url() is not None
+
+
 def verifier_env() -> dict[str, str]:
     """Proxy settings for the verifier phase only, from ``DIM_EVAL_VERIFIER_PROXY``.
 
@@ -120,10 +206,11 @@ def verifier_env() -> dict[str, str]:
     through the proxy too. Local addresses bypass it, because verifiers also
     connect to servers the agent started inside the container.
     """
-    proxy = os.environ.get("DIM_EVAL_VERIFIER_PROXY")
-    if not proxy:
+    proxy = verifier_proxy_url()
+    if proxy is None:
         return {}
-    bypass = "localhost,127.0.0.1,::1"
+    bypass = verifier_no_proxy()
+    assert bypass is not None
     return {"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "http_proxy": proxy,
             "https_proxy": proxy, "NO_PROXY": bypass, "no_proxy": bypass}
 
@@ -233,13 +320,39 @@ def check_model_identity(settings: ProviderSettings,
     return current
 
 
+def _write_private_json(path: Path, payload: dict) -> None:
+    """Write JSON readable only by the eval-machine user.
+
+    The job config contains the model config and the verifier proxy. The proxy
+    URL must be credential-free, but it can still name an internal host; 0600 is
+    the same boundary the model-identity file gets. ``O_TRUNC`` on an existing
+    file does not repair its mode, so fchmod runs before the bytes are written.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            fd = -1
+            json.dump(payload, handle, indent=2)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_job_config(config: dict) -> Path:
+    """Write a job config beside the results, private to the eval-machine user."""
+    out_dir = Path(config["jobs_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{config['job_name']}-job.json"
+    _write_private_json(path, config)
+    return path
+
+
 def main() -> int:
     settings = provider_settings()
     config = build_job_config(settings)
     out_dir = Path(config["jobs_dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-    config_path = out_dir / f"{config['job_name']}-job.json"
-    config_path.write_text(json.dumps(config, indent=2))
+    config_path = write_job_config(config)
     print(f"[run_l2] job config -> {config_path}")
     print(f"[run_l2] {len(config['tasks'])} tasks x k={config['n_attempts']}")
     print(f"[run_l2] model {settings.provider}/{settings.model}")
@@ -250,8 +363,8 @@ def main() -> int:
         # Persisted because only this process can capture it: the credential and
         # the route to the endpoint live on the eval machine, and a baseline
         # written later, elsewhere, has no way to ask what answered.
-        (out_dir / f"{config['job_name']}-model.json").write_text(
-            json.dumps(identity.to_dict(), indent=2)
+        _write_private_json(
+            out_dir / f"{config['job_name']}-model.json", identity.to_dict()
         )
 
     if os.environ.get("DIM_EVAL_DRY_RUN") == "1":

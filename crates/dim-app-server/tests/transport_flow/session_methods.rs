@@ -279,15 +279,14 @@ impl rutis::host::DynPlugin for NotesOwner {
     ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
             let methods = ctx.require_at(&self.methods)?;
-            let view = ctx.plugin(NotesProvider {
-                methods,
-                notes: self.notes.clone(),
-            });
-            (&view).await.map_err(|error| {
-                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                    format!("Notes provider failed: {error}").into(),
-                ))
-            })?;
+            let view = dim_agent_runtime::mount_active(
+                ctx,
+                NotesProvider {
+                    methods,
+                    notes: self.notes.clone(),
+                },
+            )
+            .await?;
             self.notes.0.views.lock().unwrap().push(view);
             Ok(rutis::host::Effect::Done)
         })

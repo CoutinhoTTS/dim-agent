@@ -1792,16 +1792,15 @@ struct GuideProbeOwner {
 impl Plugin for GuideProbeOwner {
     type Deps = ();
     async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
-        let view = ctx.plugin(GuideProbe {
-            flag: self.flag.clone(),
-            key: self.key.clone(),
-            scope: self.scope.clone(),
-        });
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("guide probe failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            GuideProbe {
+                flag: self.flag.clone(),
+                key: self.key.clone(),
+                scope: self.scope.clone(),
+            },
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
@@ -1920,18 +1919,17 @@ impl DynPlugin for BranchGuideProbeOwner {
             let table = ctx.require_at(&self.key)?;
             self.tables.lock().unwrap().push(table.clone());
             let branch = identity.branch_id.clone();
-            let view = ctx.plugin(BranchGuideProbe {
-                flag: self.flag.clone(),
-                text: self.text.clone(),
-                gate: self.gate.clone(),
-                table,
-                branch: branch.clone(),
-            });
-            (&view).await.map_err(|error| {
-                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                    format!("branch guide probe failed: {error}").into(),
-                ))
-            })?;
+            let view = mount_active(
+                ctx,
+                BranchGuideProbe {
+                    flag: self.flag.clone(),
+                    text: self.text.clone(),
+                    gate: self.gate.clone(),
+                    table,
+                    branch: branch.clone(),
+                },
+            )
+            .await?;
             self.views.lock().unwrap().push((branch, view));
             Ok(Effect::Done)
         })
@@ -2210,16 +2208,15 @@ struct GuideToolProbeOwner {
 impl Plugin for GuideToolProbeOwner {
     type Deps = ();
     async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
-        let view = ctx.plugin(GuideToolProbe {
-            flag: self.flag.clone(),
-            tools: self.tools.clone(),
-            guide: self.guide.clone(),
-        });
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("guide tool probe failed: {error}").into(),
-            ))
-        })?;
+        let view = mount_active(
+            ctx,
+            GuideToolProbe {
+                flag: self.flag.clone(),
+                tools: self.tools.clone(),
+                guide: self.guide.clone(),
+            },
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
