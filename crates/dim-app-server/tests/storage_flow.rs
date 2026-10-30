@@ -3423,11 +3423,17 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
             },
         ];
         assert_eq!(
-            context_messages(&full, &project_context_history(&full).unwrap()),
+            context_messages(&full, &project_context_history(&full).unwrap())
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
             expected
         );
         assert_eq!(
-            context_messages(&recovered, &project_context_history(&recovered).unwrap()),
+            context_messages(&recovered, &project_context_history(&recovered).unwrap())
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
             expected
         );
         assert_eq!(recovered.checkpoint.is_some(), intact);
@@ -3615,7 +3621,10 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             context_messages(
                 &accelerated,
                 &project_context_history(&accelerated).unwrap()
-            ),
+            )
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
             [summary_message("retained summary")]
         );
         assert_eq!(
@@ -3849,7 +3858,10 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     assert!(early_context.checkpoint.is_none());
     assert_eq!(early_context.events.len(), 2);
     assert_eq!(
-        project_context_history(&early_context).unwrap()[0].message,
+        project_context_history(&early_context).unwrap()[0]
+            .message
+            .as_ref()
+            .clone(),
         Message::text(Role::User, "earlier input")
     );
     let child = Timeline::restore(
@@ -3912,7 +3924,10 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
         [("main", 3), ("main", 4), ("child", 1), ("child", 2)]
     );
     assert_eq!(
-        context_messages(&context, &project_context_history(&context).unwrap()),
+        context_messages(&context, &project_context_history(&context).unwrap())
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
         [
             dim_agent_capabilities::history::summary_message("earlier summary"),
             Message::text(Role::User, "queued across compaction")
@@ -4706,7 +4721,7 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             assert_eq!(
                 history
                     .iter()
-                    .map(|entry| &entry.message)
+                    .map(|entry| entry.message.as_ref())
                     .collect::<Vec<_>>(),
                 vec![&assistant]
             );
