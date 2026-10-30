@@ -16,10 +16,10 @@ use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
-    model_catalog::ModelEntry,
+    model_catalog::{BundledCatalog, ModelEntry},
     provider::{
-        ConnectionInput, CreateProvider, CredentialUpdate, ModelPreferences, ProviderError,
-        ProviderPlugin, ProviderService, StaticAuth,
+        ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
+        ProviderError, ProviderPlugin, ProviderService, StaticAuth, convert_legacy_provider,
     },
     storage::SqliteStoragePlugin,
 };
@@ -5564,6 +5564,162 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
     assert_eq!(record("deepseek")["version"], 1);
     restarted.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn legacy_credentials_keep_their_native_shapes() {
+    let bundled = BundledCatalog::load().unwrap();
+    let legacy_model = json!([{
+        "modelId":"legacy-model","displayName":"legacy-model","status":"active",
+        "capabilities":serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap()
+    }]);
+    let row = |id: &str,
+               source: &str,
+               display_name: &str,
+               driver: &str,
+               base_url: &str,
+               auth: Value,
+               credential: Value| LegacyRow {
+        id: id.into(),
+        version: 1,
+        digest: "digest".into(),
+        fields: [
+            ("accountUsageSettings".to_string(), Value::Null),
+            ("activeModelId".into(), Value::Null),
+            ("auth".into(), Value::String(auth.to_string())),
+            ("baseUrl".into(), Value::String(base_url.into())),
+            ("capabilityDefaults".into(), Value::Null),
+            (
+                "credential".into(),
+                match credential {
+                    Value::Null => Value::Null,
+                    value => Value::String(value.to_string()),
+                },
+            ),
+            ("defaultBaseUrl".into(), Value::Null),
+            ("displayName".into(), Value::String(display_name.into())),
+            ("driverKind".into(), Value::String(driver.into())),
+            ("enabled".into(), Value::from(1)),
+            ("headers".into(), Value::Null),
+            ("metadata".into(), Value::String("{}".into())),
+            ("modelConfigOverrides".into(), Value::Null),
+            ("models".into(), Value::String(legacy_model.to_string())),
+            ("modelsSource".into(), Value::String("remote".into())),
+            ("proxy".into(), Value::Null),
+            ("retryConfig".into(), Value::Null),
+            ("source".into(), Value::String(source.into())),
+            ("timeoutMs".into(), Value::Null),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let cases = [
+        (
+            "api_key",
+            row(
+                "legacy-key",
+                "custom",
+                "Legacy key",
+                "openai-compatible",
+                "https://model.example/v1",
+                json!({"type":"api_key","headerName":"x-api-key","prefix":""}),
+                json!({"type":"apiKey","apiKey":"inline-key"}),
+            ),
+            json!("inline-key"),
+        ),
+        (
+            "secret_ref",
+            row(
+                "legacy-ref",
+                "custom",
+                "Legacy ref",
+                "openai-compatible",
+                "https://model.example/v1",
+                json!({"type":"bearer"}),
+                json!({"type":"secretRef","ref":"vault/bearer"}),
+            ),
+            json!({"secretRef":"vault/bearer"}),
+        ),
+        (
+            "aws_bedrock",
+            row(
+                "legacy-aws",
+                "custom",
+                "Legacy aws",
+                "amazon-bedrock",
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                json!({"type":"aws_bedrock"}),
+                json!({"type":"awsBedrockAccessKey","accessKeyId":"AKIALEGACY","secretAccessKey":"aws-secret","sessionToken":"aws-session"}),
+            ),
+            json!({"accessKeyId":"AKIALEGACY","secretAccessKey":"aws-secret","sessionToken":"aws-session"}),
+        ),
+        (
+            "custom_headers",
+            row(
+                "legacy-headers",
+                "custom",
+                "Legacy headers",
+                "openai-compatible",
+                "https://model.example/v1",
+                json!({"type":"custom"}),
+                json!({"type":"custom","customHeaders":{"X-Api-Key":"header-secret"}}),
+            ),
+            Value::Null,
+        ),
+    ];
+    for (name, row, expected_credential) in cases {
+        let conversion = convert_legacy_provider(&row, None, &bundled)
+            .unwrap_or_else(|reason| panic!("{name}: {reason}"));
+        let stored = serde_json::to_value(&conversion.record).unwrap();
+        assert_eq!(stored["credential"], expected_credential, "{name}");
+        if name == "custom_headers" {
+            assert_eq!(stored["headers"]["X-Api-Key"], "header-secret", "{name}");
+        }
+    }
+    let override_reason = match convert_legacy_provider(
+        &row(
+            "legacy-override",
+            "custom",
+            "Legacy override",
+            "openai-compatible",
+            "https://model.example/v1",
+            json!({"type":"api_key","headerName":"x-api-key","prefix":""}),
+            json!({"type":"apiKey","apiKey":"inline-key","headerName":"Authorization"}),
+        ),
+        None,
+        &bundled,
+    ) {
+        Ok(_) => panic!("credential header override was accepted"),
+        Err(reason) => reason,
+    };
+    assert_eq!(
+        override_reason,
+        "Credential auth overrides need explicit reconfiguration"
+    );
+    let mut dropped = row(
+        "legacy-dropped",
+        "custom",
+        "Legacy dropped",
+        "openai-compatible",
+        "https://model.example/v1",
+        json!({"type":"bearer"}),
+        json!({"type":"bearer","token":"kept-token"}),
+    );
+    dropped.fields.insert(
+        "retryConfig".into(),
+        Value::String(json!({"maxRetries":3,"apiKey":"dropped-secret"}).to_string()),
+    );
+    dropped.fields.insert(
+        "metadata".into(),
+        Value::String(json!({"preferenceWindow":"week"}).to_string()),
+    );
+    let conversion = convert_legacy_provider(&dropped, None, &bundled).unwrap();
+    assert_eq!(
+        conversion.omitted,
+        vec!["retryConfig", "metadata.preferenceWindow"]
+    );
+    let stored = serde_json::to_string(&conversion.record).unwrap();
+    assert!(!stored.contains("dropped-secret"));
 }
 
 #[tokio::test]
