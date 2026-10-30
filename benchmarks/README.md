@@ -32,9 +32,10 @@ dim-agent 的能力评测 pipeline。回答的问题是：**这次改动会不�
 
 ## 运行环境
 
-L2/L3 在专用 Linux amd64 + Docker 机器上运行。任务全部 `no-network`，
-容器内默认够不到模型 API，这不是可选项，见
-[tasks/UPSTREAM.md](tasks/UPSTREAM.md#任务资源规格)。
+L2/L3 在专用 Linux amd64 + Docker 机器上运行。FrontierHarness 的 30 个任务里 9 个禁网
+（`no-network` / `allow_internet = false`），21 个 Terminal-Bench 任务沿用上游的
+`allow_internet = true`；OfficeQA Pro 的 133 个任务全部禁网。禁网任务的容器默认够不到模型
+API，见 [tasks/UPSTREAM.md](tasks/UPSTREAM.md#任务资源规格)。
 
 **当前实现没有宿主代理**：按 trial 放行模型主机（harbor 的 `extra_allowed_hosts`），
 key 经 agent env 注入容器。**key 会进 agent 容器**，这是当前接受的代价，不是设计目标。

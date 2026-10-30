@@ -262,12 +262,15 @@ def resolve_window(repo: Path, state: dict | None, base_arg: str | None,
 
 
 def write_state(path: Path, head: str, run_id: str) -> None:
+    """Replace the state file atomically: a truncated one stops every later run."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps({
         "last_l2_head": head,
         "run_id": run_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }, indent=2) + "\n")
+    os.replace(temporary, path)
     print(f"[daily] state -> {path} (last_l2_head {head[:9]})")
 
 

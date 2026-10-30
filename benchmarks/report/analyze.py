@@ -218,6 +218,12 @@ def evidence_for(trial: results.Trial, trial_dir: Path) -> dict:
     }
 
 
+def failed_trials(job: results.JobReport) -> list[results.Trial]:
+    """Scored trials that did not pass. A trial nothing scored is not a failure:
+    it makes the run unscoreable, which has its own pipeline issue."""
+    return [t for t in job.trials if t.scored and t.reward != 1.0]
+
+
 def analyze(run_dir: Path, repo: Path, known: dict,
             ask, today: str) -> tuple[list[Failure], dict]:
     """Analyze every failed trial. Returns the failures and the updated record.
@@ -227,7 +233,7 @@ def analyze(run_dir: Path, repo: Path, known: dict,
     run = json.loads((run_dir / "run.json").read_text())
     job = results.read_job(run_dir / "harbor")
     changes, names = window_changes(repo, run)
-    failed = [t for t in job.trials if t.reward != 1.0]
+    failed = failed_trials(job)
     passed = {t.task_name for t in job.trials if t.reward == 1.0}
 
     def one(trial: results.Trial) -> Failure:
@@ -287,7 +293,7 @@ def main() -> int:
     model = os.environ.get("DIM_EVAL_ANALYSIS_MODEL", agent_reviewer.DEFAULT_MODEL)
     key_var = os.environ.get("DIM_EVAL_ANALYSIS_KEY_ENV", agent_reviewer.DEFAULT_KEY_ENV)
     api_key = os.environ.get(key_var)
-    if not api_key:
+    if not api_key and failed_trials(results.read_job(args.run_dir / "harbor")):
         print(f"[analyze] {key_var} is empty", file=sys.stderr)
         return 2
 

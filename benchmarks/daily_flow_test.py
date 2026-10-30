@@ -292,6 +292,20 @@ class DailyFlowTest(unittest.TestCase):
 
     # --- advancing -------------------------------------------------------
 
+    def test_a_branch_that_synced_main_is_one_mr(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "slow")
+        self._commit("slow.txt", "slow\n", "slow: change slow.txt")
+        git(self.repo, "checkout", "-q", "main")
+        landed = self._merge("fast", "fast.txt", "fast\n")
+        git(self.repo, "checkout", "-q", "slow")
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "Merge main into slow", "main")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "Merge branch 'slow'", "slow")
+        head = git(self.repo, "rev-parse", "HEAD")
+        self.state.write_text(json.dumps({"last_l2_head": self.base}))
+        self._run(mode="invisible")
+        self.assertEqual([m["sha"] for m in self._manifest()["merges"]], [landed, head])
+
     def test_invisible_batch_closes_the_window_without_running_l2(self) -> None:
         head = self._merge("docs", "notes.md", "notes\n")
         self.state.write_text(json.dumps({"last_l2_head": self.base}))
@@ -604,13 +618,13 @@ class DailyFlowTest(unittest.TestCase):
             exit_code = self._run(mode="visible", run_type="checkpoint")
 
         self.assertEqual(exit_code, daily_run.EXIT_INVALID)
-        self.assertEqual(self._state_head(), self.base)   # 窗口不动
-        self.assertEqual(self.built, [head])              # L2 确实跑过了
+        self.assertEqual(self._state_head(), self.base)   # the window holds
+        self.assertEqual(self.built, [head])              # L2 did run
 
         manifest = self._manifest_for(head)
         self.assertIn("harbor wrote nonsense", manifest["settle_error"])
         self.assertIsNone(manifest["l2"])
-        # 判定与窗口都在，只是没有分数——重跑要用的东西一样不少。
+        # The verdicts and the window are kept; only the score is missing, so a re-run has everything it needs.
         self.assertEqual(manifest["merges"][0]["sha"], head)
         self.assertEqual(manifest["l2_exit_code"], 0)
 
@@ -694,8 +708,8 @@ class DailyFlowTest(unittest.TestCase):
         self.assertIn("already exists", str(caught.exception))
         self.assertIn("in its own commit", str(caught.exception))
 
-        self.assertEqual(self.built, built_once)   # 没有再构建
-        self.assertEqual(len(self.ran), 1)         # 也没有再跑 L2
+        self.assertEqual(self.built, built_once)   # no second build
+        self.assertEqual(len(self.ran), 1)         # and no second L2
 
     def test_a_run_nothing_could_score_holds_the_window_and_goes_red(self) -> None:
         """harbor exiting 0 says the job ran, not that it can be scored.
@@ -885,7 +899,7 @@ class DailyFlowTest(unittest.TestCase):
         self.assertEqual(self._run(mode="crash"), 0)
         merge = self._manifest()["merges"][0]
         self.assertEqual((merge["verdict"], merge["trigger"]), ("invisible", "path_rule"))
-        self.assertEqual(self.ran, [])   # 没有 model-visible 改动，L2 不跑
+        self.assertEqual(self.ran, [])   # no model-visible change, so no L2
 
     def test_a_path_rule_beats_the_size_guard(self) -> None:
         """A claimed path needs no judge and no measuring: the rule already

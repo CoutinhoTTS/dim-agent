@@ -169,14 +169,16 @@ class IssueReporterFlowTest(unittest.TestCase):
                            "ssh: connect to host evalbox port 22: refused\n"
                            "[daily] results at /srv/eval-scratch/x, peer 10.1.2.3\n"
                            "[run_l2] model p/m @ https://models.internal/v1\n"
-                           "auth sk-abcdefghijklmnop rejected\n")
+                           "auth sk-abcdefghijklmnop rejected\n"
+                           "keys hf_abcdefghijklmnopqrstuvwxyz AKIA1234567890123456 xoxb-1234567890\n")
             with mock.patch.dict(os.environ, {"DIM_EVAL_HOST": "eval@evalbox",
                                               "DIM_EVAL_SCRATCH": "/srv/eval-scratch",
                                               "DIM_EVAL_REDACT": "models.internal"}):
                 self.night(4, run_json(), log=log)
         body = self.open_issues()[0]["body"]
         for secret in ("evalbox", "10.1.2.3", "/srv/eval-scratch", "models.internal",
-                       "sk-abcdefghijklmnop"):
+                       "sk-abcdefghijklmnop", "hf_abcdefghijklmnop", "AKIA1234567890123456",
+                       "xoxb-1234567890"):
             self.assertNotIn(secret, body)
 
 
@@ -298,6 +300,12 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertEqual(done, ["opened #2 (frontier/nightly)", "closed #1 (frontier/nightly)"])
         *_, done = self.night({"regex": 1.0}, {}, {})
         self.assertEqual(done, ["closed #2 (frontier/nightly)"])
+
+    def test_a_trial_nothing_scored_is_not_a_failure(self) -> None:
+        failures, updated, _, _ = self.night({"regex": -1.0}, {}, {})
+        self.assertEqual(failures, [])
+        self.assertEqual(updated, {})
+        self.assertEqual(self.prompts, [])
 
     def test_a_reply_that_cannot_be_read_is_listed_not_lost(self) -> None:
         failures, updated, summary, _ = self.night(

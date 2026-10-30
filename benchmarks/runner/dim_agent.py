@@ -1,7 +1,8 @@
 """Harbor agent adapter for dimcode.
 
 The dimcode under test is mounted read-only into the task environment as a
-prebuilt image (see ``benchmarks/README.md`` — 被测对象与评测工具分离).
+prebuilt image (see ``benchmarks/README.md``: the subject under test and the
+harness are kept apart).
 ``install()`` therefore never touches the network: every L2 task runs under a
 ``no-network`` baseline, and only the model API host is opened for the agent
 phase through the trial-level ``extra_allowed_hosts``. The task definition is

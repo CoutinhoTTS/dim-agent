@@ -14,6 +14,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -157,6 +158,18 @@ class LedgerFlowTest(unittest.TestCase):
         self.ledger.append_merge(merge(SHA_A))
         with self.assertRaises(LedgerError):
             self.ledger.append_merge(merge(SHA_A))
+
+    def test_a_write_killed_midway_leaves_no_record(self) -> None:
+        """A truncated record would be pushed and stop every later run."""
+        def partial(payload, stream, **kwargs):
+            stream.write('{"merge_sha": "')
+            raise KeyboardInterrupt
+        with mock.patch("json.dump", side_effect=partial), self.assertRaises(KeyboardInterrupt):
+            self.ledger.append_merge(merge(SHA_A))
+        self.assertIsNone(self.ledger.merge(SHA_A))
+        self.assertEqual(list(self.root.rglob("*.tmp")), [])
+        self.ledger.append_merge(merge(SHA_A))
+        self.assertEqual(self.ledger.merge(SHA_A).merge_sha, SHA_A)
 
     def test_an_undecided_merge_cannot_be_recorded_invisible(self) -> None:
         """Fail-open means the judge never answered. Filing it as invisible would

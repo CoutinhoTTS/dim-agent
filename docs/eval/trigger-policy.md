@@ -182,7 +182,9 @@ tasks/<task-id>/
 
 #### 禁网与模型代理
 
-30 个任务**全部** `network_mode = "no-network"` / `allow_internet = false`。容器内的 agent 默认够不到模型 API。
+30 个任务里 9 个禁网（`network_mode = "no-network"` / `allow_internet = false`），容器内的 agent
+默认够不到模型 API；其余 21 个 Terminal-Bench 任务沿用上游的 `allow_internet = true`，agent 与
+verifier 都能上网。下面的放行与代价对禁网任务成立。
 
 **实现没有用宿主代理。** 改为按 trial 放行模型主机（harbor 的 `extra_allowed_hosts`），
 key 经 agent env 注入容器。两点代价要如实记着：key 进了容器；放行是 agent 阶段的，

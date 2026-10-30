@@ -93,7 +93,9 @@ def redact(text: str) -> str:
     for value in sorted(filter(lambda v: len(v) > 1, values), key=len, reverse=True):
         text = text.replace(value, "<redacted>")
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", text)
-    return re.sub(r"\b(sk-|ghp_|gho_|github_pat_)[A-Za-z0-9_-]{8,}", "<token>", text)
+    text = re.sub(r"\b(sk-|ghp_|gho_|ghs_|github_pat_|hf_|xox[abprs]-)[A-Za-z0-9_-]{8,}",
+                  "<token>", text)
+    return re.sub(r"\bAKIA[0-9A-Z]{16}\b", "<token>", text)
 
 
 def log_tail(path: Path | None) -> str:

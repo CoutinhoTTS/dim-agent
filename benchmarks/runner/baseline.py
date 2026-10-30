@@ -335,8 +335,9 @@ class Comparison:
     def criteria(self) -> tuple[Criterion, ...]:
         """Every criterion, evaluated and reported. None of them blocks.
 
-        trigger-policy.md states it for the whole table — "阈值状态：初值已被本
-        语料上的 bootstrap 证伪，重标前 L2 不得 blocking" — and the thresholds it
+        trigger-policy.md states it for the whole table — the initial thresholds were
+        refuted by bootstrap on this corpus, and L2 must not block until they are
+        recalibrated — and the thresholds it
         refers to are the ones in this file. Only `net degraded` had been
         disarmed to match; the reason is recorded per criterion below, and it is
         not the same reason for all of them.

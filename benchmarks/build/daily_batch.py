@@ -94,8 +94,14 @@ def git(repo: Path, *args: str) -> str:
 
 
 def merges_in_range(repo: Path, base: str, head: str) -> list[tuple[str, str, str]]:
-    """Merge commits in (base, head], oldest first — the order they landed."""
-    raw = git(repo, "log", "--merges", "--reverse", "--format=%H|%cI|%s", f"{base}..{head}")
+    """Merge commits that landed on main in (base, head], oldest first.
+
+    First parent only: a PR branch that merged main into itself leaves a merge
+    commit inside the range that is not a PR. Its diff against its first parent
+    is everything main gained since the branch forked, already judged once.
+    """
+    raw = git(repo, "log", "--merges", "--first-parent", "--reverse",
+              "--format=%H|%cI|%s", f"{base}..{head}")
     out = []
     for line in raw.splitlines():
         if not line.strip():

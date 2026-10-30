@@ -103,7 +103,7 @@ tag 可被上游重推，判定以 digest 为准；digest 清单待镜像预热�
 | `cpus` | 1 / 2 |
 | `memory_mb` | 2048 / 4096 / 8192 |
 | `agent.timeout_sec` | 600 / 900 / 1200 / 1800 / 5400 |
-| 网络 | **全部任务禁网**；模型 API 经 agent 阶段的 `extra_allowed_hosts` 单独放行，verifier 阶段保持隔离 |
+| 网络 | 9 个任务禁网（`no-network` / `allow_internet = false`），21 个 Terminal-Bench 任务沿用上游的 `allow_internet = true`；模型 API 经 agent 阶段的 `extra_allowed_hosts` 放行 |
 
 单任务内存上限 8 GB 决定并发上限，进而决定单次 L2 的墙钟时长。
 

@@ -433,9 +433,9 @@ class BaselineFlowTest(unittest.TestCase):
         comparison = baseline.compare(before, after, 1)
 
         self.assertFalse(comparison.comparable)
-        self.assertEqual(comparison.full_flips, ("tb/a",))   # 差值照常算出
+        self.assertEqual(comparison.full_flips, ("tb/a",))   # the difference is still computed
         names = [c.name for c in comparison.criteria()]
-        self.assertEqual(names, ["arms not comparable"])     # 但不出判据
+        self.assertEqual(names, ["arms not comparable"])     # but no criterion applies
         self.assertEqual(comparison.blocking_breaches, ())
         self.assertIn("criteria not evaluated", baseline.render(comparison))
 
@@ -453,7 +453,7 @@ class BaselineFlowTest(unittest.TestCase):
         comparison = baseline.compare(before, after, 2)
 
         criteria = comparison.criteria()
-        self.assertTrue(any(not c.ok for c in criteria))  # 确实有判据不满足
+        self.assertTrue(any(not c.ok for c in criteria))  # some criterion does fail
         self.assertEqual([c.name for c in criteria if c.blocking], [])
         self.assertEqual(comparison.blocking_breaches, ())
 

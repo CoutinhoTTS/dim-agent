@@ -70,17 +70,21 @@ class Ledger:
         return MergeRecord.from_dict(json.loads(path.read_text()))
 
     # --- writes ----------------------------------------------------------
+    #
+    # A record appears whole or not at all. A run killed mid-write would
+    # otherwise leave a truncated record that the nightly script commits and
+    # pushes, and every later run would stop on it.
 
     def _write_once(self, path: Path, payload: dict, label: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = _staged(path, payload)
         try:
-            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.link(temporary, path)
         except FileExistsError as error:
             raise LedgerError(
                 f"{label} already recorded; the ledger is append-only"
             ) from error
-        with os.fdopen(handle, "w") as stream:
-            json.dump(payload, stream, indent=2, sort_keys=True)
+        finally:
+            temporary.unlink()
 
     def append_merge(self, record: MergeRecord) -> None:
         try:
@@ -111,8 +115,8 @@ class Ledger:
                 f"merge {record.merge_sha[:12]} has no fail_open record to replace; "
                 "a recorded verdict is never rewritten"
             )
-        with self.merge_path(record.merge_sha).open("w") as stream:
-            json.dump(record.to_dict(), stream, indent=2, sort_keys=True)
+        path = self.merge_path(record.merge_sha)
+        os.replace(_staged(path, record.to_dict()), path)
 
     def append_run(self, record: RunRecord) -> None:
         """Write a run, refusing one that claims merges the ledger never judged.
@@ -148,3 +152,19 @@ class Ledger:
             for sha in run.covers:
                 out.setdefault(sha, []).append(run)
         return out
+
+
+def _staged(path: Path, payload: dict) -> Path:
+    """``payload`` written and synced to a sibling temporary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o644)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary

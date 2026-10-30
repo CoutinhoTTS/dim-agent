@@ -158,6 +158,7 @@ prepare() {
     # A rebase that conflicted, or records a killed run left uncommitted,
     # would otherwise make every later pull refuse.
     git -C "$ledger" rebase --abort >/dev/null 2>&1 || true
+    find "$ledger" -path "$ledger/.git" -prune -o -name '.*.tmp' -type f -exec rm -f {} + || true
     local path
     for path in merges runs "$state"; do
       if [ -e "$ledger/$path" ]; then git -C "$ledger" add -A -- "$path" || return 1; fi
@@ -172,7 +173,7 @@ prepare() {
     git -C "$ledger" config user.name "dim eval"
     git -C "$ledger" config user.email "dim-eval@users.noreply.github.com"
   fi
-  # The window start is never guessed (benchmarks/README.md, 窗口).
+  # The window start is never guessed (see the window section of benchmarks/README.md).
   if [ ! -f "$ledger/$state" ]; then
     echo "[nightly] $ledger/$state is missing: add {\"last_l2_head\": \"<sha>\"} to $branch" >&2
     return 1
