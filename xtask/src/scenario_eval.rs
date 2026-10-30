@@ -23,17 +23,14 @@
 //!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
-//! asked. The judge's verdicts are read from a JSON array or from one object
-//! per line; a reply that gives no verdict, or leaves a statement without
-//! one, is asked again with what was wrong, at most twice. A run the judge
-//! could not answer — a judge call failed on the first call, on its retry
-//! without a temperature, or on a re-ask — or answered without usable
-//! verdicts after the re-asks is unjudged: it adds nothing to its arm's probe
-//! rates, violations or failed runs, and the report counts it and lists it
-//! with the judge's error. A judge call's failure says nothing about the run
-//! it was to judge, so it is never a reason to score the run. A run that
-//! failed on its own is a failed run, scored as before, whatever its judge
-//! did.
+//! asked, or a judge call failed — the first call, its retry without a
+//! temperature, or a re-ask. The judge's verdicts are read from a JSON array
+//! or from one object per line; a reply that gives no verdict, or leaves a
+//! statement without one, is asked again with what was wrong, at most twice.
+//! A run the judge answered but still gave no usable verdicts for after the
+//! re-asks is unjudged: it adds nothing to its arm's probe rates, violations
+//! or failed runs, and the report counts it and lists it. A run that failed
+//! on its own is a failed run, scored as before, whatever its judge did.
 //!
 //! The view is cut into parts against the judge's window, read from the
 //! judge's selection snapshot or from the `--model-config` file, and an
@@ -695,16 +692,11 @@ struct RunRecord {
     probes: Vec<ProbeRecord>,
 }
 impl RunRecord {
-    /// Whether the run is unjudged (model-prompts §8.1): the judge could not
-    /// be answered — a call failed, or the answer stayed unusable after the
-    /// re-asks — and nothing else failed the run. Such a run enters none of
-    /// its arm's metrics.
+    /// Whether the run is unjudged (model-prompts §8.1): the judge answered
+    /// every call and gave no usable verdicts after the re-asks, and nothing
+    /// else failed the run. Such a run enters none of its arm's metrics.
     fn unjudged(&self) -> bool {
-        !self.failed
-            && matches!(
-                self.judge_outcome,
-                JudgeOutcome::Unreadable | JudgeOutcome::CallFailed
-            )
+        !self.failed && self.judge_outcome == JudgeOutcome::Unreadable
     }
     /// Whether the run is judged (model-prompts §8.1): it raised no error and
     /// the judge answered every call with usable verdicts. Only such a run
@@ -749,9 +741,8 @@ impl ProbeVerdict {
 enum JudgeOutcome {
     /// The judge answered every call, and its verdicts are usable.
     Judged,
-    /// A judge call failed: a transport or an HTTP error, on the first call,
-    /// on its retry, or on a re-ask. A failure says nothing about the run it
-    /// was to judge, so the run is unjudged unless it failed on its own.
+    /// A judge call failed: a window overflow, a transport or an HTTP error,
+    /// on the first call, on its retry, or on a re-ask.
     CallFailed,
     /// The judge was never asked: the run left no export, the profile has no
     /// model host for the judge, or the run failed before the judge ran.
@@ -1012,11 +1003,16 @@ async fn drive_once(
 }
 
 /// Whether the run is a failed run (model-prompts §8.1): it failed on its
-/// own, an error or its wall-clock budget, or its judging did not happen —
-/// there was no export to judge, or no model host for the judge. A judge call
-/// that failed leaves the run unjudged, not failed.
+/// own, an error or its wall-clock budget, or its judging did not happen — a
+/// judge call failed, there was no export to judge, or no model host for the
+/// judge.
 fn failed(stop: &str, error: Option<&str>, judge_outcome: JudgeOutcome) -> bool {
-    stop == "seconds" || error.is_some() || judge_outcome == JudgeOutcome::NotAsked
+    stop == "seconds"
+        || error.is_some()
+        || matches!(
+            judge_outcome,
+            JudgeOutcome::CallFailed | JudgeOutcome::NotAsked
+        )
 }
 
 /// Every probe of a run that was not judged.
@@ -2672,20 +2668,19 @@ mod tests {
 
         let one_failure: Vec<RunRecord> = (0..20)
             .map(|index| {
-                let mut run = record(
+                record(
                     "candidate",
                     &scenario,
                     &[
                         ("reports", ProbeVerdict::Present),
                         ("floods", ProbeVerdict::Absent),
                     ],
-                    JudgeOutcome::Judged,
-                );
-                if index == 0 {
-                    run.stop = "seconds";
-                    run.failed = failed(run.stop, None, run.judge_outcome);
-                }
-                run
+                    if index == 0 {
+                        JudgeOutcome::CallFailed
+                    } else {
+                        JudgeOutcome::Judged
+                    },
+                )
             })
             .collect();
         let verdict = rule(
@@ -2802,10 +2797,10 @@ mod tests {
     }
 
     /// A probe needs a judged run in each arm, not merely a counted one
-    /// (model-prompts §8.1, issue #642): a run whose judge could not answer
-    /// enters no probe's rate, so a probe whose every run in an arm ended
-    /// that way has no judged run there, and the rule names it. One judged
-    /// run in the arm satisfies the floor.
+    /// (model-prompts §8.1, issue #642): a run whose judge call failed still
+    /// counts toward the probe's rate, so a probe whose every run in an arm
+    /// ended that way has no judged run there, and the rule names it. One
+    /// judged run in the arm satisfies the floor.
     #[test]
     fn a_probe_needs_a_judged_run_in_each_arm() {
         let case = scenario(vec![probe("reports", ProbeKind::MustShow)]);
@@ -2814,10 +2809,10 @@ mod tests {
         let scenarios = [case, other];
         let (case, other) = (&scenarios[0], &scenarios[1]);
         // One arm: of the probe's runs, the judge answered `judged` of them
-        // with a verdict that fails it, and the rest left nothing to judge;
-        // one judged run of `other` keeps the arm itself off the arm-level
+        // with a verdict that fails it and its calls failed for the rest; one
+        // judged run of `other` keeps the arm itself off the arm-level
         // message.
-        let arm = |arm: &'static str, judged: usize, not_asked: usize, with_other: bool| {
+        let arm = |arm: &'static str, judged: usize, call_failed: usize, with_other: bool| {
             let mut metrics = Metrics::default();
             for _ in 0..judged {
                 metrics.add(
@@ -2830,14 +2825,14 @@ mod tests {
                     ),
                 );
             }
-            for _ in 0..not_asked {
+            for _ in 0..call_failed {
                 metrics.add(
                     case,
                     &record(
                         arm,
                         case,
                         &[("reports", ProbeVerdict::Unparsed)],
-                        JudgeOutcome::NotAsked,
+                        JudgeOutcome::CallFailed,
                     ),
                 );
             }
@@ -2854,9 +2849,9 @@ mod tests {
             }
             metrics
         };
-        // Every one of the probe's runs in the candidate arm left nothing to
-        // judge, while the arm has a judged run elsewhere: the rule names the
-        // probe in the candidate arm alone.
+        // Every one of the probe's runs in the candidate arm ended in a
+        // failed judge call, while the arm has a judged run elsewhere: the
+        // rule names the probe in the candidate arm alone.
         let verdict = rule(
             &arm("current", 1, 2, true),
             &arm("candidate", 0, 2, true),
@@ -3366,11 +3361,11 @@ mod tests {
             "code": "context_length_exceeded"
         }})
     }
-    /// A judge call that fails, on a run that otherwise succeeded, leaves the
-    /// run unjudged: it is out of its arm's probe rates, violations and
-    /// failed runs, and the report lists it with its error (issue #635).
+    /// A judge call that fails leaves a failed run, not an unjudged one: it
+    /// counts in failed runs, its probes are `unparsed`, and the report does
+    /// not list it among the unjudged runs (model-prompts §8.1).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_judge_call_that_fails_leaves_the_run_unjudged() {
+    async fn a_judge_call_that_fails_leaves_the_run_failed() {
         let fixture = Fixture::start(
             "call-failed",
             overflowing,
@@ -3387,7 +3382,7 @@ mod tests {
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["judgeReasks"], 0, "{record}");
@@ -3405,25 +3400,17 @@ mod tests {
             report.contains("| judge temperature | dropped in 2 of 2 runs the judge was asked |"),
             "a run whose first call failed is a run the judge was asked: {report}"
         );
+        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
         assert!(
-            report.contains("| case | ran | must_show | – | – |"),
-            "an unjudged run is out of the probe rates: {report}"
-        );
-        assert!(report.contains("| current | 0 | 0 | 1 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 0 | 1 |"), "{report}");
-        assert!(
-            report.contains("| current | case | 0 | the judge failed: "),
-            "the report lists the unjudged run with its error: {report}"
-        );
-        assert!(
-            report.contains("| candidate | case | 0 | the judge failed: "),
-            "{report}"
+            !report.contains("| arm | scenario | run | judge error |"),
+            "a failed run is not listed as unjudged: {report}"
         );
     }
 
     /// The judge's first answer is unreadable and the call its re-ask makes
-    /// fails: the run is unjudged with one re-ask recorded, and its error
-    /// names the call that failed (issue #635).
+    /// fails: the run is a failed run with one re-ask recorded, and its error
+    /// names the call that failed (model-prompts §8.1).
     fn prose_then_overflowing(text: &str) -> Option<Value> {
         text.contains("You check statements").then(|| {
             if text.contains("Your answer could not be used") {
@@ -3434,7 +3421,7 @@ mod tests {
         })
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_judge_call_that_fails_during_a_re_ask_leaves_the_run_unjudged() {
+    async fn a_judge_call_that_fails_during_a_re_ask_leaves_the_run_failed() {
         let fixture = Fixture::start(
             "re-ask-failed",
             prose_then_overflowing,
@@ -3451,7 +3438,7 @@ mod tests {
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
             assert_eq!(record["judgeReasks"], 1, "{record}");
             assert_eq!(record["probes"][0]["verdict"], "unparsed", "{record}");
@@ -3463,15 +3450,11 @@ mod tests {
                 "the error names the call that failed: {record}"
             );
         }
-        assert!(report.contains("| current | 0 | 0 | 1 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 0 | 1 |"), "{report}");
+        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
         assert!(
-            report.contains("| current | case | 0 | the judge failed on a re-ask: "),
-            "the report lists the unjudged run with its error: {report}"
-        );
-        assert!(
-            report.contains("| candidate | case | 0 | the judge failed on a re-ask: "),
-            "{report}"
+            !report.contains("| arm | scenario | run | judge error |"),
+            "a failed run is not listed as unjudged: {report}"
         );
     }
 
@@ -4153,11 +4136,10 @@ mod tests {
         );
     }
 
-    /// A part whose call fails leaves the whole run unjudged, the error names
-    /// the part, and the report lists the run in the parts table marked
-    /// unjudged (issue #635).
+    /// A part whose call fails leaves the whole run failed, and the error
+    /// names the part (issue #635).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_part_whose_call_fails_leaves_the_run_unjudged() {
+    async fn a_part_whose_call_fails_leaves_the_run_failed() {
         /// The judge's verdict for every part but the second, which fails the
         /// way a judge refused for exceeding its window does.
         fn refuses_the_second_part(text: &str) -> Option<Value> {
@@ -4186,7 +4168,7 @@ mod tests {
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
-            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
             assert_eq!(record["probes"][0]["verdict"], "unparsed", "{record}");
             let error = record["judgeError"].as_str().unwrap();
@@ -4194,23 +4176,9 @@ mod tests {
             assert!(error.contains("the judge failed: "), "{error}");
             let parts = record["judgeParts"].as_u64().unwrap();
             assert!(parts > 1, "{record}");
-            assert!(
-                report.contains(&format!(
-                    "| {} | case | 0 | {parts} | yes |",
-                    record["arm"].as_str().unwrap()
-                )),
-                "the parts table marks the unjudged run: {report}"
-            );
-            assert!(
-                report.contains(&format!(
-                    "| {} | case | 0 | part 2 of ",
-                    record["arm"].as_str().unwrap()
-                )),
-                "the unjudged table lists the run with its judge error: {report}"
-            );
         }
-        assert!(report.contains("| current | 0 | 0 | 1 |"), "{report}");
-        assert!(report.contains("| candidate | 0 | 0 | 1 |"), "{report}");
+        assert!(report.contains("| current | 0 | 1 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 1 | 0 |"), "{report}");
     }
 
     /// A later part's first call is a first call: its failure is reported as
