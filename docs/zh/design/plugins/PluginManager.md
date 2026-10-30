@@ -241,12 +241,12 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 - PluginManager 在内存表上一步完成对 `plugins.json` 的修改，然后写文件，然后 reconcile 由它推导出的层，并向所有者下达命令。针对同一个 id 或名字的第二个操作能看到第一个操作的变更（`plugin_exists`，或者它在新状态上执行）。推导层和 reconcile 一次执行一个，每次都按当时的记录推导，所以最后 reconcile 的层来自最新的记录。rutis-loader 一次执行一个自己的操作。
 - rutis 拒绝的行或某个所有者拒绝的命令，不改变已写入的配置；该项在 `plugin.list` 中显示这次拒绝（例如，新插件失败，因为另一个不同名的插件提供了同一服务）。
-- `instanceNames`：rutis 需要在运行时启动之前，在 catalog 中拿到插件的部件在 Session 和分支中提供的名字（[rutis 用法 §2](../rutis-usage.md#2-插件是一行实例挂载它的部件)）。安装、切换或重新加载到一个 `instanceNames` 不在运行中 catalog 内的插件时，记录变更并回复 `restart_required`；该行在下次启动时创建。只登记工具、方法或提示来源的插件没有这个限制。
+- `instanceNames`：rutis 需要在运行时启动之前，在 catalog 中拿到插件的部件在 Session 和分支中提供的名字（[rutis 用法 §2](../rutis-usage.md#2-插件是一行实例挂载它的部件)）。安装、切换或重新加载到一个 `instanceNames` 不在运行中 catalog 内的插件时，记录变更并回复 `restartRequired`；该行在下次启动时创建。只登记工具、方法或提示来源的插件没有这个限制。
 - 正在使用时的重新加载或替换：旧世代卸载，rutis 取消它正在运行的调用，使用它的进行中轮次可能失败（[ADR 002](../../adr/002-plugin-scope.md) 的后果）。这一点写入文档，不加以阻止。
 
 ## 5. 上下文映射
 
-PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的文本。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。该工具的文本按[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)归类：命令名与每个命令的参数文法、声明携带的单行命令表、usage 文本中的 `Usage:` 行是 protocol，因为工具按原样解析它们；usage 行之后的句子以及 `help` 中说明命令做什么、不碰什么的句子是 policy。格式错误的命令，其错误结果携带命令表或该命令的 usage；被拒绝的调用，其错误携带错误码（A.2）——两者都是 protocol。完成的调用结果说明变更了什么、状态是什么，以及适用时的 `restart_required`；这也是 protocol，因为模型据此决定下一步。
+PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的文本。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。该工具的文本按[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)归类：命令名与每个命令的参数文法、声明携带的单行命令表、usage 文本中的 `Usage:` 行是 protocol，因为工具按原样解析它们；usage 行之后的句子以及 `help` 中说明命令做什么、不碰什么的句子是 policy。格式错误的命令，其错误结果携带命令表或该命令的 usage；被拒绝的调用，其错误携带错误码（A.2）——两者都是 protocol。完成的调用结果说明变更了什么、状态是什么，以及适用时的 `restartRequired`；这也是 protocol，因为模型据此决定下一步。
 
 ## 6. 接口（摘要）
 
@@ -374,7 +374,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | 安装时内容所有者不存在 | 跳过该种类并报告；PluginManager 打开该所有者时登记 | PluginManager、所有者 |
 | 内容所有者重新加载 | 它恢复自己已登记的内容 | 所有者 |
 | 所有者关闭期间插件被删除 | 所有者被打开时或下次启动时撤回它的内容 | PluginManager |
-| `instanceNames` 不在运行中的 catalog 内 | 记录配置，`restart_required`；该行在下次启动时创建 | PluginManager |
+| `instanceNames` 不在运行中的 catalog 内 | 记录配置，`restartRequired`；该行在下次启动时创建 | PluginManager |
 | Git 安装过程中进程停止 | 下次启动时删除暂存目录；`plugins.json` 未被写入 | PluginManager |
 | `plugins.json` 写入之后、loader 或所有者命令之前进程停止 | 下次启动时根据 `plugins.json` 构建行，并让所有者与它一致 | PluginManager 启动 |
 
