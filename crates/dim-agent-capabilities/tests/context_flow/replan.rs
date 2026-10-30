@@ -100,7 +100,7 @@ fn facts() -> Context {
 async fn replanned_session(
     driver: Arc<dyn ModelDriver>,
     strategy: Arc<Overshoot>,
-) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+) -> (MinimalHost, dim_agent_runtime::Session) {
     replanned_session_with(facts(), driver, strategy).await
 }
 
@@ -108,7 +108,7 @@ async fn replanned_session_with(
     facts: Context,
     driver: Arc<dyn ModelDriver>,
     strategy: Arc<Overshoot>,
-) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+) -> (MinimalHost, dim_agent_runtime::Session) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .process_value(Arc::new(ModelHost(driver)))
@@ -136,7 +136,7 @@ async fn replanned_session_with(
             }),
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

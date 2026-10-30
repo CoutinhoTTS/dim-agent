@@ -1,5 +1,5 @@
 use dim_agent_capabilities::{defaults, host::*, prompt_state::PromptSnapshot};
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -81,7 +81,7 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
             )?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -207,7 +207,7 @@ async fn rewritten_control_identity_is_registered_without_leaking_activity() {
                 Ok(Box::new(TamperControl::new(names, key)?))
             }),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -346,7 +346,7 @@ async fn scope_ended_in_committed_tail_supersedes_loading_result() {
         }),
         None,
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

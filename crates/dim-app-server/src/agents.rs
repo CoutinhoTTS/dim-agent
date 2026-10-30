@@ -1704,7 +1704,7 @@ impl Plugin for AgentScopePlugin {
             }
         };
         let host = Arc::new(AgentHost {
-            agent: spec.builder.build_at((*loader).clone(), ctx),
+            agent: spec.builder.build((*loader).clone(), ctx),
             agent_id: spec.agent_id.clone(),
             default: spec.default,
             profile: spec.profile.clone(),

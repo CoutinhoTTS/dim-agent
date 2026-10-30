@@ -378,7 +378,7 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let runtime_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let agent_instance = loader.create_instance(root, AGENT_GROUP).await?;
     let anchor = anchors.recv().await.expect("Agent anchor");
-    let agent = builder.build_at(loader.clone(), &anchor);
+    let agent = builder.build(loader.clone(), &anchor);
     let started = Instant::now();
     let one = agent.create_session(SessionConfig::default()).await?;
     let session_ms = started.elapsed().as_secs_f64() * 1_000.0;

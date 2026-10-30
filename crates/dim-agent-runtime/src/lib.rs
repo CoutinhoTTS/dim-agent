@@ -12,6 +12,8 @@ mod parts;
 mod registrations;
 mod scope;
 mod state;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod timeline_context;
 mod timeline_store;
 

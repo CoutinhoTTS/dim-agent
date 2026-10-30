@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
     timeline_tree::{BranchToolConfig, TreeCommands},
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -345,8 +346,8 @@ impl DynPlugin for CleanupWriter {
         })
     }
 }
-fn setup(probe: &Arc<Probe>) -> Agent {
-    builder(probe).build()
+async fn setup(probe: &Arc<Probe>) -> MinimalHost {
+    MinimalHost::start(&builder(probe)).await.unwrap()
 }
 fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     builder_with(probe, defaults::install)
@@ -572,7 +573,7 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         Ok(vec![2]),
     ];
     for _ in 0..2 {
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = soon(agent.restore_session("saved".into())).await.unwrap();
         soon(session.idle("main")).await.unwrap();
         let opening = probe.opening_reads.lock().unwrap().pop().unwrap();
@@ -729,7 +730,7 @@ async fn a_restart_completes_an_end_without_its_result() {
     let probe = Arc::new(Probe::default());
     let mut builder = builder(&probe);
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     soon(session.idle("main")).await.unwrap();
     assert_eq!(
@@ -905,7 +906,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
     }
     let mut builder = builder(&Arc::new(Probe::default()));
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     soon(session.idle("main")).await.unwrap();
     assert_eq!(
@@ -1105,7 +1106,7 @@ async fn an_end_at_load_finds_the_restored_line_published() {
             )?))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     soon(session.idle("main")).await.unwrap();
     soon(async {
@@ -1150,7 +1151,7 @@ async fn an_end_at_load_finds_the_restored_line_published() {
 async fn an_end_refuses_a_line_that_is_still_opening() {
     let probe = Arc::new(Probe::default());
     probe.delay_child.store(true, Ordering::SeqCst);
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1216,7 +1217,7 @@ async fn a_line_that_is_ending_opens_no_more_lines() {
     let probe = Arc::new(Probe::default());
     let mut builder = builder(&probe);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1299,7 +1300,7 @@ async fn wait_create(session: &Session, after: u64) -> Arc<AgentEvent> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1420,7 +1421,7 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1523,7 +1524,7 @@ async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ancestors_end_names_itself_on_every_descendant() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1579,7 +1580,7 @@ async fn an_ancestors_end_names_itself_on_every_descendant() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_line_that_ended_itself_names_itself_on_its_descendants() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1662,7 +1663,7 @@ async fn a_line_that_ended_itself_names_itself_on_its_descendants() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_line_cannot_open_under_an_ending_ancestor() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1744,7 +1745,7 @@ async fn a_line_cannot_open_under_an_ending_ancestor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ending_a_line_waits_for_a_child_still_building() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1819,7 +1820,7 @@ async fn a_failed_child_of_an_ended_parent_stays_unknown_after_a_restart() {
     let probe = Arc::new(Probe::default());
     let mut build = builder(&probe);
     build.timeline_store(store.clone());
-    let agent = build.build();
+    let agent = MinimalHost::start(&build).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1881,7 +1882,7 @@ async fn a_failed_child_of_an_ended_parent_stays_unknown_after_a_restart() {
     let probe = Arc::new(Probe::default());
     let mut build = builder(&probe);
     build.timeline_store(store);
-    let agent = build.build();
+    let agent = MinimalHost::start(&build).await.unwrap();
     let session = soon(agent.restore_session(id)).await.unwrap();
     assert_eq!(session.ended_head(&child), None);
     let commands = probe.commands.lock().unwrap().clone().unwrap();
@@ -1892,7 +1893,7 @@ async fn a_failed_child_of_an_ended_parent_stays_unknown_after_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1943,7 +1944,7 @@ async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
             Ok(Box::new(ProbePlugin::new(names, writer.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1990,7 +1991,7 @@ async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
             Ok(Box::new(ProbePlugin::new(names, writer.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session(id)).await.unwrap();
     assert_eq!(source(session.branches(), &child), Some(host));
     assert_eq!(source(session.branches(), "main"), None);
@@ -2012,7 +2013,7 @@ async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2073,7 +2074,7 @@ async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2190,7 +2191,7 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2244,7 +2245,7 @@ async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_releases_an_unconsumed_create_without_waiting_for_dispatch() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2284,7 +2285,7 @@ async fn close_releases_an_unconsumed_create_without_waiting_for_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parent_close_waits_for_dispatch_before_releasing_branch_reservations() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2346,7 +2347,7 @@ async fn parent_close_waits_for_dispatch_before_releasing_branch_reservations() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2420,7 +2421,7 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn candidates_remain_private_until_the_initial_input_is_accepted() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2469,7 +2470,7 @@ async fn candidates_remain_private_until_the_initial_input_is_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_batch_cut_settles_creation_without_faulting_the_session() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2517,7 +2518,7 @@ async fn invalid_batch_cut_settles_creation_without_faulting_the_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_output_cannot_be_inherited_as_an_asymmetric_prefix() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2563,8 +2564,8 @@ async fn model_output_cannot_be_inherited_as_an_asymmetric_prefix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tool_call_on_main_opens_a_line_before_its_own_request() {
     let probe = Arc::new(Probe::default());
-    let root = support::root();
-    let agent = builder(&probe).build_in(&root);
+    let agent = MinimalHost::start(&builder(&probe)).await.unwrap();
+    let root = agent.root().clone();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2731,7 +2732,7 @@ fn blocks_with(events: &[Arc<AgentEvent>], marker: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_branch_call_writes_nothing() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2874,7 +2875,7 @@ async fn a_refused_branch_call_writes_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_close_cancels_an_active_build_and_waits_for_rollback() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2921,7 +2922,7 @@ async fn open_line(session: &Session, purpose: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn main_lists_its_open_tool_lines_under_one_key() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2971,14 +2972,15 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
 async fn a_configured_roster_closing_reaches_the_roster() {
     let closing = "Configured: report once and end your wait when nothing is left to tell.";
     let probe = Arc::new(Probe::default());
-    let agent = builder_with_branch_config(
+    let agent = MinimalHost::start(&builder_with_branch_config(
         &probe,
         BranchToolConfig {
             roster_closing: Some(closing.into()),
             ..Default::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3039,7 +3041,7 @@ async fn last_system(session: &Session, branch: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3071,7 +3073,7 @@ async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_line_names_the_stale_file_failure_the_way_the_tool_reports_it() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3148,7 +3150,7 @@ async fn file_call(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_branch_tool_declares_its_actions_and_modes() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3218,7 +3220,7 @@ async fn the_branch_tool_declares_its_actions_and_modes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_branch_tool_reports_invalid_arguments() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3246,7 +3248,7 @@ async fn the_branch_tool_reports_invalid_arguments() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3411,7 +3413,7 @@ async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3474,7 +3476,7 @@ async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_that_steered_main_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3509,7 +3511,7 @@ async fn a_turn_that_steered_main_writes_no_idle_notice() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3567,7 +3569,7 @@ async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3674,7 +3676,7 @@ async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_end_in_the_same_turn_writes_no_second_final_message() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3740,7 +3742,7 @@ async fn a_second_end_in_the_same_turn_writes_no_second_final_message() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_lines_end_says_nothing_to_main() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3771,7 +3773,7 @@ async fn a_host_lines_end_says_nothing_to_main() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_end_from_outside_a_tool_line_wakes_main_with_a_notice() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3917,7 +3919,7 @@ async fn the_roster_and_the_identity_replay_after_a_compaction() {
             }),
         );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4020,7 +4022,7 @@ async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancella
                 Ok(Box::new(CaptureTreeDispatch::new(names, captured.clone())?))
             }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4058,7 +4060,7 @@ fn interrupt() -> EventKind {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4166,7 +4168,7 @@ fn gated(probe: &Arc<Probe>, gate: &Arc<Gate>) -> AgentBuilder {
 async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     let probe = Arc::new(Probe::default());
     let gate = Arc::new(Gate::default());
-    let agent = gated(&probe, &gate).build();
+    let agent = MinimalHost::start(&gated(&probe, &gate)).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4292,7 +4294,7 @@ async fn a_turn_spanning_a_restart_after_a_steer_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
     let mut builder1 = builder(&probe);
     builder1.timeline_store(first.clone());
-    let agent = builder1.build();
+    let agent = MinimalHost::start(&builder1).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4328,7 +4330,7 @@ async fn a_turn_spanning_a_restart_after_a_steer_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
     let mut builder2 = builder(&probe);
     builder2.timeline_store(second);
-    let agent = builder2.build();
+    let agent = MinimalHost::start(&builder2).await.unwrap();
     let session = soon(agent.restore_session(id)).await.unwrap();
     soon(session.idle(&child)).await.unwrap();
     soon(session.idle("main")).await.unwrap();

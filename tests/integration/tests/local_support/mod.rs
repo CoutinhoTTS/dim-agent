@@ -16,6 +16,7 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
     timeline_tree::TreeCommands,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -345,7 +346,7 @@ impl DynPlugin for LifecycleProbePlugin {
 
 pub struct Env {
     pub root: rutis::Ctx,
-    pub agent: Agent,
+    pub agent: MinimalHost,
     pub model: Arc<ScriptedModel>,
     pub gate: Arc<Gate>,
     pub today: Arc<Mutex<String>>,
@@ -399,12 +400,9 @@ impl Default for Options {
 
 /// The product profile: PromptSources and Skills with scripted hosts.
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
-    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
     let mut host = platform(&dirs.home);
     host.timezone = Some(options.timezone.into());
-    root.provide_as::<HostPlatform>(Arc::new(host)).unwrap();
-    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(options.settings.clone())))
-        .unwrap();
+    let settings = options.settings.clone();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -462,11 +460,16 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         );
     }
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-    let agent = builder.build_in(&root);
-    agent.start().await.unwrap();
+    let agent = MinimalHost::start_with(&builder, move |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(host))?;
+        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings)))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     Env {
+        root: agent.root().clone(),
         agent,
-        root,
         model,
         gate,
         today: options.today,
