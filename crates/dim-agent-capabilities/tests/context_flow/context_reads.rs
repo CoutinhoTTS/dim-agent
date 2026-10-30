@@ -1,6 +1,5 @@
 use super::*;
 use rutis::host::CtxHost;
-use rutis::host::ErrorKind;
 use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
@@ -87,12 +86,8 @@ impl Plugin for ContextHostsOwner {
     }
 
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(TestContextHosts(self.keys.clone(), self.model.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(ErrorKind::PluginFailed(
-                format!("context hosts failed: {error}").into(),
-            ))
-        })?;
+        let view =
+            mount_active(ctx, TestContextHosts(self.keys.clone(), self.model.clone())).await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

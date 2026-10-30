@@ -296,6 +296,27 @@ def load(path: Path) -> dict:
 # --- comparison -----------------------------------------------------------
 
 
+def _proxy_condition(params: dict | None) -> bool | None:
+    """The recorded verifier-proxy condition, or None when the record cannot say.
+
+    A baseline frozen before proxy support existed has no field at all. That is
+    unknown, not ``False``: treating absence as "no proxy" would compare it
+    against a proxied run and call the result a measurement.
+    """
+    if not isinstance(params, dict):
+        return None
+    value = params.get("verifier_proxy")
+    return value if isinstance(value, bool) else None
+
+
+def _no_proxy_condition(params: dict | None) -> str | None:
+    """The recorded verifier ``NO_PROXY`` value, or None when it cannot say."""
+    if not isinstance(params, dict):
+        return None
+    value = params.get("verifier_no_proxy")
+    return value if isinstance(value, str) and value else None
+
+
 @dataclass(frozen=True)
 class Criterion:
     name: str
@@ -327,10 +348,73 @@ class Comparison:
     comparable: bool = True
     baseline_k: int = 0
     candidate_k: int = 0
+    #: None means the arm cannot say whether its verifier phase used a proxy:
+    #: a baseline frozen before the field existed, or a run recorded before it
+    #: did. The mismatch is reported rather than guessed.
+    baseline_verifier_proxy: bool | None = None
+    candidate_verifier_proxy: bool | None = None
+    baseline_verifier_no_proxy: str | None = None
+    candidate_verifier_no_proxy: str | None = None
+    #: False when compare() was not given the candidate's measured params (the
+    #: calibration path compares synthetic runs). Production callers pass them.
+    verifier_proxy_checked: bool = False
 
     @property
     def net_degraded(self) -> int:
         return len(self.degraded) - len(self.improved)
+
+    @property
+    def verifier_proxy_comparable(self) -> bool:
+        if not self.verifier_proxy_checked:
+            return True
+        if (self.baseline_verifier_proxy is None
+                or self.candidate_verifier_proxy is None):
+            return False
+        if self.baseline_verifier_proxy != self.candidate_verifier_proxy:
+            return False
+        if not self.baseline_verifier_proxy:
+            # With no proxy, the bypass list changes nothing.
+            return True
+        if (self.baseline_verifier_no_proxy is None
+                or self.candidate_verifier_no_proxy is None):
+            return False
+        return self.baseline_verifier_no_proxy == self.candidate_verifier_no_proxy
+
+    @property
+    def incomparable_detail(self) -> str:
+        """Why no criterion applies, in the terms the reader has to act on."""
+        parts: list[str] = []
+        if self.baseline_k != self.candidate_k:
+            parts.append(f"baseline k={self.baseline_k}, this run k={self.candidate_k}")
+        if not self.verifier_proxy_comparable:
+            if (self.baseline_verifier_proxy is None
+                    or self.candidate_verifier_proxy is None):
+                if (self.baseline_verifier_proxy is None
+                        and self.candidate_verifier_proxy is None):
+                    parts.append("verifier proxy is unknown in both arms")
+                elif self.baseline_verifier_proxy is None:
+                    parts.append("baseline verifier proxy is unknown")
+                else:
+                    parts.append("this run's verifier proxy is unknown")
+            elif self.baseline_verifier_proxy != self.candidate_verifier_proxy:
+                baseline = "on" if self.baseline_verifier_proxy else "off"
+                candidate = "on" if self.candidate_verifier_proxy else "off"
+                parts.append(
+                    f"verifier proxy differs (baseline {baseline}, "
+                    f"this run {candidate})"
+                )
+            elif (self.baseline_verifier_no_proxy is None
+                    or self.candidate_verifier_no_proxy is None):
+                if (self.baseline_verifier_no_proxy is None
+                        and self.candidate_verifier_no_proxy is None):
+                    parts.append("verifier NO_PROXY is unknown in both arms")
+                elif self.baseline_verifier_no_proxy is None:
+                    parts.append("baseline verifier NO_PROXY is unknown")
+                else:
+                    parts.append("this run's verifier NO_PROXY is unknown")
+            else:
+                parts.append("verifier NO_PROXY differs")
+        return "; ".join(parts) or "arms not comparable"
 
     def criteria(self) -> tuple[Criterion, ...]:
         """Every criterion, evaluated and reported. None of them blocks.
@@ -354,15 +438,14 @@ class Comparison:
         """
         if not self.comparable:
             # Not "everything passed" and not "everything failed" — the
-            # thresholds are undefined across unequal k. Ten of this corpus's
-            # tasks are 3/3, and a 3/3 task that scores 0/1 reads as a full flip;
-            # at k=1 against a k=3 baseline that fires on most days with no code
-            # change at all. Reporting per-task deltas is still useful. Reporting
-            # verdicts is not.
+            # thresholds are undefined across unequal k or unequal verifier
+            # conditions. Ten of this corpus's tasks are 3/3, and a 3/3 task that
+            # scores 0/1 reads as a full flip; at k=1 against a k=3 baseline that
+            # fires on most days with no code change at all. Reporting per-task
+            # deltas is still useful. Reporting verdicts is not.
             return (Criterion(
                 "arms not comparable",
-                f"baseline k={self.baseline_k}, this run k={self.candidate_k}; "
-                "per-task deltas below are indicative only, no criterion applies",
+                f"{self.incomparable_detail}; criteria not evaluated",
                 ok=True, blocking=False,
             ),)
         out = [
@@ -519,7 +602,8 @@ def _end_reasons(trials: tuple[Trial, ...]) -> dict[str, int]:
     return out
 
 
-def compare(baseline: dict, candidate: JobReport, candidate_k: int) -> Comparison:
+def compare(baseline: dict, candidate: JobReport, candidate_k: int, *,
+            candidate_params: dict | None = None) -> Comparison:
     """Compare a run against a baseline, per task.
 
     Refuses a corpus mismatch outright: two runs over different task definitions
@@ -527,10 +611,37 @@ def compare(baseline: dict, candidate: JobReport, candidate_k: int) -> Compariso
     problem one level down — the tasks match but the quantities do not — and is
     reported rather than refused, because the deltas still carry a signal even
     when no threshold applies to them.
+
+    The verifier's network condition is load-bearing too. Eighteen of the thirty
+    FrontierHarness verifiers download uv while scoring, so a proxied candidate
+    measured against an unproxied baseline (or the reverse) can move the pass
+    rate for a reason that has nothing to do with the code. The same applies to
+    changing ``NO_PROXY`` while the proxy is on: it decides which services the
+    verifier reaches directly. ``candidate_params`` is the measured run's params;
+    when it is supplied, any difference or unknown condition makes the arms
+    non-comparable, just like unequal k. It is optional only for calibration,
+    which compares synthetic runs to their own baseline.
     """
     base_tasks = baseline.get("tasks") or {}
     cand_tasks = {task.task_name: task for task in candidate.tasks}
     shared = tuple(sorted(set(base_tasks) & set(cand_tasks)))
+
+    baseline_proxy = _proxy_condition(baseline.get("params"))
+    baseline_no_proxy = _no_proxy_condition(baseline.get("params"))
+    candidate_proxy = (_proxy_condition(candidate_params)
+                       if candidate_params is not None else None)
+    candidate_no_proxy = (_no_proxy_condition(candidate_params)
+                          if candidate_params is not None else None)
+    proxy_checked = candidate_params is not None
+    proxy_comparable = (
+        not proxy_checked
+        or (baseline_proxy is not None and candidate_proxy is not None
+            and baseline_proxy == candidate_proxy
+            and (not baseline_proxy
+                 or (baseline_no_proxy is not None
+                     and candidate_no_proxy is not None
+                     and baseline_no_proxy == candidate_no_proxy)))
+    )
 
     for name in shared:
         base_checksum = base_tasks[name].get("task_checksum")
@@ -597,9 +708,14 @@ def compare(baseline: dict, candidate: JobReport, candidate_k: int) -> Compariso
 
     baseline_k = int(baseline.get("k") or 0)
     return Comparison(
-        comparable=baseline_k == candidate_k,
+        comparable=baseline_k == candidate_k and proxy_comparable,
         baseline_k=baseline_k,
         candidate_k=candidate_k,
+        baseline_verifier_proxy=baseline_proxy,
+        candidate_verifier_proxy=candidate_proxy,
+        baseline_verifier_no_proxy=baseline_no_proxy,
+        candidate_verifier_no_proxy=candidate_no_proxy,
+        verifier_proxy_checked=proxy_checked,
         tasks_compared=shared,
         baseline_only=tuple(sorted(set(base_tasks) - set(cand_tasks))),
         candidate_only=tuple(sorted(set(cand_tasks) - set(base_tasks))),
@@ -626,8 +742,7 @@ def render(comparison: Comparison) -> str:
         "",
     ]
     if not comparison.comparable:
-        lines.append(f"  baseline k={comparison.baseline_k} vs this run "
-                     f"k={comparison.candidate_k}: criteria not evaluated")
+        lines.append(f"  {comparison.incomparable_detail}: criteria not evaluated")
         lines.append("")
     for criterion in comparison.criteria():
         mark = "ok  " if criterion.ok else ("FAIL" if criterion.blocking else "warn")
@@ -663,6 +778,35 @@ def _sidecars(job_dir: Path) -> tuple[dict | None, dict | None]:
     return config, model
 
 
+def _verifier_proxy_from_config(config: dict) -> bool | None:
+    """Whether a job config's verifier phase used a proxy.
+
+    ``None`` is not "no": a job config written before proxy support has no
+    ``verifier`` key at all, so there is nothing to read. Returning False for it
+    would make a legacy backfill claim a condition it never recorded.
+    """
+    verifier = config.get("verifier")
+    if not isinstance(verifier, dict):
+        return None
+    env = verifier.get("env")
+    if not isinstance(env, dict):
+        env = {}
+    return any(bool(env.get(name)) for name in (
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+    ))
+
+
+def _verifier_no_proxy_from_config(config: dict) -> str | None:
+    """The verifier bypass list recorded in a job config, if it has one."""
+    if _verifier_proxy_from_config(config) is not True:
+        return None
+    env = (config.get("verifier") or {}).get("env")
+    if not isinstance(env, dict):
+        return None
+    value = env.get("NO_PROXY") or env.get("no_proxy")
+    return value if isinstance(value, str) and value else None
+
+
 def params_from_config(config: dict | None) -> dict:
     if not config:
         return {}
@@ -673,7 +817,8 @@ def params_from_config(config: dict | None) -> dict:
         "agent_timeout_multiplier": config.get("agent_timeout_multiplier"),
         "n_concurrent_trials": config.get("n_concurrent_trials"),
         "model_name": agent.get("model_name"),
-        "verifier_proxy": bool((config.get("verifier") or {}).get("env")),
+        "verifier_proxy": _verifier_proxy_from_config(config),
+        "verifier_no_proxy": _verifier_no_proxy_from_config(config),
         "model_config_sha256": (
             hashlib.sha256(model_config.encode()).hexdigest()
             if (model_config := (agent.get("env") or {}).get("DIM_EVAL_MODEL_CONFIG_JSON"))

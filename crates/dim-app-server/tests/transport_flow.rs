@@ -364,11 +364,15 @@ impl Plugin for ToolHostOwner {
         "ToolHostOwner"
     }
     async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(ToolHostPlugin(
-            self.tool_host.clone(),
-            self.tools.clone(),
-            self.hold.clone(),
-        ));
+        let view = dim_agent_runtime::mount_active(
+            ctx,
+            ToolHostPlugin(
+                self.tool_host.clone(),
+                self.tools.clone(),
+                self.hold.clone(),
+            ),
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }
