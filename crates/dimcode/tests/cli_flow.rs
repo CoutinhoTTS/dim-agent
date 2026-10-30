@@ -7729,7 +7729,7 @@ fn recording_on_switches_the_model_log() {
         String::from_utf8(output.stdout).unwrap(),
         format!(
             "Model request recording is on: {}\n",
-            home.0.join("rust/model-log/recordings.jsonl").display()
+            home.0.join("model-log/recordings.jsonl").display()
         )
     );
 }
@@ -7761,4 +7761,60 @@ fn recording_reports_whether_it_is_on() {
         String::from_utf8(output.stdout).unwrap(),
         "Model request recording is off.\n"
     );
+}
+
+/// `/settings recording` reports the state and the file in the terminal UI.
+#[test]
+fn tui_settings_recording_reports_the_state() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(
+            &hello,
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}),
+        );
+        let create = wire.read("session.create");
+        wire.reply(
+            &create,
+            json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+        );
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let read = wire.read("settings.read");
+        wire.reply(
+            &read,
+            json!({"revision":"user/model-log:1","document":{"enabled":false}}),
+        );
+        let read = wire.read("settings.read");
+        wire.reply(
+            &read,
+            json!({"revision":"user/model-log:1","document":{"enabled":false}}),
+        );
+        let update = wire.read("settings.update");
+        wire.reply(
+            &update,
+            json!({"revision":"user/model-log:2","document":{"enabled":true}}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/settings recording\r");
+    terminal.until("Model request recording is off.");
+    terminal.write(b"/settings recording on\r");
+    terminal.until("Model request recording is on:");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
 }

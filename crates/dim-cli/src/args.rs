@@ -442,11 +442,11 @@ impl Options {
                             args.next();
                             None
                         }
-                        Some("on" | "enable") => {
+                        Some("on") => {
                             args.next();
                             Some(true)
                         }
-                        Some("off" | "disable") => {
+                        Some("off") => {
                             args.next();
                             Some(false)
                         }

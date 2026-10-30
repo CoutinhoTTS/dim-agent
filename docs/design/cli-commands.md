@@ -93,6 +93,8 @@ control distinguishes network from executable access without using real credenti
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
 | `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
+| `dimcode recording [on|off|status]` | Show or switch the model request log ([model-log](appserver/model-log.md)); the file is the home's `model-log/recordings.jsonl`. |
+| `/settings recording [on|off|status]` | The same switch from the terminal UI. |
 
 Global home, workspace, server and model-profile options retain their current
 meanings and work before or after the command. Existing login/account/logout,

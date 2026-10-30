@@ -21,6 +21,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md)（[中文](zh/adr/006-plugin-contract.md)）
 - [ADR 007 — PluginManager keeps plugin configuration; rutis and content owners keep state](adr/007-plugin-configuration.md)
 - [ADR 008 — Documentation ownership and immutable ADRs](adr/008-documentation-ownership.md)
+- [ADR 016 — An opt-in request record for model calls](adr/016-model-request-log.md)
 - [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability（[中文](zh/design/plugin-contract.md)）
 - [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings（[中文](zh/design/rutis-usage.md)）
 - [Architecture and ownership](architecture/README.md)
@@ -72,5 +73,6 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Idle Session unload](design/appserver/idle-unload.md) (#126, #331)（[中文](zh/design/appserver/idle-unload.md)）
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Timeline export](design/appserver/timeline-export.md) (ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
+- [Model request log](design/appserver/model-log.md)
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

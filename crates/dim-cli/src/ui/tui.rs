@@ -2516,11 +2516,13 @@ impl App {
         let mut words = args.split_whitespace();
         match (words.next(), words.next(), words.next()) {
             (None, _, _) => self.open_settings(Setting::Theme),
-            (Some("recording"), None, _) => self.host.send(Command::Recording(String::new())),
+            (Some("recording"), None | Some("status"), None) => {
+                self.host.send(Command::Recording(String::new()));
+            }
             (Some("recording"), Some(on @ ("on" | "off")), None) => {
                 self.host.send(Command::Recording(on.to_owned()));
             }
-            _ => self.set_notice("Usage: /settings [recording [on|off]]".to_owned()),
+            _ => self.set_notice("Usage: /settings [recording [on|off|status]]".to_owned()),
         }
     }
 

@@ -23,13 +23,14 @@ pub struct State {
     revision: String,
 }
 
-/// Where the daemon writes: its execution home is `<product home>/rust`.
+/// Where the daemon writes. A product daemon runs with the product home as its
+/// execution root; one started from `--model-config` runs under `<home>/rust`.
 pub fn path(options: &Options) -> PathBuf {
-    options
-        .home
-        .join("rust")
-        .join("model-log")
-        .join("recordings.jsonl")
+    let root = match options.model_config {
+        Some(_) => options.home.join("rust"),
+        None => options.home.clone(),
+    };
+    root.join("model-log").join("recordings.jsonl")
 }
 
 pub fn report(state: &State, options: &Options) -> String {

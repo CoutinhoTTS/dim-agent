@@ -1317,12 +1317,10 @@ impl Worker {
                     self.report(mcp::error(error).to_string(), true);
                 }
             }
-            Command::Recording(args) => {
-                let result = self.recording(&args).await;
-                if let Err(error) = result {
-                    self.report(error.to_string(), true);
-                }
-            }
+            Command::Recording(args) => match self.recording(&args).await {
+                Ok(text) => self.report(text, false),
+                Err(error) => self.report(error.to_string(), true),
+            },
             Command::ListPlugins => {
                 let plugins = self.plugins().await;
                 self.send(Update::Plugins(plugins));
