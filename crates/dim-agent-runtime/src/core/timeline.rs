@@ -1,7 +1,7 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, Result, StoredEvent, TimelineKey,
-    TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, Result, StoredEvent,
+    TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
@@ -737,6 +737,15 @@ impl Timeline {
     #[service(skip)]
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
         self.context_from(through, None).await
+    }
+    /// The policy-relevant events at `through`, filtered by the store.
+    #[service(skip)]
+    pub async fn policy_facts(&self, through: u64, turn_id: &str) -> Result<PolicyFacts> {
+        let through = self.through(Some(through))?;
+        self.0
+            .store
+            .policy_facts(&self.0.key, through, turn_id)
+            .await
     }
     /// Select an interpreter-compatible cache before decoding or trimming facts.
     /// Invalid caches are disposable; failures reading required facts are not.

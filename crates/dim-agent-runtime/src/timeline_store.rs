@@ -1,5 +1,5 @@
 use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
-use dim_agent_types::{AgentEvent, RecoverySnapshot};
+use dim_agent_types::{AgentEvent, EventKind, RecoverySnapshot};
 use std::{ops::RangeInclusive, sync::Arc};
 
 /// Storage address of one Timeline inside an Agent's shared store.
@@ -7,6 +7,27 @@ use std::{ops::RangeInclusive, sync::Arc};
 pub struct TimelineKey {
     pub session_id: String,
     pub branch_id: String,
+}
+
+/// The events `ContextPolicy` needs, without the rest of the Timeline.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyFacts {
+    pub through: u64,
+    pub events: Vec<Arc<AgentEvent>>,
+}
+
+fn policy_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::ContextConfigured(_)
+            | EventKind::ContextCompaction(_)
+            | EventKind::ContextBudget(_)
+            | EventKind::ModelUsage(_)
+            | EventKind::ModelCall(_)
+            | EventKind::TurnStart(_)
+            | EventKind::InputMessage(_)
+            | EventKind::InputConsumed(_)
+    )
 }
 
 /// One stored event and its atomic publication boundary.
@@ -125,6 +146,29 @@ pub trait TimelineStore: Send + Sync + 'static {
         session_id: &'a str,
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>>;
+    /// The policy-relevant events at `through`. Stores may filter before
+    /// decoding; the default reads the prefix and keeps the known kinds.
+    fn policy_facts<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        _turn_id: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyFacts>> {
+        Box::pin(async move {
+            if through == 0 {
+                return Ok(PolicyFacts::default());
+            }
+            let records = self.read(key, 1..=through).await?;
+            Ok(PolicyFacts {
+                through,
+                events: records
+                    .into_iter()
+                    .map(|record| record.event)
+                    .filter(|event| policy_event(event.as_ref()))
+                    .collect(),
+            })
+        })
+    }
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,
