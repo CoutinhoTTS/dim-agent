@@ -18,6 +18,7 @@ original text.
 | [008 — Documentation ownership and immutable ADRs](008-documentation-ownership.md) | Proposed | Supersedes 006 D9's sentence that puts delivery status in ADR tables and design documents |
 | [009 — Permission decides; HostPlatform enforces](009-permission-decides.md) | Proposed | Supersedes the permission-preset clause of 003 D5 and the F5 escalation gate |
 | [010 — The sandbox is opt-in](010-sandbox-opt-in.md) | Proposed | Extends 009; replaces the F5 default-on policy and the policy file |
+| [011 — Execution settings](011-execution-settings.md) | Proposed | Extends 010; ExecutionSettings owns the source and provides the host port |
 | [012 — Session grants](012-session-grants.md) | Proposed | Extends 014; persisted per-session grants in `session.grants`; supersedes 009 D3's stored-grant sentence |
 | [015 — Sessions, branches and their content are plugins, not loader instances](015-scopes-are-plugins.md) | Proposed | Supersedes 004's mechanism for MCP connections; follows 006 D3 and D4 |
 
