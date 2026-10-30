@@ -405,9 +405,14 @@ fn model_catalog_declares_limits_for_one_model() {
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
-        let management = wire.read("provider.management");
-        assert_eq!(management["params"], json!({"providerId":"fixture"}));
-        wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{}}],"errors":[]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]}
+            ]}}),
+        );
         let edit = wire.read("provider.models.edit");
         assert_eq!(
             edit["params"],
@@ -463,8 +468,6 @@ fn model_catalog_declares_missing_limits_for_every_model() {
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
-        let management = wire.read("provider.management");
-        wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{}}],"errors":[]}));
         let catalog = wire.read("provider.catalog");
         wire.reply(
             &catalog,

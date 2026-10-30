@@ -3373,8 +3373,9 @@ pub(crate) enum LimitTarget {
 /// Declares a context window and maximum output for the target models
 /// through `provider.models.edit`, sending each model only the limits its
 /// catalog entry reports missing, so a declared value is never overwritten.
-/// Each write uses the version the previous reply returned. A conflict stops
-/// the run and keeps the server's reread requirement.
+/// The catalog reply carries the record version, and each write uses the
+/// version the previous reply returned. A conflict stops the run and keeps
+/// the server's reread requirement.
 pub(crate) async fn declare_model_limits(
     client: &mut Client,
     provider_id: &str,
@@ -3382,49 +3383,40 @@ pub(crate) async fn declare_model_limits(
     context_window: u64,
     max_output_tokens: u64,
 ) -> crate::Result<()> {
-    let snapshot: ProviderManagement = client
-        .typed("provider.management", json!({"providerId": provider_id}))
+    #[derive(Deserialize)]
+    struct Snapshot {
+        catalog: Option<Catalog>,
+    }
+    #[derive(Deserialize)]
+    struct Catalog {
+        version: u32,
+        models: Vec<CatalogModel>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CatalogModel {
+        id: String,
+        #[serde(default)]
+        missing_limits: Vec<String>,
+    }
+    let snapshot: Snapshot = client
+        .typed("provider.catalog", json!({"providerId": provider_id}))
         .await?;
-    let mut version = snapshot
-        .providers
-        .into_iter()
-        .next()
-        .ok_or("Provider management entry is missing")?
-        .version
+    let catalog = snapshot
+        .catalog
         .ok_or("Provider catalog must be refreshed before declaring model limits")?;
-    let targets = match target {
-        LimitTarget::Model(model) => vec![(model, vec!["contextWindow".into(), "maxOutputTokens".into()])],
-        LimitTarget::Missing => {
-            #[derive(Deserialize)]
-            struct Snapshot {
-                catalog: Option<Catalog>,
-            }
-            #[derive(Deserialize)]
-            struct Catalog {
-                models: Vec<CatalogModel>,
-            }
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct CatalogModel {
-                id: String,
-                #[serde(default)]
-                missing_limits: Vec<String>,
-            }
-            let snapshot: Snapshot = client
-                .typed("provider.catalog", json!({"providerId": provider_id}))
-                .await?;
-            snapshot
-                .catalog
-                .map(|catalog| {
-                    catalog
-                        .models
-                        .into_iter()
-                        .filter(|model| !model.missing_limits.is_empty())
-                        .map(|model| (model.id, model.missing_limits))
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
+    let mut version = catalog.version;
+    let targets: Vec<(String, Vec<String>)> = match target {
+        LimitTarget::Model(model) => vec![(
+            model,
+            vec!["contextWindow".into(), "maxOutputTokens".into()],
+        )],
+        LimitTarget::Missing => catalog
+            .models
+            .into_iter()
+            .filter(|model| !model.missing_limits.is_empty())
+            .map(|model| (model.id, model.missing_limits))
+            .collect(),
     };
     for (model_id, missing) in targets {
         #[derive(Deserialize)]
