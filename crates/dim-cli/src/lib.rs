@@ -21,6 +21,7 @@ mod plugin_command;
 mod plugins;
 mod projection;
 mod question;
+mod recording;
 mod sanitize;
 mod session;
 mod session_host;
@@ -809,6 +810,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             mcp_command::print_report(rows, notes);
             Ok(0)
         }
+        Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {
             session::chat(&mut client, &options, images.blocks, images.notes).await
         }

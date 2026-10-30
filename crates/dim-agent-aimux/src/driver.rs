@@ -139,6 +139,7 @@ impl ModelDriver for AimuxDriver {
             let request::PreparedRequest {
                 mut options,
                 tool_names,
+                recording,
             } = request::convert(&request, &protocol, preset)?;
             let (provider, profile) = match preset {
                 Some(OPENAI_CODEX_PRESET) => (
@@ -200,14 +201,20 @@ impl ModelDriver for AimuxDriver {
             options.headers = Some(headers.clone());
             let abort = AbortSignal::new();
             options.abort_signal = Some(abort.clone());
+            let mut pending = recording.as_ref().map(|capture| {
+                capture.input(&options, provider, &request.model_id);
+                capture.pending()
+            });
             let result = tokio::select! {
                 biased;
                 _ = self.generation.cancelled() => {
                     abort.abort();
+                    if let Some(pending) = pending.as_mut() { pending.cancelled(); }
                     return Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed"));
                 }
                 _ = cancel.cancelled() => {
                     abort.abort();
+                    if let Some(pending) = pending.as_mut() { pending.cancelled(); }
                     return Err(HostError::Cancelled("Model invocation cancelled".into()));
                 }
                 result = async {
@@ -264,8 +271,31 @@ impl ModelDriver for AimuxDriver {
                         }
                         ModelConnection::Local => unreachable!(),
                     }
-                } => result.map_err(|error| stream::error(error, &cancel))?,
+                } => match result.map_err(|error| stream::error(error, &cancel)) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Some(pending) = pending.as_mut() {
+                            pending.failed(&error.to_string());
+                        }
+                        return Err(error);
+                    }
+                },
             };
+            let result = match recording {
+                Some(capture) => {
+                    let mut result = result;
+                    result.stream = Box::pin(aimux_core::recording::RecordingOutcomeStream::new(
+                        result.stream,
+                        Some(capture.recorder),
+                        capture.call_id,
+                    ));
+                    result
+                }
+                None => result,
+            };
+            if let Some(pending) = pending.as_mut() {
+                pending.disarm();
+            }
             let stream = stream::convert(
                 result,
                 tool_names,
