@@ -3000,6 +3000,46 @@ async fn a_configured_roster_closing_reaches_the_roster() {
     soon(agent.close()).await.unwrap();
 }
 
+/// #549: a description set at the declaring owner's factory configuration
+/// reaches the model request byte for byte, carried through ToolRegistry and
+/// ToolBinding by the shipped assembly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_description_reaches_the_request_declaration() {
+    let description =
+        "Work with the other lines of this session. Configured for the #549 flow test.";
+    let probe = Arc::new(Probe::default());
+    let agent = builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            description: Some(description.into()),
+            ..Default::default()
+        },
+    )
+    .build();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("hello".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let tools = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.clone(),
+            _ => None,
+        })
+        .expect("the request carries the declarations");
+    let branch = tools
+        .iter()
+        .find(|tool| tool.name == "branch")
+        .expect("the branch tool is declared");
+    assert_eq!(branch.description, description);
+    soon(agent.close()).await.unwrap();
+}
+
 /// #552: `<dim-branch-line>` is written by the Session part TimelineTree, so
 /// its guide entry is registered there, at the Session, and a line carries it
 /// even where no branch part is loaded. `<dim-branch-lines>` stays with
