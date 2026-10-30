@@ -7504,7 +7504,7 @@
         "path BranchToolConfig::default",
         "path TimelineTreePlugin::new",
         "path TreeTimelinePlugin::new",
-        "path crate::timeline_tree::BranchLinePlugin::new",
+        "path crate::timeline_tree::BranchLinePlugin::with_config",
         "path crate::timeline_tree::BranchToolPlugin::with_config",
         "use crate::timeline_tree::BranchToolConfig",
         "use crate::timeline_tree::TimelineTreePlugin",

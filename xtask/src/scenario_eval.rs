@@ -214,9 +214,9 @@ enum TextMember {
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
 /// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
-/// description (timeline branches §12.4) are the texts exposed at a Rust
-/// factory configuration today; the other owners add their entries with their
-/// own factory members: Capabilities under
+/// texts (timeline branches §12.4) are the texts exposed at a Rust factory
+/// configuration today; the other owners add their entries with their own
+/// factory members: Capabilities under
 /// [#551](https://github.com/arcships/dim/issues/551), and ContextCompaction
 /// under [#554](https://github.com/arcships/dim/issues/554).
 /// A plugin's text is its manifest `config` member, which the plugin's row
@@ -229,6 +229,10 @@ const TEXTS: &[(&str, TextMember)] = &[
     (
         "timeline-tree/branch-description",
         TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
+    ),
+    (
+        "timeline-tree/roster-closing",
+        TextMember::Rust(|overrides, text| overrides.roster_closing = Some(text)),
     ),
     (
         "goal/objective",
@@ -2245,10 +2249,13 @@ mod tests {
             error.contains("timeline-tree/branch-description"),
             "{error}"
         );
+        assert!(error.contains("timeline-tree/roster-closing"), "{error}");
         let known = overrides("context-compaction/summary", Arc::from("candidate")).unwrap();
         assert_eq!(known.summary_prompt.as_deref(), Some("candidate"));
         let branch = overrides("timeline-tree/branch-description", Arc::from("candidate")).unwrap();
         assert_eq!(branch.branch_description.as_deref(), Some("candidate"));
+        let roster = overrides("timeline-tree/roster-closing", Arc::from("candidate")).unwrap();
+        assert_eq!(roster.roster_closing.as_deref(), Some("candidate"));
     }
 
     /// Goal's two texts are its manifest `config` members, patched into the

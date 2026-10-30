@@ -15,7 +15,34 @@ registerHooks({
   },
 })
 
-const { ProtocolError, readBranchCreate, readHistory, readMemberApproval, readNotification } = await import("./read.ts")
+const { ProtocolError, readAccountProviders, readBranchCreate, readHistory, readMemberApproval, readNotification, readProviderCatalog } = await import("./read.ts")
+
+test("model discovery reads managed providers and distinguishes missing catalogs from failures", () => {
+  assert.deepEqual(readAccountProviders([
+    { providerId: "dim", displayName: "Dim account", loginMethods: ["browser"] },
+    { providerId: "other", displayName: "Other account", loginMethods: [] },
+  ]), [
+    { providerId: "dim", displayName: "Dim account" },
+    { providerId: "other", displayName: "Other account" },
+  ])
+  assert.equal(readProviderCatalog({ catalog: null }), undefined)
+  assert.deepEqual(readProviderCatalog({ catalog: {
+    models: [
+      { id: "ready", name: "Ready", unavailableReason: null },
+      { id: "blocked", name: "Blocked", unavailableReason: "provider_unavailable" },
+    ],
+    disabledModelIds: ["ready"],
+  } }), {
+    models: [
+      { id: "ready", name: "Ready" },
+      { id: "blocked", name: "Blocked", unavailableReason: "provider_unavailable" },
+    ],
+    disabledModelIds: ["ready"],
+  })
+  assert.throws(() => readAccountProviders({ providers: [] }), ProtocolError)
+  assert.throws(() => readAccountProviders([{ providerId: "dim" }]), ProtocolError)
+  assert.throws(() => readProviderCatalog({ catalog: { models: [] } }), ProtocolError)
+})
 
 function page(event) {
   return readHistory({ events: [event], through: event.sequence, nextAfter: event.sequence, done: true })

@@ -156,6 +156,14 @@ export function readProviderList(value: unknown): ProviderSummary[] {
   })
 }
 
+export function readAccountProviders(value: unknown): Pick<ProviderSummary, "providerId" | "displayName">[] {
+  return arr(value, "account.providers").map((item, index) => {
+    const at = `account.providers[${index}]`
+    const provider = obj(item, at)
+    return { providerId: str(provider, "providerId", at), displayName: str(provider, "displayName", at) }
+  })
+}
+
 /** `provider.catalog`: `{catalog: null}` when the provider has no catalog. */
 export function readProviderCatalog(value: unknown): ProviderCatalog | undefined {
   const source = obj(value, "provider.catalog")

@@ -400,7 +400,7 @@ WorkspaceTools 不变。
 
 **策略。**
 
-- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则，以及 `message` 关于选模式的规则。它是分支唯一有工厂配置成员的策略文本：[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它部分覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域。回应 steer、结束 `main` 自己的等待、不重做线上的工作仍未覆盖（[#636](https://github.com/arcships/dim/issues/636)）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them." 也是 `main` 的协调文字；它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则，以及 `message` 关于选模式的规则。[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它部分覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域。回应 steer、结束 `main` 自己的等待、不重做线上的工作仍未覆盖（[#636](https://github.com/arcships/dim/issues/636)）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them." 也是 `main` 的协调文字；[`BranchToolConfig.roster_closing`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这句，不替换别的。
 - **线的工作规则。** "How you work with P:" 的五条要点——目的、消息（含 "Do not repeat what P already knows"）、工作区、用户和结束——除了点明机制的从句："You cannot open lines"、动作名与模式名，以及 "the file was modified after it was last read"（`edit` 与 `write` 报告的那次失败）是协议，见上。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
 - **通知的指引。** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." 与 "read it if you need what it did."。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
 
