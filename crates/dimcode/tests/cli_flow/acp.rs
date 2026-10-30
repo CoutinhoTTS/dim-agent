@@ -1041,6 +1041,49 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
 }
 
 #[test]
+fn acp_stdio_creates_a_session_with_the_native_provider_selection() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon = home.daemon(move |wire| {
+        let mut methods = METHODS.to_vec();
+        methods.extend(["account.providers", "provider.selection"]);
+        wire.hello(&methods);
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([{"providerId":"selected-managed","displayName":"Selected","loginMethods":["browser"]}]));
+        let status = wire.read("account.status");
+        wire.reply(&status, json!({"account":null}));
+        for authenticated in [false, true] {
+            let selection = wire.read("provider.selection");
+            assert_eq!(selection["params"], json!({"cwd":cwd}));
+            wire.reply(&selection, json!({"selection":{"provider_id":"selected-managed","model_id":"selected-model","version":1}}));
+            let status = wire.read("account.status");
+            assert_eq!(status["params"]["providerId"], "selected-managed");
+            wire.reply(&status, json!({"account":authenticated.then(|| json!({"displayName":"fixture"}))}));
+        }
+        let created = wire.created();
+        assert_eq!(created["params"]["cwd"], json!(cwd));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    let rejected = peer.response(2);
+    assert_eq!(rejected["error"]["code"], -32000, "{rejected}");
+    assert_eq!(
+        rejected["error"]["message"],
+        "Authentication required for the selected provider"
+    );
+    peer.send(3, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert_eq!(peer.response(3)["result"]["sessionId"], "session");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
     for (capabilities, terminal_available) in [
         (json!({"auth":{"terminal":true}}), true),
