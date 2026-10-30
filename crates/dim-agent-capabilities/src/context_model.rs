@@ -12,9 +12,8 @@ use tokio_util::sync::CancellationToken;
 const RESERVE_RATIO: f64 = 0.10;
 const RESERVE_MIN_TOKENS: f64 = 16_000.;
 const RESERVE_MAX_RATIO: f64 = 0.20;
-/// Serialized UTF-8 bytes per estimated token: the product's own rule, which
-/// every caller estimating tokens from serialized bytes uses.
-pub const BYTES_PER_TOKEN: f64 = 4.;
+/// Serialized UTF-8 bytes per estimated token.
+const BYTES_PER_TOKEN: f64 = 4.;
 /// Estimated tokens of one image part.
 const IMAGE_TOKENS: f64 = 1_600.;
 
