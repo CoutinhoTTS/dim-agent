@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::ui::atomic;
+
 const FILE: &str = "input-history.json";
 const MAX_ENTRIES: usize = 10;
 
@@ -19,11 +21,11 @@ fn path(home: &Path) -> PathBuf {
     home.join(FILE)
 }
 
-fn read(home: &Path) -> Store {
-    let Ok(raw) = std::fs::read_to_string(path(home)) else {
+fn parse(raw: Option<&[u8]>) -> Store {
+    let Some(raw) = raw else {
         return Store::default();
     };
-    match serde_json::from_str::<Store>(&raw) {
+    match serde_json::from_slice::<Store>(raw) {
         Ok(store) if store.version == 1 => Store {
             version: 1,
             buckets: store
@@ -41,6 +43,10 @@ fn read(home: &Path) -> Store {
     }
 }
 
+fn read(home: &Path) -> Store {
+    parse(std::fs::read(path(home)).ok().as_deref())
+}
+
 pub fn load(home: &Path, cwd: &str) -> Vec<String> {
     let key = cwd.trim();
     if key.is_empty() {
@@ -49,40 +55,22 @@ pub fn load(home: &Path, cwd: &str) -> Vec<String> {
     read(home).buckets.remove(key).unwrap_or_default()
 }
 
-/// Appends `entry` for `cwd`, atomically (write a temp file, rename).
+/// Appends `entry` for `cwd` under the history's lock, so concurrent CLIs
+/// keep every entry.
 pub fn append(home: &Path, cwd: &str, entry: &str) -> std::io::Result<()> {
     let key = cwd.trim();
     if key.is_empty() || entry.is_empty() {
         return Ok(());
     }
-    let mut store = read(home);
-    store.version = 1;
-    let list = store.buckets.entry(key.to_owned()).or_default();
-    list.retain(|existing| existing != entry);
-    list.push(entry.to_owned());
-    let skip = list.len().saturating_sub(MAX_ENTRIES);
-    list.drain(..skip);
-    std::fs::create_dir_all(home)?;
-    let target = path(home);
-    let temp = target.with_extension(format!("json.{}.tmp", std::process::id()));
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(&serde_json::to_vec(&store)?)?;
-    drop(file);
-    std::fs::rename(&temp, &target).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp);
+    atomic::update(&path(home), Some(0o600), |current| {
+        let mut store = parse(current);
+        store.version = 1;
+        let list = store.buckets.entry(key.to_owned()).or_default();
+        list.retain(|existing| existing != entry);
+        list.push(entry.to_owned());
+        let skip = list.len().saturating_sub(MAX_ENTRIES);
+        list.drain(..skip);
+        Ok(Some(serde_json::to_vec(&store)?))
     })
 }
 
@@ -125,5 +113,33 @@ mod tests {
         assert!(load(dir.path(), "/x").is_empty());
         append(dir.path(), "/x", "ok").unwrap();
         assert_eq!(load(dir.path(), "/x"), vec!["ok"]);
+    }
+
+    /// Concurrent CLIs appending to one home keep every entry.
+    #[test]
+    fn concurrent_appends_keep_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        for round in 0..40 {
+            let home = dir.path().join(format!("round-{round}"));
+            std::thread::scope(|scope| {
+                for writer in 0..4 {
+                    let home = home.clone();
+                    scope.spawn(move || {
+                        for n in 0..2 {
+                            append(&home, "/work", &format!("w{writer} {n}")).unwrap();
+                        }
+                    });
+                }
+            });
+            let mut entries = load(&home, "/work");
+            let expected: Vec<String> = (0..4)
+                .flat_map(|writer| (0..2).map(move |n| format!("w{writer} {n}")))
+                .collect();
+            assert_eq!(entries.len(), expected.len(), "round {round}: {entries:?}");
+            entries.sort();
+            let mut expected_sorted = expected;
+            expected_sorted.sort();
+            assert_eq!(entries, expected_sorted, "round {round}");
+        }
     }
 }

@@ -3066,9 +3066,7 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::composer",
       "file": "crates/dim-cli/src/ui/composer/history.rs",
-      "unexpandedMacros": [
-        "format"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_cli::ui::composer::history::tests",
@@ -24502,6 +24500,14 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::history",
+      "to": "dim_cli::ui::atomic",
+      "references": [
+        "path atomic::update",
+        "use crate::ui::atomic"
       ]
     },
     {
