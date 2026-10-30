@@ -579,6 +579,7 @@
       "file": "crates/dim-agent-capabilities/src/model_provider.rs",
       "unexpandedMacros": [
         "matches",
+        "tracing::error",
         "tracing::info_span",
         "unreachable",
         "vec"
@@ -597,6 +598,7 @@
       "parent": "dim_agent_capabilities::model_provider",
       "file": "crates/dim-agent-capabilities/src/model_provider/recovery.rs",
       "unexpandedMacros": [
+        "matches",
         "tokio::select"
       ]
     },
@@ -859,6 +861,15 @@
         "serde_json::json",
         "unreachable",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::summary_strategy::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::summary_strategy",
+      "file": "crates/dim-agent-capabilities/src/summary_strategy.rs",
+      "unexpandedMacros": [
+        "assert"
       ]
     },
     {
@@ -4993,6 +5004,7 @@
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::ModelEnd",
         "path EventContent::PermissionChanged",
         "path EventContent::ToolCall",
         "path EventContent::ToolResult",
@@ -6965,6 +6977,7 @@
         "path CompactionDiagnosticsRecord",
         "path CompactionReason::Auto",
         "path CompactionReason::Manual",
+        "path CompactionStrategyRecord",
         "path CompactionTrigger",
         "path CompactionTrigger::Manual",
         "path CompactionTrigger::ProviderOutputBudgetExhausted",
@@ -8426,6 +8439,7 @@
         "path HostError::Cancelled",
         "path HostError::Failed",
         "path HostError::failed",
+        "path HostErrorKind::Other",
         "path ModelChunk",
         "path ModelChunk::Content",
         "path ModelChunk::MessageStart",
@@ -8511,6 +8525,7 @@
         "path ModelCallData",
         "path ModelContentData",
         "path ModelUsageData",
+        "path ProviderPresentation",
         "path TextData",
         "path ThinkingData",
         "path ToolCallResult",
@@ -10199,6 +10214,13 @@
         "use crate::prompt_guide::GuideEntries",
         "use crate::prompt_guide::GuideEntry",
         "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::summary_strategy::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {

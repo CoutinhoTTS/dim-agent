@@ -69,6 +69,89 @@ impl DynPlugin for Rewrite {
     }
 }
 struct RecordingModel(Arc<Mutex<Vec<Arc<ModelRequest>>>>);
+
+struct OutputLimitedModel;
+impl ModelDriver for OutputLimitedModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        if request.config.as_ref().and_then(|config| config.max_tokens) == Some(16.0) {
+            Box::pin(async {
+                Ok(Box::pin(futures_util::stream::iter([
+                    Ok(ModelChunk::MessageStart {
+                        message_id: "limited".into(),
+                    }),
+                    Ok(ModelChunk::Text("partial output".into())),
+                    Ok(ModelChunk::MessageStop {
+                        message_id: "limited".into(),
+                        reason: ModelStopReason::MaxTokens,
+                    }),
+                ])) as ModelStream)
+            })
+        } else {
+            EchoModel.invoke(request, connection, cancel)
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit() {
+    let agent = builder(Arc::new(OutputLimitedModel), Arc::new(MockTools)).build();
+    let mut config = SessionConfig::default();
+    config.model.config = Some(ModelConfig {
+        max_tokens: Some(16.0),
+        ..Default::default()
+    });
+    let mut model = config.model.clone();
+    let session = agent.create_session(config).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let history = session.history("main", None).await.unwrap();
+    assert!(history.iter().any(|event| matches!(&event.kind,
+        EventKind::ModelOutputEnd(ModelOutputEndData { outcome: ModelOutputOutcome::Failed { error, budget: None, presentation: Some(presentation) }, .. })
+        if error.contains(&model.provider_id) && error.contains(&model.model_id)
+            && presentation.source == model.provider_id && presentation.reason == "max_tokens"
+            && presentation.action.as_deref().is_some_and(|action| action.contains("output token limit")))));
+    assert!(matches!(
+        &history.last().unwrap().kind,
+        EventKind::TurnEnd(TurnEndData {
+            outcome: TurnOutcome::Failed { .. },
+            ..
+        })
+    ));
+    model.config.as_mut().unwrap().max_tokens = Some(128.0);
+    session
+        .configure(
+            ConfigureUpdate {
+                model: Some(model),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session
+        .submit("continue".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let history = session.history("main", None).await.unwrap();
+    assert!(matches!(
+        &history.last().unwrap().kind,
+        EventKind::TurnEnd(TurnEndData {
+            outcome: TurnOutcome::Completed { .. },
+            ..
+        })
+    ));
+    agent.close().await.unwrap();
+}
+
 impl ModelDriver for RecordingModel {
     fn invoke(
         &self,

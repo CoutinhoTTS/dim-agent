@@ -436,7 +436,7 @@ fn isolated_home(path: &Path) -> Result<PathBuf> {
 /// (`window_facts().count_tokens`) on the request the text travels in. The
 /// count reads the request's bytes; the window it is built with does not
 /// enter it.
-fn text_tokens(model: &ModelId, text: &str) -> f64 {
+pub(crate) fn text_tokens(model: &ModelId, text: &str) -> f64 {
     let mut request = ModelRequest::new(&model.provider_id, &model.model_id, vec![]);
     request.system = Some(Arc::new(SystemPrompt::Text(text.into())));
     window_facts(0, 0, &request).count_tokens(&request)
