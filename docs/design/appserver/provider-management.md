@@ -523,11 +523,11 @@ carry user configuration; missing maps/lists mean no corresponding user data:
 
 The two model limits carry their own, later format decision: the
 [#522 storage decision](native-storage-format.md#522-格式决定) makes an
-undeclared limit an absent key, which no v23 reader can parse either way, and
-upgrades stored records in place instead of reusing a version. The decision
-states the next version after v23, the rewrite the startup transaction performs,
-and the old binary's startup refusal. §3.5 states how the effective catalog then
-supplies what a source declares.
+undeclared limit an absent key, which a reader of the earlier format cannot
+parse either way, and upgrades stored records in place instead of reusing a
+version. The decision states the format version this change introduces, the
+rewrite the startup transaction performs, and the old binary's startup refusal.
+§3.5 states how the effective catalog then supplies what a source declares.
 
 The [storage contract](native-storage-format.md#329-格式决定) records the v19
 decision and its downgrade loss. No fields are added to `ModelMetadata`,
