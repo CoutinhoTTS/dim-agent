@@ -292,6 +292,9 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 该规则宁可再次询问，也不保留可能的假定值：用户若恰好输入 128000 或 16384，升级后该项显示为
 未声明，用 `--set-missing-limits` 或 `/models` 重新声明即可。
 
+两个旧版导入器沿用同一划分：旧记录中 `bundled`/`remote` 行的 `models` 属于投影输出，按严格
+规则处理；用户模型与 `modelsSource` 为 `user` 的行按逐字段规则处理。
+
 Session 保留已采用的能力快照。模型变为未声明的 Session 仍可恢复并保持可读；下一次请求在
 解析器处失败，错误指出缺失的上限，且发生在凭据或网络 I/O 之前。两项都声明后再选择该模型
 即采用新值；在此之前 `/usage` 报告已采用快照，与其他描述修改相同（§6）。

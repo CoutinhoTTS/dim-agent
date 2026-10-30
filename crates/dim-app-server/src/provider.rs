@@ -27,7 +27,7 @@ use crate::{
     model_catalog::{
         BundledCatalog, CatalogCapabilities, MAX_MODEL_TOKENS, ModelEdit, ModelEntry,
         ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
-        declare_supplied_limits, declared_limit_values, declared_limits, inherit_limits,
+        declare_supplied_limits, declared_limit_values, drop_undeclared_limits, inherit_limits,
         limits_valid,
     },
     storage::SqliteStorage,
@@ -1138,38 +1138,6 @@ pub(crate) fn rewrite_stored_limits(
         }
     }
     Ok(())
-}
-
-/// Deletes the limits neither the mark nor `metadata.raw` declares.
-fn drop_undeclared_limits(model: &mut ModelEntry) -> bool {
-    let marked = model
-        .metadata
-        .as_ref()
-        .map(|metadata| metadata.capability_override_fields.as_slice())
-        .unwrap_or_default();
-    // A listed model keeps the item it came from in `raw`; a limit that item
-    // declares was a declaration even when the store does not mark it.
-    let (declared_context, declared_output) = model
-        .metadata
-        .as_ref()
-        .map(|metadata| declared_limits(&metadata.raw))
-        .unwrap_or((None, None));
-    let mut changed = false;
-    if model.capabilities.context_window.is_some()
-        && !marked.iter().any(|field| field == "contextWindow")
-        && declared_context.is_none()
-    {
-        model.capabilities.context_window = None;
-        changed = true;
-    }
-    if model.capabilities.max_output_tokens.is_some()
-        && !marked.iter().any(|field| field == "maxOutputTokens")
-        && declared_output.is_none()
-    {
-        model.capabilities.max_output_tokens = None;
-        changed = true;
-    }
-    changed
 }
 
 /// The limits a model does not declare come from the bundled catalog, which

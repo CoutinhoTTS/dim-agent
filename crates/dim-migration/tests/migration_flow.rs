@@ -1240,7 +1240,9 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
 }
 
 /// #522: a legacy limit equal to the assumed pair imports as undeclared,
-/// while a typed or `metadata.raw`-declared value imports as a declaration.
+/// while a typed or `metadata.raw`-declared value imports as a declaration;
+/// the `models` of a `bundled` or `remote` row are listing output, so an
+/// unmarked limit no raw item declares is dropped whatever its value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn migration_declares_only_the_limits_the_source_does() {
     let directory = tempfile::tempdir().unwrap();
@@ -1262,6 +1264,16 @@ async fn migration_declares_only_the_limits_the_source_does() {
          "metadata":{"raw":{"inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
     ]);
     db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES ('legacy-limits','custom','Legacy limits','openai-responses','https://model.example/v1',?1,?2,?3,'user',1,1)", params![json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), models.to_string()]).unwrap();
+    let listing = json!([
+        {"modelId":"derived","displayName":"Derived","status":"active",
+         "capabilities":limits(200_000,20_000)},
+        {"modelId":"listed-declared","displayName":"Listed Declared","status":"active",
+         "capabilities":limits(200_000,20_000),
+         "metadata":{"raw":{"inputTokenLimit":200_000,"outputTokenLimit":20_000}}}
+    ]);
+    for (id, source) in [("legacy-remote", "remote"), ("legacy-bundled", "bundled")] {
+        db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES (?1,'custom',?2,'openai-responses','https://model.example/v1',?3,?4,?5,?6,1,1)", params![id, format!("Legacy {source}"), json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), listing.to_string(), source]).unwrap();
+    }
     let target = directory.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(
@@ -1278,12 +1290,14 @@ async fn migration_declares_only_the_limits_the_source_does() {
     (&plugin).await.unwrap();
     let migration = root.get::<Migration>().unwrap();
     let report = migration.run(source.clone(), true, None).await.unwrap();
-    assert!(
-        report.objects.iter().any(|item| item.kind == "provider"
-            && item.id == "legacy-limits"
-            && item.outcome == Outcome::Imported),
-        "{report:?}"
-    );
+    for id in ["legacy-limits", "legacy-remote", "legacy-bundled"] {
+        assert!(
+            report.objects.iter().any(|item| item.kind == "provider"
+                && item.id == id
+                && item.outcome == Outcome::Imported),
+            "{report:?}"
+        );
+    }
     plugin.dispose().await.unwrap();
     root.shutdown().await.unwrap();
     let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
@@ -1316,6 +1330,37 @@ async fn migration_declares_only_the_limits_the_source_does() {
         declared["metadata"]["capabilityOverrideFields"],
         json!(["contextWindow", "maxOutputTokens"])
     );
+    for id in ["legacy-remote", "legacy-bundled"] {
+        let record: Value = serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let models = record["models"].as_array().unwrap();
+        let entry = |model_id: &str| {
+            models
+                .iter()
+                .find(|model| model["modelId"] == model_id)
+                .unwrap()
+        };
+        let derived = entry("derived");
+        assert!(
+            derived["capabilities"].get("contextWindow").is_none(),
+            "{id}"
+        );
+        assert!(
+            derived["capabilities"].get("maxOutputTokens").is_none(),
+            "{id}"
+        );
+        let declared = entry("listed-declared");
+        assert_eq!(declared["capabilities"]["contextWindow"], 200_000);
+        assert_eq!(declared["capabilities"]["maxOutputTokens"], 20_000);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

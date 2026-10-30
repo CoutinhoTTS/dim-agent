@@ -5305,7 +5305,9 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
 
 /// #522: a legacy limit that equals the assumed pair and carries no
 /// declaration imports as undeclared, while a typed or `metadata.raw`-declared
-/// value imports as a declaration.
+/// value imports as a declaration; the `models` of a `bundled` or `remote` row
+/// are listing output, so an unmarked limit no raw item declares is dropped
+/// whatever its value.
 #[tokio::test]
 async fn legacy_import_declares_only_the_limits_the_source_does() {
     let home =
@@ -5343,6 +5345,16 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
              "metadata":{"raw":{"inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
         ]);
         db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES ('legacy-limits','custom','Legacy limits','openai-responses','https://model.example/v1',?1,?2,?3,'user',1,1)", rusqlite::params![json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), models.to_string()]).unwrap();
+        let listing = json!([
+            {"modelId":"derived","displayName":"Derived","status":"active",
+             "capabilities":limits(200_000,20_000)},
+            {"modelId":"listed-declared","displayName":"Listed Declared","status":"active",
+             "capabilities":limits(200_000,20_000),
+             "metadata":{"raw":{"inputTokenLimit":200_000,"outputTokenLimit":20_000}}}
+        ]);
+        for (id, source) in [("legacy-remote", "remote"), ("legacy-bundled", "bundled")] {
+            db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,enabled,version) VALUES (?1,'custom',?2,'openai-responses','https://model.example/v1',?3,?4,?5,?6,1,1)", rusqlite::params![id, format!("Legacy {source}"), json!({"type":"bearer"}).to_string(), json!({"type":"bearer","token":"import-secret"}).to_string(), listing.to_string(), source]).unwrap();
+        }
     }
     let root = Ctx::root().unwrap();
     root.plugin(
@@ -5370,7 +5382,16 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(result["items"][0]["status"], "imported", "{result}");
+    assert_eq!(
+        result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["status"] == "imported")
+            .count(),
+        3,
+        "{result}"
+    );
     let imported = provider
         .management(Some("legacy-limits".into()), &cancel)
         .await
@@ -5402,6 +5423,32 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
     assert_eq!(declared.model.capabilities.context_window, Some(64_000));
     assert_eq!(declared.model.capabilities.max_output_tokens, Some(8_000));
     assert_eq!(marks("declared"), ["contextWindow", "maxOutputTokens"]);
+    for id in ["legacy-remote", "legacy-bundled"] {
+        let imported = provider.management(Some(id.into()), &cancel).await.unwrap();
+        let models = imported.providers[0].models.as_ref().unwrap();
+        let entry = |model_id: &str| {
+            models
+                .iter()
+                .find(|model| model.model.model_id == model_id)
+                .unwrap()
+        };
+        let marks = |model_id: &str| {
+            entry(model_id)
+                .model
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.capability_override_fields.clone())
+                .unwrap_or_default()
+        };
+        let derived = entry("derived");
+        assert_eq!(derived.model.capabilities.context_window, None, "{id}");
+        assert_eq!(derived.model.capabilities.max_output_tokens, None, "{id}");
+        assert!(marks("derived").is_empty(), "{id}");
+        let declared = entry("listed-declared");
+        assert_eq!(declared.model.capabilities.context_window, Some(200_000));
+        assert_eq!(declared.model.capabilities.max_output_tokens, Some(20_000));
+        assert!(marks("listed-declared").is_empty());
+    }
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

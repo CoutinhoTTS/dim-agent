@@ -992,6 +992,41 @@ fn supplied_limit(
     }
 }
 
+/// Deletes the limits of projection output that neither the mark nor
+/// `metadata.raw` declares: a listing, a bundle-derived entry or a descriptor
+/// override is re-derived from its source, so an unmarked limit there was the
+/// old assumed default whatever its value.
+pub fn drop_undeclared_limits(model: &mut ModelEntry) -> bool {
+    let marked = model
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.capability_override_fields.as_slice())
+        .unwrap_or_default();
+    // A listed model keeps the item it came from in `raw`; a limit that item
+    // declares was a declaration even when the store does not mark it.
+    let (declared_context, declared_output) = model
+        .metadata
+        .as_ref()
+        .map(|metadata| declared_limits(&metadata.raw))
+        .unwrap_or((None, None));
+    let mut changed = false;
+    if model.capabilities.context_window.is_some()
+        && !marked.iter().any(|field| field == "contextWindow")
+        && declared_context.is_none()
+    {
+        model.capabilities.context_window = None;
+        changed = true;
+    }
+    if model.capabilities.max_output_tokens.is_some()
+        && !marked.iter().any(|field| field == "maxOutputTokens")
+        && declared_output.is_none()
+    {
+        model.capabilities.max_output_tokens = None;
+        changed = true;
+    }
+    changed
+}
+
 fn inherit_reasoning(current: &mut ModelReasoning, fallback: &ModelReasoning) {
     if !current.supported {
         return;

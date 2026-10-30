@@ -389,6 +389,10 @@ user who typed exactly 128000 or 16384 sees that field listed as undeclared
 after the upgrade and declares it again with `--set-missing-limits` or
 `/models`.
 
+The same split applies in both legacy importers: the `models` of a `bundled` or
+`remote` legacy row are listing output and take the strict rule, while user
+models and the `models` of a `user` row keep the per-field rule.
+
 A Session keeps its adopted capability snapshot. One whose model becomes
 undeclared resumes and stays readable; its next request fails in the resolver with
 the missing limits named, before credentials or network I/O. After both values are

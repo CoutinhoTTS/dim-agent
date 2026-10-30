@@ -430,13 +430,19 @@ fn convert_provider(
             }
         });
     }
-    // A legacy descriptor that states a limit declared it, unless the value
-    // may be the assumed pair the legacy schema and v24's probe filled in.
-    for model in models
-        .iter_mut()
-        .chain(&mut user_models)
-        .chain(&mut overrides)
-    {
+    // User-supplied entries declare what they state, unless the value may be
+    // the assumed pair the legacy schema and v24's probe filled in. The
+    // `models` of a `bundled` or `remote` row are listing output, so they keep
+    // the v25 rewrite's stricter rule: an unmarked limit that `metadata.raw`
+    // does not declare is dropped whatever its value.
+    for model in &mut models {
+        if models_source == "user" {
+            declare_supplied_limits(model);
+        } else {
+            drop_undeclared_limits(model);
+        }
+    }
+    for model in user_models.iter_mut().chain(&mut overrides) {
         declare_supplied_limits(model);
     }
     let metadata =
