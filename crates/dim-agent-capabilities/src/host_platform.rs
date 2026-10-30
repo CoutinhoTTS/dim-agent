@@ -325,7 +325,6 @@ impl HostPlatform {
         spec: ProcessSpec,
         _workspace: &Path,
         _output_dir: Option<&Path>,
-        _requested: Option<Sandbox>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
         Ok((spec, None, None))

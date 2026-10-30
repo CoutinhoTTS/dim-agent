@@ -82,7 +82,7 @@ impl Default for IsolationPolicy {
             version: 2,
             enabled: None,
             network: None,
-            sandbox: Some(Sandbox::Workspace),
+            sandbox: Some(Sandbox::Host),
             escalation: Some(IsolationEscalation::Ask),
             read_only_paths: None,
             writable_paths: None,
