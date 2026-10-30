@@ -86,18 +86,20 @@ composition already made is unaffected by a later registration or withdrawal on
 its own: the adopted System moves only at an adoption that publishes a
 configuration. Prompt's branch part makes the load or unload one of them:
 before the branch's own open adoption composes it takes the entries'
-`changes()` watch and the composition it starts from, and once that adoption
-has run it composes the branch's guide again on every change and adopts it with
-the settings unchanged on every open branch whose composition moved, a
-registration made while the open runs included. A branch whose composition did
-not move reads nothing, because the composition reads the in-memory entries
-only. One more adoption runs inside every open, over the configuration the
-branch carries and before it reports itself open, so a fork and a restore
-converge on the entries in force at load and their first request carries them;
-it costs one context read per open and publishes nothing when the adopted
-System already equals the composition. The listener ends when the branch starts
-closing, and an adoption that already started reading refuses its append then,
-so entries that withdraw only because the branch shuts down are never recorded.
+`changes()` watch and the composition it starts from, and starts listening
+before that adoption runs, so a change during the adoption is queued behind
+the open, whose own reconciliation still comes first; on every change it
+composes the branch's guide again and adopts it with the settings unchanged
+on every open branch whose composition moved, a registration made while
+the open runs included. A branch whose composition did not move reads
+nothing, because the composition reads the in-memory entries only. One more
+adoption runs inside every open, over the configuration the branch carries
+and before it reports itself open, so a fork and a restore converge on the
+entries in force at load and their first request carries them; it costs one
+context read per open and publishes nothing when the adopted System already
+equals the composition. The listener ends when the branch starts closing,
+and an adoption that already started reading refuses its append then, so
+entries that withdraw only because the branch shuts down are never recorded.
 A writer's tools can reach a request one step before its entry: the tools bind through the tool adoption as soon as their source loads,
 while the entry arrives through the guide adoption and its queue, so a step
 between the two carries the new tools with the previous System. A tools-only or
@@ -123,6 +125,7 @@ through the request Loop assembles, never through a request of their own.
 `an_entry_withdrawing_as_the_session_unloads_is_not_recorded`,
 `a_reloaded_writer_that_keeps_its_entry_records_nothing`,
 `a_composition_that_moved_and_returned_while_its_branch_opens_is_adopted`,
+`an_entry_that_returns_during_the_open_adoption_is_adopted`,
 `each_branch_keeps_its_own_entries`, `the_frame_states_the_compaction_handle`;
 [reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
 `an_entry_leaves_with_its_contributor`.
