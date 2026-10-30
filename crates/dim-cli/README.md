@@ -134,8 +134,9 @@ insertion; removing a marker never deletes the original file. A rejected file gr
 leaves the draft unchanged. File references retain separate ordered text content blocks.
 An image whose sent form differs gives both sizes when the size changed,
 `[Image 1: screen.png · 8064×6048 → 2048×1536]`, both media types when the re-encode
-changed the type, `[Image 1: screen.png · image/png → image/jpeg]`, and ` · first frame`
-for an animation; an image sent as it is keeps the plain marker.
+changed the type, `[Image 1: screen.png · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image
+sent as it is keeps the plain marker.
 A path attached while the model takes images is read and scaled at insertion,
 and a model that takes no images still receives the link.
 

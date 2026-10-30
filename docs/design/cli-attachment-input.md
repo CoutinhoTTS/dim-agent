@@ -60,8 +60,9 @@ keeps the cursor in the draft. Image pixels are not rendered in the terminal. Ma
 escaped file names or paste line counts; labels are presentation, not model content. An image
 whose sent form differs from its source's says how: both sizes when the size changed, as in
 `[Image 1: photo.jpg · 8064×6048 → 2048×1536]`, both media types when the re-encode changed
-the type, as in `[Image 1: shot.png · image/png → image/jpeg]`, and ` · first frame` for an
-animation; an image sent as it is keeps the plain marker.
+the type, as in `[Image 1: shot.png · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image
+sent as it is keeps the plain marker.
 After submission, transcript messages show image blocks as numbered `[Image #N]` markers
 on separate lines in content order, including image-only messages and messages restored
 from history. These fixed tokens do not change with the interface language. Numbering starts
@@ -151,8 +152,9 @@ from the line client's above:
 - **Clipboard images** read `[Image #N]`, counting the draft's images. An image whose sent form
   differs from its source's says how: both sizes when the size changed,
   `[Image #1 · 8064×6048 → 2048×1536]`, both media types when the re-encode changed the type,
-  `[Image #1 · image/png → image/jpeg]`, and ` · first frame` for an animation; an image sent as
-  it is keeps the plain marker.
+  `[Image #1 · image/png → image/jpeg]`, ` · first frame` for an animation, and ` · re-encoded`
+  when the re-encode kept both the size and the type; an image sent as it is keeps the plain
+  marker.
 - **Pasted text.** A paste of fewer than 4 lines and 201 characters is typed into the draft. A
   longer one is one atomic `[... N lines]` marker (over 5,000 characters `[Text: preview (N
   chars)]`), and on submission it is stored with `attachment.put` and sent as
@@ -349,10 +351,10 @@ invoking process's cwd. Apply the same scaling rule and encoded-frame limit befo
 adds one line to stderr before the run starts, naming the sent form: `Scaled photo.jpg from
 8064×6048 to 2048×1536 px (image/jpeg)` when the size changed, with a resized animation
 appending `; only the first frame is sent`; `Re-encoded shot.png as image/jpeg (1500×1500 px)`
-when only the encoding's media type changed; and `Only the first frame of anim.gif is sent
-(image/jpeg)` when only the frame changed. The media type in parentheses is the one sent, so a
-size change that also changed the type is still one line. stdout keeps carrying only the reply
-or the JSON stream.
+when only the encoding changed, whether or not the media type did; and `Only the first frame
+of anim.gif is sent (image/jpeg)` when only the frame changed. The media type in parentheses
+is the one sent, so a size change that also changed the type is still one line. stdout keeps
+carrying only the reply or the JSON stream.
 Invalid input reports an error and a nonzero exit.
 Headless execution does not inspect the clipboard or infer images/file references from text.
 Its notification output and approval/stop semantics remain the existing exec contract.

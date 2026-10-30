@@ -202,6 +202,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "[Image #{index}]" => "[이미지 #{index}]",
         "[Image #{index}{details}]" => "[이미지 #{index}{details}]",
         "first frame" => "첫 프레임만",
+        "re-encoded" => "재인코딩됨",
         "The current model does not accept images; remove {label} to send" => {
             "현재 모델은 이미지 미지원, {label} 삭제 후 전송"
         }

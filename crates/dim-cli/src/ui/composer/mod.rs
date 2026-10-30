@@ -1030,7 +1030,8 @@ pub fn read_planned(plan: &[PlannedFile]) -> Result<Vec<Option<crate::images::At
 
 /// What a marker adds to its plain form: both sizes when the sent size
 /// differs from the original, both media types when the encoding changed the
-/// type, and the first-frame note of an animation.
+/// type, the first-frame note of an animation, and a re-encode that kept both
+/// the size and the type.
 fn image_details(image: &crate::images::Attached) -> String {
     let mut details = String::new();
     if image.resized() {
@@ -1044,6 +1045,10 @@ fn image_details(image: &crate::images::Attached) -> String {
     if image.animated {
         details.push_str(" · ");
         details.push_str(t("first frame"));
+    }
+    if image.reencoded() {
+        details.push_str(" · ");
+        details.push_str(t("re-encoded"));
     }
     details
 }
@@ -1251,9 +1256,8 @@ mod tests {
         std::fs::write(path, png.into_inner()).unwrap();
     }
 
-    /// Deterministic noise: a PNG within the edge limit whose base64 is over
-    /// the byte limit, so it is sent as a JPEG at the same size.
-    fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    /// Deterministic RGB noise of `width`×`height` pixels.
+    fn noise_rgb(width: u32, height: u32) -> Vec<u8> {
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut step = || {
             state ^= state << 13;
@@ -1266,15 +1270,54 @@ mod tests {
             let (red, green, blue) = (step(), step(), step());
             pixels.extend([(red >> 24) as u8, (green >> 24) as u8, (blue >> 24) as u8]);
         }
+        pixels
+    }
+
+    /// Deterministic noise: a PNG within the edge limit whose base64 is over
+    /// the byte limit, so it is sent as a JPEG at the same size.
+    fn noise_png(width: u32, height: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         image::ImageEncoder::write_image(
             image::codecs::png::PngEncoder::new(&mut bytes),
-            &pixels,
+            &noise_rgb(width, height),
             width,
             height,
             image::ExtendedColorType::Rgb8,
         )
         .unwrap();
+        bytes
+    }
+
+    fn noise_jpeg(width: u32, height: u32, quality: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality);
+        encoder
+            .encode(
+                &noise_rgb(width, height),
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// `noise_jpeg`, with a minimal EXIF APP1 segment whose one IFD0 entry is
+    /// the orientation: `3` turns the image 180° and `6` 90° clockwise.
+    fn oriented_jpeg(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+        let mut bytes = noise_jpeg(width, height, 90);
+        let mut exif = vec![0xFF, 0xE1, 0x00, 0x22];
+        exif.extend(b"Exif\0\0");
+        exif.extend(b"II\x2A\x00");
+        exif.extend(8u32.to_le_bytes());
+        exif.extend(1u16.to_le_bytes());
+        exif.extend(0x0112u16.to_le_bytes());
+        exif.extend(3u16.to_le_bytes());
+        exif.extend(1u32.to_le_bytes());
+        exif.extend(orientation.to_le_bytes());
+        exif.extend([0, 0]);
+        exif.extend(0u32.to_le_bytes());
+        bytes.splice(2..2, exif);
         bytes
     }
 
@@ -1374,6 +1417,40 @@ mod tests {
         let mut c = Composer::new(Vec::new());
         c.attach_image(image).unwrap();
         assert_eq!(c.text(), "[Image #1 · image/png → image/jpeg]");
+    }
+
+    /// A JPEG within both limits whose EXIF orientation turns it upright is
+    /// sent re-encoded at the same size and media type: the marker says so.
+    #[test]
+    fn an_exif_rotation_reencoded_at_the_same_size_says_reencoded() {
+        for orientation in [3, 6] {
+            let image = crate::images::from_bytes(oriented_jpeg(40, 20, orientation)).unwrap();
+            assert!(
+                image.scaled && !image.resized() && image.media_types().is_none(),
+                "orientation {orientation}"
+            );
+            let mut c = Composer::new(Vec::new());
+            c.attach_image(image).unwrap();
+            assert_eq!(c.text(), "[Image #1 · re-encoded]");
+        }
+    }
+
+    /// A JPEG within the edge limit whose base64 is over the byte limit fits
+    /// once it is re-encoded at quality 85, again at the same size and type.
+    #[test]
+    fn a_jpeg_that_fits_only_after_the_reencode_says_reencoded() {
+        use dim_agent_capabilities::images::{MAX_BASE64_BYTES, base64_len};
+        let bytes = noise_jpeg(1500, 1500, 100);
+        assert!(
+            base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+            "{}",
+            bytes.len()
+        );
+        let image = crate::images::from_bytes(bytes).unwrap();
+        assert!(image.scaled && !image.resized() && image.media_types().is_none());
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(c.text(), "[Image #1 · re-encoded]");
     }
 
     #[test]

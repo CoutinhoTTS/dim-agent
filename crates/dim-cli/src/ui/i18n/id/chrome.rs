@@ -224,6 +224,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "[Image #{index}]" => "[Gambar #{index}]",
         "[Image #{index}{details}]" => "[Gambar #{index}{details}]",
         "first frame" => "hanya frame pertama",
+        "re-encoded" => "dikodekan ulang",
         "The current model does not accept images; remove {label} to send" => {
             "Model ini tak menerima gambar; hapus {label} untuk kirim"
         }

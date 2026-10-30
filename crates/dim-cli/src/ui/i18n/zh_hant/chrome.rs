@@ -190,6 +190,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "[Image #{index}]" => "[圖片 #{index}]",
         "[Image #{index}{details}]" => "[圖片 #{index}{details}]",
         "first frame" => "僅首幀",
+        "re-encoded" => "已重新編碼",
         "The current model does not accept images; remove {label} to send" => {
             "目前的模型不支援圖片；請移除 {label} 再傳送"
         }

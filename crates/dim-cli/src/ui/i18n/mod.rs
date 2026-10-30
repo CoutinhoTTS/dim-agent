@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn every_locale_translates_the_scaled_image_marker() {
         for (code, lookup) in tables() {
-            for key in ["[Image #{index}{details}]", "first frame"] {
+            for key in ["[Image #{index}{details}]", "first frame", "re-encoded"] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }
             let marker = lookup("[Image #{index}{details}]").expect("marker");

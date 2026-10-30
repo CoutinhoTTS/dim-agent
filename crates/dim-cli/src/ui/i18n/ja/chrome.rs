@@ -210,6 +210,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "[Image #{index}]" => "[画像 #{index}]",
         "[Image #{index}{details}]" => "[画像 #{index}{details}]",
         "first frame" => "先頭フレームのみ",
+        "re-encoded" => "再エンコード",
         "The current model does not accept images; remove {label} to send" => {
             "このモデルは画像非対応。{label} を削除して送信"
         }

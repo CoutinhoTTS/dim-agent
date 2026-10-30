@@ -529,6 +529,25 @@ fn noise_jpeg(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
+/// `noise_jpeg`, with a minimal EXIF APP1 segment whose one IFD0 entry is the
+/// orientation: `3` turns the image 180° and `6` 90° clockwise.
+fn oriented_jpeg(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+    let mut bytes = noise_jpeg(width, height);
+    let mut exif = vec![0xFF, 0xE1, 0x00, 0x22];
+    exif.extend(b"Exif\0\0");
+    exif.extend(b"II\x2A\x00");
+    exif.extend(8u32.to_le_bytes());
+    exif.extend(1u16.to_le_bytes());
+    exif.extend(0x0112u16.to_le_bytes());
+    exif.extend(3u16.to_le_bytes());
+    exif.extend(1u32.to_le_bytes());
+    exif.extend(orientation.to_le_bytes());
+    exif.extend([0, 0]);
+    exif.extend(0u32.to_le_bytes());
+    bytes.splice(2..2, exif);
+    bytes
+}
+
 /// Deterministic noise as PNG: within the shared edge limit while its base64
 /// is over the byte limit, so it is sent as a JPEG at the same size.
 fn noise_png(width: u32, height: u32) -> Vec<u8> {
@@ -670,6 +689,153 @@ fn exec_reports_a_reencode_that_keeps_the_size() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Re-encoded shot.png as image/jpeg (1500×1500 px)"),
+        "{stderr}"
+    );
+}
+
+/// A JPEG within the edge and byte limits whose EXIF orientation turns it
+/// upright is re-encoded as JPEG at the same size: the file differs from what
+/// is sent only in its encoding, and exec says so.
+#[test]
+fn exec_reports_a_photo_turned_upright_at_the_same_size() {
+    let home = Home::new();
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, oriented_jpeg(40, 20, 3)).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", photo.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded photo.jpg as image/jpeg (40×20 px)"),
+        "{stderr}"
+    );
+}
+
+/// The 90° turn swaps the axes before the sizes are compared, so a square
+/// result keeps the size too: exec still says the encoding changed.
+#[test]
+fn exec_reports_a_quarter_turn_at_the_same_size() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, oriented_jpeg(40, 20, 6)).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        let sent = image::load_from_memory(&sent).unwrap();
+        assert_eq!((sent.width(), sent.height()), (20, 40));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", photo.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded photo.jpg as image/jpeg (20×40 px)"),
+        "{stderr}"
+    );
+}
+
+/// A JPEG within the edge limit whose base64 is over the byte limit fits once
+/// it is re-encoded at quality 85, again without a size or type change.
+#[test]
+fn exec_reports_a_jpeg_that_fits_only_after_the_reencode() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let bytes = noise_jpeg(1500, 1500);
+    assert!(
+        base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, &bytes).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        let sent = image::load_from_memory(&sent).unwrap();
+        assert_eq!((sent.width(), sent.height()), (1500, 1500));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", photo.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded photo.jpg as image/jpeg (1500×1500 px)"),
         "{stderr}"
     );
 }

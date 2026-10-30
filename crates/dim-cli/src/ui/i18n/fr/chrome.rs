@@ -222,6 +222,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "[Image #{index}]" => "[Image #{index}]",
         "[Image #{index}{details}]" => "[Image #{index}{details}]",
         "first frame" => "première image seulement",
+        "re-encoded" => "réencodée",
         "The current model does not accept images; remove {label} to send" => {
             "Le modèle n'accepte pas les images; retirer {label} pour envoyer"
         }

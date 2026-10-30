@@ -84,6 +84,19 @@ impl Attached {
     pub fn resized(&self) -> bool {
         self.original != self.sent
     }
+
+    /// Whether the sent form differs from the source's own form: the bytes
+    /// were re-encoded and there was an encoded source to compare with. A
+    /// platform bitmap has none — it has no file form to differ from.
+    pub fn differs(&self) -> bool {
+        self.scaled && self.source_media_type.is_some()
+    }
+
+    /// Whether the re-encode is the only change: the source's size and media
+    /// type both stand, so no size, type or first-frame note names it.
+    pub fn reencoded(&self) -> bool {
+        self.differs() && !self.resized() && !self.animated && self.media_types().is_none()
+    }
 }
 
 /// What a local file is to a draft: an image item, or the path sent as a
@@ -214,8 +227,8 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 /// The line exec writes for an image whose sent form differs from its file:
-/// both sizes when they differ, both media types when the encoding changed
-/// the type, and the first-frame note of an animation.
+/// the source and sent sizes when the size changed, the first-frame note of an
+/// animation, and the sent encoding of a re-encode.
 fn scaled_note(path: &Path, image: &Attached) -> Option<String> {
     let name = path.file_name().unwrap_or(path.as_os_str());
     if image.resized() {
@@ -240,7 +253,7 @@ fn scaled_note(path: &Path, image: &Attached) -> Option<String> {
             image.source.media_type
         ));
     }
-    if image.media_types().is_some() {
+    if image.differs() {
         return Some(format!(
             "Re-encoded {} as {} ({}×{} px)",
             name.to_string_lossy(),
