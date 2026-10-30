@@ -16,6 +16,8 @@ pub struct Command {
     /// The argument a slash command takes inline (`<prompt>`): choosing it
     /// fills the composer instead of running it.
     pub argument: Option<&'static str>,
+    /// Dispatch requires the exact name or alias; other matches only complete.
+    pub requires_exact_name: bool,
     pub needs: Needs,
 }
 
@@ -95,6 +97,7 @@ const fn slash(
         slash: true,
         key: None,
         argument: None,
+        requires_exact_name: false,
         needs,
     }
 }
@@ -114,6 +117,7 @@ const fn action(
         slash: false,
         key: Some(key),
         argument: None,
+        requires_exact_name: false,
         needs,
     }
 }
@@ -297,15 +301,19 @@ pub const COMMANDS: &[Command] = &[
     ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),
     slash("keys", "app", "show the key bindings", &[], Needs::Nothing),
-    slash(
-        "suspend",
-        "app",
-        "suspend to the shell",
-        &[],
-        Needs::Nothing,
-    ),
+    Command {
+        requires_exact_name: true,
+        ..slash(
+            "suspend",
+            "app",
+            "suspend to the shell",
+            &[],
+            Needs::Nothing,
+        )
+    },
     Command {
         key: Some("Ctrl+C Ctrl+C"),
+        requires_exact_name: true,
         ..slash("exit", "app", "exit", &["quit"], Needs::Nothing)
     },
 ];

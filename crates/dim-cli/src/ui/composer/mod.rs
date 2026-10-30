@@ -362,7 +362,7 @@ impl Composer {
                 }
                 match &row.kind {
                     crate::ui::rows::Kind::Command(command)
-                        if matches!(command.name, "exit" | "suspend")
+                        if command.requires_exact_name
                             && query != command.name
                             && !command.aliases.contains(&query.as_str()) =>
                     {
