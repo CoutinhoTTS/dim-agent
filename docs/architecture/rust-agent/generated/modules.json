@@ -2276,6 +2276,20 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::catalog::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::catalog",
+      "file": "crates/dim-app-server/src/storage/catalog.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "params",
+        "tokio::pin"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::codec",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -13070,12 +13084,15 @@
       "from": "dim_agent_runtime::timeline_context",
       "to": "dim_agent_runtime::assembly",
       "references": [
+        "path OpeningAdvanced",
+        "path StartupProgress::new",
         "path crate::BRANCH_GROUP",
         "path crate::assembly::retain_scope",
         "path crate::assembly::shutdown_scope",
         "path crate::assembly::with_copies",
         "path required",
-        "path rows"
+        "path rows",
+        "use crate::assembly::OpeningAdvanced"
       ]
     },
     {
@@ -13094,7 +13111,8 @@
         "path BranchLifecycle",
         "path BranchPhase::Active",
         "path BranchPhase::Closed",
-        "path BranchPhase::Closing"
+        "path BranchPhase::Closing",
+        "path BranchPhase::Loading"
       ]
     },
     {
@@ -13705,10 +13723,12 @@
       "references": [
         "path AgentBuilder",
         "path Modules::new",
+        "path StartupProgress::new",
         "path register_part",
         "path wait_active",
         "use dim_agent_runtime::AgentBuilder",
         "use dim_agent_runtime::Modules",
+        "use dim_agent_runtime::StartupProgress",
         "use dim_agent_runtime::register_part",
         "use dim_agent_runtime::wait_active"
       ]
@@ -13726,6 +13746,7 @@
       "from": "dim_app_server",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::Build",
         "path AgentError::aggregate",
         "path AgentError::from",
@@ -14785,6 +14806,13 @@
       ]
     },
     {
+      "from": "dim_app_server::agents::tests",
+      "to": "dim_app_server::connection",
+      "references": [
+        "path crate::connection::ConnectionHub"
+      ]
+    },
+    {
       "from": "dim_app_server::agents::tests::slots",
       "to": "dim_agent_runtime::assembly",
       "references": [
@@ -15736,6 +15764,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path AgentError::Storage",
@@ -15896,6 +15925,7 @@
         "path Call::BranchCreate",
         "path Call::BranchEnd",
         "path Call::Catalog",
+        "path Call::CatalogCancel",
         "path Call::Close",
         "path Call::Contributed",
         "path Call::Create",
@@ -20163,6 +20193,13 @@
     },
     {
       "from": "dim_app_server::storage::catalog",
+      "to": "dim_app_server::storage::catalog::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
       "to": "dim_app_server::storage::metadata",
       "references": [
         "path metadata::decode",
@@ -20188,6 +20225,56 @@
         "use super::SessionStore",
         "use super::timeline::Row",
         "use super::timeline::read_sequence"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_agent_capabilities::defaults",
+      "references": [
+        "path dim_agent_capabilities::defaults::install",
+        "path dim_agent_capabilities::defaults::mock_hosts"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder::new",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path AgentConfig::default",
+        "use dim_agent_runtime::AgentConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server",
+      "references": [
+        "path ServerConfig",
+        "path serve",
+        "use crate::ServerConfig",
+        "use crate::serve"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::storage::catalog",
+      "references": [
+        "path create"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path SqliteStorage",
+        "path error",
+        "use crate::storage::SqliteStorage"
       ]
     },
     {
@@ -20517,6 +20604,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::Cancelled",
         "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
@@ -31449,6 +31537,10 @@
     {
       "module": "dim_agent_capabilities::workspace_tools::files::codec",
       "path": "char::is_ascii_alphanumeric"
+    },
+    {
+      "module": "dim_agent_runtime::assembly",
+      "path": "F::Output"
     },
     {
       "module": "dim_agent_runtime::branch",

@@ -830,6 +830,7 @@ impl AgentIndex {
         request: crate::protocol::Catalog,
         agent: Option<String>,
         version: u32,
+        cancel: CancellationToken,
     ) -> dim_agent_runtime::Result<crate::protocol::CatalogResult> {
         let store = self
             .session_store
@@ -851,7 +852,7 @@ impl AgentIndex {
             .map(|(id, _)| id.clone())
             .collect();
         let mut page = store
-            .catalog(request, agent, version, hosts, closed)
+            .catalog(request, agent, version, hosts, closed, cancel)
             .await?;
         for summary in &mut page.sessions {
             if let Some((_, session)) = self.session(&summary.session.session_id) {
