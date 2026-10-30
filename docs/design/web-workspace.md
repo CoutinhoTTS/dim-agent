@@ -103,7 +103,7 @@ For development against the repository checkout, and for a build that must carry
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
 | Methods | Rpc Session built-ins and the execution Session methods (`session.permission.*`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp*`), on every Session of the host. All other management methods and `daemon.shutdown` → `-32601 unknown_method` |
-| Model list | The read-only management methods `provider.list`, `provider.catalog` and `provider.selection` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Switching uses the Session method `session.model.update` |
+| Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -184,6 +184,67 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 **Not in this phase:** session fork, a drawn DAG, compare/adopt, per-line model selection and questions (`ask_user`). Each needs its own client design.
 
+### 4.2 Model discovery and slash commands
+
+Model discovery adds only `account.providers` to the web-readable methods. Its
+existing descriptors identify managed Providers without account identity or
+credentials. The client combines these descriptors with enabled entries from
+`provider.list`, then reads each Provider through `provider.catalog`. The catalog
+owner determines account availability; a missing catalog contributes no models.
+No `account.status`, login, logout, refresh or settings method is added to the web
+allowlist. Static Providers are not excluded merely because
+`credentialConfigured` is false: anonymous Providers require no credential, and
+the catalog already marks unavailable models. Disabled and unavailable models
+remain unselectable. Catalog read failures must not be presented as a successful
+empty list and must offer retry; successfully loaded Providers remain selectable.
+
+Each editable composer opens a command menu for a leading `/` followed by an optional
+command-name prefix, not for a slash inside ordinary prose. Search filters the
+available commands; categories and canonical English command names follow the
+repository menu ordering convention. Arrow keys move selection, Enter executes,
+and Escape dismisses without sending or deleting the draft. Mouse selection has
+the same behavior. Command handling does not run during IME composition. Known
+commands are handled locally rather than submitted as model input.
+
+| Category | Command | Action and availability |
+| --- | --- | --- |
+| `model` | `/models` | Open the existing model picker when model selection is available |
+| `session` | `/branch <prompt>` | Create a line from the shown line's newest finished turn and use the inline prompt as its opening input |
+| `session` | `/lines` | Open the existing Session lines panel |
+| `session` | `/new` | Navigate to the existing new-Session page |
+
+Commands whose action is unavailable are omitted. Native-only commands are not
+advertised. Shared actions follow the TUI's canonical names and argument flow,
+not terminal-specific shortcuts. `/keys` and a separate `/help` are unnecessary;
+the menu footer displays its keyboard controls.
+
+Choosing `/branch` fills `/branch ` and focuses the composer without opening a
+dialog. Submitting a nonempty prompt creates the line and opens it in the side
+panel. In a line-panel composer its parent is that line, not `main`. With no
+finished turn or after a creation error, show the reason and preserve the draft;
+never submit a recognized branch command as model input unless explicitly escaped.
+Only successful creation clears the submitted draft. The existing transcript
+actions and new-child buttons retain their point-based dialogs. `/btw` is not an
+alternate command name.
+Unknown slash-prefixed text remains ordinary input; dismissing the menu allows
+the user to send literal slash-prefixed text.
+
+```text
+┌──────────────────────────────────────────────────┐
+│ model     /models             Choose a model      │
+│ session   /branch <prompt>    Open a line here    │
+│           /lines             Show Session lines  │
+│           /new               New Session         │
+│ ↑↓ select · Enter confirm · Esc close            │
+├──────────────────────────────────────────────────┤
+│ /branch review the patch                         │
+│                                 [model] [send]   │
+└──────────────────────────────────────────────────┘
+```
+
+This reuses existing catalog reads, the model picker, routing and branch methods;
+it introduces no command RPC, catalog cache or general management access.
+
 ## 5. Build and release
 
 `cargo build`, `./dev` and the CI workspace build need neither Node nor npm: the frontend is not part of the App Server crate unless `--features embedded-web` is given. The PR check builds the frontend once with `scripts/stage-web.mjs` (which type-checks `web/` through `vue-tsc`), and the release workflow runs the same script in its assembly job, so the frontend is built once per release, not once per platform. `collect-release.mjs` takes its `release-web` directory beside the six platform directories, adds `dimcode-web` to the wrapper's optional dependencies, and `publish-npm.mjs` and `check-native.mjs` expect its npm package and native archive ([release packaging](../release/README.md)).
@@ -192,7 +253,7 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 | # | Question | Proposal |
 | --- | --- | --- |
-| Q1 | Model selection needs the model list, which only management methods return | Decided: serve `provider.list`, `provider.catalog` and `provider.selection` read-only on the web entry (§2.5) |
+| Q1 | Model selection needs the model list, which only management methods return | Decided: serve `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` read-only on the web entry (§2.5) |
 | Q2 | Settings pages (providers, MCP, skills) are management | Phase 2: decide whether a loopback web entry may carry management methods; RemoteGateway currently says never |
 
 ## 7. Rule check

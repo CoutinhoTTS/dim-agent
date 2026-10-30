@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n"
 import { GitBranch, LoaderCircle, RotateCcw } from "lucide-vue-next"
 import { MAIN_BRANCH } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
+import { useConnectionStore } from "../../stores/connection"
 import { useUiStore } from "../../stores/ui"
 import ApprovalPrompt from "../chat/ApprovalPrompt.vue"
 import ComposerPanel from "../chat/ComposerPanel.vue"
@@ -13,6 +14,7 @@ import { lineName, lineStateLabel, lineStateTone, shortId } from "./line-state"
 const props = defineProps<{ sessionId: string; branchId: string }>()
 const { t } = useI18n()
 const chat = useChatStore()
+const connection = useConnectionStore()
 const ui = useUiStore()
 const composer = ref<InstanceType<typeof ComposerPanel>>()
 
@@ -71,6 +73,13 @@ function newChild(): void {
   const at = branch.value?.lastTurnEnd
   if (at === undefined) return
   ui.requestNewLine({ sessionId: props.sessionId, parentBranchId: props.branchId, at, text: "" })
+}
+
+async function createBranch(prompt: string): Promise<void> {
+  const at = branch.value?.lastTurnEnd
+  if (at === undefined) throw new Error(t("lines.noFinishedTurn"))
+  const branchId = await chat.createLine(props.sessionId, props.branchId, at, prompt)
+  ui.openLine(props.sessionId, branchId)
 }
 
 function retry(): void {
@@ -134,6 +143,8 @@ function noModel(): void {
         :model-selectable="false"
         :select-model="noModel"
         :placeholder="t('lines.placeholder')"
+        :create-branch="connection.supports('session.branch_create') ? createBranch : undefined"
+        :open-lines="() => ui.openLines(sessionId)"
         variant="panel"
       >
         <template #status>
