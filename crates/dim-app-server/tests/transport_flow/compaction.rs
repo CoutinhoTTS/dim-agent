@@ -747,7 +747,11 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
         assert_ok(&usage);
         let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
         let budget = (capabilities.context_window - capabilities.max_output_tokens) as f64;
-        assert_eq!(threshold, budget - 0.2 * budget);
+        // ContextModel::threshold_tokens (context_model.rs:78-83): the trigger
+        // leaves 10% of the input budget, at least 16000 tokens and at most
+        // 20% of it.
+        let reserve = (0.10 * budget).max(16_000.).min(0.20 * budget);
+        assert_eq!(threshold, budget - reserve);
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(
             overhead > threshold,
