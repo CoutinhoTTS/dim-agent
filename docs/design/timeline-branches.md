@@ -369,20 +369,22 @@ The requirements that answer these items are in [Model-facing prompts](model-pro
 
 ### 12.3 Evaluation scenarios
 
-These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
+The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: seven under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), run with the model's own window, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), run with a model whose declared window is 16,000 tokens, so that compaction happens. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
 
-| Scenario | Watch for |
-| --- | --- |
-| A line acts as main | It opens lines, claims the roster, or coordinates other lines |
-| Redone work | `main` repeats what a line is doing, or two lines do the same thing |
-| Stale knowledge | A line acts on files or decisions that changed after its cut without re-reading them |
-| Flooding | Append or steer messages that repeat what the receiver already knows |
-| Over-splitting | Lines opened for short or sequential steps |
-| Never ending | A line that is done but does not call `end` |
-| Sibling relay | `main` is used to pass messages between lines that should have been one line |
-| Identity after compaction | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
-| Ping-pong | Steer exchanges that do not move the work forward |
-| Asking the user | A line asks the user directly when it should, and does not route through `main` |
+| Scenario | Scenario directory | Watch for |
+| --- | --- | --- |
+| A line acts as main | — | It opens lines, claims the roster, or coordinates other lines |
+| Redone work | `timeline-branches/redone-work` | `main` repeats what a line is doing, or two lines do the same thing |
+| Stale knowledge | — | A line acts on files or decisions that changed after its cut without re-reading them |
+| Flooding | `timeline-branches/flooding` | Append or steer messages that repeat what the receiver already knows |
+| Over-splitting | `timeline-branches/over-splitting` | Lines opened for short or sequential steps |
+| Never ending | `timeline-branches/never-ending` | A line that is done but does not call `end` |
+| Sibling relay | `timeline-branches/sibling-relay` | `main` is used to pass messages between lines that should have been one line |
+| Identity after compaction | `timeline-branches-compact/identity-after-compaction` | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
+| Ping-pong | `timeline-branches/ping-pong` | Steer exchanges that do not move the work forward |
+| Asking the user | `timeline-branches/asking-the-user` | A line asks the user directly when it should, and does not route through `main` |
+
+A row whose scenario directory is `—` has no scenario in the set.
 
 ### 12.4 Texts and their classes
 
