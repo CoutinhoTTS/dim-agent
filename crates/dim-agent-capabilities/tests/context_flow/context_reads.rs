@@ -767,7 +767,7 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
                 .unwrap();
                 store.earliest_read.store(u64::MAX, Ordering::SeqCst);
                 let (recovered, _) = renderer
-                    .context(&timeline, timeline.sequence())
+                    .rendered_context(&timeline, timeline.sequence())
                     .await
                     .unwrap();
                 assert!(recovered.checkpoint.is_some());

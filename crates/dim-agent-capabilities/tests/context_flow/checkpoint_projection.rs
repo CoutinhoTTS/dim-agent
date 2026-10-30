@@ -273,7 +273,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         decode_checkpoint: |_, _| panic!("must not decode an incompatible interpreter"),
         ..HistoryRenderer::default()
     };
-    let (replay, _) = renderer.context(&timeline, fact.sequence).await.unwrap();
+    let (replay, _) = renderer
+        .rendered_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
     assert!(replay.checkpoint.is_none());
     assert_eq!(replay.events.len(), 4);
     assert_eq!(
@@ -306,7 +309,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         )
         .await
         .unwrap();
-    let (accelerated, _) = renderer.context(&timeline, fact.sequence).await.unwrap();
+    let (accelerated, _) = renderer
+        .rendered_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
     assert_eq!(accelerated.checkpoint, Some(checkpoint.clone()));
     assert!(accelerated.events.iter().any(|event| event.id == fact.id));
     assert_eq!(
@@ -368,7 +374,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         let (timeline, renderer, replay) = (&timeline, &renderer, &replay);
         async move {
             timeline.save_snapshot(snapshot).await.unwrap();
-            let (context, _) = renderer.context(timeline, at).await.unwrap();
+            let (context, _) = renderer.rendered_context(timeline, at).await.unwrap();
             assert!(context.checkpoint.is_none());
             assert_eq!(context.events, replay.events);
         }
@@ -455,19 +461,22 @@ async fn a_checkpoint_whose_render_fails_falls_back_to_full_replay() {
         .unwrap();
     timeline.save_snapshot(saved).await.unwrap();
     let full = timeline.context(fact.sequence).await.unwrap();
-    let accelerated = HistoryRenderer::default()
-        .context(&timeline, fact.sequence)
+    let (accelerated, _) = HistoryRenderer::default()
+        .rendered_context(&timeline, fact.sequence)
         .await
         .unwrap();
     assert!(
-        accelerated.0.checkpoint.is_some(),
+        accelerated.checkpoint.is_some(),
         "the read must use the checkpoint"
     );
     let renderer = HistoryRenderer {
         render: fail_on_checkpoint,
         ..HistoryRenderer::default()
     };
-    let (context, history) = renderer.context(&timeline, fact.sequence).await.unwrap();
+    let (context, history) = renderer
+        .rendered_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
     assert!(context.checkpoint.is_none());
     assert_eq!(context.events, full.events);
     assert_eq!(history, project_context_history(&full).unwrap());

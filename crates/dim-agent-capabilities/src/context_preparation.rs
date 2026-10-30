@@ -474,7 +474,7 @@ impl ContextPreparation {
         let through = self.timeline.committed();
         let (context, history) = self
             .history
-            .context(&self.timeline, through)
+            .rendered_context(&self.timeline, through)
             .await
             .map_err(ContextOpError::Read)?;
         let request =
@@ -535,7 +535,7 @@ impl ContextPreparation {
             Some((source.turn_id.clone(), source.through, request.clone()));
         let (context, history) = self
             .history
-            .context(&self.timeline, source.through)
+            .rendered_context(&self.timeline, source.through)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
         crate::context_policy::check_cancel(&cancel)?;

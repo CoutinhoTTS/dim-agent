@@ -352,7 +352,10 @@ impl AgentLoop {
         let Some(policy) = &self.policy else {
             return failed("Context compaction is not available".into());
         };
-        let (context, history) = self.history.context(&self.timeline, through).await?;
+        let (context, history) = self
+            .history
+            .rendered_context(&self.timeline, through)
+            .await?;
         let Some(request) = configured_request(&context, &history) else {
             return failed("Context is not configured; adopt a model first".into());
         };
@@ -659,7 +662,10 @@ impl AgentLoop {
                     source.request_id = request_id.clone();
                     return Ok(source);
                 }
-                let (prefix, entries) = owner.history.context(&owner.timeline, through).await?;
+                let (prefix, entries) = owner
+                    .history
+                    .rendered_context(&owner.timeline, through)
+                    .await?;
                 let configuration = context_configuration(&prefix);
                 let prompt = PromptSnapshot::from_context(&prefix).revision;
                 let history = context_messages(&prefix, &entries);

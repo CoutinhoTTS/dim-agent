@@ -813,7 +813,7 @@ impl ContextPolicy {
             None => {
                 let context = self
                     .history
-                    .read(&self.timeline, self.timeline.committed())
+                    .context(&self.timeline, self.timeline.committed())
                     .await
                     .map_err(|e| HostError::failed(e.to_string()))?;
                 self.estimate(&request, model.as_ref(), &context.events)?

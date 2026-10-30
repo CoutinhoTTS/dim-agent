@@ -126,11 +126,30 @@ impl HistoryRenderer {
         Ok(snapshot)
     }
 
-    /// The context at `through` with its rendering. A read renders once: the
-    /// render that validates a checkpoint is the one returned, and without a
-    /// checkpoint the context is rendered here too. A checkpoint that does not
-    /// render is a cache miss and yields the full replay with its rendering.
+    /// The context at `through` alone, for readers that inspect events instead
+    /// of rendering them. A checkpoint is validated by rendering it once and
+    /// discarding that render; without a checkpoint no render is made, and a
+    /// checkpoint that does not render falls back to the full replay.
     pub async fn context(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        let context = timeline
+            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await?;
+        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
+            return timeline.context(through).await;
+        }
+        Ok(context)
+    }
+
+    /// The context at `through` with its rendering, for callers that use it. A
+    /// read renders once: the render that validates a checkpoint is the one
+    /// returned, and without a checkpoint the context is rendered here too. A
+    /// checkpoint that does not render is a cache miss and yields the full
+    /// replay with its rendering.
+    pub async fn rendered_context(
         &self,
         timeline: &Timeline,
         through: u64,
@@ -149,24 +168,6 @@ impl HistoryRenderer {
             Err(error) => Err(AgentError::fault("History", error)),
         }
     }
-
-    /// The context at `through` alone, for readers that inspect events instead
-    /// of rendering them. No render is made without a checkpoint; one made to
-    /// validate a checkpoint is discarded, and a checkpoint that does not
-    /// render falls back to the full replay.
-    pub async fn read(
-        &self,
-        timeline: &Timeline,
-        through: u64,
-    ) -> dim_agent_runtime::Result<ContextHistory> {
-        let context = timeline
-            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
-            .await?;
-        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
-            return timeline.context(through).await;
-        }
-        Ok(context)
-    }
 }
 
 /// Read the shared prompt/input/output projection using its supported cache.
@@ -174,7 +175,7 @@ pub async fn read_context(
     timeline: &Timeline,
     through: u64,
 ) -> dim_agent_runtime::Result<ContextHistory> {
-    HistoryRenderer::default().read(timeline, through).await
+    HistoryRenderer::default().context(timeline, through).await
 }
 
 /// One message an input or the projection places, with the in-effect
