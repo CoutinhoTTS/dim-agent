@@ -785,9 +785,21 @@ impl DynPlugin for PromptPlugin {
                                 .unwrap_or_else(|panic| {
                                     Err(AgentError::fault("Prompt", panic_message(panic)))
                                 });
+                            let opened = result.is_ok();
                             owner.opened.send_replace(Some(result.clone()));
                             let _ = reply.send(result);
                             owner.listen_guide(changes, composed);
+                            // The baseline the listener compares against is a
+                            // composition, not the System the branch carries:
+                            // a fork inherits its parent's configuration, and a
+                            // restore finds whatever its writers registered at
+                            // load. One adoption here converges the branch on
+                            // the entries in force; an unchanged System
+                            // publishes nothing. It costs one context read per
+                            // open when the branch carries a configuration.
+                            if opened {
+                                let _ = owner.adoption.send(Adoption::Guide);
+                            }
                             continue;
                         }
                         Some(Adoption::Guide) => {
