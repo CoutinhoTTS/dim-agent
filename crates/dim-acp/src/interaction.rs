@@ -31,47 +31,85 @@ pub(crate) async fn approval(
 ) -> Option<Value> {
     let args = |decision: &str| json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":decision});
     let member = approval.call.name == MEMBER_APPROVAL_ALLOW;
-    let (title, input) = if member {
-        match rpc.typed::<MemberApprovalDetail>(MEMBER_APPROVAL_GET, json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id})).await {
-            Ok(MemberApprovalDetail::Pending { descriptor, .. }) => (format!("{} / {} / {}: {} — {}", approval.branch_id, descriptor.member.agent_id, descriptor.member.branch_id, descriptor.call.name, descriptor.reason), serde_json::to_value(descriptor).ok()?),
-            _ => return Some(args("deny")),
-        }
-    } else {
-        (
-            approval.reason.clone(),
-            Value::Object(approval.call.input.clone()),
+    let detail_params = json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id});
+    let mut detail = if member {
+        Some(
+            rpc.typed::<MemberApprovalDetail>(MEMBER_APPROVAL_GET, detail_params.clone())
+                .await,
         )
-    };
-    let mut call = json!({"toolCallId":key("approval",&approval.session_id,&approval.branch_id,&approval.request_id,""),"title":title,"kind":"other","status":"pending","rawInput":input});
-    if member {
-        call["content"] = json!([{"type":"content","content":{"type":"text","text":serde_json::to_string_pretty(&input).ok()?}}]);
-    }
-    let message = UntypedMessage::new("session/request_permission",json!({"sessionId":approval.session_id,"toolCall":call,"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject once","kind":"reject_once"}]})).ok()?;
-    let result = tokio::select! {
-        () = stop.cancelled() => return None,
-        result = outbox.request(&cx,&message.method,message.params) => match result {
-            Ok(result) => result,
-            Err(_) => return member.then(|| args("deny")),
-        },
-    };
-    let decision = match result
-        .get("outcome")
-        .filter(|outcome| outcome["outcome"] == "selected")
-        .and_then(|outcome| outcome["optionId"].as_str())
-    {
-        Some("allow_once") => "allow",
-        Some("reject_once") => "deny",
-        _ => return member.then(|| args("deny")),
-    };
-    let decision = if member && decision == "allow" {
-        match rpc.typed::<MemberApprovalDetail>(MEMBER_APPROVAL_GET, json!({"sessionId":approval.session_id,"branchId":approval.branch_id,"requestId":approval.request_id})).await {
-            Ok(MemberApprovalDetail::Pending { .. }) => "allow",
-            _ => "deny",
-        }
     } else {
-        decision
+        None
     };
-    Some(args(decision))
+    loop {
+        let (title, input, can_allow) = match &detail {
+            Some(Ok(MemberApprovalDetail::Pending { descriptor, .. })) => (
+                format!(
+                    "{} / {} / {}: {} — {}",
+                    approval.branch_id,
+                    descriptor.member.agent_id,
+                    descriptor.member.branch_id,
+                    descriptor.call.name,
+                    descriptor.reason
+                ),
+                serde_json::to_value(descriptor).ok()?,
+                true,
+            ),
+            Some(Ok(MemberApprovalDetail::Ended)) => return Some(args("deny")),
+            Some(Err(error)) => (
+                format!("Cannot review the original member action: {error}. Reject this request."),
+                json!({"error":error.to_string()}),
+                false,
+            ),
+            None => (
+                approval.reason.clone(),
+                Value::Object(approval.call.input.clone()),
+                true,
+            ),
+        };
+        let mut call = json!({"toolCallId":key("approval",&approval.session_id,&approval.branch_id,&approval.request_id,""),"title":title,"kind":"other","status":"pending","rawInput":input});
+        if member {
+            call["content"] = json!([{"type":"content","content":{"type":"text","text":serde_json::to_string_pretty(&input).ok()?}}]);
+        }
+        let mut options =
+            vec![json!({"optionId":"reject_once","name":"Reject once","kind":"reject_once"})];
+        if can_allow {
+            options.insert(
+                0,
+                json!({"optionId":"allow_once","name":"Allow once","kind":"allow_once"}),
+            );
+        }
+        let message = UntypedMessage::new(
+            "session/request_permission",
+            json!({"sessionId":approval.session_id,"toolCall":call,"options":options}),
+        )
+        .ok()?;
+        let result = tokio::select! {
+            () = stop.cancelled() => return None,
+            result = outbox.request(&cx,&message.method,message.params) => match result {
+                Ok(result) => result,
+                Err(_) => return member.then(|| args("deny")),
+            },
+        };
+        let decision = match result
+            .get("outcome")
+            .filter(|outcome| outcome["outcome"] == "selected")
+            .and_then(|outcome| outcome["optionId"].as_str())
+        {
+            Some("allow_once") if can_allow => "allow",
+            Some("reject_once") => "deny",
+            _ => return member.then(|| args("deny")),
+        };
+        if !member || decision == "deny" {
+            return Some(args(decision));
+        }
+        detail = Some(
+            rpc.typed::<MemberApprovalDetail>(MEMBER_APPROVAL_GET, detail_params.clone())
+                .await,
+        );
+        if matches!(detail, Some(Ok(MemberApprovalDetail::Pending { .. }))) {
+            return Some(args("allow"));
+        }
+    }
 }
 
 pub(crate) async fn question(

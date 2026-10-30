@@ -75,7 +75,10 @@ authoritative. [CLI commands](cli-commands.md#subagent-tool-approval) owns termi
 Web applies this contract to the leader's normal approval card, even when a member detail is open;
 it retains the full original arguments in an accessible detail view. ACP maps the trusted original
 action into its permission request information and exposes only allow-once/reject-once options;
-if its client cannot convey the action, it rejects rather than silently approving an opaque id.
+if the detail read fails, it shows the error with Reject only and waits for the user before
+answering. An error during the final recheck also shows this rejection prompt. Ended requests
+close without an allow. If its client cannot convey a permission prompt, it rejects rather than
+silently approving an opaque id.
 These are requirements for member-route support, separate from existing ordinary approvals.
 Older clients can continue ordinary tools; rich member-approval review requires the new query and
 corresponding client support. No frozen v1/v2 notification set or Approval envelope is extended.
