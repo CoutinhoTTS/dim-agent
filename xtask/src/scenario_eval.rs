@@ -3106,6 +3106,48 @@ mod tests {
         }
     }
 
+    /// The judge's verdict for the `must_not_show` probe, explaining why the
+    /// run does not show it.
+    fn contradicts_the_probe(text: &str) -> Option<Value> {
+        text.contains("You check statements")
+            .then(|| content(r#"[{"id":"floods","verdict":"contradicted","quote":"turn/end"}]"#))
+    }
+    /// A `contradicted` verdict is kept as it is, passes a `must_not_show`
+    /// probe with the scores unchanged, and is no violation (model-prompts
+    /// §8.1). The parser the scenario judge shares with the summary
+    /// evaluation accepts it although the scenario judge is asked for
+    /// `present` or `absent`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_contradicted_verdict_passes_a_must_not_show_probe() {
+        let fixture = Fixture::start(
+            "contradicted",
+            contradicts_the_probe,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "floods", "kind": "must_not_show", "text": "the run floods the Timeline"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "contradicted", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+        }
+        assert!(
+            report.contains("| case | floods | must_not_show | 1.000 | 1.000 |"),
+            "a contradicted verdict passes the probe: {report}"
+        );
+        assert!(report.contains("| current | 0 | 0 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 0 | 0 |"), "{report}");
+        assert!(report.contains("candidate passes"), "{report}");
+    }
+
     /// The judge's first answer loses a level of escaping in a quote, as one
     /// answer in the evaluation for #553 did, so it is not JSON.
     const UNESCAPED: &str =
