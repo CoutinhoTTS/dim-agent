@@ -217,6 +217,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-agent-types"
   },
   {

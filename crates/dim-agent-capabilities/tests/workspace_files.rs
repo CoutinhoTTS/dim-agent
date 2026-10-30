@@ -1229,6 +1229,31 @@ fn decoded(source: &ImageSource) -> RgbaImage {
     image::load_from_memory(&sent(source)).unwrap().to_rgba8()
 }
 
+/// The shared decoder rule: an allocation refused for size is the pixel-guard
+/// refusal, and any other decoder error is an invalid image of its kind.
+#[test]
+fn decode_refusal_maps_a_memory_limit_to_the_pixel_guard() {
+    let stored = images::ImageSize {
+        width: 4000,
+        height: 3000,
+    };
+    let limit = image::ImageError::Limits(image::error::LimitError::from_kind(
+        image::error::LimitErrorKind::InsufficientMemory,
+    ));
+    assert_eq!(
+        images::decode_refusal(images::ImageKind::Png, stored, limit),
+        images::ImageRefusal::TooManyPixels(stored)
+    );
+    let broken = image::ImageError::IoError(std::io::Error::other("truncated"));
+    assert!(matches!(
+        images::decode_refusal(images::ImageKind::Tiff, stored, broken),
+        images::ImageRefusal::Invalid {
+            kind: images::ImageKind::Tiff,
+            ..
+        }
+    ));
+}
+
 #[tokio::test]
 async fn read_returns_a_png_as_an_image_block_and_a_line() {
     let workspace = Workspace::new();

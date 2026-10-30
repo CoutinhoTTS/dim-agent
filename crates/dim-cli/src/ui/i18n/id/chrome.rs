@@ -205,12 +205,26 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Output shell tak tercatat: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Membaca clipboard…",
+        "Reading image…" => "Membaca gambar…",
+        "Wait for the image insertion before sending" => {
+            "Tunggu penyisipan gambar sebelum mengirim"
+        }
+        "The image could not be read" => "Gambar tidak dapat dibaca",
+        "An image is still being inserted; paste again when it is in" => {
+            "Gambar masih disisipkan; tempel lagi setelah selesai"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Clipboard masih disisipkan; tempel lagi setelah selesai"
+        }
         "Clipboard: {reason}" => "Clipboard: {reason}",
         "Wait for clipboard insertion before sending" => {
             "Tunggu clipboard disisipkan sebelum kirim"
         }
         "A submission accepts at most 20 images" => "Maks. 20 gambar per kiriman",
         "[Image #{index}]" => "[Gambar #{index}]",
+        "[Image #{index}{details}]" => "[Gambar #{index}{details}]",
+        "first frame" => "hanya frame pertama",
+        "re-encoded" => "dikodekan ulang",
         "The current model does not accept images; remove {label} to send" => {
             "Model ini tak menerima gambar; hapus {label} untuk kirim"
         }

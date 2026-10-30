@@ -219,11 +219,13 @@ CLI checks, before submitting:
 
 | Image | Handling |
 | --- | --- |
-| File, clipboard or pasted path | Decode; sniff the format from magic bytes (any declared type ignored); accept PNG, JPEG, WebP, GIF (feature list); set `media_type`; enforce limits (A2) |
+| File, clipboard or pasted path | Decode; sniff the format from magic bytes (any declared type ignored); accept PNG, JPEG, WebP, GIF (feature list); scale it to the shared rule (below); set `media_type` |
 | URL | Never sent (A3) |
 | Rejected | Not sent; the draft is kept and the reason shown |
 
-Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per side; violations rejected, never resized. Blocks keep their order.
+Images are scaled, not refused. The rule is the one `read` uses, written once in [WorkspaceTools § read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images): `images::scale_image` makes an image acceptable within 2048 px on its longest edge and 5,000,000 bytes of base64, applying the EXIF orientation so the pixels are upright, keeping a PNG while its scaled PNG fits and using JPEG otherwise, and sending an animation as its first frame. The only size refusal is that function's 100-megapixel guard, which names the dimensions; bytes that are not an image, a format this build cannot decode and invalid data are refused as before.
+
+Limits (A2): at most 20 images per submission and the 16 MiB transport frame for the whole encoded request; a submission that still exceeds the frame is refused and the draft kept. Blocks keep their order.
 
 ModelProvider supplement (implemented in S11, `model_provider/images.rs`; [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)), applied to every image block when it builds a model request:
 
@@ -234,7 +236,7 @@ ModelProvider supplement (implemented in S11, `model_provider/images.rs`; [overv
 | Capability unknown | Sent as is; the provider decides (A4) |
 | URL source, missing or undecodable base64 data, or a format other than PNG, JPEG, WebP or GIF | Text `[Image omitted: the image cannot be sent to this model.]` (A10) |
 
-Size is not checked here: no adapter publishes a per-model image size limit, so an oversized image is sent and the provider decides, as for unknown capability (A4). The CLI limits (A2) still apply before submitting.
+Size is not checked here: no adapter publishes a per-model image size limit, so an oversized image is sent and the provider decides, as for unknown capability (A4). The CLI's scaling rule and limits (A2) still apply before submitting.
 
 The history is never changed; each request decides again from its own model.
 
@@ -373,7 +375,7 @@ Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked --
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | Text attachments are Session files owned by SessionStore and stored on the Session's resource node under `<db>.session-files/<fileId>/`, a directory no single Session owns, so the path survives forks and the source's deletion; SessionStore keeps the ownership rows on the control node ([session files](../appserver/session-files.md)) | Judgment; `read` runs on the resource node | Other layout or inline text content |
-| A2 | Limits: 20 images, 5 MiB, 8000 px (CLI), 10 MiB text (`attachment.put`); reject rather than resize. 10 MiB of text leaves room under the 16 MiB frame for the JSON escaping of ordinary text | Edge-case reference; judgment | Different limits or resizing |
+| A2 | Limits: 20 images per submission and the 16 MiB encoded request frame (CLI), 10 MiB text (`attachment.put`); a larger image is scaled to 2048 px on its longest edge and 5,000,000 bytes of base64, not refused. Vision models read images at about two thousand pixels on the long edge, so the extra pixels only add bytes. 10 MiB of text leaves room under the 16 MiB frame for the JSON escaping of ordinary text | Edge-case reference; judgment | Different limits or no scaling |
 | A3 | The CLI never sends URL image sources; ModelProvider replaces them | Overview "final content"; judgment | Provider fetches URLs |
 | A4 | With unknown model capability ModelProvider sends images | Judgment | Unknown replaced by the placeholder |
 | A5 | The CLI chooses the paste threshold and the reference format, and counts lines itself | [Overview Appendix D](../overview.md#appendix-d-cli-layer) (CLI); judgment | Server returns a formatted reference |

@@ -1383,6 +1383,7 @@ version = "0.1.0-alpha.8"
 dependencies = [
  "agent-client-protocol-schema",
  "base64 0.22.1",
+ "dim-agent-capabilities",
  "dim-agent-types",
  "dim-app-server",
  "dim-cli",

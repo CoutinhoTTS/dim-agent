@@ -43,17 +43,28 @@ $ dimcode exec --image before.png --image after.png -p 'Compare these images'
 $ dimcode exec resume <session-id> --image screenshot.png --json > run.jsonl
 $ printf 'Describe this\n' | dimcode exec --image screenshot.png
 
-local files -> bounded read/header checks -> user.content -> session.submit
+local files -> shared image scaling -> user.content -> session.submit
 ```
 
-The CLI reads and checks all local images before connecting: at most 20 images,
-5 MiB of image-file bytes each, and 8000 pixels per side. Format comes from bytes,
-including when a filename has another extension. Invalid/truncated headers fail;
-pixels are not resized or rewritten. The `image` dependency enables only these
-four formats and reads dimensions without decoding pixels. Local symbolic links
-are followed, and file type is checked on the opened file. The combined base64
-size is checked before connecting; the final encoded request, including its JSON
-envelope and text, must still fit 16 MiB.
+The CLI reads, scales and checks all local images before connecting with the same
+rule `read` uses, written once in
+[WorkspaceTools § read results and images](../../docs/architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images):
+an image is made acceptable within that rule's longest-edge and encoded-size
+limits (for example 2048 px and 5,000,000 bytes of base64 today), a PNG kept while its scaled PNG fits
+and JPEG otherwise, the EXIF orientation applied, and an animation sent as its
+first frame. The only size refusal is that rule's pixel guard, which names the
+dimensions; invalid or truncated data and unsupported formats fail. Format comes
+from bytes, including when a filename has another extension. The `image` dependency
+enables the four input formats; TIFF and BMP are decoded only as macOS and Windows
+clipboard bitmaps. Local symbolic links are followed, and file type is checked on
+the opened file. At most 20 images are accepted. The combined base64 size is
+checked before connecting; the final encoded request, including its JSON envelope
+and text, must still fit 16 MiB. An image whose sent form differs from its file
+adds one line to stderr before the run, as in
+`Scaled photo.jpg from 8064×6048 to 2048×1536 px (image/jpeg)` or, when only the
+encoding changed,
+`Re-encoded shot.png as image/jpeg (1500×1500 px)`; an animation says only its
+first frame is sent. stdout carries only the reply or the JSON stream.
 
 An error reply to `session.submit` can follow an already queued input. The CLI
 reports uncertainty for publication failures and unclassified errors and exits
@@ -121,6 +132,13 @@ image markers even with another filename extension. Other ordinary files produce
 references, which the model can read with its existing tool. Image data is captured at
 insertion; removing a marker never deletes the original file. A rejected file group
 leaves the draft unchanged. File references retain separate ordered text content blocks.
+An image whose sent form differs gives both sizes when the size changed,
+`[Image 1: screen.png · 8064×6048 → 2048×1536]`, both media types when the re-encode
+changed the type, `[Image 1: screen.png · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image
+sent as it is keeps the plain marker.
+A path attached while the model takes images is read and scaled at insertion,
+and a model that takes no images still receives the link.
 
 Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
 macOS uses AppKit and resolves native file-reference URLs to real paths before image
