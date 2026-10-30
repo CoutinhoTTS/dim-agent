@@ -312,7 +312,7 @@ fn definitions_match_the_ts_tool_contracts() {
     assert!(!FileTools::handles("exec"));
     assert_eq!(
         definitions[0].description,
-        "Read a text file from the filesystem. Returns text with line numbers. Use offset and limit for large files."
+        "Read a file from the filesystem. Text comes back with line numbers; use offset and limit for large files. A PNG, JPEG, WebP or GIF image comes back as an image block with one line giving its path and pixel size."
     );
 }
 
@@ -1163,4 +1163,328 @@ async fn file_tools_declare_the_file_they_published() {
     assert_eq!(code(&unmatched), "oldtext_not_found");
     assert_eq!(unmatched.effects, None);
     assert_eq!(workspace.bytes("file.txt"), b"changed\n");
+}
+
+// ── #656: `read` returns image files as image blocks ────────────────────────
+
+use base64::Engine as _;
+use dim_agent_types::{ContentBlock, ImageSource, ImageSourceType};
+use image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
+
+fn png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> Rgba<u8>) -> Vec<u8> {
+    let mut image = RgbaImage::new(width, height);
+    for (x, y, value) in image.enumerate_pixels_mut() {
+        *value = pixel(x, y);
+    }
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut encoded, ImageFormat::Png)
+        .unwrap();
+    encoded.into_inner()
+}
+
+fn jpeg(image: &DynamicImage, quality: u8) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, quality)
+        .encode_image(image)
+        .unwrap();
+    encoded
+}
+
+/// The image block and its line from a `read` result.
+fn image_blocks(result: &ToolResult) -> (&str, &ImageSource) {
+    let ToolContent::Blocks(blocks) = &result.content else {
+        panic!("not an image result: {:?}", result.content);
+    };
+    let ContentBlock::Text { text } = &blocks[0] else {
+        panic!("the first block is not the line: {blocks:?}");
+    };
+    let ContentBlock::Image { source } = &blocks[1] else {
+        panic!("the second block is not the image: {blocks:?}");
+    };
+    (text, source)
+}
+
+fn sent(source: &ImageSource) -> Vec<u8> {
+    assert_eq!(source.source_type, ImageSourceType::Base64);
+    base64::engine::general_purpose::STANDARD
+        .decode(source.data.as_deref().expect("image data"))
+        .unwrap()
+}
+
+fn decoded(source: &ImageSource) -> RgbaImage {
+    image::load_from_memory(&sent(source)).unwrap().to_rgba8()
+}
+
+#[tokio::test]
+async fn read_returns_a_png_as_an_image_block_and_a_line() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let bytes = png(320, 240, |x, _| {
+        if x < 160 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    workspace.put("screen.png", &bytes);
+    let result = workspace.read(&reads, "screen.png").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert_eq!(line, "Read image: screen.png (320x240 px).");
+    assert_eq!(source.media_type, "image/png");
+    assert_eq!(
+        sent(source),
+        bytes,
+        "an image within the limits is sent as read"
+    );
+    assert_eq!(decoded(source).dimensions(), (320, 240));
+    let structured = structured(&result);
+    assert_eq!(structured["kind"], "image");
+    assert_eq!(structured["width"], 320);
+    assert_eq!(structured["height"], 240);
+    assert!(structured.get("sentWidth").is_none());
+
+    // offset and limit do not apply to images, and the line says so.
+    let windowed = workspace
+        .call(&reads, "read", json!({ "path": "screen.png", "offset": 2 }))
+        .await;
+    let (line, _) = image_blocks(&windowed);
+    assert!(
+        line.ends_with(" Offset and limit do not apply to images."),
+        "{line}"
+    );
+
+    // The image is recognized by its content, not its extension: text named
+    // like an image stays text.
+    workspace.put("fake.png", b"plain text\n");
+    assert_eq!(
+        ok(&workspace.read(&reads, "fake.png").await),
+        "1\tplain text"
+    );
+}
+
+#[tokio::test]
+async fn read_scales_a_large_jpeg_within_the_limits() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let mut image = RgbImage::new(3000, 2000);
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    for pixel in image.pixels_mut() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *pixel = Rgb([state as u8, (state >> 8) as u8, (state >> 16) as u8]);
+    }
+    let bytes = jpeg(&DynamicImage::ImageRgb8(image), 95);
+    assert!(
+        bytes.len() > 4 * 1024 * 1024,
+        "the fixture is above 4 MiB: {}",
+        bytes.len()
+    );
+    workspace.put("photo.jpg", &bytes);
+    let result = workspace.read(&reads, "photo.jpg").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("(3000x2000 px)"), "{line}");
+    assert!(line.contains("as image/jpeg"), "{line}");
+    assert!(line.contains("Sent 2048x1365 px"), "{line}");
+    let sent = sent(source);
+    assert!(sent.len() <= 4 * 1024 * 1024, "{}", sent.len());
+    assert!(line.contains(&format!("({} bytes)", sent.len())), "{line}");
+    assert_eq!(decoded(source).dimensions(), (2048, 1365));
+    assert_eq!(structured(&result)["sentWidth"], 2048);
+}
+
+/// A JPEG with an EXIF APP1 orientation segment in front of its frame.
+fn with_orientation(jpeg: Vec<u8>, orientation: u16) -> Vec<u8> {
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II\x2a\x00");
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&orientation.to_le_bytes());
+    tiff.extend_from_slice(&0u16.to_le_bytes());
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    let mut app1 = Vec::new();
+    app1.extend_from_slice(b"Exif\x00\x00");
+    app1.extend_from_slice(&tiff);
+    let mut out = Vec::new();
+    out.extend_from_slice(&jpeg[..2]);
+    out.extend_from_slice(&[0xFF, 0xE1]);
+    out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+#[tokio::test]
+async fn read_turns_an_exif_rotated_photo_upright() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let image = RgbaImage::from_fn(40, 20, |x, _| {
+        if x < 20 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    workspace.put(
+        "portrait.jpg",
+        &with_orientation(jpeg(&DynamicImage::ImageRgba8(image), 95), 6),
+    );
+    let result = workspace.read(&reads, "portrait.jpg").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("(40x20 px)"), "{line}");
+    assert!(line.contains("Sent 20x40 px as image/jpeg"), "{line}");
+    let image = decoded(source);
+    assert_eq!(image.dimensions(), (20, 40), "the sent pixels are upright");
+    // Stored left half red, right half blue, rotated clockwise: the first row
+    // is the stored bottom edge, so its ends keep their colours.
+    let top = image.get_pixel(0, 0);
+    let bottom = image.get_pixel(0, 39);
+    assert!(top[0] > 200 && top[2] < 60, "top {top:?}");
+    assert!(bottom[2] > 200 && bottom[0] < 60, "bottom {bottom:?}");
+}
+
+#[tokio::test]
+async fn read_keeps_a_scaled_screenshot_png() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    workspace.put(
+        "wide.png",
+        &png(3000, 1000, |_, _| Rgba([250, 250, 250, 255])),
+    );
+    let result = workspace.read(&reads, "wide.png").await;
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("(3000x1000 px)"), "{line}");
+    assert!(line.contains("Sent 2048x683 px as image/png"), "{line}");
+    assert_eq!(source.media_type, "image/png");
+    assert_eq!(decoded(source).dimensions(), (2048, 683));
+}
+
+#[tokio::test]
+async fn read_returns_the_first_frame_of_an_animated_gif() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let mut gif = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+        encoder
+            .encode_frames([
+                image::Frame::new(RgbaImage::from_pixel(20, 20, Rgba([255, 0, 0, 255]))),
+                image::Frame::new(RgbaImage::from_pixel(20, 20, Rgba([0, 0, 255, 255]))),
+            ])
+            .unwrap();
+    }
+    workspace.put("anim.gif", &gif);
+    let result = workspace.read(&reads, "anim.gif").await;
+    let (line, source) = image_blocks(&result);
+    assert!(
+        line.contains("Animated GIF: only the first frame was sent."),
+        "{line}"
+    );
+    let image = decoded(source);
+    assert_eq!(image.dimensions(), (20, 20));
+    let pixel = image.get_pixel(10, 10);
+    assert!(pixel[0] > 200 && pixel[2] < 60, "{pixel:?}");
+    assert_eq!(structured(&result)["animated"], true);
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (index, entry) in table.iter_mut().enumerate() {
+        let mut value = index as u32;
+        for _ in 0..8 {
+            value = if value & 1 == 1 {
+                0xEDB8_8320 ^ (value >> 1)
+            } else {
+                value >> 1
+            };
+        }
+        *entry = value;
+    }
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in bytes {
+        crc = table[((crc ^ u32::from(*byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+/// A PNG header that claims `width` x `height` and holds no pixels.
+fn png_header(width: u32, height: u32) -> Vec<u8> {
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let mut typed = b"IHDR".to_vec();
+    typed.extend_from_slice(&ihdr);
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    out.extend_from_slice(&13u32.to_be_bytes());
+    out.extend_from_slice(&typed);
+    out.extend_from_slice(&crc32(&typed).to_be_bytes());
+    // A decoder needs an IDAT chunk present, not a decodable one: the guard
+    // runs after the header and before the pixels are decoded.
+    let mut idat = b"IDAT".to_vec();
+    idat.extend_from_slice(&[0x78, 0x9c, 0x03, 0x00]);
+    out.extend_from_slice(&4u32.to_be_bytes());
+    out.extend_from_slice(&idat);
+    out.extend_from_slice(&crc32(&idat).to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(b"IEND");
+    out.extend_from_slice(&0xAE42_6082u32.to_be_bytes());
+    out
+}
+
+#[tokio::test]
+async fn read_refuses_a_header_above_the_pixel_guard_before_decoding() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    workspace.put("huge.png", &png_header(20_000, 20_000));
+    let result = workspace.read(&reads, "huge.png").await;
+    assert_eq!(code(&result), "binary_unsupported");
+    let message = text(&result);
+    assert!(message.contains("20000x20000"), "{message}");
+    assert!(message.contains("Make a smaller copy"), "{message}");
+}
+
+/// The guard runs on the header, not on the file's length: a sparse tail
+/// makes this file 1 GiB long, and the refusal still comes from the header.
+#[tokio::test]
+async fn read_refuses_a_sparse_file_before_reading_it() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    workspace.put("huge-sparse.png", &png_header(20_000, 20_000));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(workspace.path("huge-sparse.png"))
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let result = workspace.read(&reads, "huge-sparse.png").await;
+    assert_eq!(code(&result), "binary_unsupported");
+    let message = text(&result);
+    assert!(message.contains("20000x20000"), "{message}");
+    assert!(message.contains("Make a smaller copy"), "{message}");
+}
+
+#[tokio::test]
+async fn read_refuses_formats_it_cannot_decode_and_other_binaries() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    workspace.put(
+        "photo.heic",
+        b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic",
+    );
+    let heic = workspace.read(&reads, "photo.heic").await;
+    assert_eq!(code(&heic), "binary_unsupported");
+    assert!(text(&heic).contains("HEIC/HEIF"), "{}", text(&heic));
+    workspace.put("archive.zip", b"PK\x03\x04");
+    assert_eq!(
+        code(&workspace.read(&reads, "archive.zip").await),
+        "binary_unsupported"
+    );
 }

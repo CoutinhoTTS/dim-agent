@@ -82,6 +82,45 @@ decoder into an `OutputSink` (exec's sink also offloads to the output file) and
 keeps reading for the 100 ms grace after the root exits. These are the existing
 output rules, exposed without changing their behavior.
 
+### read results and images
+
+`read` returns a PNG, JPEG, WebP or GIF file as an image block and one text
+line, recognized from the file's content rather than its extension
+([images.rs](../../../../crates/dim-agent-capabilities/src/images.rs)). The line
+gives the path and the pixel size; an image that had to be re-encoded also gives
+the size sent, in pixels and bytes; an animation says only its first frame was
+sent; `offset` or `limit` on an image adds one sentence saying they do not
+apply.
+
+One shared function, `images::scale_image`, makes the image acceptable to a
+model. It reads from a seekable source — the file, not its bytes — so the whole
+source is never buffered: it reads the header, runs the guard, and only then
+decodes. An image whose longest edge exceeds 2048 px or whose encoding exceeds
+4 MiB is decoded, its EXIF orientation applied first so the sent pixels are
+upright, and re-encoded to fit: a PNG source stays PNG while its scaled PNG
+fits, everything else becomes JPEG at quality 85, and the long edge steps down
+until the encoding fits. An image within both limits with no orientation to
+apply is sent byte for byte. One guard keeps memory bounded: a header claiming
+more than 100 megapixels is refused from its dimensions before the pixels are
+decoded, and the refusal names the dimensions and asks for a smaller copy.
+HEIC/HEIF and AVIF are refused with the format named; every other binary file is
+refused as before. `read` never decides for the model: the same image block goes
+into the tool result whatever the model, and the stored result holds what was
+sent, the scaled image. ModelProvider turns the image into its text placeholder
+for a model without image input ([ModelProvider](ModelProvider.md#image-handling)).
+
+The model-facing texts and their classes
+([model prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):
+
+- **Protocol.** The image text line's form — `Read image: <path> (<w>x<h> px).`,
+  the `Sent <w>x<h> px as <media type> (<n> bytes).` sentence when the image was
+  re-encoded, `Animated <format>: only the first frame was sent.` for an
+  animation, and `Offset and limit do not apply to images.` when either was
+  given — the refusal sentences (unsupported format, too many pixels,
+  undecodable bytes) with their `binary_unsupported` code, and the tool
+  declaration's schema and image result format.
+- **Policy.** The description's guidance naming the formats it returns.
+
 ### Declared effects
 
 `write`, `edit` and `exec` declare the effect of each call on its result, through
@@ -150,6 +189,14 @@ None (§4 rule 8). S7 uses the existing host and storage contracts.
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs),
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs),
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
+
+[workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
+also drives `read` over images: a PNG and its line, a JPEG scaled within both
+limits, an EXIF-rotated photo made upright, a wide screenshot kept PNG, an
+animated GIF's first frame, the pixel guard before decoding, and the refusals.
+[read_image_flow.rs](../../../../crates/dim-app-server/tests/read_image_flow.rs)
+runs a model's `read` on a PNG: a vision model receives the image block, and a
+model without image input receives the placeholder.
 
 The App Server's [native execution flow](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
 reads a live capture through C1, holds its real SQLite terminal commit, checks
