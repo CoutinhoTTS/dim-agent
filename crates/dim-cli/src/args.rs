@@ -27,7 +27,7 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
-  recording [on|off|status]        Record model requests to the home's\n\
+  recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
   plugin list                      List plugins by name, the one in use and its status\n\
@@ -121,7 +121,7 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
-    /// `recording [on|off|status]`: the daemon's model request record.
+    /// `recording [on|off]`: the daemon's model request record.
     Recording {
         enabled: Option<bool>,
     },
@@ -438,10 +438,6 @@ impl Options {
                 }
                 "recording" if matches!(options.action, Action::Chat) => {
                     let enabled = match args.peek().cloned().as_deref() {
-                        Some("status") => {
-                            args.next();
-                            None
-                        }
                         Some("on") => {
                             args.next();
                             Some(true)
@@ -451,9 +447,7 @@ impl Options {
                             Some(false)
                         }
                         Some(other) if !other.starts_with('-') => {
-                            return Err(
-                                format!("Use recording [on|off|status], not {other:?}").into()
-                            );
+                            return Err(format!("Use recording [on|off], not {other:?}").into());
                         }
                         _ => None,
                     };

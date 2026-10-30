@@ -29,9 +29,8 @@ project content must not turn them on.
 line to the daemon's `model-log/recordings.jsonl`; when it is false new requests
 are not recorded. A request already in flight keeps the recorder it started with
 and finishes into the file. The recorder is replaced on `settings.changed` and
-stopped when the plugin unloads; one recorder serves the whole process, a change
-to the same directory keeps the existing writer, and the file has no rotation or
-size limit.
+stopped when the plugin unloads; one recorder serves the whole process, and the
+file has no rotation or size limit.
 
 The directory is created with mode 0700 and the file with 0600 (Unix). A product
 daemon writes `<home>/model-log/recordings.jsonl`; one started from
@@ -43,13 +42,14 @@ storage it is the same document in the settings table, written through
 
 The line client and the terminal UI carry the switch:
 
-- `dimcode recording [status]` prints whether it is on; `dimcode recording
-  on|off` switches it and prints the resulting state (the file path when on).
-- `/settings recording [status]` and `/settings recording on|off` do the same
-  from the terminal UI, under the settings command.
+- `dimcode recording` prints whether it is on; `dimcode recording on|off`
+  switches it and prints the resulting state (the file path when on).
+- `/settings recording` and `/settings recording on|off` switch it from the
+  terminal UI without printing.
 
-Both read the current revision, write the new document and report the state the
-daemon stored; a daemon without the source reports the settings error.
+The line client reads the current revision, writes the new document and prints
+the state the daemon stored; a daemon without the source reports the settings
+error.
 
 A line holds one call: the input prompt and options, the provider identity, one
 entry per HTTP exchange (request headers and body, response status, headers and
@@ -92,7 +92,5 @@ read back into Dim.
 - `cli_flow::recording_on_switches_the_model_log` and
   `recording_reports_whether_it_is_on`: the line client reads and writes the
   source and prints the state.
-- `cli_flow::tui_settings_recording_reports_the_state`: the terminal UI shows
-  the report.
 - `ui::tui::tests::settings_recording_sends_its_words`: `/settings recording`
   reaches the session host with its arguments.
