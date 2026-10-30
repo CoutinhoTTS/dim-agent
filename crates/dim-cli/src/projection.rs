@@ -1282,11 +1282,15 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 fn text_of(blocks: &[ContentBlock]) -> String {
+    let mut images = 0;
     blocks
         .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Image { .. } => None,
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Image { .. } => {
+                images += 1;
+                crate::ui::i18n::tf("[Image #{index}]", &[("index", &images.to_string())])
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1679,6 +1683,53 @@ mod tests {
                 .any(|row| row.text == "This line ended (with b-7c)"),
             "a cascaded line's own transcript names its ancestor"
         );
+    }
+
+    #[test]
+    fn image_messages_remain_visible_in_history_queue_and_transcript() {
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"},
+        });
+        let input = |sequence, id, content| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": content}, "mode": "queue"},
+            })
+        };
+        let history = input(1, "history-image", serde_json::json!([image]));
+        let mixed = input(
+            2,
+            "mixed-images",
+            serde_json::json!([
+                {"type": "text", "text": "Compare"}, image,
+                {"type": "text", "text": "with"}, image,
+            ]),
+        );
+        let applied = serde_json::json!({
+            "id": "applied", "sequence": 3, "create_at": 3,
+            "type": "input", "name": "applied", "data": {"input_id": "mixed-images"},
+        });
+        let mut live = Projection::default();
+        apply(&mut live, std::slice::from_ref(&history));
+        assert_eq!(live.snapshot().rows[0].text, "[Image #1]");
+        live.set_running(true);
+        apply(&mut live, std::slice::from_ref(&mixed));
+        let expected = "Compare\n[Image #1]\nwith\n[Image #2]";
+        assert_eq!(live.snapshot().queued[0].text, expected);
+        assert_eq!(
+            serde_json::to_value(live.held_input("mixed-images").unwrap()).unwrap(),
+            mixed["data"]["user"],
+            "display markers preserve the original queued image blocks"
+        );
+        apply(&mut live, std::slice::from_ref(&applied));
+        assert!(live.snapshot().queued.is_empty());
+        assert_eq!(live.snapshot().rows[1].text, expected);
+        let mut replay = Projection::default();
+        apply(&mut replay, &[history, mixed, applied]);
+        assert_eq!(replay.snapshot().rows[0].text, "[Image #1]");
+        assert_eq!(replay.snapshot().rows[1].text, expected);
     }
 
     #[test]

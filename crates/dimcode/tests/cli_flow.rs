@@ -3067,6 +3067,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
             {"type":"text","text":" [Pasted text: /files/paste.txt (1 lines)]"},
         ]));
         wire.reply(&submit, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"image-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":submit["params"]["user"],"mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -3080,10 +3081,11 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.paste(&long);
     terminal.until("16385 chars");
     terminal.write(b"\r");
-    let joined = daemon.join();
+    terminal.until("[Image #1]");
+    terminal.until("[Pasted text: /files/paste.txt (1 lines)]");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    joined.unwrap();
+    daemon.join().unwrap();
 }
 
 #[test]

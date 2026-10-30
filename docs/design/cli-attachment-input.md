@@ -58,6 +58,17 @@ session: <session-id>
 The composer stays in terminal scrollback. It redraws its own input and suggestion rows and
 keeps the cursor in the draft. Image pixels are not rendered in the terminal. Markers show
 escaped file names or paste line counts; labels are presentation, not model content.
+After submission, transcript messages show image blocks as numbered `[Image #N]` markers
+in content order, including image-only messages and messages restored from history. The
+numbering starts at 1 for each message; the submitted image block has no filename.
+
+```text
+> What is this?
+  [Image #1]
+
+> [Image #1]
+```
+
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
 or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.
 Typing path components narrows the search from the displayed base. Suggestions list UTF-8 names;
