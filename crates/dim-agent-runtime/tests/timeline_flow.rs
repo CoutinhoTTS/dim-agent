@@ -1,12 +1,107 @@
 use dim_agent_runtime::{
-    AgentError, MemoryTimelineStore, SessionConfig, Timeline, TimelineKey, TimelineStore,
+    AgentError, BoxFuture, MemoryTimelineStore, PublishCallback, Result, SessionConfig,
+    StoredBranch, StoredEvent, Timeline, TimelineKey, TimelineStore, TimelineTrace,
 };
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::CtxHost;
-use std::sync::Arc;
+use std::{
+    ops::RangeInclusive,
+    sync::{Arc, Mutex},
+};
 fn input(text: &str) -> EventDraft {
     EventKind::InputMessage(InputMessageData::text(text, None)).into()
+}
+
+/// Counts every segment read from the store, in call order.
+#[derive(Default)]
+struct Reads {
+    memory: MemoryTimelineStore,
+    segments: Mutex<Vec<(String, RangeInclusive<u64>)>>,
+}
+impl TimelineStore for Reads {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        Box::pin(async move {
+            for (branch, range) in &segments {
+                self.segments
+                    .lock()
+                    .unwrap()
+                    .push((branch.clone(), range.clone()));
+            }
+            self.memory.read_segments(session_id, segments).await
+        })
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+}
+
+/// Decodes a checkpoint whose resume is the sequence held in the snapshot
+/// state, on `main`.
+fn checkpoint_resume(
+    snapshot: &RecoverySnapshot,
+    _anchor: &AgentEvent,
+) -> Option<ProjectionCheckpoint> {
+    Some(ProjectionCheckpoint {
+        resume: TimelinePosition {
+            branch_id: "main".into(),
+            sequence: snapshot.state.parse().ok()?,
+        },
+        state: ProjectionCheckpointState::default(),
+    })
 }
 #[tokio::test]
 async fn producer_preassigned_event_id_is_the_first_delta_part_id() {
@@ -428,4 +523,182 @@ async fn before_keys_accept_a_domain_wildcard() {
         )
         .unwrap();
     assert_eq!(other.tags, None);
+}
+
+/// A checkpointed read reads the anchor as one row and never a range that
+/// spans it to the cut, so the tail is not decoded twice.
+#[tokio::test]
+async fn a_checkpointed_read_decodes_one_anchor_event() {
+    let store = Arc::new(Reads::default());
+    store
+        .memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    writer
+        .append_batch_registered(
+            (1..=50)
+                .map(|index| input(&format!("prefix {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let anchor = writer.append(input("anchor")).unwrap();
+    writer
+        .save_snapshot(RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: "test/anchor".into(),
+            state: "40".into(),
+        })
+        .await
+        .unwrap();
+    writer
+        .append_batch_registered(
+            (1..=1000)
+                .map(|index| input(&format!("tail {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let reader = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let through = reader.committed();
+    assert_eq!(through, 1051);
+    store.segments.lock().unwrap().clear();
+    let context = reader
+        .context_with_checkpoint(through, "test/anchor", checkpoint_resume)
+        .await
+        .unwrap();
+    assert!(context.checkpoint.is_some());
+    assert_eq!(context.events.len(), (through - 39) as usize);
+    let segments = store.segments.lock().unwrap();
+    assert_eq!(
+        segments
+            .first()
+            .map(|(branch, range)| (branch.as_str(), range.clone())),
+        Some(("main", 51..=51)),
+        "the anchor check reads the anchor row"
+    );
+    assert!(
+        !segments
+            .iter()
+            .any(|(_, range)| *range.start() >= 51 && *range.end() >= through),
+        "no read runs from the anchor row to the cut"
+    );
+}
+
+/// A live branch serves the anchor from its hot window: the anchor check makes
+/// no store read, and the checkpoint is used.
+#[tokio::test]
+async fn a_checkpoint_anchored_in_the_hot_window_is_used() {
+    let store = Arc::new(Reads::default());
+    store
+        .memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    writer
+        .append_batch_registered(
+            (1..=50)
+                .map(|index| input(&format!("prefix {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let branch = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let anchor = branch.append(input("anchor")).unwrap();
+    branch
+        .save_snapshot(RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: "test/anchor".into(),
+            state: "40".into(),
+        })
+        .await
+        .unwrap();
+    branch
+        .append_batch_registered(
+            (1..=1000)
+                .map(|index| input(&format!("tail {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let through = branch.committed();
+    assert_eq!(through, 1051);
+    store.segments.lock().unwrap().clear();
+    let context = branch
+        .context_with_checkpoint(through, "test/anchor", checkpoint_resume)
+        .await
+        .unwrap();
+    assert!(context.checkpoint.is_some(), "the checkpoint is used");
+    assert_eq!(context.events.len(), (through - 39) as usize);
+    assert_eq!(
+        *store.segments.lock().unwrap(),
+        [("main".to_string(), 40..=through)],
+        "the anchor comes from the hot window; only the context read reaches the store"
+    );
+}
+
+/// An anchor row inside an atomic batch keeps its checkpoint: the point read
+/// cannot end there, so the segment read finds the same anchor as before.
+#[tokio::test]
+async fn a_checkpoint_anchored_inside_an_atomic_batch_is_still_used() {
+    let store = Arc::new(Reads::default());
+    store
+        .memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let key = TimelineKey {
+        session_id: "session".into(),
+        branch_id: "main".into(),
+    };
+    let writer = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    writer
+        .append_batch_registered(
+            (1..=50)
+                .map(|index| input(&format!("prefix {index}")))
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let batch = writer
+        .append_batch_registered(vec![input("anchor"), input("after")], |_| Ok(()))
+        .unwrap();
+    writer
+        .save_snapshot(RecoverySnapshot {
+            sequence: batch[0].sequence,
+            event_id: batch[0].id.clone(),
+            interpreter: "test/anchor".into(),
+            state: "40".into(),
+        })
+        .await
+        .unwrap();
+    let reader = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let context = reader
+        .context_with_checkpoint(52, "test/anchor", checkpoint_resume)
+        .await
+        .unwrap();
+    assert!(
+        context.checkpoint.is_some(),
+        "a mid-batch anchor still selects its checkpoint"
+    );
+    assert_eq!(context.events.len(), 13);
 }

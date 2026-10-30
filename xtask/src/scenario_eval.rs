@@ -12,22 +12,68 @@
 //! Both arms run the shipped assembly: `current` with the product's own texts
 //! and `candidate` with the candidate file in place of the text `--text`
 //! names. Each arm runs every scenario `--runs` times, one fixed judge reads
-//! each run's exported Timeline, and the report applies the relative rule of
-//! model-prompts §8.1: every probe's pass rate is at least the current arm's
-//! minus 0.05, the candidate's violations, failed runs and unjudged runs are
-//! no higher, and every probe has at least one judged run in each arm. There
-//! is no absolute pass line.
+//! a view of each run's exported Timeline, and the report applies the
+//! relative rule of model-prompts §8.1: every probe's pass rate is at least
+//! the current arm's minus 0.05, the candidate's violations, failed runs and
+//! unjudged runs are no higher, and every probe has at least one judged run
+//! in each arm. There is no absolute pass line.
 //!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
 //! asked, or a judge call failed — the first call, its retry without a
-//! temperature, or a re-ask. The judge's verdicts are read from a JSON array
-//! or from one object per line; a reply that gives no verdict, or leaves a
-//! statement without one, is asked again with what was wrong, at most twice.
+//! temperature, or a re-ask. The judge is asked for `present` or `absent`;
+//! the verdict parser it shares with the summary evaluation also accepts
+//! `contradicted`, which a `must_not_show` probe treats as not shown. The
+//! judge's verdicts are read from a JSON array or from one object per line; a
+//! reply that gives no verdict, or leaves a statement without one, is asked
+//! again with what was wrong, at most twice.
 //! A run the judge answered but still gave no usable verdicts for after the
-//! re-asks is unjudged: it adds nothing to its arm's probe rates, violations
-//! or failed runs, and the report counts it and lists it. A run that failed
-//! on its own is a failed run, scored as before, whatever its judge did.
+//! re-asks is unjudged, and so is a run whose view does not fit the judge's
+//! budget, which is never asked: either adds nothing to its arm's probe
+//! rates, violations or failed runs, and the report counts it and lists it
+//! with its reason. A run that failed on its own is a failed run, scored as
+//! before, whatever its judge did.
+//!
+//! The judge's window is read from the judge's selection snapshot or from the
+//! `--model-config` file, and an evaluation whose judge declares no window
+//! fails before its first call. A run's view is judged in one call, and a
+//! view that does not fit the window less the reply's `maxTokens` leaves the
+//! run unjudged without a call: there is no judging in parts, because a probe
+//! that counts, orders or holds over a whole run cannot be answered from one
+//! part. On the product profile, until
+//! [#522](https://github.com/arcships/dim/issues/522) lands, a model whose
+//! limits are not declared carries the catalog's assumed pair (128,000 and
+//! 16,384 tokens): only a view over the assumed budget is unjudged with the
+//! estimate and the budget, while a view between the real and the assumed
+//! budget is sent, refused by the provider, and a failed run. The
+//! `--model-config` file declares the window explicitly. A scenario's
+//! `budget.window` must equal the run model's declared window, so a model
+//! configuration whose run entry is narrowed for the scenarios declares the
+//! judge as a second provider entry beside it: the same `baseUrl` and
+//! `apiKeyEnv`, its own provider id, and the model's real window and output
+//! limit. The catalog keys its models by provider and model id
+//! (`crates/dim-agent-aimux/src/models.rs`), so one upstream model can be
+//! declared under two providers:
+//!
+//! ```json
+//! {
+//!   "defaultModel": {"providerId": "run", "modelId": "model-a"},
+//!   "providers": [
+//!     {"id": "run", "kind": "openai-chat", "apiKeyEnv": "MODEL_KEY",
+//!      "baseUrl": "https://example.invalid/v1",
+//!      "models": [{"id": "model-a", "contextWindow": 16000,
+//!                  "maxOutputTokens": 1024, "config": {"maxTokens": 1024}}]},
+//!     {"id": "judge", "kind": "openai-chat", "apiKeyEnv": "MODEL_KEY",
+//!      "baseUrl": "https://example.invalid/v1",
+//!      "models": [{"id": "model-a", "contextWindow": 1048576,
+//!                  "maxOutputTokens": 8192, "config": {"maxTokens": 8192}}]}
+//!   ]
+//! }
+//! ```
+//!
+//! The run model above is declared for the scenarios' 16,000-token window and
+//! the same upstream model judges with its own 1,048,576-token window, so
+//! `--judge judge/model-a` reads a view of that size in one call.
 //!
 //! Both arms load the product's default plugins, from the default
 //! configuration file the product ships (`--defaults FILE`, by default the
@@ -97,8 +143,9 @@
 //! The runner copies the scenario's workspace and `--home` into a fresh
 //! directory for every run, so runs share no state, and writes one directory
 //! per run under `--out`, which it creates and resolves where the command
-//! line is read: `timeline.jsonl` (the whole Timeline, every line
-//! included, which the judge reads), `home/` and `workspace/`. The App
+//! line is read: `timeline.jsonl` (the whole Timeline, every line included:
+//! the run's account of record), `judge-view.jsonl` (the view of it the judge
+//! read), `home/` and `workspace/`. The App
 //! Server's local endpoint sits under the system temporary directory, because
 //! a Unix socket's path is short and a run's directory is not; each run
 //! owns its endpoint directory and removes it when the run ends, on success
@@ -107,8 +154,9 @@ use crate::app_server::{self, Overrides, RunSettings};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
 use dim_agent_capabilities::{
     context_model::window_facts,
-    host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver},
+    host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver, ResolveContextModel},
 };
+use dim_agent_runtime::AgentBuilder;
 use dim_agent_types::{
     Message, ModelConfig, ModelId, ModelRequest, ModelSelection, Role, SystemPrompt,
 };
@@ -140,7 +188,7 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
-const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
+const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
 /// The message that asks the judge again, `{what}` saying why its last answer
 /// could not be used.
@@ -200,15 +248,18 @@ const TEXTS: &[(&str, TextMember)] = &[
 
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
-    let report = evaluate(&options).await?;
+    let report = evaluate(&options, |_| {}).await?;
     println!("{report}");
     println!("wrote {}", options.out.join("scenario.md").display());
     Ok(())
 }
 
 /// Runs the evaluation and writes `runs.jsonl` and `scenario.md`; returns the
-/// report.
-async fn evaluate(options: &Options) -> Result<String> {
+/// report. `observe` sees every run's App Server builder before it is served,
+/// the seam [`app_server::serve_home`] gives a caller that places its own
+/// values; the flow tests point a run's process facts at a home of their own
+/// instead of the developer's.
+async fn evaluate(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Result<String> {
     if options.defaults.is_some() {
         if options.node.is_none() {
             return Err("set DIM_TEST_NODE: the default plugins run in Node".into());
@@ -234,6 +285,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         tokens: text_tokens(&options.model, &options.candidate),
         model_configuration: None,
         judge_configuration: None,
+        judge_window: None,
         judge_temperature_dropped: 0,
         judge_asked_runs: 0,
         judge_reasks: 0,
@@ -246,6 +298,7 @@ async fn evaluate(options: &Options) -> Result<String> {
                     &home,
                     arm,
                     &overrides,
+                    &observe,
                     scenario,
                     run,
                     &cancel,
@@ -253,8 +306,10 @@ async fn evaluate(options: &Options) -> Result<String> {
                 )
                 .await?;
                 instrument.judge_temperature_dropped += usize::from(record.temperature_dropped);
-                instrument.judge_asked_runs +=
-                    usize::from(record.judge_outcome != JudgeOutcome::NotAsked);
+                instrument.judge_asked_runs += usize::from(!matches!(
+                    record.judge_outcome,
+                    JudgeOutcome::NotAsked | JudgeOutcome::Unfit
+                ));
                 instrument.judge_reasks += record.judge_reasks as usize;
                 records.push(record);
             }
@@ -299,7 +354,11 @@ impl Options {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
                      --text ID --candidate FILE --model PROVIDER/MODEL \
                      --judge PROVIDER/MODEL --runs N --home DIR --out DIR \
-                     [--model-config FILE] [--defaults FILE]";
+                     [--model-config FILE] [--defaults FILE]; a run whose \
+                     view does not fit the judge's own declared window is \
+                     unjudged, so a model configuration narrowed for the \
+                     scenarios declares the judge under its own provider \
+                     entry (see the module doc)";
         // Both arms serve the product's default plugins; `--defaults`
         // names another default configuration file.
         let mut args = args.into_iter();
@@ -643,11 +702,16 @@ struct RunRecord {
     probes: Vec<ProbeRecord>,
 }
 impl RunRecord {
-    /// Whether the run is unjudged (model-prompts §8.1): the judge answered
-    /// every call and gave no usable verdicts after the re-asks, and nothing
+    /// Whether the run is unjudged (model-prompts §8.1): the judge was not
+    /// asked because the view of the run's export does not fit its budget, or
+    /// it answered without usable verdicts after the re-asks, and nothing
     /// else failed the run. Such a run enters none of its arm's metrics.
     fn unjudged(&self) -> bool {
-        !self.failed && self.judge_outcome == JudgeOutcome::Unreadable
+        !self.failed
+            && matches!(
+                self.judge_outcome,
+                JudgeOutcome::Unreadable | JudgeOutcome::Unfit
+            )
     }
     /// Whether the run is judged (model-prompts §8.1): it raised no error and
     /// the judge answered every call with usable verdicts. Only such a run
@@ -686,6 +750,9 @@ enum JudgeOutcome {
     /// The judge was never asked: the run left no export, the profile has no
     /// model host for the judge, or the run failed before the judge ran.
     NotAsked,
+    /// The judge was never asked: the view of the run's export does not fit
+    /// the judge's budget. The run is unjudged.
+    Unfit,
     /// The judge answered every call and gave no usable verdicts after the
     /// re-asks.
     Unreadable,
@@ -697,6 +764,7 @@ async fn run_once(
     home: &Path,
     arm: &'static str,
     overrides: &Overrides,
+    observe: &dyn Fn(&mut AgentBuilder),
     scenario: &Scenario,
     run: usize,
     cancel: &CancellationToken,
@@ -733,7 +801,7 @@ async fn run_once(
         &workspace,
         options.out.join("command-output"),
         settings.clone(),
-        |_| {},
+        |builder| observe(builder),
     )
     .await?;
     let started = Instant::now();
@@ -745,8 +813,10 @@ async fn run_once(
     instrument
         .judge_configuration
         .get_or_insert_with(|| Configuration::read(judge.config.as_ref()));
+    let limits = judge_window(&judge, options.model_config.as_deref(), cancel).await?;
+    instrument.judge_window.get_or_insert(limits);
     let finished = match drive_once(
-        &server, &settings, &run_home, &workspace, scenario, &model, &judge, cancel,
+        &server, &settings, &run_home, &workspace, scenario, &model, &judge, limits, cancel,
     )
     .await
     {
@@ -757,6 +827,9 @@ async fn run_once(
     server.join().await?;
     if let Some(export) = &finished.export {
         std::fs::write(run_directory.join("timeline.jsonl"), export)?;
+    }
+    if let Some(view) = &finished.view {
+        std::fs::write(run_directory.join("judge-view.jsonl"), view)?;
     }
     let driven = finished.driven;
     let error = driven.error;
@@ -779,11 +852,12 @@ async fn run_once(
     })
 }
 
-/// What one run left behind: the driven Session, its export and the judge's
-/// part.
+/// What one run left behind: the driven Session, its export, the view of it
+/// the judge read, and the judge's part.
 struct Finished {
     driven: Driven,
     export: Option<String>,
+    view: Option<String>,
     judging: Judging,
 }
 impl Finished {
@@ -797,6 +871,7 @@ impl Finished {
                 error: Some(error),
             },
             export: None,
+            view: None,
             judging: Judging::not_asked(scenario, None),
         }
     }
@@ -841,6 +916,7 @@ async fn drive_once(
     scenario: &Scenario,
     model: &ModelSelection,
     judge: &ModelSelection,
+    limits: JudgeWindow,
     cancel: &CancellationToken,
 ) -> Result<Finished> {
     let socket = settings
@@ -867,6 +943,7 @@ async fn drive_once(
         return Ok(Finished {
             driven,
             export: None,
+            view: None,
             judging: Judging::not_asked(scenario, None),
         });
     }
@@ -899,6 +976,7 @@ async fn drive_once(
             return Ok(Finished {
                 driven,
                 export: None,
+                view: None,
                 judging: Judging::not_asked(scenario, Some(format!("no export to judge: {error}"))),
             });
         }
@@ -910,16 +988,19 @@ async fn drive_once(
         return Ok(Finished {
             driven,
             export: Some(export),
+            view: None,
             judging: Judging::not_asked(
                 scenario,
                 Some("the served profile has no model host for the judge".to_owned()),
             ),
         });
     };
-    let judging = judge_export(&host, &resolver, judge, scenario, &export, cancel).await;
+    let view = judge_view(&export);
+    let judging = judge_export(&host, &resolver, judge, scenario, &view, limits, cancel).await;
     Ok(Finished {
         driven,
         export: Some(export),
+        view: Some(view),
         judging,
     })
 }
@@ -1399,18 +1480,137 @@ async fn idle(
         .any(|message| matches!(message, WireMessage::Notice { .. })))
 }
 
+/// The export as the judge reads it (issue #635): every line in order, with
+/// each request-bearing event's request rendered against the previous request
+/// of the same line, so a run does not carry a request's unchanged history
+/// once per model call.
+fn judge_view(export: &str) -> String {
+    let mut view = String::new();
+    let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+    for raw in export.lines() {
+        let Ok(mut line) = serde_json::from_str::<Value>(raw) else {
+            view.push_str(raw);
+            view.push('\n');
+            continue;
+        };
+        if line["event"]["data"]["request"].is_object() {
+            let branch = line["branch_id"].as_str().unwrap_or_default().to_owned();
+            let request = line["event"]["data"]["request"].clone();
+            line["event"]["data"]["request"] = rendered_request(&request, previous.get(&branch));
+            previous.insert(branch, request);
+        }
+        view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+        view.push('\n');
+    }
+    view
+}
+
+/// One request as [`judge_view`] renders it, starting from the request object
+/// itself so that nothing is dropped: the messages added since the line's
+/// previous request, when that request's messages are a prefix of this one's,
+/// or all of them otherwise; every other field in full when it differs from
+/// the previous request's, or a marker when it does not. Every request can be
+/// rebuilt from the view, whatever fields the request type gains later.
+fn rendered_request(request: &Value, previous: Option<&Value>) -> Value {
+    let messages = request["messages"].as_array();
+    let added = messages.and_then(|messages| {
+        let previous = previous?["messages"].as_array()?;
+        let added = messages.get(previous.len()..)?;
+        messages[..previous.len()]
+            .iter()
+            .zip(previous)
+            .all(|(message, earlier)| message == earlier)
+            .then_some(added)
+    });
+    let mut rendered = serde_json::Map::new();
+    for (field, value) in request.as_object().into_iter().flatten() {
+        if field == "messages" {
+            match added {
+                Some(added) => rendered.insert("addedMessages".to_owned(), json!(added)),
+                None => rendered.insert("messages".to_owned(), request["messages"].clone()),
+            };
+            rendered.insert(
+                "messageCount".to_owned(),
+                json!(messages.map_or(0, Vec::len)),
+            );
+            continue;
+        }
+        let unchanged = previous.is_some_and(|previous| previous.get(field) == Some(value));
+        rendered.insert(
+            field.clone(),
+            if unchanged {
+                json!({"unchanged": true})
+            } else {
+                value.clone()
+            },
+        );
+    }
+    Value::Object(rendered)
+}
+
+/// The judge's limits (model-prompts §8.1, #522): its context window and its
+/// output limit, read from its selection snapshot or from the model
+/// configuration. A judge that declares neither fails the evaluation before
+/// its first call.
+#[derive(Clone, Copy, Debug)]
+struct JudgeWindow {
+    window: u64,
+    max_output: u64,
+}
+/// The judge's declared limits, read beside its selection: a product
+/// profile's selection carries a capability snapshot; a development model
+/// configuration declares its limits in the file and its selections carry
+/// none, so the profile answers through its own context-model resolver, the
+/// one a Session asks for its window.
+async fn judge_window(
+    judge: &ModelSelection,
+    model_config: Option<&Path>,
+    cancel: &CancellationToken,
+) -> Result<JudgeWindow> {
+    if let Some(capabilities) = judge
+        .capability_snapshot
+        .as_ref()
+        .map(|snapshot| &snapshot.capabilities)
+        .filter(|capabilities| capabilities.context_window > 0)
+    {
+        return Ok(JudgeWindow {
+            window: capabilities.context_window,
+            max_output: capabilities.max_output_tokens,
+        });
+    }
+    if let Some(path) = model_config {
+        let (models, _) = dim_app_server::cli::model_profile(path)
+            .map_err(|error| format!("--model-config {}: {error}", path.display()))?;
+        let request = ModelRequest::new(&judge.provider_id, &judge.model_id, vec![]);
+        if let Ok(facts) = models.resolve(Arc::new(request), cancel.clone()).await {
+            return Ok(JudgeWindow {
+                window: facts.context_window() as u64,
+                max_output: facts.output_tokens() as u64,
+            });
+        }
+    }
+    Err(format!(
+        "the judge {}/{} declares no context window in its selection or the model configuration",
+        judge.provider_id, judge.model_id
+    )
+    .into())
+}
+
 /// The judge's answer for one run: a record per probe, the judge's error,
 /// whether the judge had to drop its temperature, and how many times it was
-/// asked again. A reply that gives no verdict, or leaves a probe without one,
-/// is asked again with what was wrong, at most [`REASKS`] times; a call that
-/// fails during a re-ask ends the asking. An answer that stays unusable
-/// leaves every probe `unparsed` (model-prompts §8.1).
+/// asked again. A view that does not fit the judge's budget — the window less
+/// the reply's `maxTokens`, estimated with the product's counter — leaves the
+/// run unjudged before any call. A reply that gives no verdict, or leaves a
+/// probe without one, is asked again with what was wrong, at most [`REASKS`]
+/// times; a call that fails during a re-ask ends the asking. An answer that
+/// stays unusable leaves every probe `unparsed` (model-prompts §8.1).
 async fn judge_export(
     host: &Arc<ModelHost>,
     resolver: &Arc<ProviderConnectionResolver>,
     judge: &ModelSelection,
     scenario: &Scenario,
-    export: &str,
+    view: &str,
+    limits: JudgeWindow,
     cancel: &CancellationToken,
 ) -> Judging {
     let statements = scenario
@@ -1420,19 +1620,34 @@ async fn judge_export(
         .collect::<Vec<_>>()
         .join("\n");
     let text =
-        format!("<statements>\n{statements}\n</statements>\n\n<timeline>\n{export}\n</timeline>");
+        format!("<statements>\n{statements}\n</statements>\n\n<timeline>\n{view}\n</timeline>");
     let mut messages = vec![Message::text(Role::User, text)];
     let mut config = judge.config.clone().unwrap_or_default();
     config.temperature = Some(0.);
     let mut dropped = false;
     let mut reasks = 0;
+    let whole = judge_request(judge, &messages, &config);
+    let facts = window_facts(limits.window, limits.max_output, &whole);
+    let estimate = facts.count_tokens(&whole);
+    let budget = facts.context_window() - facts.output_tokens();
+    if estimate > budget {
+        return Judging {
+            outcome: JudgeOutcome::Unfit,
+            probes: unparsed(scenario),
+            error: Some(format!(
+                "the judge view needs about {estimate:.0} tokens; the judge's budget is {budget:.0}"
+            )),
+            reasks: 0,
+            temperature_dropped: false,
+        };
+    }
     let (outcome, probes, error) = loop {
         let request = Arc::new(judge_request(judge, &messages, &config));
         let reply = match complete(host, resolver, &request, cancel).await {
             Ok(reply) => reply,
             // A call that fails during a re-ask ends the asking, and the
             // error names the call that failed.
-            Err(error) if dropped || reasks > 0 => {
+            Err(error) if reasks > 0 => {
                 break (
                     JudgeOutcome::CallFailed,
                     unparsed(scenario),
@@ -1697,8 +1912,11 @@ struct Instrument {
     tokens: f64,
     model_configuration: Option<Configuration>,
     judge_configuration: Option<Configuration>,
+    /// The judge's declared limits, read from the first run's selection.
+    judge_window: Option<JudgeWindow>,
     judge_temperature_dropped: usize,
-    /// Runs the judge was asked about: every outcome but `not_asked`.
+    /// Runs the judge was asked about: every outcome but `not_asked` and a
+    /// view that does not fit its budget.
     judge_asked_runs: usize,
     /// How many re-asks the judge was asked for over every run.
     judge_reasks: usize,
@@ -1744,8 +1962,14 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         };
         metrics.entry(record.arm).or_default().add(scenario, record);
     }
+    let window = instrument.judge_window.map_or_else(String::new, |window| {
+        format!(
+            ", window {}, max output {}",
+            window.window, window.max_output
+        )
+    });
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher |\n",
+        "| | |\n| --- | --- |\n| text | `{}` |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {:.0} |\n| rule | every probe is at least the current arm's − {delta:.2}, and violations, failed runs and unjudged runs are no higher |\n",
         instrument.text,
         instrument.model.provider_id,
         instrument.model.model_id,
@@ -1914,6 +2138,7 @@ mod tests {
         HostFuture, ModelConnection, ModelDriver, ModelStopReason, ResolveModelConnection,
         ResolvedModelConnection,
     };
+    use dim_agent_capabilities::host_platform::{HostPlatform, resolve_shell};
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -2001,6 +2226,7 @@ mod tests {
             tokens: 1.,
             model_configuration: None,
             judge_configuration: None,
+            judge_window: None,
             judge_temperature_dropped: 0,
             judge_asked_runs: 0,
             judge_reasks: 0,
@@ -2120,6 +2346,149 @@ mod tests {
             (2, Some("main: the turn failed: provider error".to_owned()))
         );
         assert_eq!(turns_in_export(""), (0, None));
+    }
+
+    /// Every request the judge reads can be rebuilt from its rendered form,
+    /// whatever fields the request type carries: a request with a capability
+    /// snapshot, request metadata and a field added after the renderer was
+    /// written comes back whole, because the renderer starts from the request
+    /// itself and replaces only what it renders. The view also says each
+    /// request's message count, and a branch's first request is given in full
+    /// against its own line's previous request, never another line's (issue
+    /// #635).
+    ///
+    /// A dedicated test, because no flow produces these fields: both of the
+    /// runner's flows serve a development model configuration, whose
+    /// selections carry no capability snapshot and no metadata. The flows
+    /// assert the same rule on the requests they do produce.
+    #[test]
+    fn the_judge_view_keeps_every_request_field() {
+        fn request(messages: &[&str]) -> Value {
+            json!({
+                "providerId": "p",
+                "modelId": "m",
+                "capabilitySnapshot": {
+                    "target": {"providerId": "p", "modelId": "m"},
+                    "capabilities": {"contextWindow": 128_000, "maxOutputTokens": 16_384},
+                    "reasoning": null,
+                    "serviceTier": null,
+                },
+                "messages": messages
+                    .iter()
+                    .map(|text| json!({"role": "user", "content": text}))
+                    .collect::<Vec<_>>(),
+                "system": "S",
+                "tools": [{"name": "read"}],
+                "config": {"maxTokens": 8},
+                "metadata": {"sessionId": "s", "runId": "r", "providerProtocol": "openai-chat"},
+                "aFieldAddedLater": {"kept": true},
+            })
+        }
+        let line = |branch: &str, request: Value| {
+            json!({
+                "kind": "event",
+                "branch_id": branch,
+                "event": {"type": "model", "name": "call", "data": {"request": request}},
+            })
+            .to_string()
+        };
+        let export = [
+            r#"{"kind":"header","export":1}"#.to_owned(),
+            line("main", request(&["one"])),
+            line("main", request(&["one", "two"])),
+            // The other line's first request is the one `main` made last, so
+            // only the line it belongs to says it was given in full.
+            line("other", request(&["one", "two"])),
+            r#"{"kind":"end","branches":2,"events":3}"#.to_owned(),
+        ]
+        .join("\n");
+        let view = judge_view(&export);
+        let rebuilt = rebuilt_requests(&view);
+        assert_eq!(rebuilt.len(), 3, "every request is in the view");
+        for (index, request) in rebuilt {
+            let original: Value = serde_json::from_str(export.lines().nth(index).unwrap()).unwrap();
+            assert_eq!(
+                request, original["event"]["data"]["request"],
+                "the request at line {index} is rebuilt from the view"
+            );
+        }
+        let other: Value = view
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|line| line["branch_id"] == "other")
+            .unwrap();
+        assert!(
+            other["event"]["data"]["request"]["messages"].is_array(),
+            "the other line's first request is given in full: {other}"
+        );
+    }
+
+    /// The requests [`judge_view`] rendered, rebuilt from the view alone: the
+    /// line each came from, and the request its export carried. A field
+    /// rendered as `{"unchanged": true}` takes the previous request's value on
+    /// its line, `addedMessages` continues the previous request's list, and
+    /// the view's message count must be the rebuilt list's.
+    fn rebuilt_requests(view: &str) -> Vec<(usize, Value)> {
+        let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+        let mut rebuilt = Vec::new();
+        for (index, raw) in view.lines().enumerate() {
+            let Ok(line) = serde_json::from_str::<Value>(raw) else {
+                continue;
+            };
+            let Some(rendered) = line["event"]["data"]["request"].as_object() else {
+                continue;
+            };
+            let branch = line["branch_id"].as_str().unwrap_or_default().to_owned();
+            let earlier = previous.get(&branch).cloned();
+            let mut request = serde_json::Map::new();
+            let mut messages = None;
+            let mut counted = None;
+            for (field, value) in rendered {
+                let unchanged = value.as_object().is_some_and(|marker| {
+                    marker.len() == 1 && marker.get("unchanged") == Some(&json!(true))
+                });
+                match field.as_str() {
+                    "messageCount" => counted = value.as_u64(),
+                    "addedMessages" => {
+                        let mut all = earlier
+                            .as_ref()
+                            .and_then(|earlier| earlier["messages"].as_array().cloned())
+                            .unwrap_or_default();
+                        all.extend(value.as_array().cloned().unwrap_or_default());
+                        messages = Some(Value::Array(all));
+                    }
+                    "messages" => messages = Some(value.clone()),
+                    _ if unchanged => {
+                        request.insert(
+                            field.clone(),
+                            earlier
+                                .as_ref()
+                                .and_then(|earlier| earlier.get(field))
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        );
+                    }
+                    _ => {
+                        request.insert(field.clone(), value.clone());
+                    }
+                }
+            }
+            if let Some(messages) = messages {
+                request.insert("messages".to_owned(), messages);
+            }
+            assert_eq!(
+                request
+                    .get("messages")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len) as u64,
+                counted.expect("the view says each request's message count"),
+                "the message count is the rebuilt request's"
+            );
+            let request = Value::Object(request);
+            previous.insert(branch, request.clone());
+            rebuilt.push((index, request));
+        }
+        rebuilt
     }
 
     /// More violations or more failed runs fail the candidate even when every
@@ -2588,6 +2957,10 @@ mod tests {
             &judge,
             &scenario,
             "{\"kind\":\"header\"}",
+            JudgeWindow {
+                window: 8_000,
+                max_output: 1_024,
+            },
             &CancellationToken::new(),
         )
         .await;
@@ -2646,6 +3019,53 @@ mod tests {
         );
     }
 
+    /// The judge's window is its selection's capability snapshot, or else the
+    /// model configuration's own declaration; with neither, the evaluation
+    /// fails before the first call and names the judge (issue #635).
+    ///
+    /// A dedicated test, because no flow can reach the failure: a model
+    /// configuration requires a `contextWindow` for every model, so a judge
+    /// that resolves from one always declares a window, and the product
+    /// profile's selections all carry a snapshot (the catalog's assumed pair
+    /// where nothing is declared, #522).
+    #[tokio::test]
+    async fn a_judge_without_a_declared_window_fails_the_evaluation() {
+        let judge = ModelSelection {
+            provider_id: "gateway".into(),
+            model_id: "unknown".into(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        };
+        let error = judge_window(&judge, None, &CancellationToken::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gateway/unknown"), "{error}");
+        assert!(error.contains("declares no context window"), "{error}");
+        let target = ModelId {
+            provider_id: "gateway".into(),
+            model_id: "unknown".into(),
+        };
+        let declared = ModelSelection {
+            capability_snapshot: Some(dim_agent_types::ModelCapabilitySnapshot {
+                target,
+                capabilities: dim_agent_types::ModelCapabilities {
+                    context_window: 64_000,
+                    max_output_tokens: 200,
+                    ..dim_agent_types::ModelCapabilities::with_limits(64_000, 200)
+                },
+                reasoning: None,
+                service_tier: None,
+            }),
+            ..judge
+        };
+        let limits = judge_window(&declared, None, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!((limits.window, limits.max_output), (64_000, 200));
+    }
+
     /// The judge answers one verdict object per line: one request per run
     /// reads both probes' verdicts (issue #642, acceptance 1).
     fn one_object_per_line(text: &str) -> Option<Value> {
@@ -2673,7 +3093,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         assert_eq!(fixture.judge().len(), 2, "one judge request per arm");
         let records = fixture.records(&options.out);
@@ -2684,6 +3104,48 @@ mod tests {
             assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
             assert_eq!(record["probes"][1]["verdict"], "absent", "{record}");
         }
+    }
+
+    /// The judge's verdict for the `must_not_show` probe, explaining why the
+    /// run does not show it.
+    fn contradicts_the_probe(text: &str) -> Option<Value> {
+        text.contains("You check statements")
+            .then(|| content(r#"[{"id":"floods","verdict":"contradicted","quote":"turn/end"}]"#))
+    }
+    /// A `contradicted` verdict is kept as it is, passes a `must_not_show`
+    /// probe with the scores unchanged, and is no violation (model-prompts
+    /// §8.1). The parser the scenario judge shares with the summary
+    /// evaluation accepts it although the scenario judge is asked for
+    /// `present` or `absent`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_contradicted_verdict_passes_a_must_not_show_probe() {
+        let fixture = Fixture::start(
+            "contradicted",
+            contradicts_the_probe,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "floods", "kind": "must_not_show", "text": "the run floods the Timeline"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "contradicted", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+        }
+        assert!(
+            report.contains("| case | floods | must_not_show | 1.000 | 1.000 |"),
+            "a contradicted verdict passes the probe: {report}"
+        );
+        assert!(report.contains("| current | 0 | 0 | 0 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 0 | 0 |"), "{report}");
+        assert!(report.contains("candidate passes"), "{report}");
     }
 
     /// The judge's first answer loses a level of escaping in a quote, as one
@@ -2717,7 +3179,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -2784,7 +3246,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -2837,7 +3299,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -2893,7 +3355,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
@@ -2994,6 +3456,23 @@ mod tests {
         text.contains("You check statements")
             .then(|| content(r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#))
     }
+    /// How many times one turn reads the workspace file before it answers.
+    const READS: usize = 4;
+    /// The fixture model's declared window in the bytes of a request body, at
+    /// the product's four bytes per token.
+    const WINDOW_BYTES: usize = 24_000 * 4;
+    /// The judge's answers, its refusal of a request its window cannot hold,
+    /// the way a judge model refuses one over its window, and a `read` of the
+    /// workspace file for a run request that has not read it [`READS`] times.
+    fn reads_until_the_window_overflows(text: &str) -> Option<Value> {
+        if text.contains("You check statements") {
+            return (text.len() > WINDOW_BYTES)
+                .then(|| refusal("This model's maximum context length is 24000 tokens"))
+                .or_else(|| judged(text));
+        }
+        (text.matches(FILE_TEXT).count() < READS)
+            .then(|| tool_call("read", r#"{"path":"notes.txt"}"#))
+    }
     /// The judge's verdict, the summarizer's two texts, and plain text for
     /// everything else.
     fn summaries_and_judgements(text: &str) -> Option<Value> {
@@ -3021,6 +3500,10 @@ mod tests {
         home: PathBuf,
         models: PathBuf,
         scenarios: PathBuf,
+        /// The process facts a flow's runs see: the ones this process has,
+        /// with `home` pointed at the fixture's own empty directory, so a run
+        /// never reads the developer's `~/AGENTS.md`, Skills list or `<home>`.
+        platform: HostPlatform,
     }
     impl Fixture {
         /// `scenario` is the scenario file's content and `workspace` the
@@ -3063,17 +3546,34 @@ mod tests {
                 &models,
                 serde_json::to_string_pretty(&json!({
                     "defaultModel": {"providerId": "gateway", "modelId": "mock"},
-                    "providers": [{
-                        "id": "gateway",
-                        "kind": "openai-chat",
-                        "baseUrl": format!("http://{endpoint}/v1"),
-                        "models": [{
-                            "id": "mock",
-                            "contextWindow": 24000,
-                            "maxOutputTokens": 200,
-                            "config": {"maxTokens": 200}
-                        }]
-                    }]
+                    "providers": [
+                        {
+                            "id": "gateway",
+                            "kind": "openai-chat",
+                            "baseUrl": format!("http://{endpoint}/v1"),
+                            "models": [{
+                                "id": "mock",
+                                "contextWindow": 24000,
+                                "maxOutputTokens": 200,
+                                "config": {"maxTokens": 200}
+                            }]
+                        },
+                        // The same upstream model under its own provider, with
+                        // the wide window a flow judges views that outgrow the
+                        // run model's (the module doc's two-entry
+                        // configuration).
+                        {
+                            "id": "judge",
+                            "kind": "openai-chat",
+                            "baseUrl": format!("http://{endpoint}/v1"),
+                            "models": [{
+                                "id": "mock",
+                                "contextWindow": 128000,
+                                "maxOutputTokens": 200,
+                                "config": {"maxTokens": 200}
+                            }]
+                        }
+                    ]
                 }))
                 .unwrap(),
             )
@@ -3089,6 +3589,12 @@ mod tests {
                 serde_json::to_string_pretty(&scenario).unwrap(),
             )
             .unwrap();
+            let platform_home = directory.join("platform-home");
+            std::fs::create_dir_all(&platform_home).unwrap();
+            let env: Vec<_> = std::env::vars_os().collect();
+            let shell = resolve_shell(Ok(None), &env).await;
+            let mut platform = HostPlatform::current(shell).unwrap();
+            platform.home = platform_home;
             Self {
                 directory,
                 provider,
@@ -3096,7 +3602,18 @@ mod tests {
                 home,
                 models,
                 scenarios,
+                platform,
             }
+        }
+        /// [`evaluate`] over this fixture's runs, whose process facts point at
+        /// the fixture's empty home: a flow that sizes a view or compacts a
+        /// context would otherwise measure the developer's machine (issue
+        /// #635).
+        async fn evaluate(&self, options: &Options) -> Result<String> {
+            evaluate(options, |builder| {
+                builder.process_value(Arc::new(self.platform.clone()));
+            })
+            .await
         }
         /// The options of one run per arm over this fixture, with `out`.
         fn options(&self, out: PathBuf) -> Options {
@@ -3114,6 +3631,16 @@ mod tests {
                 node: None,
                 js_runtime: None,
             }
+        }
+        /// [`options`](Self::options) with the judge under the provider entry
+        /// whose window holds a view that outgrows the run model's.
+        fn judge_options(&self, out: PathBuf) -> Options {
+            let mut options = self.options(out);
+            options.judge = ModelId {
+                provider_id: "judge".into(),
+                model_id: "mock".into(),
+            };
+            options
         }
         fn target(&self) -> ModelId {
             ModelId {
@@ -3200,6 +3727,7 @@ mod tests {
             tokens: 0.,
             model_configuration: None,
             judge_configuration: None,
+            judge_window: None,
             judge_temperature_dropped: 0,
             judge_asked_runs: 0,
             judge_reasks: 0,
@@ -3209,6 +3737,9 @@ mod tests {
             &fixture.home,
             arm,
             overrides,
+            &|builder| {
+                builder.process_value(Arc::new(fixture.platform.clone()));
+            },
             &scenario,
             run,
             &CancellationToken::new(),
@@ -3257,7 +3788,8 @@ mod tests {
 
     /// Both arms run the shipped assembly on the same scenario, and the
     /// candidate text reaches the candidate arm's summarizer request and only
-    /// that arm's.
+    /// that arm's. The judge is the wide one: the run's message makes its view
+    /// outgrow the run model's window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn only_the_candidate_arm_carries_the_candidate_text() {
         let fixture = Fixture::start(
@@ -3272,8 +3804,8 @@ mod tests {
             &[],
         )
         .await;
-        let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let options = fixture.judge_options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3308,6 +3840,245 @@ mod tests {
                 .all(|request| !request.contains("You summarize a coding session")),
             "the candidate arm never carries the product prompt"
         );
+        // The compaction changes this run's history: the request right after
+        // the change carries the whole message list, not the messages added
+        // since.
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join(arm).join("case").join("run-0");
+            assert_view_rebuilds(&directory);
+            let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+            let view = std::fs::read_to_string(directory.join("judge-view.jsonl")).unwrap();
+            let changed = after_history_change(&export);
+            let rendered: Value = serde_json::from_str(view.lines().nth(changed).unwrap()).unwrap();
+            assert!(
+                rendered["event"]["data"]["request"]["messages"].is_array(),
+                "{arm}: the request after the history change carries the whole list: {rendered}"
+            );
+        }
+    }
+
+    /// A run whose export is longer than the judge's window is judged through
+    /// the view, which carries each request's unchanged fields once: the judge
+    /// refuses the raw export and answers the view (issue #635). The raw
+    /// export alone is longer than the judge's window; the view fits it.
+    ///
+    /// One turn asks the model [`READS`] times with the file's text carried
+    /// back each time, so the export carries the whole system prompt and tool
+    /// catalog once per request while the view carries them once. Every
+    /// request of the view is rebuilt from it and compared with the export's,
+    /// so the view loses no field this run produces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_longer_than_the_judge_window_is_judged_through_its_view() {
+        const WINDOW: u64 = 24_000;
+        let fixture = Fixture::start(
+            "judge-view",
+            reads_until_the_window_overflows,
+            json!({
+                "message": "Read notes.txt until you are sure of it.",
+                "budget": {"turns": 4, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+        }
+        let estimate = |text: &str| {
+            let judge = ModelSelection {
+                provider_id: "gateway".into(),
+                model_id: "mock".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            };
+            let request = judge_request(
+                &judge,
+                &[Message::text(Role::User, text)],
+                &ModelConfig::default(),
+            );
+            window_facts(WINDOW, 200, &request).count_tokens(&request)
+        };
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join(arm).join("case").join("run-0");
+            let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+            let view = std::fs::read_to_string(directory.join("judge-view.jsonl")).unwrap();
+            assert!(
+                estimate(&export) > WINDOW as f64,
+                "{arm}: the raw export is longer than the judge's window"
+            );
+            assert!(
+                estimate(&view) < WINDOW as f64,
+                "{arm}: the view fits the judge's window"
+            );
+            // Every line survives in order and every request is rebuilt from
+            // the view into the one the export carried.
+            let requests = assert_view_rebuilds(&directory);
+            assert!(
+                requests.len() > 1,
+                "{arm}: the run made more than one request"
+            );
+            assert!(
+                requests.iter().any(|request| request["addedMessages"]
+                    .as_array()
+                    .is_some_and(|added| !added.is_empty())),
+                "{arm}: a later request carries the messages added since"
+            );
+            for field in ["system", "tools", "config"] {
+                assert!(
+                    requests
+                        .iter()
+                        .any(|request| request[field] == json!({"unchanged": true})),
+                    "{arm}: an unchanged {field} reads as the marker"
+                );
+            }
+            assert!(
+                requests[0]["system"] != json!({"unchanged": true}),
+                "{arm}: the first request of a line is given in full"
+            );
+        }
+    }
+
+    /// Asserts that a run's `judge-view.jsonl` is its export line for line,
+    /// with every request rebuilt from the view alone into the one the export
+    /// carried, and answers the view's rendered requests in order.
+    fn assert_view_rebuilds(directory: &Path) -> Vec<Value> {
+        let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+        let view = std::fs::read_to_string(directory.join("judge-view.jsonl")).unwrap();
+        assert_eq!(
+            view.lines().count(),
+            export.lines().count(),
+            "the view keeps every line of the export"
+        );
+        let rebuilt = rebuilt_requests(&view);
+        assert!(!rebuilt.is_empty(), "the export carries requests");
+        for (index, request) in &rebuilt {
+            let original: Value =
+                serde_json::from_str(export.lines().nth(*index).unwrap()).unwrap();
+            assert_eq!(
+                *request, original["event"]["data"]["request"],
+                "the request at line {index} is rebuilt from the view"
+            );
+        }
+        view.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|line| {
+                line["event"]["data"]["request"]
+                    .is_object()
+                    .then(|| line["event"]["data"]["request"].clone())
+            })
+            .collect()
+    }
+
+    /// The line of a run's export holding the first request whose messages do
+    /// not extend its line's previous request's: the request a history change
+    /// produced.
+    fn after_history_change(export: &str) -> usize {
+        let mut previous: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for (index, raw) in export.lines().enumerate() {
+            let Ok(line) = serde_json::from_str::<Value>(raw) else {
+                continue;
+            };
+            let Some(messages) = line["event"]["data"]["request"]["messages"].as_array() else {
+                continue;
+            };
+            let branch = line["branch_id"].as_str().unwrap_or_default().to_owned();
+            if let Some(earlier) = previous.get(&branch) {
+                let extends =
+                    messages.len() >= earlier.len() && messages[..earlier.len()] == earlier[..];
+                if !extends {
+                    return index;
+                }
+            }
+            previous.insert(branch, messages.clone());
+        }
+        panic!("the run's export holds a request after a history change");
+    }
+
+    /// A run whose view does not fit the judge's budget is unjudged before
+    /// any call — the judge is never asked, and the report lists the run with
+    /// the estimate and the budget — while a run whose view fits is judged
+    /// (issue #635).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_whose_view_does_not_fit_the_judge_is_unjudged() {
+        let fixture = Fixture::start(
+            "judge-fit",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        // The second scenario's message makes its view exceed the judge's
+        // budget, which is the host model's window; the first scenario's view
+        // fits it.
+        let over = fixture.scenarios.join("over");
+        std::fs::create_dir_all(over.join("workspace")).unwrap();
+        std::fs::write(
+            over.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": format!("Say hello. {}", "x".repeat(20_000)),
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 4, "one run per arm and scenario");
+        for record in &records {
+            assert_eq!(record["failed"], false, "{record}");
+            if record["scenario"] == "case" {
+                assert_eq!(record["judgeOutcome"], "judged", "{record}");
+                assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+            } else {
+                assert_eq!(record["judgeOutcome"], "unfit", "{record}");
+                assert_eq!(record["probes"][0]["verdict"], "unparsed", "{record}");
+                let error = record["judgeError"].as_str().unwrap();
+                assert!(error.starts_with("the judge view needs about "), "{error}");
+                assert!(error.contains(" tokens; the judge's budget is "), "{error}");
+            }
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            2,
+            "the judge is asked once for each run whose view fits, and never for the other"
+        );
+        assert!(report.contains("| current | 0 | 0 | 1 |"), "{report}");
+        assert!(report.contains("| candidate | 0 | 0 | 1 |"), "{report}");
+        assert!(
+            report.contains("| current | over | 0 | the judge view needs about "),
+            "the report lists the unjudged run with its estimate and budget: {report}"
+        );
+        assert!(
+            report.contains("| candidate | over | 0 | the judge view needs about "),
+            "{report}"
+        );
+        assert!(
+            report.contains("| case | ran | must_show | 1.000 | 1.000 |"),
+            "the runs whose view fits are judged: {report}"
+        );
+        assert!(
+            report.contains("| over | ran | must_show | – | – |"),
+            "an unjudged run is out of the probe rates: {report}"
+        );
+        assert!(
+            report.contains(
+                "candidate fails: over/ran has no judged run in the current arm; over/ran has no judged run in the candidate arm"
+            ),
+            "the judged-run floor names the runs the judge was not asked about: {report}"
+        );
     }
 
     /// A run offers the shipped assembly's whole tool catalog — the workspace
@@ -3330,7 +4101,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3434,7 +4205,7 @@ mod tests {
             out.canonicalize().unwrap(),
             "the resolved --out is the fixture's output directory"
         );
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3474,7 +4245,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate passes"), "{report}");
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
@@ -3541,7 +4312,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(
             report.contains("candidate passes"),
             "{report}\nrecords: {:?}",
@@ -3580,7 +4351,7 @@ mod tests {
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
-        let report = evaluate(&options).await.unwrap();
+        let report = fixture.evaluate(&options).await.unwrap();
         assert!(
             report.contains("candidate passes"),
             "{report}\nrecords: {:?}",

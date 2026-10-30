@@ -694,6 +694,7 @@ async fn run_connection(
                                             vec!["session.summaries", "daemon.shutdown.completed"];
                                         if hub.config().database_path.is_some() {
                                             methods.push("session.catalog");
+                                            methods.push("session.catalog.cancel");
                                         }
                                         methods
                                     } else {
