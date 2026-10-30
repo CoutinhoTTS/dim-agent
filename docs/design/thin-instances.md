@@ -37,9 +37,10 @@ costs this:
 
 rutis 0.19.1 removes the reason ([rutis#948](https://github.com/arcships/rutis/issues/948),
 [rutis#961](https://github.com/arcships/rutis/pull/961)). `Definition::at` takes a copy's instances
-from its position in the plugin tree (`ctx.scope()`), and `mark_scope(group)` is a public method on
-`Ctx`. A host mounts a plain plugin with `ctx.plugin`, marks it as the scope of a group, and foreign
-copies inside it resolve that group's names to it.
+from its position in the plugin tree (`ctx.scope()`; rutis-loader 0.19.1 `loader/mod.rs:334`), and
+`mark_scope(group)` is a public method on `Ctx` (rutis 0.19.1 `ctx.rs:1000`). A host mounts a plain
+plugin with `ctx.plugin`, marks it as the scope of a group, and foreign copies inside it resolve that
+group's names to it.
 
 This design makes the Session and branch plain plugins that mark their group, and the per-Session
 content plain plugins of the parts that own it. Nothing of a Session is a loader row.
@@ -122,7 +123,7 @@ tree shows where their content sits.
   check already does (`Names::check`). The catalog still says which group a name belongs to.
   - `key::<T>()` gives `Key::<T>::of().instance(id)`, as today (`names.rs:195`).
   - `named(name)` gives `host_key_in(name, id)` for a shared instance name, which is the key the
-    catalog gives it today (`host_key` is `Key::dynamic(name)`, rutis-bridge 0.19.0
+    catalog gives it today (`host_key` is `Key::dynamic(name)`, rutis-bridge 0.19.1
     `session/services.rs:48-54`). A Rust-typed instance name is read with `key::<T>()`, and `named`
     refuses one, naming `key::<T>()`. Every `named` caller today reads a shared name.
 - **Foreign copies** are mounted with `Definition::at` under a mounter, as today. In 0.19.1 it takes
@@ -274,9 +275,12 @@ instances from its position in the tree, and a host marks its own scopes with `m
   `InstanceId` note and the assembly section's required rows.
 - [Skills](../architecture/rust-agent/plugins/Skills.md): `S:SessionLoader` and the
   `SkillContentInstances` template; [MCP OAuth](appserver/mcp-oauth.md): the `McpServer` row.
-- [single-tree](../architecture/rust-agent/single-tree.md) `:111`: "nested instances belong to the
-  Session group, not to the row that created them" becomes "a Session's content belongs to the part
-  that mounts it".
+- [single-tree](../architecture/rust-agent/single-tree.md) `:111`:
+  - "请求的 Session 扩展由 `SessionExtension` 行装载，该行显式注入 `SessionIdentity`" and the sentence after it
+    become: the Session scope mounts the requested extension's plugins as its children and hands them
+    to creation as required, within the bound `StartupProgress` sets;
+  - "嵌套实例归 Session 分组所有，不归创建它的行所有" becomes: a Session's content belongs to the part
+    that mounts it.
 - [Plugin pages index](../architecture/rust-agent/plugins/README.md) `:15-17` and
   `xtask/src/plugins.rs:45-55`: the excluded infrastructure list drops `SessionExtension`, `session`
   and `branch`; the scopes and mounters stay.
