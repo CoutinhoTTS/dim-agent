@@ -813,14 +813,22 @@ impl CollaborationSession {
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> Result<ToolResult, HostError> {
+        let member_action = matches!(
+            call.input.get("action").and_then(Value::as_str),
+            Some("cancel" | "close" | "message" | "read")
+        );
         let input: Input = match serde_json::from_value(Value::Object(call.input)) {
             Ok(input) => input,
             Err(error) => {
                 return Ok(refusal(
                     Refusal::InvalidInput,
-                    &format!(
-                        "{error}. Member actions require agentId + sessionId from list. Detached exec commands use exec_stop with their taskId; no member action was performed."
-                    ),
+                    &if member_action {
+                        format!(
+                            "{error}. Member actions require agentId + sessionId from list. Detached exec commands use exec_stop with their taskId; no member action was performed."
+                        )
+                    } else {
+                        error.to_string()
+                    },
                 ));
             }
         };
@@ -2324,8 +2332,17 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
             for field in &required {
                 fields.insert((*field).into(), properties[*field].clone());
             }
+            let optional: &[&str] = match *action {
+                "request" if required.contains(&"agentId") => &["sessionId"],
+                "message" => &["mode"],
+                "read" => &["after", "limit"],
+                _ => &[],
+            };
+            for field in optional {
+                fields.insert((*field).into(), properties[*field].clone());
+            }
             fields.insert("action".into(), json!({"type":"string","enum":[action]}));
-            variants.push(json!({"type":"object","properties":fields,"required":required}));
+            variants.push(json!({"type":"object","properties":fields,"required":required,"additionalProperties":false}));
         }
     }
     definition(

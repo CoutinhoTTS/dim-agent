@@ -1328,6 +1328,14 @@ async fn leader_delegates_and_team_members_communicate() {
     );
     let validator = jsonschema::validator_for(&schema).unwrap();
     assert!(!validator.is_valid(&json!({"action":"cancel","agentId":"exec-unknown"})));
+    assert!(!validator.is_valid(&json!({"action":"list","agentId":"unexpected"})));
+    assert!(!validator.is_valid(&json!({"action":"request","prompt":"work","agentId":default_agent,"profile":{"name":"worker","description":"","systemPrompt":"work","tools":[]}})));
+    assert!(validator.is_valid(
+        &json!({"action":"request","prompt":"work","agentId":default_agent,"sessionId":member})
+    ));
+    assert!(validator.is_valid(
+        &json!({"action":"read","agentId":default_agent,"sessionId":member,"after":1,"limit":2})
+    ));
     assert!(
         validator.is_valid(&json!({"action":"cancel","agentId":default_agent,"sessionId":member}))
     );

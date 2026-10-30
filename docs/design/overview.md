@@ -463,7 +463,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | Extensions | Hooks | New: Hooks |
 | Extensions | Web search and fetch | New: Web |
 | Extensions | Slack and Feishu | Per-platform plugins with their own tools; no generic channel or `notify` tool |
-| Workspace tools | `read`, `write`, `edit`, `glob`, `grep`, `exec`, `wait` | Existing: WorkspaceTools, BackgroundExec, Wait |
+| Workspace tools | `read`, `write`, `edit`, `glob`, `grep`, `exec`, `exec_stop`, `wait` | Existing: WorkspaceTools, BackgroundExec, Wait |
 | Remote access | JSON-RPC resident service | Existing: Transport, Rpc |
 | Remote access | ACP | New: AcpGateway |
 | Remote access | `/web`, `/remote`, phone pairing, remote Sessions | New: RemoteGateway |
