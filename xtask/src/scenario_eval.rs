@@ -143,7 +143,7 @@
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
 use dim_agent_capabilities::{
-    context_model::window_facts,
+    context_model::{BYTES_PER_TOKEN, window_facts},
     host::{ModelHost, ModelSelectionHost, ProviderConnectionResolver, ResolveContextModel},
 };
 use dim_agent_types::{
@@ -1577,8 +1577,9 @@ async fn judge_window(
 }
 
 /// The share of one judge call's input budget a part of the view may use: the
-/// estimate is the product's own (`window_facts().count_tokens`, four bytes to
-/// a token), and the rest of the budget holds the estimate's error.
+/// estimate is the product's own (`window_facts().count_tokens`, at
+/// [`BYTES_PER_TOKEN`]), and the rest of the budget holds the estimate's
+/// error.
 const JUDGE_PART_MARGIN: f64 = 0.9;
 
 /// The message one part of the view is judged in: the same statements in
@@ -1649,7 +1650,7 @@ fn judge_parts(
 /// length and its separating newline.
 fn line_tokens(line: &str) -> f64 {
     let quoted = serde_json::to_vec(line).map_or(0, |value| value.len());
-    (quoted as f64 - 1.) / 4.
+    (quoted as f64 - 1.) / BYTES_PER_TOKEN
 }
 
 /// The run's judge state across its parts: once a call failed with a
