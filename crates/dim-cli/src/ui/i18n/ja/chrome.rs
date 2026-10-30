@@ -195,10 +195,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell 出力は未記録：{reason}",
         "Shell: {reason}" => "Shell：{reason}",
         "Reading clipboard…" => "クリップボード読込中…",
+        "Reading image…" => "画像を読み込み中…",
+        "Wait for the image insertion before sending" => "画像の挿入完了後に送信",
+        "The image could not be read" => "画像を読み込めませんでした",
+        "An image is still being inserted; paste again when it is in" => {
+            "画像を挿入中です。完了後にもう一度貼り付けてください"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "クリップボードを挿入中です。完了後にもう一度貼り付けてください"
+        }
         "Clipboard: {reason}" => "クリップボード：{reason}",
         "Wait for clipboard insertion before sending" => "クリップボード挿入の完了後に送信",
         "A submission accepts at most 20 images" => "送信できる画像は最大 20 枚",
         "[Image #{index}]" => "[画像 #{index}]",
+        "[Image #{index}{details}]" => "[画像 #{index}{details}]",
+        "first frame" => "先頭フレームのみ",
         "The current model does not accept images; remove {label} to send" => {
             "このモデルは画像非対応。{label} を削除して送信"
         }

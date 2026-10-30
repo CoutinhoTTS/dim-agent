@@ -175,10 +175,21 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "未記錄 Shell 輸出：{reason}",
         "Shell: {reason}" => "Shell：{reason}",
         "Reading clipboard…" => "正在讀取剪貼簿…",
+        "Reading image…" => "正在讀取圖片…",
+        "Wait for the image insertion before sending" => "請等待圖片插入後再傳送",
+        "The image could not be read" => "無法讀取該圖片",
+        "An image is still being inserted; paste again when it is in" => {
+            "圖片正在插入，請稍後再貼上"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "剪貼簿內容正在插入，請稍後再貼上"
+        }
         "Clipboard: {reason}" => "剪貼簿：{reason}",
         "Wait for clipboard insertion before sending" => "請等剪貼簿內容插入後再傳送",
         "A submission accepts at most 20 images" => "每次送出最多 20 張圖片",
         "[Image #{index}]" => "[圖片 #{index}]",
+        "[Image #{index}{details}]" => "[圖片 #{index}{details}]",
+        "first frame" => "僅首幀",
         "The current model does not accept images; remove {label} to send" => {
             "目前的模型不支援圖片；請移除 {label} 再傳送"
         }

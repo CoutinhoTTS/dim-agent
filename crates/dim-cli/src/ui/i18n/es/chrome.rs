@@ -213,12 +213,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Salida del shell no registrada: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Leyendo portapapeles…",
+        "Reading image…" => "Leyendo imagen…",
+        "Wait for the image insertion before sending" => {
+            "Espera a que se inserte la imagen antes de enviar"
+        }
+        "The image could not be read" => "No se pudo leer la imagen",
+        "An image is still being inserted; paste again when it is in" => {
+            "Se está insertando una imagen; pega de nuevo cuando termine"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Se está insertando el portapapeles; pega de nuevo cuando termine"
+        }
         "Clipboard: {reason}" => "Portapapeles: {reason}",
         "Wait for clipboard insertion before sending" => {
             "Espera a pegar el portapapeles antes de enviar"
         }
         "A submission accepts at most 20 images" => "Máximo 20 imágenes por envío",
         "[Image #{index}]" => "[Imagen #{index}]",
+        "[Image #{index}{details}]" => "[Imagen #{index}{details}]",
+        "first frame" => "solo el primer fotograma",
         "The current model does not accept images; remove {label} to send" => {
             "El modelo actual no admite imágenes; quita {label} para enviar"
         }

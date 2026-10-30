@@ -21,6 +21,7 @@ mod question;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
 
+use dim_agent_capabilities::images::{MAX_BASE64_BYTES, MAX_EDGE, base64_len};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -495,6 +496,161 @@ fn image_fixture(format: image::ImageFormat, width: u32, height: u32) -> Vec<u8>
     bytes.into_inner()
 }
 
+/// Deterministic noise: JPEG quality 100 keeps it over 5 MiB, and its long
+/// edge is over the shared edge limit, so an entry has to scale it.
+fn noise_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut step = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+    for _ in 0..width as usize * height as usize {
+        let (red, green, blue) = (step(), step(), step());
+        pixels.extend([(red >> 24) as u8, (green >> 24) as u8, (blue >> 24) as u8]);
+    }
+    let mut bytes = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
+    encoder
+        .encode(&pixels, width, height, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    bytes
+}
+
+#[test]
+fn exec_scales_a_large_photo_and_reports_both_sizes() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    // Quality-100 noise over the raw bytes that fit the base64 limit, while a
+    // debug-build decode and scale stay well inside the harness patience.
+    let bytes = noise_jpeg(2100, 700);
+    assert!(
+        base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, &bytes).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&sent[..3], b"\xff\xd8\xff");
+        assert!(
+            base64_len(sent.len() as u64) <= MAX_BASE64_BYTES,
+            "{}",
+            sent.len()
+        );
+        let image = image::load_from_memory(&sent).unwrap();
+        assert!(
+            image.width() <= MAX_EDGE && image.height() <= MAX_EDGE,
+            "{}×{}",
+            image.width(),
+            image.height()
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args([
+                "exec",
+                "--image",
+                photo.to_str().unwrap(),
+                "-p",
+                "Describe this",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Scaled photo.jpg from 2100×700 to "),
+        "{stderr}"
+    );
+    assert!(stderr.contains("px (image/jpeg)"), "{stderr}");
+}
+
+#[test]
+fn exec_reports_the_first_frame_of_an_animation() {
+    let home = Home::new();
+    let mut gif = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+        encoder
+            .encode_frames([
+                image::Frame::new(image::RgbaImage::from_pixel(
+                    2,
+                    2,
+                    image::Rgba([255, 0, 0, 255]),
+                )),
+                image::Frame::new(image::RgbaImage::from_pixel(
+                    2,
+                    2,
+                    image::Rgba([0, 0, 255, 255]),
+                )),
+            ])
+            .unwrap();
+    }
+    let animation = home.0.join("anim.gif");
+    fs::write(&animation, &gif).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", animation.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Only the first frame of anim.gif is sent (image/jpeg)"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -523,7 +679,7 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
         .into_iter()
         .enumerate()
         {
-            let bytes = image_fixture(format, 1, if index == 0 { 8000 } else { 1 });
+            let bytes = image_fixture(format, 1, if index == 0 { MAX_EDGE } else { 1 });
             let path = format!("image {index}.txt");
             fs::write(home.0.join(&path), &bytes).unwrap();
             images.push(json!({"type":"image","source":{"type":"base64","mediaType":media_type,"data":STANDARD.encode(bytes)}}));
@@ -616,10 +772,13 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
     let png = image_fixture(image::ImageFormat::Png, 1, 1);
     let mut bad_crc = png.clone();
     bad_crc[29] ^= 1;
-    let mut oversized = png.clone();
-    oversized.resize(5 * 1024 * 1024 + 1, 0);
     let mut zero = image_fixture(image::ImageFormat::Gif, 1, 1);
     zero[6..8].fill(0);
+    let mut guard = b"GIF89a".to_vec();
+    guard.extend(12000u16.to_le_bytes());
+    guard.extend(9000u16.to_le_bytes());
+    guard.extend([0, 0, 0, 0]);
+    guard.push(b';');
     for (name, bytes, reason) in [
         ("text", b"not an image".to_vec(), "PNG, JPEG, WebP or GIF"),
         ("truncated", png[..8].to_vec(), "Invalid or truncated"),
@@ -633,27 +792,7 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
         ("webp", b"RIFF\0\0\0\0WEBP".to_vec(), "Invalid or truncated"),
         ("zero", zero, "dimensions"),
         ("crc", bad_crc, "Invalid or truncated"),
-        (
-            "wide",
-            image_fixture(image::ImageFormat::Png, 8001, 1),
-            "8000",
-        ),
-        (
-            "tall",
-            image_fixture(image::ImageFormat::Gif, 1, 8001),
-            "8000",
-        ),
-        (
-            "jpeg_wide",
-            image_fixture(image::ImageFormat::Jpeg, 8001, 1),
-            "8000",
-        ),
-        (
-            "webp_tall",
-            image_fixture(image::ImageFormat::WebP, 1, 8001),
-            "8000",
-        ),
-        ("large", oversized, "5 MiB"),
+        ("guard", guard, "12000×9000"),
     ] {
         let file = home.0.join(name);
         fs::write(&file, bytes).unwrap();
@@ -703,25 +842,33 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
 
 #[test]
 fn exec_images_check_the_combined_encoded_frame_before_sending() {
-    for size in [5 * 1024 * 1024, 4 * 1024 * 1024 - 3] {
+    // A kept image encodes to at most MAX_BASE64_BYTES, so four of them
+    // exceed the 16 MiB request frame; one raw byte over the fit is
+    // re-encoded and fits.
+    let fits_raw = (MAX_BASE64_BYTES / 4 * 3) as usize;
+    assert_eq!(base64_len(fits_raw as u64), MAX_BASE64_BYTES);
+    for (size, refused) in [(fits_raw, true), (fits_raw + 1024 * 1024, false)] {
         let home = Home::new();
-        let early = size > 4 * 1024 * 1024;
         let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
         png.resize(size, 0);
         let image = home.0.join("large.png");
         fs::write(&image, png).unwrap();
-        let daemon = if early {
+        let daemon = if refused {
             fs::remove_dir_all(home.0.join("rust")).unwrap();
             None
         } else {
             Some(home.daemon(|wire| {
                 wire.start(false);
+                let submit = wire.read("session.submit");
+                wire.reply(&submit, json!({"event":{}}));
+                let idle = wire.read("session.idle");
+                wire.reply(&idle, json!({"sequence":30}));
                 wire.detach();
             }))
         };
         let mut command = home.command();
         command.arg("exec").stdin(Stdio::null());
-        for _ in 0..3 {
+        for _ in 0..4 {
             command.arg("--image").arg(&image);
         }
         let output = command.output().unwrap();
@@ -730,9 +877,17 @@ fn exec_images_check_the_combined_encoded_frame_before_sending() {
         } else {
             assert!(!home.0.join("rust").exists());
         }
-        assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
-        assert!(output.stdout.is_empty());
+        if refused {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
+            assert!(output.stdout.is_empty());
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
 
@@ -2269,6 +2424,47 @@ fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
     terminal.until("exceeds 16 MiB after JSON encoding");
     terminal.raw(b"\x7f\r");
     terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn a_line_draft_of_images_over_the_frame_is_refused_and_kept() {
+    // A kept image encodes to at most MAX_BASE64_BYTES; four exceed the
+    // 16 MiB request frame, and deleting one leaves three that fit.
+    let fits_raw = (MAX_BASE64_BYTES / 4 * 3) as usize;
+    assert_eq!(base64_len(fits_raw as u64), MAX_BASE64_BYTES);
+    let home = Home::new();
+    let mut paths = Vec::new();
+    for index in 0..4 {
+        let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
+        png.resize(fits_raw, 0);
+        let path = home.0.join(format!("large{index}.png"));
+        fs::write(&path, &png).unwrap();
+        paths.push(path);
+    }
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3, "{content:?}");
+        assert!(content.iter().all(|block| block["type"] == "image"));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let mut terminal = Terminal::launch(home.command());
+    terminal.editor();
+    for path in &paths {
+        terminal.paste(path.to_str().unwrap());
+    }
+    terminal.until("[Image 4: large3.png]");
+    terminal.write(b"\n");
+    terminal.until("Draft retained");
+    terminal.write(b"\x7f\n");
+    terminal.editor();
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
