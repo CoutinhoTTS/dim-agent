@@ -96,12 +96,12 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | exec 输出和转存的 `read` 结果 | `<数据库目录>/command-output/<S>/` | 第 3 步 |
 | 已加载实例、租约、订阅、在途使用 | 进程内存 | 第 2 步 |
 | 协议版本、准入槽位、不可用 Session 条目 | Agents 内存 | 第 6 步 |
-| 指向 S 的 Collaboration 关系，以及因此没有 Session 的临时 Agent | Collaboration 内存 | Collaboration 对 S 的结束处理，把业务关闭当作 Session 的结束（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `session_ended`）。已加载的 S 经关闭观察者（`session_closed`）进入这一处理；删除随后失败时也成立：关闭的 Session 在本进程内不再加载（第 6 步）。未加载的 S（例如被空闲卸载释放的）没有关闭：第 6 步之后，Agents 发出 `UnloadedSessionDeleted`，由它进入这一处理。在 Collaboration 重载期间结束的删除（S2 的删除可能如此）没有监听者，由 Collaboration 再次装载时核对（[空闲卸载 §7](idle-unload.md#7-竞争与交互)） |
+| 指向 S 的 Collaboration 关系，以及 S 领导或拥有的 Agent | 持久：`agent_sessions.leader_session_id` 与 `agents.owner_session_id`（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）；Collaboration 的关系由它们重建 | Agents 随 leader 一起删除 Team：每个成员自己的删除、Agent 记录，最后是 S。Collaboration 在观察到成员关闭（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `session_ended`）或删除已卸载成员时移除关系，装载时重建其余（[空闲卸载 §7](idle-unload.md#7-竞争与交互)） |
 
 删除不移除：
 
 - **其他所有者记录中指向 S 的内容**，例如 Scheduler 与 Workflow 存在 `pluginFiles` 中的运行记录。这些所有者使用该 id 时会得到 `session_closed`，与 Session 已关闭时相同。
-- **其他 Session。** 被删除的 leader 的成员、S 的分叉都是有自己行的 Session。删除不级联。
+- **其他 Session。** S 的分叉是有自己行的 Session。被删除 leader 的成员与它拥有的 Agent 属于它的 Team，随它一起删除（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）；它们不是其他所有者的记录。
 - **宿主配置**（按工作区的 Provider 选择、MCP 项目启用），不属于任何 Session。
 
 ### 3.4 客户端与订阅
@@ -345,7 +345,7 @@ S5c 中被否决：在 S 的分叉都删除之前保留 S 的命令输出。删�
 | 删除与 attach、submit 或 Session 方法 | 它们等准入门，然后失败于 `session_closed`；已持有使用权的请求随关闭结束 |
 | 删除与该 Session 自己的追加 | 关闭结算它们；行事务在 Timeline 写线程上排在所有已排队的追加之后 |
 | 分叉与对源的追加 | `at` 及之前的行不变，分叉也不复制其后的任何行：子分支目录不带事件 |
-| 删除 Collaboration leader | 关闭它会像如今一样停止其成员请求；成员仍是 Session |
+| 删除 Collaboration leader | 关闭它会停止其成员请求，随后 Agents 随它删除 Team：它领导的成员与它拥有的 Agent（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)） |
 | 删除成员 | leader 对它的请求像如今一样以成员已关闭结算 |
 | 对同一源的两次分叉 | 两个独立的 Session，各自拥有共享的文件 |
 
@@ -430,7 +430,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | --- | --- | --- |
 | FileStorage | `remove` 在报告成功之前同步被移除条目的父目录（条目原本就不存在时也同步），同步失败时返回 `Unsynced`。Windows 没有目录同步，与 `replace` 一样依赖 NTFS 元数据日志。用于让删除的移除在提交之前落盘（§4） | 已在 S5c 中实现（[FileStorage](../../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)） |
 | Loop、InputQueue、BackgroundExec | 作用于固定前缀的只读静止点检查：没有未结束的轮次，没有等着驱动轮次的 Queue 或 Steer 输入，每个后台任务都已结束且其唤醒已发出（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 已在 Agents 中实现，读取这些能力的公开事实，不改动它们（§16 D1）。它们的所有者保留这些事实；某条重载规则以后要从其他事实开始工作时，扩展 [agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `rest_point`。实现中发现、留给 BackgroundExec 所有者的问题：它的 `rebuild` 沿用了更早一代的分支关闭（`session.close` 或正常关机）留下的 `closing`，因此恢复之后不会重新发出崩溃中丢失的唤醒。`rest_point` 像实时唤醒那样把这个标志限定在本代之内，所以落在这样的 `exec/ended` 与其唤醒之间的切点会被拒绝 |
-| Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。成员关系是进程内存，守护进程重启后同样不停止任何成员。#127 之前，这种重载会停止已加载的该成员；现在成员自身重载规则启动的工作会继续运行，leader 已把请求结算为失败，成员发给 leader 的 `agent` 消息因没有成员关系而被拒绝（`TeamMemberNotFound`）（[#97 评审](https://github.com/arcships/dim/pull/97)）。验收第 7 条 |
+| Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。#127 之前，这种重载会停止已加载的该成员；现在成员自身重载规则启动的工作会继续运行，leader 已把请求结算为失败，成员发给 leader 分叉的 `agent` 消息因没有成员关系而被拒绝（`TeamMemberNotFound`）（[#97 评审](https://github.com/arcships/dim/pull/97)）。重启后 Team 保留：关系由存储的 leader 重建（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）。验收第 7 条 |
 | Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | 复制来的目标不得在 F 中驱动轮次，也不是 F 的目标。分叉在其事务中、复制来的事实之后写 `session/forked`（§6.5）；Goal 从该事实之后折叠 `main`，并对复制来的生效目标清除一次（[Goal](../plugins/Goal.md) A11） | 随 Goal 验收实现（[#209](https://github.com/arcships/dim/pull/209)） |
 | S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | 已在 S5b 实现（[#96](https://github.com/arcships/dim/pull/96)，[标题元数据 §9](session-title-metadata.md#9-生命周期)） |
 | [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | 不需要：#32 把该字段留在 `input/message` 中（[sessions 服务 §6.3](sessions-service.md#提交标识存放在哪里)），分叉随事件复制它 |

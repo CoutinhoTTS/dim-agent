@@ -49,7 +49,7 @@ Session 部件在自己的 `apply` 中为每个标记各注册一个条目，按
 | §4 规则 5 决定前读完整批次 | 本页不适用：文本由 Session 部件的工具处理与分支部件按派发序的决定写出；本页不增加读取，也不改变决定 |
 | §4 规则 6 上下文只来自交接后的事件 | 标记只作为被消费的输入到达模型，工具结果只作为 `step/tool-result`；本页不增加上下文路径 |
 | §4 规则 7 只用公开事件与服务 | Session 部件使用 Session 的 `collaboration`、`sessionIdentity`、`sessionConfig`、`treeCommands`、`sessionLifecycle`、`toolRegistry` 与 `guideEntries`；分支部件注入 Session 的 `CollaborationSession`、`timeline`、`dispatcher`、`timelineIdentity` 与 `branchLifecycle`。不读其他插件的内部状态 |
-| §4 规则 8 向机制所有者提需求 | 无：条目走 Prompt 既有契约，声明走 ToolRegistry，输入走分支既有操作 |
+| §4 规则 8 向机制所有者提需求 | 对运行时、rutis、loader、生命周期与工具契约无：条目走 Prompt 既有契约，声明走 ToolRegistry，输入走分支既有操作。委派的需求提给 Agents、SessionStore 与删除设计（§6.5） |
 | §4 规则 9 只有后续决定要用的事实进 Timeline | 不增加 Timeline 事实。两个标记是委派本就需要的模型可见结果，guide 条目是 Prompt 作用域内的注册。委派的所有权与 leader 是不进 Timeline 的业务记录，经 Agents 与 SessionStore 的具名写操作写入（§6），不是事件 |
 | §1 插件、部件与 Capability 有界 | Collaboration 仍是它现有的 App Server 能力。Session 部件注册声明、工具与条目；分支部件消费委派的事实。不新增 Capability，核心模块不增加业务代码 |
 | §3 正交性 | 文本沿[面向模型的提示词 §3](../model-prompts.md#3-通道)列出的通道传递：一个声明、一个工具结果、两个标记；条目走任何能力都可用的 Prompt 通道 |
@@ -64,7 +64,7 @@ Session 部件在自己的 `apply` 中为每个标记各注册一个条目，按
 
 ## 5. 向机制所有者提出的需求
 
-无。声明使用 ToolRegistry 既有注册，两个标记使用分支既有 `input` 操作，条目使用 Prompt 的 `guideEntries` 契约（[Prompt §2](Prompt.md#2-条目的登记路由)）。Collaboration 不向运行时、rutis、loader、生命周期或工具契约提出需求。
+对机制所有者无。声明使用 ToolRegistry 既有注册，两个标记使用分支既有 `input` 操作，条目使用 Prompt 的 `guideEntries` 契约（[Prompt §2](Prompt.md#2-条目的登记路由)）。本页向 Agents、SessionStore 与删除设计提出的需求在 §6.5。
 
 ## 6. 委派的所有权与寿命
 
@@ -85,22 +85,22 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 - 被拥有 Agent 的 owner 是它的 `request` 创建它时所在的 leader Session，之后不再改变。把 Agent 改到别的 owner 名下或转为公开都不是受支持的操作。
 - 被拥有的 Agent 至少有一个成员 Session。没有成员 Session 的是未完成的委派，不是可复用的 Agent。
 - 成员 Session 的 leader 是创建它的 leader，且当它的 Agent 有 owner 时与之相等。
-- 一个 Team 是一个 leader Session，加上 leader 为它的成员 Session。成员 Session 自己又是它创建的 Team 的 leader。
+- 一个 Team 是一个 leader Session，加上 leader 为它的成员 Session。只有 leader 能委派：`agent` 工具对成员拒绝 `request`、`cancel`、`close`、`inspect` 与 `result`，因此 Team 只有一层。
 
 ### 6.2 谁能寻址什么
 
 - `agent` 工具只解析公开的、或 owner 是调用方自己的 Session、或调用方所属 Team 的 leader 的 Agent。其他任何 id 与不存在的 id 一样返回 `agent_not_found`。
-- 其他 Team 的成员返回 `team_member_not_found`；成员 Session 的 id 在它的 Team 之外不构成地址。
+- 其他 Team 的成员返回 `team_member_not_found`。这是 Collaboration 的地址空间：`session.attach`、`session.delete` 等 Session RPC 仍按各自的客户端授权接受成员 id，但它在 `agent` 工具中在 Team 之外不构成地址。
 - 可见性从不来自进程碰巧持有的东西：缺失的关系是拒绝，绝不是公开记录。重启、Agents 或 Collaboration 的重载都保持这条规则。
-- 工具的 `list` 与 `inspect` 只向上面这些 Team 报告 Agent。RPC 的 `agent.list` 只服务公开目录，因此被拥有的 Agent 在两者中都不出现。owner 的 Session id 是 Collaboration 的记录，不进入客户端协议。
+- 工具的 `list` 向上面这些 Team 报告 Agent（包括成员），`inspect` 只给 leader。RPC 的 `agent.list` 只服务公开目录，因此被拥有的 Agent 不会出现在那里。owner 的 Session id 是 Collaboration 的记录，不进入客户端协议。
 
 ### 6.3 寿命
 
 - 重启从持久事实恢复 Team：被拥有的 Agent 以被拥有状态装载，成员 Session 连同 leader 一起装载。卸载、未被读取或重载都不会让任何记录变成公开。
 - `close` 在本进程内结算请求并关闭成员 Session。Session 记录、它的 leader 与它 Agent 的记录都保留，因此重启后该成员作为普通 Session 重新装载，leader 仍能寻址它；closed 是进程状态，不写入存储。
-- 删除 owner Session 会删除它拥有的 Agent 及其成员 Session，因为没有 owner 的 Agent 没有意义。这取代了删除原先“成员保留为 Session”的规则（[Session 删除与 fork](../appserver/session-deletion-and-fork.md) 记录这一变更）。
-- 删除被拥有 Agent 的最后一个成员 Session 时，在同一个操作里删除该 Agent 记录。公开 Agent 不会因为删除成员 Session 而被删。
-- 对成员 Session 做 fork 会被拒绝：成员会话是只读的，fork 也没有 leader 可继承。对 leader 做 fork 不领导任何成员，源的被拥有 Agent 与成员留在源。
+- 删除 leader Session 会结束它的 Team，由 Agents 执行：对 leader 领导的每个成员，执行该成员自己的删除（已装载则关闭、结算其工作、删除命令输出，并由 SessionStore 在它自己的事务里删除行）；然后关闭 leader 拥有的每个 Agent 并删除其记录；最后关闭并删除 leader 自己。Team 之间没有单一事务：成员行引用 leader，所以先删成员；中途失败或崩溃会留下 leader 与残缺的 Team，重试即可完成。挂在成员上的客户端会看到它像自己的删除一样先关闭再消失，进行中的成员工作由该关闭结算。
+- 删除被拥有 Agent 的最后一个成员 Session 时，在成员行消失后关闭该 Agent 并删除其记录。两步之间失败会留下没有成员的被拥有 Agent，由启动清理。公开 Agent 不会因为删除成员 Session 而被删。
+- 对成员 Session 做 fork 会被拒绝：fork 会带上成员的角色与其 Agent，却没有 leader，既不是成员也不是普通对话。对 leader 做 fork 不领导任何成员，源的被拥有 Agent 与成员留在源。
 - 自身创建失败的委派会删掉它为这次请求创建的 Agent 记录，因此不会留下没有成员 Session 的被拥有 Agent。
 
 ### 6.4 错误
@@ -111,15 +111,15 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 | 目标 Agent 属于其他 Team，或不存在 | `agent_not_found`，沿用现有文本 |
 | 成员 Session 属于其他 Team，或不存在 | `team_member_not_found` |
 | 被拥有的 Agent 或它的第一个成员 Session 创建失败 | `member_create_failed: <原因>`；为这次请求创建的记录被删除 |
-| `session.fork` 指向一个成员 Session | `invalid_input`：成员会话只读 |
+| `session.fork` 指向一个成员 Session | `invalid_input`：成员会话不能被 fork |
 | 启动时某个被存储的被拥有 Agent 没有成员 Session | 未完成的委派：删除该 Agent，绝不作为公开服务 |
-| 启动时某个被存储的被拥有 Agent 的 owner 行不存在 | 未完成的删除：连同其成员 Session 一起删除，绝不作为公开服务 |
+| 启动时某个被存储的被拥有 Agent 的 owner 行不存在 | 在守护进程之外被破坏的库（外键与删除顺序本可避免）：连同其成员 Session 一起删除，绝不作为公开服务 |
 
 ### 6.5 向其他所有者提出的需求
 
-- **Agents。** 存储 `agents.owner_session_id`；以带 owner 的方式创建 Agent、删除 Agent 记录，作为具名操作；把被存储的 Agent 按被拥有状态装载；在删除 Session 的同一个事务里删除它拥有的 Agent，以及最后一个成员 Session 被删时的被拥有 Agent 记录；向 Collaboration 提供所有权，但不加入客户端协议；启动时清理未完成或失去 owner 的被拥有 Agent。
-- **SessionStore 与原生存储。** 存储 `agent_sessions.leader_session_id`；决定两列的格式版本、升级与索引；在删除 Session 的同一个事务里删除它拥有的 Agent 与成员 Session。
-- **Session 删除与 fork。** 把负责的级联与最后成员规则记入删除的效果（§6.3），替换“删除 leader 保留成员”的规则，并拒绝对成员 Session 执行 `session.fork`。
+- **Agents。** 存储 `agents.owner_session_id`；以带 owner 的方式创建 Agent、删除 Agent 记录，作为具名操作；把被存储的 Agent 按被拥有状态装载；删除 Session 时执行每个成员自己的删除并删除它拥有的 Agent，以及最后一个成员 Session 被删时的被拥有 Agent 记录；向 Collaboration 提供所有权，但不加入客户端协议；启动时清理未完成或失去 owner 的被拥有 Agent。
+- **SessionStore 与原生存储。** 存储 `agent_sessions.leader_session_id`；决定两列的格式版本、升级与索引；在它自己的事务里删除一个 Session 的行，Team 的删除在 leader 自己的行之前对每个成员各执行一次。
+- **Session 删除与 fork。** 把 Team 的级联、其次序与最后成员规则记入删除的效果（§6.3），替换“删除 leader 保留成员”的规则，并拒绝对成员 Session 执行 `session.fork`。
 
 ### 6.6 这次删掉什么
 
