@@ -16,20 +16,25 @@ member's approval is not a user.
 
 ### D1. The grant and its storage
 
-The `SessionGrants` Session part owns the service and registers `sessionGrants.add`, `remove`, `list`
-and `lookup` in the session method namespace. SessionStore owns the native `session_grants` table,
-keyed `(session_id, path)`. A row is
-`{session_id, path, kind, mode}`: `path` is a canonical file or directory, `kind` is `file` or
-`dir`, `mode` is `read` or `write`, and a write grant also permits reads. `add` upserts, and a
-`write` upgrade replaces `read`; `remove(session_id, path)` drops both modes. `list(session_id)`
-lets a user revoke a remembered path.
+The `SessionGrants` Session part owns the service and registers `session.grants.add`, `remove`,
+`list` and `lookup` in the session method namespace. SessionStore owns the native
+`session_grants` table, keyed `(session_id, path)`. A row is `{session_id, path, kind, mode}`:
+`path` is canonical, `kind` is `file` or `dir`, `mode` is `read` or `write`, and a write grant
+also permits reads.
+
+`add(session_id, path, kind, mode)` upserts. A `read` add never lowers an existing `write`; a
+`write` add raises it. `remove(session_id, path)` drops both modes; `list(session_id)` lets a user
+revoke a remembered path. The method owner resolves `~`, relative paths, `..` and symlinks, and
+rejects an unresolvable path. A file that does not exist yet is resolved by its parent and final
+name and stored with `kind: file`; the caller passes the kind it is approving.
 
 A grant applies only to its session, survives a restore (it is stored configuration read at use
 time), and is removed with the session in the same delete transaction. A fork is a new session
 and does not inherit grants.
 
-The table is part of the next native storage format version; its upgrade creates it empty, and a
-failed upgrade rolls back. `session-deletion-and-fork.md` lists it in the delete transaction so a
+The table is part of a native storage format version after the one #671 takes; the number is
+claimed in #596 by the implementation. Its upgrade creates the table empty, and a failed upgrade
+rolls back. `session-deletion-and-fork.md` lists it in the delete transaction so a
 damaged or unloaded session is still cleaned.
 
 ### D2. Permission applies the grant
@@ -40,8 +45,8 @@ turns a `Deny` into `Allow`, and a write grant is inert under `read-only`. A loo
 denies. `Approval` remains the one admission point and re-checks through `Permission` after the
 user answers. At process start, a write grant is mounted writable and a read grant read-only.
 
-The client calls `add(session_id, path, mode)` and then answers allow; the re-check sees the
-grant. If `add` fails, the client answers allow-once. `ApprovalDecision` stays `Allow | Deny`.
+The client calls `add(session_id, path, kind, mode)` and then answers allow; the re-check sees
+the grant. If `add` fails, the client answers allow-once. `ApprovalDecision` stays `Allow | Deny`.
 
 ### D3. Who may write
 
@@ -55,9 +60,10 @@ grant field.
 
 ### D4. Matching
 
-A directory operation is decided on the directory path; a prefix covers its children;
-`grep`/`glob` over a directory use that directory. Approving a directory writes a prefix. The
-grant is on the canonical path, not the inode: a replacement file at the same path inherits it.
+A `file` grant matches only its exact path; a `dir` grant matches the path and its children by
+component. A directory operation is decided on the directory path; `grep`/`glob` over a
+directory use that directory. Approving a directory writes `kind: dir`. The grant is on the
+canonical path, not the inode: a replacement file at the same path inherits it.
 Read paths are resolved before admission by ADR 014, so `read`, `grep` and `glob` match the same
 canonical target as `write`.
 
@@ -94,7 +100,7 @@ remains as written.
 | Rule | Application |
 | --- | --- |
 | §1, ADR 002 D1 | `Permission` owns the grant fact; `Approval` remains the branch Capability; `SessionGrants` is the Session part and SessionStore owns the table. |
-| §4 rule 1 | Grants are configuration with typed owner operations; no command event. |
+| §4 rule 1 | Grants are configuration with typed owner operations in `session.grants`; no command event. |
 | §4 rule 2 | A grant changes the next decision; this rule does not apply to stored configuration. |
 | §4 rule 3 | No `before` callback. |
 | §4 rule 4 | No core mechanism change. |
@@ -106,4 +112,4 @@ remains as written.
 | ADR 002 D2 | No wiring plugin. |
 | ADR 002 D3 | Grants are Session-scoped; `Permission` depends on the service. |
 | ADR 002 D4 | Business configuration, read at use time. |
-| ADR 002 D5 | `add`/`remove`/`list`/`lookup` are language-neutral contracts carrying paths and modes. |
+| ADR 002 D5 | `session.grants.add/remove/list/lookup` are language-neutral contracts carrying paths, kinds and modes. |
