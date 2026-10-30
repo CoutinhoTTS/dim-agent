@@ -376,6 +376,30 @@ async fn last_system(session: &Session, branch: &str) -> String {
         .expect("a model call carries the system")
 }
 
+/// The minimal execution profile is sound once its Session and a branch are
+/// live: the assembly check reports nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_minimal_execution_assembly_passes_the_assembly_check() {
+    let harness = Harness::new(platform(&[]).await).await;
+    let session = harness.session().await;
+    session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "check".into(),
+                source: BranchSource::Host {
+                    operation_id: "check".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = harness.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    harness.shutdown().await;
+}
+
 /// #552: this profile installs no branch tool, so nothing writes the roster
 /// and nothing explains it. A host line still carries `<dim-branch-line>`,
 /// and the Session part that writes it explains the marker there.

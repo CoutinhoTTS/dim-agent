@@ -529,7 +529,6 @@ impl Gateway {
                                 selection: Option<Selected>,
                             }
                             #[derive(Deserialize)]
-                            #[serde(rename_all = "camelCase")]
                             struct Selected {
                                 provider_id: String,
                             }
