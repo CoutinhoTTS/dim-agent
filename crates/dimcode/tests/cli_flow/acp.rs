@@ -2045,8 +2045,9 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
 
 #[test]
 fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    for same_failure in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
@@ -2054,7 +2055,7 @@ fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[
             {"id":"limited-model","sequence":9,"create_at":1,"type":"step","name":"model-output-end","data":{"turn_id":"limited","request_id":"limited-request","status":"failed","error":"private model detail","presentation":{"source":"local","reason":"max_tokens","serverMessage":"local/model stopped at max_tokens","action":"Increase the output token limit and retry"}}},
-            {"id":"limited-turn","sequence":10,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"limited","status":"failed","error":"private turn detail"}}
+            {"id":"limited-turn","sequence":10,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"limited","status":"failed","error":if same_failure { "private model detail" } else { "independent turn failure" }}}
         ],"through":10,"nextAfter":10,"done":true}));
         for _ in 0..2 {
             let request = wire.read_any();
@@ -2074,14 +2075,22 @@ fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Increase the output token");
-    terminal.until("limit and retry");
-    assert!(!terminal.transcript.contains("private model detail"));
-    terminal.write(b"try again\r");
-    terminal.until("the next turn answers");
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
+        let mut terminal = Terminal::launch_tui(home.command());
+        terminal.until("Increase the output token");
+        terminal.until("limit and retry");
+        assert!(!terminal.transcript.contains("private model detail"));
+        if !same_failure {
+            terminal.until("independent turn failure");
+        }
+        terminal.write(b"try again\r");
+        terminal.until("the next turn answers");
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        if same_failure {
+            assert!(!terminal.transcript.contains("turn failed:"));
+        }
+        assert!(!terminal.transcript.contains("private model detail"));
+    }
 }

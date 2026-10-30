@@ -1087,7 +1087,7 @@ JSON escaping can make a prompt exceed this limit even when its original text fi
 
 When a model reaches `max_tokens`, the CLI names its provider/model and asks for
 a larger output token limit. The turn fails with exit code `2`; the Session stays
-usable. Model failures are also recorded in the private daemon log with their
+usable. Model request failures are also recorded in the private daemon log with their
 Session, turn and request identities.
 
 ```text
