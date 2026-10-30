@@ -722,7 +722,7 @@ async fn run_connection(
                                     if local {
                                         features.extend(WEB_ENTRY_METHODS);
                                         features.extend(UI_HOST_METHODS);
-                                        features.push("ui.leaf");
+                                        features.push("ui.leaf.2");
                                     }
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();
