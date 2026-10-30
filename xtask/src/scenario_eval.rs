@@ -3616,7 +3616,13 @@ mod tests {
             std::fs::create_dir_all(&platform_home).unwrap();
             let env: Vec<_> = std::env::vars_os().collect();
             let shell = resolve_shell(Ok(None), &env).await;
-            let mut platform = HostPlatform::current(shell).unwrap();
+            let mut platform = HostPlatform::current(shell)
+                .unwrap()
+                .with_execution_settings(
+                    dim_agent_capabilities::execution_settings::ExecutionSettingsHost::fixed(
+                        Default::default(),
+                    ),
+                );
             platform.home = platform_home;
             Self {
                 directory,

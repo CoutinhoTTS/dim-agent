@@ -7,6 +7,7 @@ mod local_support;
 use dim_agent_capabilities::{
     approval::Approval,
     defaults,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     history::HistoryRenderer,
     host::*,
     host_platform::{
@@ -36,7 +37,8 @@ async fn product(dirs: &Dirs) -> Product {
         source: ShellSource::Fallback,
         output_encoding: OutputEncoding::Utf8,
     }))
-    .unwrap();
+    .unwrap()
+    .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.home = dirs.home.clone();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -465,8 +467,7 @@ async fn a_turn_reads_writes_and_runs_an_approved_command_with_real_tools() {
         .collect();
     assert!(exec.len() > 1 && exec.iter().all(|description| *description == exec[0]));
     assert_eq!(
-        exec[0].contains("Isolation: unless the user disabled it")
-            && exec[0].contains("host-isolation.json"),
+        exec[0].contains("Isolation: the user decides") && !exec[0].contains("host-isolation.json"),
         cfg!(unix),
         "{}",
         exec[0]

@@ -1,10 +1,9 @@
-//! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, Sandbox, TemporaryDirectory};
+//! The process boundary the sandbox switch applies, before ordinary spawn/PTY.
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory};
 use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
-use tokio_util::sync::CancellationToken;
 
-/// Resolves declared roots once at the policy boundary, each with its
+/// Resolves the system roots once at the sandbox boundary, each with its
 /// requested path and canonical source. Returns the directories, parents
 /// before children, and the regular files, which only read-only roots
 /// (`files`) may name.
@@ -61,7 +60,7 @@ pub(super) fn validate_overlap(
             })
         })
     {
-        return Err("A declared or resolved read-only isolation root cannot equal or be inside a writable root".into());
+        return Err("A read-only isolation root cannot equal or be inside a writable root".into());
     }
     Ok(())
 }
@@ -78,22 +77,10 @@ impl HostPlatform {
             code: "isolation_config_invalid",
             reason,
         };
-        let settings = match &self.execution {
-            Some(source) => source
-                .read(CancellationToken::new())
-                .await
-                .map_err(|error| invalid(error.to_string()))?,
-            None => Default::default(),
-        };
-        let sandbox = if !settings.sandbox {
-            Sandbox::Host
-        } else if settings.network {
-            Sandbox::Network
-        } else {
-            Sandbox::Workspace
-        };
-        let enabled = sandbox != Sandbox::Host;
-        let location = "/settings > Execution".to_string();
+        let settings = self.execution_settings().await?;
+        if !settings.sandbox {
+            return Ok((spec, None, None));
+        }
         let environment: Vec<String> = [
             "PATH",
             "HOME",
@@ -113,9 +100,7 @@ impl HostPlatform {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        let (read_only_paths, default_files) = if !enabled {
-            (Vec::new(), Vec::new())
-        } else {
+        let (read_only_paths, default_files) = {
             #[cfg(target_os = "macos")]
             let paths = [
                 "/System",
@@ -159,29 +144,23 @@ impl HostPlatform {
         };
         let (read_only, mut read_only_files) =
             roots(read_only_paths, true).await.map_err(invalid)?;
-        let default_writes = true;
-        let writable_paths: Vec<PathBuf> = if enabled {
-            std::iter::once(workspace)
-                .chain(output_dir)
-                .map(Path::to_path_buf)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let writable_paths: Vec<PathBuf> = std::iter::once(workspace)
+            .chain(output_dir)
+            .map(Path::to_path_buf)
+            .collect();
         let (mut writable, _) = roots(writable_paths, false).await.map_err(invalid)?;
         validate_overlap(&read_only, &read_only_files, &writable).map_err(invalid)?;
         read_only_files.extend(default_files);
-        if !enabled {
-            return Ok((spec, None, None));
-        }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
-        let temporary = if default_writes && cfg!(target_os = "macos") {
+        let temporary = if cfg!(target_os = "macos") {
             let temporary = temporary_directory()
                 .await
                 .map_err(|error| ProcessSpecError {
                     code: "isolation_unavailable",
-                    reason: format!("Isolated temporary directory: {error}; change /settings > Execution: {location}"),
+                    reason: format!(
+                        "Isolated temporary directory: {error}; turn Sandbox off in /settings > Execution"
+                    ),
                 })?;
             writable.push((temporary.0.clone(), temporary.0.clone()));
             spec.env.retain(|(name, _)| name != "TMPDIR");
@@ -197,9 +176,9 @@ impl HostPlatform {
             &read_only,
             &read_only_files,
             &writable,
-            sandbox == Sandbox::Network,
+            settings.network,
         )?;
-        Ok((spec, temporary, Some(Isolation { policy: location })))
+        Ok((spec, temporary, Some(Isolation)))
     }
 }
 
@@ -358,10 +337,7 @@ fn prepare(
         })
         .ok_or_else(|| ProcessSpecError {
             code: "isolation_unavailable",
-            reason: format!(
-                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or turn the sandbox off in /settings > Execution (policy: {}).",
-                "/settings > Execution"
-            ),
+            reason: "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or turn the sandbox off in /settings > Execution".into(),
         })?;
     let mut args: Vec<OsString> = [
         "--unshare-user",

@@ -1322,7 +1322,7 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 21,
+            "provider": 22,
             "generation": 1
           },
           {
@@ -1347,7 +1347,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 21,
+            "provider": 22,
             "declared": true,
             "external": true
           },
@@ -1374,45 +1374,45 @@
       {
         "id": 22,
         "parent": 2,
-        "name": "IsolationPolicy",
+        "name": "HostPlatform",
         "state": "Active",
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
             "scope": null,
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::methods::ManagementMethods",
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
             "scope": null,
             "provider": 21,
             "generation": 1
           },
           {
-            "service": "dim_app_server::methods::ManagementMethods",
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
-            "provider": 8,
+            "provider": 4,
             "generation": 1
           }
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
             "provider": 21,
             "declared": true,
             "external": true
           },
           {
-            "service": "dim_app_server::methods::ManagementMethods",
-            "provider": 8,
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
             "declared": true,
             "external": true
           }
@@ -1421,28 +1421,28 @@
       {
         "id": 21,
         "parent": 2,
-        "name": "HostPlatform",
+        "name": "ExecutionSettings",
         "state": "Active",
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "service": "dim_app_server::settings::SettingsService",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "service": "dim_app_server::settings::SettingsService",
             "scope": null,
-            "provider": 4,
+            "provider": 15,
             "generation": 1
           }
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
-            "provider": 4,
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 15,
             "declared": true,
             "external": true
           }
@@ -2143,6 +2143,12 @@
     ],
     "bindings": [
       {
+        "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+        "provider": 21,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::file_storage::FileStorage",
         "provider": 4,
         "generation": 1,
@@ -2180,7 +2186,7 @@
       },
       {
         "service": "dim_agent_capabilities::host_platform::HostPlatform",
-        "provider": 21,
+        "provider": 22,
         "generation": 1,
         "removing": false
       },

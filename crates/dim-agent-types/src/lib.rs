@@ -3,7 +3,6 @@
 mod checkpoint;
 mod content;
 mod events;
-pub mod isolation;
 mod member_approval;
 mod model;
 mod permission;
@@ -15,7 +14,6 @@ pub mod v1;
 pub use checkpoint::*;
 pub use content::*;
 pub use events::*;
-pub use isolation::*;
 pub use member_approval::*;
 pub use model::*;
 pub use permission::*;

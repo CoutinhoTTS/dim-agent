@@ -43,8 +43,8 @@ flowchart LR
     p25["CollaborationModelPolicy"]
     p24["PermissionRules"]
     p23["SkillsCatalog"]
-    p22["IsolationPolicy"]
-    p21["HostPlatform"]
+    p22["HostPlatform"]
+    p21["ExecutionSettings"]
     p20["Mcp"]
     p19["McpPublication"]
     p18["ModelLog"]
@@ -114,13 +114,13 @@ flowchart LR
   p15 -->|"dim_app_server::settings::SettingsService"| p25
   p8 -->|"dim_app_server::methods::ManagementMethods"| p24
   p15 -->|"dim_app_server::settings::SettingsService"| p24
-  p21 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p23
+  p22 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p23
   p35 -->|"dim_agent_runtime::parts::PartRegistry"| p23
   p8 -->|"dim_app_server::methods::ManagementMethods"| p23
   p15 -->|"dim_app_server::settings::SettingsService"| p23
-  p21 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p22
-  p8 -->|"dim_app_server::methods::ManagementMethods"| p22
-  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p21
+  p21 -->|"dim_agent_capabilities::execution_settings::ExecutionSettingsHost"| p22
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p22
+  p15 -->|"dim_app_server::settings::SettingsService"| p21
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p20
   p35 -->|"dim_agent_runtime::parts::PartRegistry"| p20
   p19 -->|"dim_app_server::mcp::publication::Publication"| p20

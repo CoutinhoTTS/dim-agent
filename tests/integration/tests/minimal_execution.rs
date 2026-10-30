@@ -9,6 +9,7 @@ mod compaction_support;
 mod process_support;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
@@ -21,7 +22,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use process_support::{alive, gone, pid_in};
+use process_support::{gone, pid_in};
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
 use std::{
@@ -116,16 +117,21 @@ fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
         builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
     }
 }
-/// FileStorage over `home` and the HostPlatform plugin reading `config`
-/// there, rows of the harness's host.
-fn configured_platform(
-    home: PathBuf,
-    config: HostPlatformConfig,
-) -> impl FnOnce(&mut AgentBuilder) {
+/// FileStorage over `home` and the HostPlatform plugin reading
+/// `exec-shell.json` there, rows of the harness's host.
+fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
     move |builder| {
         let files = FileStoragePlugin::new(vec![home]);
         builder.plugin(move |_| Ok(Box::new(files.clone())));
-        builder.plugin(move |names| Ok(Box::new(HostPlatformPlugin::new(names, config.clone())?)));
+        builder.plugin(|names| {
+            Ok(Box::new(HostPlatformPlugin::new(
+                names,
+                HostPlatformConfig {
+                    execution: names.key()?,
+                    exec_shell_file: Some((0, "exec-shell.json".into())),
+                },
+            )?))
+        });
     }
 }
 
@@ -144,7 +150,9 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
     let mut env: Vec<_> = std::env::vars_os().collect();
     env.retain(|(key, _)| key != "SHELL");
     env.push(("SHELL".into(), "/bin/bash".into()));
-    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await)
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.env.extend(
         extra
             .iter()
@@ -215,6 +223,9 @@ impl Harness {
             root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
                 MemorySkillSettings::default(),
             ))))?;
+            root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+                ExecutionSettings::default(),
+            )))?;
             Ok(())
         })
         .await
@@ -540,17 +551,7 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
         .unwrap()
     };
     set_shell("/bin/bash");
-    let harness = Harness::with_platform(
-        configured_platform(
-            home.clone(),
-            HostPlatformConfig {
-                exec_shell_file: Some((0, "exec-shell.json".into())),
-                ..HostPlatformConfig::default()
-            },
-        ),
-        scratch("cwd"),
-    )
-    .await;
+    let harness = Harness::with_platform(configured_platform(home.clone()), scratch("cwd")).await;
     let session = harness.session().await;
     let alternate = if Path::new("/bin/zsh").is_file() {
         "/bin/zsh"
@@ -646,7 +647,7 @@ async fn foreground_echo_returns_output() {
         })
         .unwrap();
     assert!(
-        declared.contains("Isolation: when the user enables it")
+        declared.contains("Isolation: the user decides")
             && !declared.contains("host-isolation.json"),
         "{declared}"
     );

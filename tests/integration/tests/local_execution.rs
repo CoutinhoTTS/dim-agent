@@ -7,6 +7,7 @@ mod compaction_support;
 mod process_support;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
@@ -144,16 +145,21 @@ fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
         builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
     }
 }
-/// FileStorage over `home` and the HostPlatform plugin reading `config`
-/// there, rows of the harness's host.
-fn configured_platform(
-    home: PathBuf,
-    config: HostPlatformConfig,
-) -> impl FnOnce(&mut AgentBuilder) {
+/// FileStorage over `home` and the HostPlatform plugin reading
+/// `exec-shell.json` there, rows of the harness's host.
+fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
     move |builder| {
         let files = FileStoragePlugin::new(vec![home]);
         builder.plugin(move |_| Ok(Box::new(files.clone())));
-        builder.plugin(move |names| Ok(Box::new(HostPlatformPlugin::new(names, config.clone())?)));
+        builder.plugin(|names| {
+            Ok(Box::new(HostPlatformPlugin::new(
+                names,
+                HostPlatformConfig {
+                    execution: names.key()?,
+                    exec_shell_file: Some((0, "exec-shell.json".into())),
+                },
+            )?))
+        });
     }
 }
 
@@ -280,7 +286,9 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
     let mut env: Vec<_> = std::env::vars_os().collect();
     env.retain(|(key, _)| key != "SHELL");
     env.push(("SHELL".into(), "/bin/bash".into()));
-    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await)
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.env.extend(
         extra
             .iter()
@@ -371,7 +379,14 @@ impl Harness {
         builder.require_feature(Feature::new("Probe").branch("Probe", move |names| {
             Ok(Box::new(Probe::new(names, hook, probes.clone())?))
         }));
-        let agent = MinimalHost::start(&builder).await.unwrap();
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+                ExecutionSettings::default(),
+            )))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         let process: Vec<_> = agent
             .loader()
             .entries()
@@ -549,13 +564,7 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let config = home.join("exec-shell.json");
     std::fs::write(&config, "invalid json").unwrap();
     let harness = Harness::with_platform(
-        configured_platform(
-            home.clone(),
-            HostPlatformConfig {
-                exec_shell_file: Some((0, "exec-shell.json".into())),
-                ..HostPlatformConfig::default()
-            },
-        ),
+        configured_platform(home.clone()),
         Hook::None,
         scratch("cwd"),
     )

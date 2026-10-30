@@ -205,7 +205,7 @@ fn parse(input: &JsonObject) -> Result<Input, (String, &'static str)> {
     if !removed.is_empty() {
         return Err((
             format!(
-                "exec accepts command, cwd, runInBackground, timeoutMs, and disableTimeout; remove {}.",
+                "exec accepts command, cwd, runInBackground and timeoutMs; a negative timeoutMs disables the background timeout. Remove {}.",
                 removed.join(", ")
             ),
             "exec_invalid_request",

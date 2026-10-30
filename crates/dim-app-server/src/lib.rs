@@ -713,7 +713,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
-                            execution: Some(names.key()?),
+                            execution: names.key()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
                         },
                     )?,
