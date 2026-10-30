@@ -2,77 +2,103 @@
 
 Decision status: Proposed.
 
-Extends [ADR 010](010-sandbox-opt-in.md): a file operation outside the facts asks. This decision
-lets a user answer “for this session” and keeps that answer across a short interruption.
-ADR 003 is unchanged.
+Extends the file-access facts of ADR 014 (sibling PR). ADR 010 leaves file access unchanged; this
+decision adds the persisted “for this session” answer that ADR 014's ask needs. ADR 003 is
+unchanged.
 
 ## Context
 
-An approval outside the workspace asks once or for the session. A session can be interrupted and
-resumed, and the user should not have to answer the same path again. The grant is a user action;
-a model answering a member's approval is not a user.
+ADR 014 makes a file operation outside the facts ask. A session can be interrupted and resumed,
+and the user should not answer the same path again. A grant is a user action; a model answering a
+member's approval is not a user.
 
 ## Decision
 
 ### D1. The grant and its storage
 
-A grant is `{session_id, path, mode}` in a native table keyed by session. `path` is an exact file
-or a directory prefix; `mode` is `read` or `write`, and a write grant also permits reads. A grant
-applies only to its session, survives a restore, and is removed when the session is deleted. A
-fork is a new session and does not inherit grants.
+SessionStore owns a native `session_grants` table keyed `(session_id, path)`. A row is
+`{session_id, path, kind, mode}`: `path` is a canonical file or directory, `kind` is `file` or
+`dir`, `mode` is `read` or `write`, and a write grant also permits reads. `add` upserts, and a
+`write` upgrade replaces `read`; `remove(session_id, path)` drops both modes. `list(session_id)`
+lets a user revoke a remembered path.
 
-### D2. Approval writes the grant
+A grant applies only to its session, survives a restore (it is stored configuration read at use
+time), and is removed with the session in the same delete transaction. A fork is a new session
+and does not inherit grants.
 
-`ApprovalDecision` stays `Allow | Deny`. The Session grants service exposes
-`add(session_id, path, mode)` and `remove(session_id, path)`. When the user chooses “this
-session”, the client calls `add` and then answers allow; if the write fails, the answer is
-allow-once. Approving a directory writes a prefix.
+The table is part of the next native storage format version; its upgrade creates it empty, and a
+failed upgrade rolls back. `session-deletion-and-fork.md` lists it in the delete transaction so a
+damaged or unloaded session is still cleaned.
 
-### D3. User clients only
+### D2. Permission applies the grant
 
-Grant writes come from a user client. Local and remote clients are treated the same; the
-connection or identity layer decides whether that user may act on the session. A leader model
-answering a member's approval never writes a grant, and a member session does not inherit the
-leader's grants.
+The grant is a `Permission` fact, not an `Approval` decision. `Permission` applies a matching
+grant only at the `Ask` step; it never turns a `Deny` into `Allow`, and a write grant is inert
+under `read-only`. `Approval` remains the one admission point and re-checks through `Permission`
+after the user answers.
 
-### D4. Directory operations
+The client calls `add(session_id, path, mode)` and then answers allow; the re-check sees the
+grant. If `add` fails, the client answers allow-once. `ApprovalDecision` stays `Allow | Deny`.
 
-A directory operation is decided on the directory path. A prefix covers its children;
-`grep`/`glob` over a directory use that directory. A path outside the facts still asks.
+### D3. Who may write
+
+Any client that may call the session's methods may write a grant, including a paired remote
+client. This decision does not add an identity tier; a deployment that needs one adds it at the
+connection layer.
+
+A leader model answering a member's approval never writes a grant, and a member session does not
+inherit the leader's grants. No tool exposes `add` or `remove`; the approval-answer path has no
+grant field.
+
+### D4. Matching
+
+A directory operation is decided on the directory path; a prefix covers its children;
+`grep`/`glob` over a directory use that directory. Approving a directory writes a prefix. The
+grant is on the canonical path, not the inode: a replacement file at the same path inherits it.
+Read paths are resolved before admission by ADR 014, so `read`, `grep` and `glob` match the same
+canonical target as `write`.
 
 ### D5. Full access
 
-A full-access model can write the grant table; that is the accepted trust consequence. A user
-who wants a boundary does not use `full-access`.
+A full-access model can edit the table directly, through file tools or a shell; so can any model
+with an approved host write. That is the accepted trust consequence, not a property of this
+decision.
 
 ## Consequences
 
-- A native `session_grants` table and the `add`/`remove` Session methods.
-- The client approval surface, `overview.md` B.1/B.2, `Permission.md` and the CLI tables are
-  updated under their owners after acceptance.
+- A native `session_grants` table, `add`/`remove`/`list` and a native format upgrade.
+- `native-storage-format.md`, `session-deletion-and-fork.md`, `session-boundary.md`,
+  `session-files.md`, `overview.md` B.1/B.2, `Permission.md` and the CLI tables are updated under
+  their owners after acceptance.
 - No Timeline event or approval wire field is added; `ApprovalDecision` is unchanged.
 
 ## Non-goals
 
 - Cross-session or user-scoped grants.
 - Model-written grants.
+- An identity tier; that belongs to the connection layer.
 - A path-pattern engine.
+
+## Supersession
+
+Extends ADR 014's facts and adds the grant store. ADR 010's “file access is unchanged” is
+qualified by ADR 014, not this decision. ADR 003 remains as written.
 
 ## Rule check
 
 | Rule | Application |
 | --- | --- |
-| §1, ADR 002 D1 | `Approval` remains the branch Capability; grants are Session state; the Session grants service is its owner. |
+| §1, ADR 002 D1 | `Permission` owns the grant fact; `Approval` remains the branch Capability and SessionStore owns the table. |
 | §4 rule 1 | Grants are configuration with typed owner operations; no command event. |
-| §4 rule 2 | A grant applies to the next operation; the admitted call is unchanged. |
+| §4 rule 2 | A grant changes the next decision; this rule does not apply to stored configuration. |
 | §4 rule 3 | No `before` callback. |
 | §4 rule 4 | No core mechanism change. |
 | §4 rule 5 | No Timeline batch. |
 | §4 rule 6 | No context-input change. |
-| §4 rule 7 | `Approval` calls the Session grants service; no other plugin state is read. |
-| §4 rule 8 | No infrastructure change. |
+| §4 rule 7 | `Permission` reads the grants service; `Approval` does not write it. |
+| §4 rule 8 | No new infrastructure; the native table is a storage format change owned by SessionStore. |
 | §4 rule 9 | No new Timeline fact; grants stay outside the Timeline. |
 | ADR 002 D2 | No wiring plugin. |
-| ADR 002 D3 | Grants are Session-scoped; `Approval` depends on the service. |
+| ADR 002 D3 | Grants are Session-scoped; `Permission` depends on the service. |
 | ADR 002 D4 | Business configuration, read at use time. |
-| ADR 002 D5 | `add`/`remove` are language-neutral contracts carrying paths and modes. |
+| ADR 002 D5 | `add`/`remove`/`list` are language-neutral contracts carrying paths and modes. |
