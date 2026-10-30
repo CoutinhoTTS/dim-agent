@@ -459,9 +459,10 @@ fn model_catalog_declares_limits_for_one_model() {
     assert!(output.stderr.is_empty());
 }
 
-/// `--set-missing-limits` reads the catalog, declares both limits of every
-/// model it reports as missing them, and chains each reply's version into
-/// the next write.
+/// `--set-missing-limits` reads the catalog, declares the limits of every
+/// model the list marks `undeclared`, and chains each reply's version into
+/// the next write. A disabled model and one unavailable for another reason
+/// keep that state even when they report missing limits.
 #[test]
 fn model_catalog_declares_missing_limits_for_every_model() {
     let home = Home::new();
@@ -471,10 +472,12 @@ fn model_catalog_declares_missing_limits_for_every_model() {
         let catalog = wire.read("provider.catalog");
         wire.reply(
             &catalog,
-            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+            json!({"catalog":{"version":1,"disabledModelIds":["gone"],"models":[
                 {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
                 {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
-                {"id":"wide","name":"Wide","unavailableReason":"limits_undeclared","missingLimits":["maxOutputTokens"]}
+                {"id":"wide","name":"Wide","unavailableReason":"limits_undeclared","missingLimits":["maxOutputTokens"]},
+                {"id":"gone","name":"Gone","unavailableReason":null,"missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":["contextWindow"]}
             ]}}),
         );
         let first = wire.read("provider.models.edit");

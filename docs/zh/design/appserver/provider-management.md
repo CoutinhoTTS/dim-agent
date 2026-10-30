@@ -352,8 +352,9 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 统计需要窗口的模型数量并给出声明命令；该 Provider 没有任何可选模型时，这条提示取代空 Provider
 行，而不是与之并列。`dimcode models PROVIDER --set-limits MODEL --context-window N
 --max-output-tokens N` 通过 `models.edit` 为单个模型声明两项上限；
-`--set-missing-limits --context-window N --max-output-tokens N` 为该 Provider 中
-`missingLimits` 非空的每个模型声明。两种形式都必须同时给出两个具名值。两者都不能与
+`--set-missing-limits --context-window N --max-output-tokens N` 为列表标为 `undeclared`
+的每个模型声明，即缺失上限是唯一障碍的启用模型；被禁用或因其他原因不可用的模型不写入。
+两种形式都必须同时给出两个具名值。两者都不能与
 `--refresh` 或 `--clear-preferences` 组合。两者都先读取记录版本，串接每次 `models.edit`
 回复的版本，然后像 `models PROVIDER` 一样打印目录。列表把上限未声明的模型标为
 `undeclared`，并在行下列出声明命令。

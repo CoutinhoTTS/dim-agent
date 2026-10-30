@@ -480,7 +480,9 @@ row replaces the empty-provider row instead of joining it.
 `dimcode models PROVIDER --set-limits MODEL --context-window N
 --max-output-tokens N` declares both limits of one model through `models.edit`,
 and `--set-missing-limits --context-window N --max-output-tokens N` declares them
-for every model of that provider whose `missingLimits` is not empty. Both named
+for every model the list marks `undeclared`, an enabled model whose missing limits
+are its only blocker; a disabled model or one unavailable for another reason is
+not written. Both named
 values are required with either form. Neither form combines with `--refresh` or
 `--clear-preferences`. Both read the record version first, chain the version each
 `models.edit` reply returns, and then print the catalog as `models PROVIDER`

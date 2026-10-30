@@ -3375,7 +3375,8 @@ pub(crate) async fn clear_saved_model_preferences(
 pub(crate) enum LimitTarget {
     /// The one model the command names.
     Model(String),
-    /// Every model whose catalog entry reports missing limits.
+    /// Every model `dimcode models` marks `undeclared`: an enabled model whose
+    /// missing limits are its only blocker.
     Missing,
 }
 
@@ -3397,8 +3398,11 @@ pub(crate) async fn declare_model_limits(
         catalog: Option<Catalog>,
     }
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Catalog {
         version: u32,
+        #[serde(default)]
+        disabled_model_ids: Vec<String>,
         models: Vec<CatalogModel>,
     }
     #[derive(Deserialize)]
@@ -3407,6 +3411,8 @@ pub(crate) async fn declare_model_limits(
         id: String,
         #[serde(default)]
         missing_limits: Vec<String>,
+        #[serde(default)]
+        unavailable_reason: Option<String>,
     }
     let snapshot: Snapshot = client
         .typed("provider.catalog", json!({"providerId": provider_id}))
@@ -3420,12 +3426,21 @@ pub(crate) async fn declare_model_limits(
             model,
             vec!["contextWindow".into(), "maxOutputTokens".into()],
         )],
-        LimitTarget::Missing => catalog
-            .models
-            .into_iter()
-            .filter(|model| !model.missing_limits.is_empty())
-            .map(|model| (model.id, model.missing_limits))
-            .collect(),
+        LimitTarget::Missing => {
+            let disabled = catalog.disabled_model_ids;
+            catalog
+                .models
+                .into_iter()
+                .filter(|model| {
+                    crate::limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        disabled.contains(&model.id),
+                    )
+                })
+                .map(|model| (model.id, model.missing_limits))
+                .collect()
+        }
     };
     for (model_id, missing) in targets {
         #[derive(Deserialize)]
