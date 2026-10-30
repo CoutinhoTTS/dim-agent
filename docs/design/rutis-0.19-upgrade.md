@@ -36,9 +36,10 @@ to connect.
 
 The target is 0.19, not 0.18. Most of 0.18's breaks (diagnostics, configuration checks) carry
 into 0.19 unchanged, while the APIs Dim would have adapted to on 0.18 (links, `LocalRuntime`,
-`RuntimeResolver`) are removed by 0.19. The pins are 0.19.1 (tag `v0.19.1`), which adds the
-synchronous waterfall M2 needs ([rutis#947](https://github.com/arcships/rutis/pull/947)) and the
-public `mark_scope` that [#684](https://github.com/arcships/dim/pull/684) builds on
+`RuntimeResolver`) are removed by 0.19. The pins are 0.19.1, released on 2026-10-30 on crates.io,
+npm and PyPI. It adds the synchronous waterfall M2 needs
+([rutis#947](https://github.com/arcships/rutis/pull/947)) and the public `mark_scope` that
+[#684](https://github.com/arcships/dim/pull/684) builds on
 ([rutis#948](https://github.com/arcships/rutis/issues/948)). It speaks the same protocol as 0.19.0,
 so the `npm` peer range stays `~0.19.0`.
 
@@ -123,11 +124,11 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 
 ## 3. Dim's current usage
 
-A trial build of all targets (`cargo check --workspace --all-targets --keep-going`) at 70ad3835
-against 0.19.0 gives the table below. Crates behind a failing one were not reached, and are located
-by search. `main` has moved
-since (35b3a067); the file and line findings still hold there, and the implementation re-runs the
-build on its own base before it starts.
+A trial build of all targets (`cargo check --workspace --all-targets --keep-going`) at 76a5105f
+against the released 0.19.1 gives the table below. A second run with the two `dim-agent-runtime`
+errors fixed as M2 and M3 say reached the crates behind it. Crates neither run reached are located by
+search. The same build at 70ad3835 against 0.19.0 gave the same table. The implementation re-runs
+the build on its own base before it starts.
 
 | Crate | Result |
 | --- | --- |
@@ -610,7 +611,6 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | A leaf starts its session but its `Tui` never attaches | Closed after `START`; a replacement keeps the old interface until the new one attaches (M8) |
 | A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each minimal host hold one |
 | Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 states its expected graph diff |
-| 0.19.1 is tagged, but its packages are not yet on crates.io, npm and PyPI | Step 1 waits for them |
 | #645 lands first | Its Git pin of rutis#920 conflicts with the 0.19.1 pins (M1), and the instance rows it queries go with #684. It does not land; §3 routes #594 to #684 |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |

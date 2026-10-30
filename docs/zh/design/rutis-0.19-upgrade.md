@@ -33,8 +33,8 @@ Python 运行时和交互式 `dimcode` 进程（UI leaf，M8）必须一起升�
 Python 行都无法连接。
 
 目标是 0.19，而不是 0.18。0.18 的大部分不兼容变化（诊断、配置校验）原样延续到 0.19；而如果先升到 0.18，
-要适配的那些 API（链接、`LocalRuntime`、`RuntimeResolver`）在 0.19 里又都被删掉了。固定版本是 0.19.1（tag `v0.19.1`）：
-它补回了 M2 需要的同步 waterfall（[rutis#947](https://github.com/arcships/rutis/pull/947)），并公开了
+要适配的那些 API（链接、`LocalRuntime`、`RuntimeResolver`）在 0.19 里又都被删掉了。固定版本是 0.19.1，
+已于 2026-10-30 发布到 crates.io、npm 和 PyPI。它补回了 M2 需要的同步 waterfall（[rutis#947](https://github.com/arcships/rutis/pull/947)），并公开了
 [#684](https://github.com/arcships/dim/pull/684) 依赖的 `mark_scope`（[rutis#948](https://github.com/arcships/rutis/issues/948)）。
 它和 0.19.0 使用同一个协议，所以 `npm` 的 peer 范围仍是 `~0.19.0`。
 
@@ -112,9 +112,9 @@ Python 行都无法连接。
 
 ## 3. Dim 的当前用法
 
-在 70ad3835 上对 0.19.0 试编译了所有 target（`cargo check --workspace --all-targets --keep-going`），结果见下表。
-排在失败 crate 后面的 crate 没有编到，靠搜索定位。此后 `main` 已经前进到 35b3a067；这些文件和行号的发现
-在那里仍然成立，实施时会在自己的基线上重新跑一次。
+在 76a5105f 上对已发布的 0.19.1 试编译了所有 target（`cargo check --workspace --all-targets --keep-going`），
+结果见下表。第二次按 M2、M3 的做法修好 `dim-agent-runtime` 的两处错误后，编到了排在它后面的 crate。两次都没编到的
+crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译，结果与此相同。实施时会在自己的基线上重新跑一次。
 
 | Crate | 结果 |
 | --- | --- |
@@ -509,7 +509,6 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | leaf 建立了会话，但它的 `Tui` 一直不 attach | 在 `START` 之后关闭；替换时在新界面 attach 之前保留旧界面（M8） |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
-| 0.19.1 已打 tag，但它的包还没发到 crates.io、npm 和 PyPI | 步骤 1 等这些包 |
 | #645 先合入 | 它对 rutis#920 的 Git 固定版本与 0.19.1 的固定版本（M1）冲突，它查询的实例行也会随 #684 去掉。它不合入；§3 让 #594 改走 #684 |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
