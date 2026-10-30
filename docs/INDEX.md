@@ -25,6 +25,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [ADR 010 — The sandbox is opt-in](adr/010-sandbox-opt-in.md)
 - [ADR 011 — Execution settings](adr/011-execution-settings.md)
 - [ADR 012 — Session grants](adr/012-session-grants.md)
+- [ADR 014 — File access facts](adr/014-file-access-facts.md)
 - [ADR 015 — Sessions, branches and their content are plugins, not loader instances](adr/015-scopes-are-plugins.md)
 - [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability（[中文](zh/design/plugin-contract.md)）
 - [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings（[中文](zh/design/rutis-usage.md)）
