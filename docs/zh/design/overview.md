@@ -463,7 +463,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 扩展 | Hooks | 新增：Hooks |
 | 扩展 | Web 搜索与抓取 | 新增：Web |
 | 扩展 | Slack 与飞书 | 各平台各自的插件与工具；没有通用渠道，也没有 `notify` 工具 |
-| 工作区工具 | `read`、`write`、`edit`、`glob`、`grep`、`exec`、`wait` | 现有：WorkspaceTools、BackgroundExec、Wait |
+| 工作区工具 | `read`、`write`、`edit`、`glob`、`grep`、`exec`、`exec_stop`、`wait` | 现有：WorkspaceTools、BackgroundExec、Wait |
 | 远程访问 | JSON-RPC 常驻服务 | 现有：Transport、Rpc |
 | 远程访问 | ACP | 新增：AcpGateway |
 | 远程访问 | `/web`、`/remote`、手机配对、远程 Session | 新增：RemoteGateway |

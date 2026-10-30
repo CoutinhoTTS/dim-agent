@@ -159,7 +159,10 @@ in one compare-and-set write. The listing is taken outside the write and keeps
 `refresh`'s user-model conflict rule. An invalid patch is rejected before
 anything is listed, as `provider_invalid_config` with its reason. A failed
 listing fails the update and writes nothing, so re-pointing never leaves the old
-endpoint's models on the new one. A `network`-only change — a proxy or a timeout
+endpoint's models on the new one. A disabled record whose models are its own
+drops them in the same write, without a request: they are the old endpoint's,
+and the empty, listable catalog is what the picker's refill fills after the
+record is enabled. A `network`-only change — a proxy or a timeout
 — saves alone and lists nothing: it changes how the endpoint is reached, not
 what it serves, and requiring a listing would make those settings unsavable
 whenever listing fails. A driver that cannot list saves the connection alone. A
@@ -365,10 +368,13 @@ adopts that model; a cycled effort is saved as its `reasoningEffort` and sent
 with the model's other saved preferences.
 
 The picker also fills a static provider whose catalog holds no models through
-`provider.refresh`, once per provider per connection, when `provider.list` says
-its models can be listed, and shows what the refresh stored. A failed read or a
-failed refresh keeps the provider's row, and a reply that arrives after the
-picker closed only records the fill: the next open reads it.
+`provider.refresh`, once per version of its catalog in a connection, when
+`provider.list` says its models can be listed, and shows what the refresh
+stored. A successful refresh records the version it wrote, so a listing that
+comes back empty is not asked for again; a write to the record, such as an
+enable or a re-point, asks once more. A failed read or a failed refresh keeps
+the provider's row, and a reply that arrives after the picker closed only
+records the fill: the next open reads it.
 
 ```text
 Select a model
@@ -423,8 +429,10 @@ plus userModels, apply descriptor overrides to their owned defaults and endpoint
 overrides before deriving routes. Preserve these fields on refresh, writes and
 bundled-definition reseeding; managed preferences are preserved only for a
 same-account refresh (§3.2). User IDs must not collide with default/override IDs;
-a refresh introducing a collision fails without replacing the admitted catalog.
-Delete the colliding user model through `provider.models.delete`, then retry refresh.
+a refresh introducing a collision fails without replacing the admitted catalog,
+and an update that lists the new endpoint follows the same rule: it fails, names
+the colliding user models, and writes nothing. Delete the colliding user model
+through `provider.models.delete`, then retry the refresh or the update.
 
 Bundled reseeding must not fail seeding or Provider activation on that collision.
 When a changed fingerprint's candidate would collide with a user model, leave
