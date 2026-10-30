@@ -45,6 +45,14 @@ repeat irreversible output. The process-model constructor also injects the
 process `ProviderConnectionResolver` to resolve each request's connection; this
 profile does not.
 
+A provider's `max_tokens` stop fails that turn with a `max_tokens` presentation,
+the request's provider/model identity and an action to increase the output limit.
+It is not a context-budget recovery signal and is never retried automatically.
+The private daemon log records model request failures with their Session, turn and request
+identities. The Session remains available for a later input or model configuration.
+A presentation supplied by the model host takes precedence; ModelFailurePolicy
+provides a presentation only when the host supplied none.
+
 ## Tests
 
 [host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs):

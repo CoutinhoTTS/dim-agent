@@ -130,9 +130,9 @@ Which names a part declares:
   needs no service name.
 - **Provided without declaring it** (an undeclared `ctx.provide`, as an unmodified Cordis plugin
   does): rutis publishes it under its plain name for the whole process. Inside a Session or branch
-  that is one process-wide service: a second copy fails with rutis's duplicate-provider error, and a
-  debug build of the host refuses the Session at once (`scoped service provided without an instance
-  key`).
+  that is one process-wide service: a second copy fails with rutis's duplicate-provider error, and
+  the host's assembly check reports the Session (`scoped service provided without an instance key`)
+  when a test runs it.
 
 One provider per name per instance: of two parts that provide the same name in one Session or
 branch, the second fails with rutis's duplicate-provider error.

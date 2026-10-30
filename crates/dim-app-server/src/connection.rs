@@ -55,7 +55,7 @@ pub(crate) struct Connection {
     pub closed: CancellationToken,
     pub sender: Sender,
     pub shutdown_reply: Mutex<Option<RequestId>>,
-    ids: Mutex<HashSet<RequestId>>,
+    ids: Mutex<HashMap<RequestId, Option<CancellationToken>>>,
     attachments: Mutex<HashMap<String, Attachment>>,
     next_attachment: AtomicU64,
     subscriptions: TaskTracker,
@@ -89,7 +89,7 @@ impl Connection {
             sender,
             shutdown_reply: Mutex::new(None),
             hub,
-            ids: Mutex::new(HashSet::new()),
+            ids: Mutex::new(HashMap::new()),
             attachments: Mutex::new(HashMap::new()),
             next_attachment: AtomicU64::new(1),
             subscriptions: TaskTracker::new(),
@@ -302,7 +302,7 @@ impl Connection {
     }
     fn admit(self: &Arc<Self>, request: &Request) -> Result<Inflight, RpcError> {
         let mut ids = self.ids.lock().expect("request identities");
-        if ids.contains(&request.id) {
+        if ids.contains_key(&request.id) {
             return Err(RpcError::invalid("Request id is already in flight"));
         }
         let control = matches!(
@@ -315,6 +315,7 @@ impl Connection {
                 | Call::Detach(_)
                 | Call::ApprovalRespond(_)
                 | Call::Shutdown(_)
+                | Call::CatalogCancel(_)
         );
         if ids.len() >= MAX_REQUESTS + if control { CONTROL_RESERVE } else { 0 } {
             return Err(RpcError::app(
@@ -323,7 +324,9 @@ impl Connection {
                 "Connection request limit reached",
             ));
         }
-        ids.insert(request.id.clone());
+        let cancel = matches!(request.call, Call::Catalog(_) | Call::Summaries(_))
+            .then(|| self.closed.child_token());
+        ids.insert(request.id.clone(), cancel);
         Ok(Inflight {
             connection: self.clone(),
             id: request.id.clone(),
@@ -382,6 +385,7 @@ impl Connection {
                     | Call::List(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
+                    | Call::CatalogCancel(_)
                     | Call::AgentList
             )
         {
@@ -394,6 +398,7 @@ impl Connection {
                     | Call::History(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
+                    | Call::CatalogCancel(_)
                     | Call::SessionMethods(_)
                     | Call::Delete(_)
                     | Call::Fork(_)
@@ -671,6 +676,17 @@ impl Connection {
                 return None;
             }
             Call::Create(params) => self.create(rpc, params).await,
+            Call::CatalogCancel(params) => {
+                if let Some(Some(cancel)) = self
+                    .ids
+                    .lock()
+                    .expect("request identities")
+                    .get(&params.request_id)
+                {
+                    cancel.cancel();
+                }
+                Ok(Reply::empty())
+            }
             Call::Catalog(mut params) => {
                 let limit = params.limit.unwrap_or(50);
                 if !(1..=200).contains(&limit) {
@@ -679,9 +695,12 @@ impl Connection {
                     )));
                 }
                 params.limit = Some(limit);
+                let cancel = self.ids.lock().expect("request identities")[&id]
+                    .clone()
+                    .expect("catalog reads have cancellation");
                 match rpc
                     .index
-                    .session_catalog(params, None, self.protocol_version())
+                    .session_catalog(params, None, self.protocol_version(), cancel)
                     .await
                 {
                     Ok(mut page) => {
@@ -692,6 +711,11 @@ impl Connection {
                         Ok(Reply::Catalog(page))
                     }
                     Err(AgentError::InvalidInput(reason)) => Err(RpcError::invalid(reason)),
+                    Err(AgentError::Cancelled(_)) => Err(RpcError::app(
+                        -32000,
+                        "cancelled",
+                        "Session catalog read cancelled",
+                    )),
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
@@ -707,10 +731,18 @@ impl Connection {
                     return Some(Err(RpcError::from(AgentError::Storage(reason))));
                 }
                 if include_summary && rpc.config.database_path.is_some() {
+                    let cancel = self.ids.lock().expect("request identities")[&id]
+                        .clone()
+                        .expect("summary reads have cancellation");
                     return Some(
                         match rpc
                             .index
-                            .session_catalog(Catalog::default(), filter, self.protocol_version())
+                            .session_catalog(
+                                Catalog::default(),
+                                filter,
+                                self.protocol_version(),
+                                cancel,
+                            )
                             .await
                         {
                             Ok(mut page) => {
@@ -720,6 +752,11 @@ impl Connection {
                                 }
                                 Ok(Reply::Summaries(page.sessions))
                             }
+                            Err(AgentError::Cancelled(_)) => Err(RpcError::app(
+                                -32000,
+                                "cancelled",
+                                "Session catalog read cancelled",
+                            )),
                             Err(error) => Err(RpcError::from(error)),
                         },
                     );

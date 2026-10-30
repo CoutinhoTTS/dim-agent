@@ -132,6 +132,31 @@ async fn tool_results(session: &Session) -> Vec<ToolResult> {
         .collect()
 }
 
+/// The product assembly with its default plugins is sound once its Session
+/// and a branch are live: the assembly check reports nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_product_assembly_passes_the_assembly_check() {
+    let dirs = Dirs::new();
+    let product = product(&dirs).await;
+    let session = session(&product, &dirs.dir("work")).await;
+    session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "check".into(),
+                source: BranchSource::Host {
+                    operation_id: "check".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = product.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    product.agent.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_write_asks_for_each_external_mutation() {
     let dirs = Dirs::new();

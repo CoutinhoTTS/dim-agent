@@ -35,11 +35,33 @@ pub(crate) async fn session_cwd(cwd: &str) -> Result<String, RpcError> {
         .map_err(|_| RpcError::invalid("cwd must be UTF-8"))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(untagged)]
 pub enum RequestId {
     Number(serde_json::Number),
     String(String),
+}
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::String(value) => Ok(Self::String(value)),
+            Value::Number(number) => {
+                let value = number.as_f64().expect("finite JSON number");
+                Ok(Self::Number(
+                    if value.fract() == 0.0 && value >= 0.0 && value < u64::MAX as f64 {
+                        serde_json::Number::from(value as u64)
+                    } else if value.fract() == 0.0 && value < 0.0 && value >= i64::MIN as f64 {
+                        serde_json::Number::from(value as i64)
+                    } else {
+                        serde_json::Number::from_f64(value).expect("finite JSON number")
+                    },
+                ))
+            }
+            _ => Err(serde::de::Error::custom(
+                "Expected a numeric or string request identity",
+            )),
+        }
+    }
 }
 
 /// The error of an unknown or closed Agent.
@@ -79,6 +101,7 @@ pub enum Call {
     List(SessionList),
     Summaries(SessionList),
     Catalog(Catalog),
+    CatalogCancel(CatalogCancel),
     Attach(Attach),
     Detach(SessionId),
     Submit(Submit),
@@ -355,6 +378,11 @@ pub struct CatalogResult {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogCancel {
+    pub request_id: RequestId,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionId {
     pub session_id: String,
 }
@@ -456,7 +484,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 34] = [
+const BUILTIN_METHODS: [&str; 35] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -474,6 +502,7 @@ const BUILTIN_METHODS: [&str; 34] = [
     "session.list",
     "session.summaries",
     "session.catalog",
+    "session.catalog.cancel",
     "session.attach",
     "session.detach",
     "session.submit",
@@ -512,22 +541,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
     };
     let id = obj
         .remove("id")
-        .and_then(|id| serde_json::from_value::<RequestId>(id).ok())
-        .map(|id| match id {
-            RequestId::Number(number) => {
-                let number = number.as_f64().expect("finite JSON number");
-                RequestId::Number(
-                    if number.fract() == 0.0 && number >= 0.0 && number < (u64::MAX as f64) {
-                        serde_json::Number::from(number as u64)
-                    } else if number.fract() == 0.0 && number < 0.0 && number >= i64::MIN as f64 {
-                        serde_json::Number::from(number as i64)
-                    } else {
-                        serde_json::Number::from_f64(number).expect("finite JSON number")
-                    },
-                )
-            }
-            id => id,
-        });
+        .and_then(|id| serde_json::from_value::<RequestId>(id).ok());
     if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || id.is_none() {
         return Err((id, RpcError::wire(-32600, "Invalid JSON-RPC envelope")));
     }
@@ -554,6 +568,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.list" => Call::List(params(raw_params)?),
             "session.summaries" => Call::Summaries(params(raw_params)?),
             "session.catalog" => Call::Catalog(params(raw_params)?),
+            "session.catalog.cancel" => Call::CatalogCancel(params(raw_params)?),
             "session.attach" => Call::Attach(params(raw_params)?),
             "session.detach" => Call::Detach(params(raw_params)?),
             "session.submit" => Call::Submit(params(raw_params)?),

@@ -1377,10 +1377,11 @@ fn transaction<'a>(
                     .execute(params![session, row.hash, row.kind, row.body])
                     .map_err(error)?;
             }
+            let mut outputs = BTreeMap::new();
             batches
                 .iter()
                 .zip(&prepared.lists)
-                .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists))
+                .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists, &mut outputs))
         });
         match written {
         Ok(()) => tx.commit().map_err(|failure| {
@@ -1444,11 +1445,19 @@ pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::
 fn sql_sequence(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(error)
 }
+struct OutputRow {
+    sequence: u64,
+    kind: String,
+    bytes: usize,
+    row: Row,
+}
+
 /// Writes `batch`, with `lists` the prepared lists of each of its records.
 fn write_batch(
     connection: &Connection,
     batch: &Pending,
     lists: &[Vec<Option<ListReferences>>],
+    outputs: &mut BTreeMap<String, OutputRow>,
 ) -> Result<()> {
     #[cfg(test)]
     if let Some(fault) = batch.fault {
@@ -1464,34 +1473,45 @@ fn write_batch(
         let kind = record.event.kind.key();
         match &record.event.kind {
             EventKind::Text(data) | EventKind::Thinking(data) => {
-                let previous: Option<(u64, String, String)> = connection.prepare_cached("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1").map_err(error)?.query_row(params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
+                if !outputs.contains_key(&batch.key.branch_id) {
+                    let previous: Option<(u64, String, String)> = connection.prepare_cached("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1").map_err(error)?.query_row(params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
+                    if let Some((sequence, previous_kind, body)) = previous
+                        && previous_kind == kind
+                        && body.len() < 4096
+                    {
+                        outputs.insert(
+                            batch.key.branch_id.clone(),
+                            OutputRow {
+                                sequence,
+                                kind: previous_kind,
+                                bytes: body.len(),
+                                row: serde_json::from_str(&body).map_err(error)?,
+                            },
+                        );
+                    }
+                }
                 let output_data = wire.event["data"]
                     .as_object_mut()
                     .ok_or_else(|| error("output data is missing in event encoding"))?;
                 output_data.remove("turn_id");
                 output_data.remove("request_id");
-                if let Some((start, previous_kind, body)) = previous
-                    && previous_kind == kind
-                    && body.len() < 4096
+                if let Some(previous) = outputs.get_mut(&batch.key.branch_id)
+                    && previous.kind == kind
+                    && previous.bytes < 4096
                     && let Row::Output {
                         turn_id,
                         request_id,
                         started_at,
-                        mut records,
-                    } = serde_json::from_str(&body).map_err(error)?
-                    && turn_id == data.turn_id
-                    && request_id == data.request_id
-                    && record.event.create_at.saturating_sub(started_at) < 1000
+                        records,
+                    } = &mut previous.row
+                    && *turn_id == data.turn_id
+                    && *request_id == data.request_id
+                    && record.event.create_at.saturating_sub(*started_at) < 1000
                 {
                     records.push(wire);
-                    let body = serde_json::to_string(&Row::Output {
-                        turn_id,
-                        request_id,
-                        started_at,
-                        records,
-                    })
-                    .map_err(error)?;
-                    connection.prepare_cached("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5").map_err(error)?.execute(params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(start)?]).map_err(error)?;
+                    let body = serde_json::to_string(&previous.row).map_err(error)?;
+                    connection.prepare_cached("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5").map_err(error)?.execute(params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(previous.sequence)?]).map_err(error)?;
+                    previous.bytes = body.len();
                     continue;
                 }
                 let row = Row::Output {
@@ -1500,9 +1520,19 @@ fn write_batch(
                     started_at: record.event.create_at,
                     records: vec![wire],
                 };
-                insert_event(connection, &batch.key, sequence, kind, &row)?;
+                let bytes = insert_event(connection, &batch.key, sequence, kind, &row)?;
+                outputs.insert(
+                    batch.key.branch_id.clone(),
+                    OutputRow {
+                        sequence,
+                        kind: kind.into(),
+                        bytes,
+                        row,
+                    },
+                );
             }
             _ => {
+                outputs.remove(&batch.key.branch_id);
                 insert_event(
                     connection,
                     &batch.key,
@@ -1561,7 +1591,8 @@ fn insert_event(
     sequence: u64,
     kind: &str,
     row: &Row,
-) -> Result<()> {
+) -> Result<usize> {
+    let body = serde_json::to_string(row).map_err(error)?;
     connection
         .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)")
         .map_err(error)?
@@ -1570,14 +1601,14 @@ fn insert_event(
             key.branch_id,
             sql_sequence(sequence)?,
             kind,
-            serde_json::to_string(row).map_err(error)?,
+            body,
             match row {
                 Row::Event { record } => record.event["id"].as_str(),
                 Row::Output { .. } => None,
             }
         ])
         .map_err(error)?;
-    Ok(())
+    Ok(body.len())
 }
 /// A stored row whose records are decoded in order, across connection holds.
 struct Fetched {

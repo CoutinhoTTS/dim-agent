@@ -262,12 +262,14 @@ struct Worker {
     context_stale: bool,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
-    /// Providers whose catalog this connection already asked to refill, so an
-    /// endpoint that lists nothing costs one request, not one per open.
-    refilled_catalogs: std::collections::HashSet<String>,
+    /// The catalog version each provider was last asked to refill at in this
+    /// connection, moved to the version the refresh stored: an endpoint that
+    /// lists nothing costs one request per unchanged record, not one per open,
+    /// and a write to the record (a re-point, an enable) asks once more.
+    refilled_catalogs: std::collections::HashMap<String, u32>,
     /// The outstanding `provider.refresh` requests `models()` sent for those
-    /// catalogs.
-    refill_requests: Vec<u64>,
+    /// catalogs, with the provider each was sent for.
+    refill_requests: Vec<(u64, String)>,
 }
 
 struct OutputWatch {
@@ -567,6 +569,17 @@ struct CancelNotice {
 }
 
 impl Worker {
+    async fn cancel_catalog(&mut self) -> crate::Result<()> {
+        if let Some((request, _, _)) = self.catalog_request.take()
+            && self.client.offers("session.catalog.cancel")
+        {
+            self.client
+                .send("session.catalog.cancel", json!({"requestId":request}))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
@@ -1030,7 +1043,7 @@ impl Worker {
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
             Command::ListSessions { id, query, cursor } => {
-                self.catalog_request = None;
+                self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
                 let (method, params) = if paged {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
@@ -1050,7 +1063,7 @@ impl Worker {
                     }),
                 }
             }
-            Command::CloseSessions => self.catalog_request = None,
+            Command::CloseSessions => self.cancel_catalog().await?,
             Command::Usage => match self.context_usage().await {
                 Ok(usage) => self.report(usage.describe(), false),
                 Err(error) => self.report(error.to_string(), true),
@@ -2244,17 +2257,18 @@ impl Worker {
                     continue;
                 }
             };
+            let version = catalog.as_ref().map_or(0, |catalog| catalog.version);
             if catalog
                 .as_ref()
                 .is_none_or(|catalog| catalog.models.is_empty())
                 && refillable.contains(&provider_id)
-                && self.refilled_catalogs.insert(provider_id.clone())
+                && self.refilled_catalogs.insert(provider_id.clone(), version) != Some(version)
                 && let Ok(request) = self
                     .client
                     .send("provider.refresh", json!({"providerId": provider_id}))
                     .await
             {
-                self.refill_requests.push(request);
+                self.refill_requests.push((request, provider_id.clone()));
             }
             let Some(catalog) = catalog else {
                 empty.push(EmptyProvider {
@@ -2977,15 +2991,21 @@ impl Worker {
         if let Some(index) = self
             .refill_requests
             .iter()
-            .position(|request| *request == id)
+            .position(|(request, _)| *request == id)
         {
-            self.refill_requests.remove(index);
-            if result.is_ok() {
-                // The refresh stored the catalog; a picker that is still
-                // open reads the list again to show it, and
-                // `refilled_catalogs` keeps that read from asking twice.
-                // With the picker closed this only records the fill: the
-                // next open reads anyway.
+            let (_, provider_id) = self.refill_requests.remove(index);
+            if let Ok(value) = result {
+                // The refresh stored the catalog under a new version; record
+                // it, so a listing that came back empty is not asked for
+                // again. A picker that is still open reads the list again to
+                // show the fill; with the picker closed this only records it.
+                #[derive(Deserialize)]
+                struct Stored {
+                    version: u32,
+                }
+                if let Ok(Stored { version }) = serde_json::from_value(value) {
+                    self.refilled_catalogs.insert(provider_id, version);
+                }
                 self.send(Update::ModelsRefilled);
             }
             return Ok(());
