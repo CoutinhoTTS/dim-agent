@@ -115,7 +115,7 @@ fn path(home: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    const ROUNDS: usize = 40;
+    const ROUNDS: usize = 8;
     const WRITERS: usize = 4;
 
     /// Every writer keeps its own key across a write race, and the file

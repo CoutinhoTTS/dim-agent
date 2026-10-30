@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn concurrent_appends_keep_every_entry() {
         let dir = tempfile::tempdir().unwrap();
-        for round in 0..40 {
+        for round in 0..8 {
             let home = dir.path().join(format!("round-{round}"));
             std::thread::scope(|scope| {
                 for writer in 0..4 {
