@@ -1645,10 +1645,9 @@ async fn judge_export(
         let request = Arc::new(judge_request(judge, &messages, &config));
         let reply = match complete(host, resolver, &request, cancel).await {
             Ok(reply) => reply,
-            // A call that fails during a re-ask, or after the temperature was
-            // dropped, ends the asking, and the error names the call that
-            // failed.
-            Err(error) if dropped || reasks > 0 => {
+            // A call that fails during a re-ask ends the asking, and the
+            // error names the call that failed.
+            Err(error) if reasks > 0 => {
                 break (
                     JudgeOutcome::CallFailed,
                     unparsed(scenario),
