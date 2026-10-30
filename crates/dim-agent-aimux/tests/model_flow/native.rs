@@ -1491,7 +1491,7 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat","openai-responses","anthropic","gemini"] {
             let server = NativeServer::start(kind).await;
-            let agent = model_agent(server.models(), None);
+            let agent = model_agent(server.models(), None).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.input(InputMessageData {
                 user: Some(UserInput { content: vec![
@@ -1568,7 +1568,7 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                     }
                 }
             }
-            let host=agent.root.get::<ModelHost>().unwrap();
+            let host=agent.root().get::<ModelHost>().unwrap();
             let protocol=match kind {"openai-chat"=>ModelProtocol::OpenaiChat,"openai-responses"=>ModelProtocol::OpenaiResponses,"anthropic"=>ModelProtocol::Anthropic,_=>ModelProtocol::Gemini};
             let connection=||ModelConnection::Http(HttpModelConnection{protocol,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:if kind=="anthropic" {Some("bearer-secret".into())} else {None},api_key:None,preset:None});
             let request=Arc::new(ModelRequest::new("local","test-model",vec![Message::text(Role::User,"tool")]));
@@ -1677,14 +1677,179 @@ impl rutis::host::DynPlugin for RewriteNative {
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_content_rejects_lost_continuation_and_respects_committed_tools() {
+async fn native_unsigned_thinking_completes_and_is_not_replayed() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for kind in ["anthropic", "openai-responses"] {
+            let server = NativeServer::start(kind).await;
+            let agent = model_agent(server.models(), None).await;
+            let session = agent.create_session(server.session_config()).await.unwrap();
+            session
+                .submit("missing-continuation".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+            let events = session.history("main", None).await.unwrap();
+            assert!(
+                matches!(
+                    events.last().unwrap().kind,
+                    EventKind::TurnEnd(TurnEndData {
+                        outcome: TurnOutcome::Completed { .. },
+                        ..
+                    })
+                ),
+                "{kind}"
+            );
+            let content = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ModelContent(data) => Some(data.content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            // The reply keeps its thinking and text even without continuation data.
+            assert!(
+                content
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::Thinking { .. })),
+                "{kind}: {content:?}"
+            );
+            assert!(
+                content
+                    .iter()
+                    .any(|part| matches!(part,MessagePart::Text{text,..} if text=="before")),
+                "{kind}: {content:?}"
+            );
+            // Step 2 keeps the tool call and its result, and leaves the unsigned thinking out.
+            let requests = server.endpoint.requests.lock().unwrap().clone();
+            assert_eq!(requests.len(), 2, "{kind}");
+            let next = &requests[1].2;
+            match kind {
+                "anthropic" => {
+                    let assistant = next["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|message| message["role"] == "assistant")
+                        .unwrap();
+                    let parts = assistant["content"].as_array().unwrap();
+                    assert!(
+                        !parts.iter().any(|part| part["type"] == "thinking"),
+                        "{kind}: {assistant}"
+                    );
+                    // Signed metadata is replayed exactly as before.
+                    assert!(
+                        parts.iter().any(|part| part["type"] == "redacted_thinking"),
+                        "{kind}: {assistant}"
+                    );
+                    assert!(
+                        parts.iter().any(|part| part["type"] == "tool_use"),
+                        "{kind}: {assistant}"
+                    );
+                    assert!(
+                        next["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .flat_map(|message| message["content"].as_array().unwrap())
+                            .any(|part| part["type"] == "tool_result"),
+                        "{kind}"
+                    );
+                    assert!(
+                        !next.to_string().contains("\"signature\""),
+                        "{kind}: {next}"
+                    );
+                }
+                _ => {
+                    let input = next["input"].as_array().unwrap();
+                    assert!(
+                        !input
+                            .iter()
+                            .any(|item| item["type"] == "reasoning" || item["id"] == "rs-1"),
+                        "{kind}: {next}"
+                    );
+                    assert!(
+                        input.iter().any(|item| item["type"] == "function_call"),
+                        "{kind}"
+                    );
+                    assert!(
+                        input
+                            .iter()
+                            .any(|item| item["type"] == "function_call_output"),
+                        "{kind}"
+                    );
+                }
+            }
+            // A request built from stored content drops the part on its own.
+            let host = agent.root().get::<ModelHost>().unwrap();
+            let request = Arc::new(ModelRequest::new(
+                "local",
+                server.model_id(),
+                vec![Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        MessagePart::Thinking {
+                            thinking: "unreplayable".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                        MessagePart::Text {
+                            text: "kept".into(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: None,
+                        },
+                    ]),
+                }],
+            ));
+            let connection = ModelConnection::Http(HttpModelConnection {
+                protocol: if kind == "anthropic" {
+                    ModelProtocol::Anthropic
+                } else {
+                    ModelProtocol::OpenaiResponses
+                },
+                base_url: server.url.clone(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            });
+            let mut stream = host
+                .0
+                .invoke(request, connection, CancellationToken::new())
+                .await
+                .expect("unsigned thinking must not fail the request");
+            while let Some(chunk) = stream.next().await {
+                chunk.unwrap();
+            }
+            {
+                let requests = server.endpoint.requests.lock().unwrap();
+                assert_eq!(requests.len(), 3, "{kind}");
+                let sent = requests[2].2.to_string();
+                assert!(
+                    !sent.contains("unreplayable") && !sent.contains("\"thinking\""),
+                    "{kind}: {sent}"
+                );
+                assert!(sent.contains("kept"), "{kind}");
+            }
+            agent.close().await.unwrap();
+            server.close().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
     tokio::time::timeout(Duration::from_secs(20),async{
         let server=NativeServer::start("anthropic").await;
         let models=server.models();
         for complete in [false,true]{
             let mut custom=builder(models.clone(),Arc::new(MockTools));
             custom.require_feature(Feature::new("test.rewrite-native").branch("test.rewrite-native", move|names|Ok(Box::new(RewriteNative{complete,timeline:names.key()?}))));
-            let agent=model_agent(models.clone(),Some(custom));
+            let agent=model_agent(models.clone(),Some(custom)).await;
             let session=agent.create_session(server.session_config()).await.unwrap();
             session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
             let events=session.history("main",None).await.unwrap();
@@ -1694,7 +1859,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
             agent.close().await.unwrap();
         }
         let custom=builder(models.clone(),Arc::new(ErrorEcho));
-        let agent=model_agent(models,Some(custom));let session=agent.create_session(server.session_config()).await.unwrap();
+        let agent=model_agent(models,Some(custom)).await;let session=agent.create_session(server.session_config()).await.unwrap();
         session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
         let requests=server.endpoint.requests.lock().unwrap().clone();
         let last=&requests.last().unwrap().2;
@@ -1703,25 +1868,21 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         agent.close().await.unwrap();server.close().await;
         for kind in ["anthropic", "openai-responses"] {
             let server = NativeServer::start(kind).await;
-            let agent = model_agent(server.models(), None);
+            let agent = model_agent(server.models(), None).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("missing-continuation".into(),InputMode::Queue,"main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = session.history("main",None).await.unwrap();
-            assert!(events.iter().any(|e|matches!(&e.kind,EventKind::ModelOutputEnd(data) if matches!(data.outcome,ModelOutputOutcome::Failed{..}))),"{kind}");
-            assert!(!events.iter().any(|e|matches!(&e.kind,EventKind::ModelContent(_) | EventKind::ToolCall(_)) || matches!(&e.kind,EventKind::ToolResult(data) if data.call_event_id.is_some())),"{kind}");
-            let host = agent.root.get::<ModelHost>().unwrap();
-            let request = Arc::new(ModelRequest::new("local",server.model_id(),vec![Message {role:Role::Assistant,content:MessageContent::Parts(vec![MessagePart::Thinking {thinking:"unreplayable".into(),start_time:None,end_time:None,provider_metadata:None}])}]));
-            let connection = ModelConnection::Http(HttpModelConnection {protocol:if kind=="anthropic" {ModelProtocol::Anthropic} else {ModelProtocol::OpenaiResponses},base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
-            let Err(error) = host.0.invoke(request,connection,CancellationToken::new()).await else {panic!("{kind}: unsigned reasoning was accepted")};
-            assert!(error.to_string().contains("continuation metadata"));
+            // The reply completes and commits its complete content.
+            assert!(matches!(events.last().unwrap().kind,EventKind::TurnEnd(TurnEndData{outcome:TurnOutcome::Completed{..},..})),"{kind}");
+            assert!(events.iter().any(|event|matches!(&event.kind,EventKind::ModelContent(_))),"{kind}");
             if kind == "anthropic" {
+                let host = agent.root().get::<ModelHost>().unwrap();
                 let request=Arc::new(ModelRequest::new("local",server.model_id(),vec![Message {role:Role::Assistant,content:MessageContent::Parts(vec![MessagePart::Thinking {thinking:"signed".into(),start_time:None,end_time:None,provider_metadata:Some(ContentMetadata::Anthropic {signature:"original-signature".into()})}])}]));
                 let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Anthropic,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
                 let Err(error)=host.0.invoke(request,connection,CancellationToken::new()).await else {panic!("signed thinking was silently dropped")};
                 assert!(error.to_string().contains("requires enabled or adaptive"));
             }
-            assert_eq!(server.endpoint.requests.lock().unwrap().len(),1);
             agent.close().await.unwrap();server.close().await;
         }
         for (kind, prompt) in [
@@ -1731,7 +1892,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
             ("gemini", "native-eof"),
         ] {
             let server = NativeServer::start(kind).await;
-            let agent = model_agent(server.models(), None);
+            let agent = model_agent(server.models(), None).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
@@ -1747,7 +1908,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         }
         for prompt in ["native-refusal", "native-refusal-done", "native-refusal-empty"] {
             let server = NativeServer::start("openai-responses").await;
-            let agent = model_agent(server.models(), None);
+            let agent = model_agent(server.models(), None).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
@@ -1769,7 +1930,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         }
         for prompt in ["native-text-tool", "native-thought-tool"] {
             let server = NativeServer::start("gemini").await;
-            let agent = model_agent(server.models(), None);
+            let agent = model_agent(server.models(), None).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
@@ -1791,9 +1952,9 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
             server.close().await;
         }
         let server = NativeServer::start("gemini").await;
-        let agent = model_agent(server.models(),None);
+        let agent = model_agent(server.models(),None).await;
         agent.create_session(server.session_config()).await.unwrap();
-        let host = agent.root.get::<ModelHost>().unwrap();
+        let host = agent.root().get::<ModelHost>().unwrap();
         for (config, expected_budget) in [
             (json!({"reasoning":{"enabled":true,"budgetTokens":0}}),None),
             (json!({"reasoning":{"enabled":true},"providerOptions":{"gemini":{"thinkingConfig":{"thinkingBudget":0}}}}),Some(0)),
@@ -1888,7 +2049,7 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
         for kind in ["openai-chat", "openai-responses", "anthropic", "gemini"] {
             let server = NativeServer::start(kind).await;
             let models = server.models();
-            let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho))));
+            let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho)))).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
@@ -1980,7 +2141,7 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let server = NativeServer::start("openai-chat").await;
         let models = server.models();
-        let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho))));
+        let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho)))).await;
         let mut config = server.session_config();
         config.model.capability_snapshot = Some(ModelCapabilitySnapshot {
             target: ModelId {

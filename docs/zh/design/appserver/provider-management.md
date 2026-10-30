@@ -278,6 +278,10 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 `←` 与 `→` 在选中模型上循环其声明的推理强度。Enter 采用该模型；若强度被切换过，
 先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。
 
+catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，固定子代理模型选择器也一样。
+搜索 `zdr` 会包含这些模型；字段缺失或为 false 时不显示标签。替换模型列表时，
+标签随服务端最新字段更新，不保留已撤销的标记。
+
 列表还会通过 `provider.refresh` 填充 catalog 无模型的静态 provider：`provider.list`
 说其模型可列举时，每个连接对 catalog 的每个版本只问一次，并显示刷新写入的 catalog。
 刷新成功时记录它写入的版本，因此列举为空的结果不会再次询问；记录被写入（启停用、
@@ -286,7 +290,7 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 
 ```text
 Select a model
-> Provider / model          ‹ high ›
+> Provider / model          ZDR  ‹ high ›
 Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 
@@ -365,12 +369,16 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
 
-旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected。明确映射连接、默认、
-用户覆盖/新增、禁用、偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。
-非空静态用量设置、未支持 retryConfig/capabilityDefaults 或其他未映射字段拒绝并保留源，
-按以下冻结映射处理。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
-草稿、模板、用量回复、已解析凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、
-释放租约并结算已接受调用后移除服务。
+旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected；冻结映射由
+Provider 以单次纯转换持有：输入旧行字段、既有目标记录与捆绑目录，输出原生记录与省略
+的源字段，或拒绝原因。provider.import_legacy 与 Migration 的 Provider 步骤都调用它；
+Migration 保留自己的快照、回执、账本与报告。明确映射连接、默认、用户覆盖/新增、禁用、
+偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。无原生对应物的字段丢弃并
+报告为省略，该项照常导入：非空静态用量设置、retryConfig、capabilityDefaults，以及映射
+之外的 metadata 键。未知描述字段与启用/禁用列表冲突会改变模型本身，仍拒绝该项。不覆盖
+已有目标、不复制 OAuth grants、不因重复导入复活删除项。草稿、模板、用量回复、已解析
+凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、释放租约并结算已接受调用后
+移除服务。
 
 冻结的旧库结构通过 `modelsSource` 区分模型来源：
 
@@ -384,8 +392,20 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
 | `provider_selections` | 沿既有目标校验和导入账本导入明确的 scoped 选择 |
 
-不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值拒绝该项。
-其他 metadata 键、未知描述字段同样拒绝，源文件字节不变。
+旧行 source 为 builtin 时映射到该 ID 的内置项。没有目标时导入从该内置项的捆绑定义
+开始，与在已播种目标上的导入完全相同，因此 ID 没有捆绑定义的 builtin 行会被拒绝；已有
+目标必须是未改动的播种记录。custom 行的 ID 属于捆绑目录时拒绝。两个入口用同一解析器
+解析并校验既有目标记录，校验不通过则拒绝该项。Migration 在转换之前把不是未改动播种记录的
+目标归为 Conflict 且不带原因；其余情况下转换的拒绝原因同时到达两个入口。
+
+provider_selections 同样共用一次转换：工作区作用域是已存在目录的规范路径，所选模型
+必须在 Provider 目录中对该记录可用。目录已不存在的选择按该原因拒绝，它本就无法匹配。
+较早导入过的 Provider 行仍可供其选择使用：两个入口都从导入账本读取该记录，已存记录
+无法读取时选择按该读取错误拒绝。provider.import_legacy 的回复在已导入项上增加 omitted
+（转换丢弃的源字段名），导入的选择项不带该字段；该字段为增量，协议 v3 不变。
+
+不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置，也不报告。
+源文件字节不变。
 
 ## 7. 验收与交付
 

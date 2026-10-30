@@ -201,6 +201,41 @@ mod tests {
         }
     }
 
+    /// The image marker exists in every locale, with the placeholders its
+    /// index and details go through.
+    #[test]
+    fn every_locale_translates_the_scaled_image_marker() {
+        for (code, lookup) in tables() {
+            for key in ["[Image #{index}{details}]", "first frame", "re-encoded"] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+            let marker = lookup("[Image #{index}{details}]").expect("marker");
+            for placeholder in ["{index}", "{details}"] {
+                assert!(
+                    marker.contains(placeholder),
+                    "{code} drops {placeholder} in {marker:?}"
+                );
+            }
+        }
+    }
+
+    /// The notices an image read shows — the wait, the second-paste refusal,
+    /// the clipboard refusal and the failed read — exist in every locale.
+    #[test]
+    fn every_locale_translates_the_image_read_notices() {
+        for (code, lookup) in tables() {
+            for key in [
+                "Reading image…",
+                "Wait for the image insertion before sending",
+                "An image is still being inserted; paste again when it is in",
+                "The clipboard is still being inserted; paste again when it is in",
+                "The image could not be read",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
     /// The approval prompt and the transcript command row name the requested
     /// boundary; a table that drops the placeholder would print the tier name
     /// nowhere.

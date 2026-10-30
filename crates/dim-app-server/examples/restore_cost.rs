@@ -65,10 +65,9 @@ use dim_agent_capabilities::{
     host::*,
     summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
-use rutis::host::CtxHost;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -399,11 +398,9 @@ impl ResolveModelConnection for Local {
         })
     }
 }
-/// The product context window over the echo model, in `root`.
-fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result<(), Error> {
-    let driver: Arc<dyn ModelDriver> = Arc::new(Summarizing(AtomicUsize::new(0)));
-    root.provide(ModelHost(driver))?;
-    root.provide(ProviderConnectionResolver(Arc::new(Local)))?;
+/// The product context window over the echo model, whose hosts
+/// [`product_hosts`] provides.
+fn product(builder: &mut AgentBuilder) -> std::result::Result<(), Error> {
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
@@ -445,6 +442,13 @@ fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result
             }),
         }),
     );
+    Ok(())
+}
+/// The product mix's model hosts, which the host's root provides.
+fn product_hosts(root: &rutis::Ctx) -> dim_agent_runtime::Result<()> {
+    let driver: Arc<dyn ModelDriver> = Arc::new(Summarizing(AtomicUsize::new(0)));
+    root.provide(ModelHost(driver))?;
+    root.provide(ProviderConnectionResolver(Arc::new(Local)))?;
     Ok(())
 }
 
@@ -708,16 +712,19 @@ async fn main() -> std::result::Result<(), Error> {
         recording: AtomicBool::new(false),
         spans: Arc::default(),
     });
-    let root = rutis::Ctx::root()?;
     let mut builder = AgentBuilder::new(AgentConfig::default());
     if mix == "product" {
-        product(&mut builder, &root)?;
+        product(&mut builder)?;
     } else {
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
     }
     builder.timeline_store(probe.clone());
-    let agent = builder.build_in(&root);
+    let agent = MinimalHost::start_with(&builder, |root, _| match mix == "product" {
+        true => product_hosts(root),
+        false => Ok(()),
+    })
+    .await?;
 
     let sessions = if reused.is_empty() {
         let sessions = grow(&agent, &mix, &sizes).await?;

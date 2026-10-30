@@ -193,8 +193,9 @@ pub(crate) fn convert(
                         )),
                     };
                     let mut mapped = mapped?;
-                    continuation(request, kind, &path, part, &mut mapped)?;
-                    content.push(mapped);
+                    if continuation(request, kind, &path, part, &mut mapped)? {
+                        content.push(mapped);
+                    }
                 }
                 content
             }
@@ -434,13 +435,19 @@ fn error(request: &ModelRequest, path: &str, reason: &str) -> HostError {
     ))
 }
 
+/// Attaches the native continuation fields a stored part carries, and says
+/// whether the part belongs in the request. A thinking part without
+/// continuation data for this protocol stays in the Timeline and in display,
+/// but is not sent back: the endpoint cannot continue it, and an empty or
+/// invented signature is rejected by a strict Anthropic implementation.
 fn continuation(
     request: &ModelRequest,
     kind: &ProviderKind,
     path: &str,
     part: &MessagePart,
     native: &mut ContentPart,
-) -> Result<(), HostError> {
+) -> Result<bool, HostError> {
+    let thinking = matches!(part, MessagePart::Thinking { .. });
     let metadata = match part {
         MessagePart::Text {
             provider_metadata, ..
@@ -454,45 +461,48 @@ fn continuation(
         _ => None,
     };
     let Some(metadata) = metadata else {
-        if matches!(part, MessagePart::Thinking { .. })
+        if thinking
             && matches!(
                 kind,
                 ProviderKind::Anthropic
-                    | ProviderKind::Bedrock
                     | ProviderKind::OpenaiResponses
                     | ProviderKind::XaiResponses
             )
         {
+            warn_dropped(kind);
+            return Ok(false);
+        }
+        if thinking && *kind == ProviderKind::Bedrock {
             return Err(error(
                 request,
                 path,
                 "thinking requires native continuation metadata",
             ));
         }
-        return Ok(());
+        return Ok(true);
     };
     let options = match (kind, metadata) {
-        (ProviderKind::Bedrock, ContentMetadata::Bedrock { signature })
-            if matches!(part, MessagePart::Thinking { .. }) =>
-        {
+        (ProviderKind::Bedrock, ContentMetadata::Bedrock { signature }) if thinking => {
             match signature {
                 Some(signature) => json!({"bedrock":{"signature":signature}}),
                 None => json!({"bedrock":{}}),
             }
         }
-        (ProviderKind::Bedrock, ContentMetadata::BedrockRedacted { data })
-            if matches!(part, MessagePart::Thinking { .. }) =>
-        {
+        (ProviderKind::Bedrock, ContentMetadata::BedrockRedacted { data }) if thinking => {
             json!({"bedrock":{"redactedData":data}})
         }
-        (ProviderKind::Anthropic, ContentMetadata::Anthropic { signature })
-            if matches!(part, MessagePart::Thinking { .. }) =>
-        {
+        (ProviderKind::Anthropic, ContentMetadata::Anthropic { signature }) if thinking => {
+            if signature.is_empty() {
+                warn_dropped(kind);
+                return Ok(false);
+            }
             json!({"anthropic":{"signature":signature}})
         }
-        (ProviderKind::Anthropic, ContentMetadata::AnthropicRedacted { data })
-            if matches!(part, MessagePart::Thinking { .. }) =>
-        {
+        (ProviderKind::Anthropic, ContentMetadata::AnthropicRedacted { data }) if thinking => {
+            if data.is_empty() {
+                warn_dropped(kind);
+                return Ok(false);
+            }
             json!({"anthropic":{"redactedData":data}})
         }
         (ProviderKind::Gemini, ContentMetadata::Gemini { thought_signature }) => {
@@ -505,14 +515,9 @@ fn continuation(
                 encrypted_content,
             },
         ) => {
-            if matches!(part, MessagePart::Thinking { .. })
-                && encrypted_content.as_ref().is_none_or(String::is_empty)
-            {
-                return Err(error(
-                    request,
-                    path,
-                    "thinking requires encrypted continuation metadata",
-                ));
+            if thinking && encrypted_content.as_ref().is_none_or(String::is_empty) {
+                warn_dropped(kind);
+                return Ok(false);
             }
             let mut options = serde_json::Map::from_iter([("itemId".into(), json!(item_id))]);
             if let Some(encrypted) = encrypted_content {
@@ -529,14 +534,9 @@ fn continuation(
                 phase,
             },
         ) => {
-            if matches!(part, MessagePart::Thinking { .. })
-                && encrypted_content.as_ref().is_none_or(String::is_empty)
-            {
-                return Err(error(
-                    request,
-                    path,
-                    "thinking requires encrypted continuation metadata",
-                ));
+            if thinking && encrypted_content.as_ref().is_none_or(String::is_empty) {
+                warn_dropped(kind);
+                return Ok(false);
             }
             let mut options = serde_json::Map::from_iter([("itemId".into(), json!(item_id))]);
             if let Some(encrypted) = encrypted_content {
@@ -570,5 +570,21 @@ fn continuation(
         } => *provider_options = Some(options),
         _ => unreachable!(),
     }
-    Ok(())
+    Ok(true)
+}
+
+fn warn_dropped(kind: &ProviderKind) {
+    tracing::warn!(
+        protocol = match kind {
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::OpenaiResponses => "openai-responses",
+            ProviderKind::XaiResponses => "xai-responses",
+            ProviderKind::OpenaiChat => "openai-chat",
+            ProviderKind::OpenaiCompatible => "openai-compatible",
+            ProviderKind::Xai => "xai",
+            ProviderKind::Gemini => "gemini",
+            ProviderKind::Bedrock => "bedrock",
+        },
+        "thinking without continuation data was left out of the request"
+    );
 }

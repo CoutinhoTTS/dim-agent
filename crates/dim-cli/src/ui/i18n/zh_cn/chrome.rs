@@ -174,10 +174,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell 输出未记录：{reason}",
         "Shell: {reason}" => "Shell：{reason}",
         "Reading clipboard…" => "正在读取剪贴板…",
+        "Reading image…" => "正在读取图片…",
+        "Wait for the image insertion before sending" => "请等待图片插入后再发送",
+        "The image could not be read" => "无法读取该图片",
+        "An image is still being inserted; paste again when it is in" => {
+            "图片正在插入，请稍后再粘贴"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "剪贴板内容正在插入，请稍后再粘贴"
+        }
         "Clipboard: {reason}" => "剪贴板：{reason}",
         "Wait for clipboard insertion before sending" => "请等待剪贴板内容插入后再发送",
         "A submission accepts at most 20 images" => "一次提交最多 20 张图片",
         "[Image #{index}]" => "[图片 #{index}]",
+        "[Image #{index}{details}]" => "[图片 #{index}{details}]",
+        "first frame" => "仅首帧",
+        "re-encoded" => "已重新编码",
         "The current model does not accept images; remove {label} to send" => {
             "当前模型不支持图片输入；删除 {label} 后再发送"
         }
@@ -400,8 +412,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }
         "Fullscreen" => "全屏",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑，q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 (草稿为空时) · Tab 选择消息，e 编辑，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滚轮滚动 · 拖动选择并复制 · 点击链接打开，点击工具组展开"

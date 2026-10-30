@@ -13,6 +13,7 @@ use rutis_bridge::exports::failure;
 use rutis_bridge::session::{Error as BridgeError, HostDispatch, Reply, Value, host_key_in};
 use serde_json::{Value as Json, json};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 /// Longest entry text, in bytes: the guide is part of every request's
 /// prefix, and an entry that large is a design smell as much as a cost.
@@ -204,6 +205,12 @@ impl GuideEntries {
         );
         parts.extend(FRAME_TAIL);
         parts.join("\n\n")
+    }
+
+    /// Changes with every registration and withdrawal, for the parts that
+    /// adopt a composition over the entries in force.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.entries.changes()
     }
 
     /// The System for `branch`: `base` text followed by the guide composed

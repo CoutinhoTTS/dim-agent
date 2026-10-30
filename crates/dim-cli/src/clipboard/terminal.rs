@@ -7,14 +7,13 @@
 //! A read lists the clipboard's types first (no permission prompt), then
 //! asks for the one it inserts; the terminal may ask the user to allow it.
 
-use super::Source;
+use super::{IMAGE_READ_LIMIT, Source};
 use crate::{Result, images};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::time::{Duration, Instant};
 
 /// How long the terminal may take to answer, its permission prompt included.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
-const IMAGE_LIMIT: usize = 5 * 1024 * 1024;
 const TEXT_LIMIT: usize = 10 * 1024 * 1024;
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 const TEXT_TYPES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
@@ -132,7 +131,7 @@ impl Read {
             Status::Data { mime, data } => {
                 let (wanted, limit) = match &self.mime {
                     None => (".", TEXT_LIMIT),
-                    Some(mime) if mime.starts_with("image/") => (mime.as_str(), IMAGE_LIMIT),
+                    Some(mime) if mime.starts_with("image/") => (mime.as_str(), IMAGE_READ_LIMIT),
                     Some(mime) => (mime.as_str(), TEXT_LIMIT),
                 };
                 if mime != wanted {
@@ -161,7 +160,7 @@ impl Read {
                 Some(mime) => {
                     let data = std::mem::take(&mut self.data);
                     Step::Done(if mime.starts_with("image/") {
-                        images::encoded(data).map(Source::Image)
+                        images::from_bytes(data).map(Source::Image)
                     } else {
                         String::from_utf8(data)
                             .map(Source::Text)
@@ -226,11 +225,33 @@ mod tests {
     }
 
     fn png() -> Vec<u8> {
+        png_of(2, 1)
+    }
+
+    fn png_of(width: u32, height: u32) -> Vec<u8> {
         let mut bytes = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(2, 1)
+        image::DynamicImage::new_rgb8(width, height)
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    /// A screenshot wider than the shared edge limit is scaled, not refused.
+    #[test]
+    fn a_wide_terminal_image_is_scaled() {
+        use dim_agent_capabilities::images::MAX_EDGE;
+        let now = Instant::now();
+        let (mut read, _) = Read::start("dim-5".into(), now);
+        read.feed(data("dim-5", ".", b"image/png"), now);
+        assert!(matches!(read.feed(done("dim-5"), now), Step::Send(_)));
+        let image = png_of(MAX_EDGE * 2, 2);
+        read.feed(data("dim-5", "image/png", &image), now);
+        let Step::Done(Ok(Source::Image(image))) = read.feed(done("dim-5"), now) else {
+            panic!("expected a scaled image")
+        };
+        assert!(image.scaled);
+        assert_eq!(image.source.media_type, "image/png");
+        assert_eq!((image.sent.width, image.sent.height), (MAX_EDGE, 1));
     }
 
     #[test]
@@ -261,8 +282,8 @@ mod tests {
         let Step::Done(Ok(Source::Image(source))) = read.feed(done("dim-1"), now) else {
             panic!("expected an image")
         };
-        assert_eq!(source.media_type, "image/png");
-        assert_eq!(source.data, Some(STANDARD.encode(&image)));
+        assert_eq!(source.source.media_type, "image/png");
+        assert_eq!(source.source.data, Some(STANDARD.encode(&image)));
     }
 
     #[test]

@@ -13,6 +13,7 @@ working directory, through the Session methods `shell.run`, `shell.stop` and
 | --- | --- |
 | `P:HostPlatform` | Build each command as `exec` does (`build_process_spec`) and spawn its process tree. |
 | `S:SessionConfig` | The Session working directory. |
+| `S:GuideEntries` | Register the shell-input marker's guide entry at Session scope, until this plugin unloads. |
 | `S:TreeCommands` | Check `branchId` at start; write a recorded run's input on that branch. |
 | `S:SessionLifecycle` | `closing()` ends a run without writing; `hold()` keeps the Session from an idle unload while a run is registered. |
 | `S:SessionIdentity` | Session id of the `shell.run` span, one per started run. |
@@ -146,7 +147,7 @@ for the race flows; production builds have no hook.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:SessionMethods`、`S:TreeCommands` |
+| 注入 | `P:HostPlatform`、`S:GuideEntries`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:SessionMethods`、`S:TreeCommands` |
 | 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

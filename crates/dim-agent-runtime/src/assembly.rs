@@ -166,6 +166,9 @@ pub(crate) struct Assembly {
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
     /// This Agent's branch openings that are alive.
     pub openings: OpeningCount,
+    /// Shutdowns of instances whose creation was abandoned before the
+    /// instance could be found; the Agent's close waits for them.
+    pub abandoned: tokio_util::task::TaskTracker,
     values: Vec<Provide>,
     /// The names of `values`, each a Session name.
     value_names: Vec<String>,
@@ -174,8 +177,8 @@ pub(crate) struct Assembly {
     plugins: Vec<PartMake>,
     /// Where the plugin of each feature is in `plugins`, by name.
     features: std::collections::HashMap<String, usize>,
-    /// The parts plugins register: the builder's for a host that places
-    /// its Agents (`build_at`), a fresh one in each Agent placing itself.
+    /// The parts plugins register: the builder's, for the host that builds
+    /// its Agents ([`AgentBuilder::build`]); the minimal host takes a fresh one.
     pub parts: Arc<crate::parts::PartRegistry>,
     /// Registered parts the profile requires, by name.
     required_parts: Arc<HashSet<String>>,
@@ -203,6 +206,7 @@ impl AgentBuilder {
                 store: Arc::new(MemoryTimelineStore::default()),
                 ephemeral_store: None,
                 openings: OpeningCount::default(),
+                abandoned: tokio_util::task::TaskTracker::new(),
                 values: vec![],
                 value_names: vec![],
                 process_values: vec![],
@@ -236,21 +240,20 @@ impl AgentBuilder {
         &mut self.catalog
     }
     /// The registry where plugins register Session and branch parts
-    /// ([`PartRegistry::register`](crate::PartRegistry::register)) in a host
-    /// that places its Agents ([`Self::build_at`]): every such Agent mounts
+    /// ([`PartRegistry::register`](crate::PartRegistry::register)) in the
+    /// host that builds its Agents ([`Self::build`]): every such Agent mounts
     /// from it, and [`Self::plugin_rows`] provides it to the host's process
-    /// plugins as `partRegistry`. An Agent placing itself ([`Self::build`],
-    /// [`Self::build_in`]) has a registry of its own, where only its own
-    /// plugins register.
+    /// plugins as `partRegistry`. The minimal host (`testing::MinimalHost`)
+    /// takes a registry of its own, so two hosts built from one builder mount
+    /// only their own plugins' parts.
     pub fn parts(&self) -> Arc<crate::PartRegistry> {
         self.assembly.parts.clone()
     }
     /// Adds a process plugin: `make` builds it from the names its
     /// dependencies resolve to at the process, usually
-    /// `|names| Ok(Box::new(MyPlugin::new(names)?))`. An Agent placing itself mounts it in
-    /// its own loader; a host placing its Agents places it with
-    /// [`Self::plugin_rows`]. It reaches the registry by the process name
-    /// `partRegistry`.
+    /// `|names| Ok(Box::new(MyPlugin::new(names)?))`. The host places it as
+    /// a process row of its loader with [`Self::plugin_rows`]. It reaches the
+    /// registry by the process name `partRegistry`.
     pub fn plugin(
         &mut self,
         make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error>
@@ -288,7 +291,7 @@ impl AgentBuilder {
     }
     /// Registers in `builtins` the module providing [`Self::parts`] at
     /// `partRegistry` and those of the plugins added with [`Self::plugin`],
-    /// and returns their rows, for a host that places its Agents. Register
+    /// and returns their rows, for the host that builds its Agents. Register
     /// them before [`Self::install`]; a module of the same name registered
     /// already fails.
     pub async fn plugin_rows(&self, builtins: &mut Modules) -> Result<Vec<Value>> {
@@ -378,10 +381,8 @@ impl AgentBuilder {
     }
     /// Provides a host-configured value under its process name to this
     /// Agent's Sessions: each Agent instance provides it at the name's
-    /// process key, in a scope of its own ([`Self::agent_row`]). An Agent
-    /// hosting itself ([`Self::build`], [`Self::build_in`]) places that row;
-    /// under [`Self::build_at`] the host does. The name must be registered
-    /// at the process.
+    /// process key, in a scope of its own ([`Self::agent_row`]), which the
+    /// host places. The name must be registered at the process.
     pub fn process_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
         self.assembly.process_values.push(ProcessValue {
             name: crate::names::name_of::<T>(),
@@ -578,37 +579,50 @@ impl AgentBuilder {
         .await
         .unwrap_or_else(|_| Err(AgentError::Build("plugin registration panicked".into())))
     }
-    /// Sessions own a private rutis root that the Agent shuts down on close.
-    pub fn build(&self) -> Agent {
-        Agent::new(self.clone(), self.finished(), AgentHost::Private)
-    }
-    /// Sessions are loaded under `host`, in a loader of their own; the host
-    /// owns that context's lifetime.
-    pub fn build_in(&self, host: &Ctx) -> Agent {
+    /// Builds the Agent in its host's loader. A host has one loader, and the
+    /// Agent creates neither a root nor a loader: its Sessions are instances
+    /// of `loader`, created inside the Agent instance that `anchor` runs in,
+    /// a running loader plugin of that instance (usually the host's Agent
+    /// plugin). The loader must have this builder's modules
+    /// ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row must be
+    /// [`Self::agent_row`], which provides the process values. The host owns
+    /// the loader, the Agent instance and the root; closing the Agent closes
+    /// its Sessions only. Tests, examples and tools use the minimal host
+    /// (`testing::MinimalHost`).
+    pub fn build(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
             self.finished(),
-            AgentHost::Within(host.clone()),
-        )
-    }
-    /// Sessions are instances of `loader`, created inside the Agent instance
-    /// that `anchor` runs in: a running loader plugin of that instance,
-    /// usually the host's Agent plugin. The loader must have this builder's
-    /// modules ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row
-    /// must be [`Self::agent_row`], which provides the process values.
-    pub fn build_at(&self, loader: Loader, anchor: &Ctx) -> Agent {
-        Agent::new(
-            self.clone(),
-            self.finished(),
-            AgentHost::Placed(Placement {
+            Placement {
                 loader,
                 anchor: anchor.clone(),
-            }),
+            },
         )
+    }
+    /// This builder with a part registry of its own, for a host other than
+    /// the builder's: two hosts built from one builder then mount only their
+    /// own plugins' parts.
+    #[cfg(feature = "testing")]
+    pub(crate) fn with_own_registry(&self) -> Self {
+        let mut builder = self.clone();
+        builder.assembly.parts = Arc::default();
+        builder
+    }
+    /// Whether plugins were added ([`Self::plugin`]); a host without any
+    /// places no process rows.
+    #[cfg(feature = "testing")]
+    pub(crate) fn has_plugins(&self) -> bool {
+        !self.assembly.plugins.is_empty()
+    }
+    /// The longest a host waits for its assembly without progress.
+    #[cfg(feature = "testing")]
+    pub(crate) fn opening_timeout(&self) -> Duration {
+        self.assembly.startup_timeout
     }
     fn finished(&self) -> Assembly {
         let mut assembly = self.assembly.clone();
         assembly.openings = OpeningCount::default();
+        assembly.abandoned = tokio_util::task::TaskTracker::new();
         assembly.catalog = Arc::new(self.catalog.clone());
         if !self.custom_store {
             let store = Arc::new(MemoryTimelineStore::default());
@@ -627,19 +641,19 @@ pub struct NoConfig {}
 /// A loader module built from a closure. The first plugin is built when the
 /// factory is, to read the name and dependencies the fiber is registered
 /// with; it is handed to the first load.
-struct Factory {
+pub(crate) struct Factory {
     name: String,
     injects: Vec<TypeKey>,
     first: Mutex<Option<Box<dyn DynPlugin>>>,
     make: Box<dyn Fn() -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync>,
 }
 impl Factory {
-    fn new(
+    pub(crate) fn new(
         make: impl Fn() -> Box<dyn DynPlugin> + Send + Sync + 'static,
     ) -> std::result::Result<Self, Error> {
         Self::try_new(move || Ok(make()))
     }
-    fn try_new(
+    pub(crate) fn try_new(
         make: impl Fn() -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
     ) -> std::result::Result<Self, Error> {
         let make = Box::new(move || {
@@ -722,7 +736,7 @@ impl Modules {
     }
     /// Registers the module `name`: `build` makes each copy's factory from
     /// the instances it runs in.
-    fn register(
+    pub(crate) fn register(
         &mut self,
         name: impl Into<String>,
         build: impl Fn(&Build) -> std::result::Result<Factory, Error> + Send + Sync + 'static,
@@ -910,7 +924,7 @@ fn extension_value<V: Send + Sync + 'static>(build: &Build) -> std::result::Resu
     })
 }
 /// A row named after its module.
-fn row(module: &str) -> Value {
+pub(crate) fn row(module: &str) -> Value {
     json!({ "id": module, "name": module })
 }
 fn group(id: &str, config: Vec<Value>) -> Value {
@@ -928,169 +942,11 @@ fn branch_scope(build: &Build) -> std::result::Result<BranchScope, Error> {
     })
 }
 
-/// Where an Agent's Sessions are created.
-pub(crate) enum AgentHost {
-    /// A private root and loader, created with the first Session.
-    Private,
-    /// A loader of the Agent's own under the host's context.
-    Within(Ctx),
-    /// The host's loader, inside the host's Agent instance.
-    Placed(Placement),
-}
 /// A loader and a running plugin of the Agent instance Sessions go in.
 #[derive(Clone)]
 pub(crate) struct Placement {
     pub loader: Loader,
     pub anchor: Ctx,
-}
-
-/// What an Agent created for itself to host its Sessions.
-pub(crate) struct Owned {
-    /// The private root, when the Agent made one.
-    pub root: Option<Ctx>,
-    /// The Agent instance, then its loader.
-    pub views: Vec<FiberView>,
-}
-
-/// Mounts a loader of the Agent's own under `host` (a private root when
-/// `None`) and creates the Agent instance its Sessions go in. Under a host,
-/// the loader's service is isolated so several Agents can share the host.
-pub(crate) async fn own_placement(
-    builder: &AgentBuilder,
-    host: Option<&Ctx>,
-    timeout: Duration,
-    cancel: &CancellationToken,
-) -> Result<(Placement, Owned)> {
-    let mut builder = builder.clone();
-    builder.assembly.parts = Arc::default();
-    let builder = &builder;
-    let (root, parent) = match host {
-        None => {
-            let root = Ctx::root_with_sink(
-                tokio::runtime::Handle::current(),
-                Arc::new(|error| tracing::error!(%error, "Agent runtime error")),
-            );
-            (Some(root.clone()), root)
-        }
-        Some(host) => {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let label = format!("dim-agent/{number}");
-            (
-                None,
-                host.isolate(TypeKey::of::<Loader>(), &label)
-                    .isolate(TypeKey::of::<crate::PartRegistry>(), &label)
-                    .isolate(rutis_bridge::runtime::mounter_key().erase(), &label),
-            )
-        }
-    };
-    let mut builtins = Modules::new();
-    builtins.register("AgentAnchor", |build| {
-        let slot = build.value::<AnchorSlot>().ok_or_else(|| {
-            rutis::Error::from(ErrorKind::PluginFailed(
-                "Agent created without its slot".into(),
-            ))
-        })?;
-        Factory::new(move || Box::new(AgentAnchor((*slot).clone())) as Box<dyn DynPlugin>)
-    });
-    let installed = async {
-        let plugins = match builder.assembly.plugins.is_empty() {
-            true => vec![],
-            false => builder.plugin_rows(&mut builtins).await?,
-        };
-        Ok::<_, AgentError>((plugins, builder.install(&mut builtins, []).await?))
-    };
-    let (plugin_rows, session_row) = match installed.await {
-        Ok(rows) => rows,
-        Err(error) => {
-            if let Some(root) = root {
-                root.shutdown().await.map_err(AgentError::from)?;
-            }
-            return Err(error);
-        }
-    };
-    let plugin = rutis_loader::LoaderPlugin::new(
-        builtins,
-        rutis_loader::LoaderOptions {
-            catalog: builder.catalog().clone(),
-            ..Default::default()
-        },
-    );
-    let loader = plugin.handle();
-    let view = parent.plugin(plugin);
-    let mut owned = Owned {
-        root,
-        views: vec![view.clone()],
-    };
-    let placed = async {
-        wait_active(&parent, std::slice::from_ref(&view), timeout, cancel).await?;
-        let mut inserted = plugin_rows;
-        inserted.push(builder.agent_row([row("AgentAnchor"), session_row]));
-        let rows = json!([{ "insert": inserted }]);
-        let rows = serde_json::from_value(rows).map_err(|e| AgentError::Build(e.to_string()))?;
-        let report = loader
-            .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)
-            .await
-            .map_err(loader_error)?;
-        if !report.failures.is_empty() || !report.issues.is_empty() {
-            return Err(AgentError::Build(format!(
-                "{:?} {:?}",
-                report.failures, report.issues
-            )));
-        }
-        let slot = AnchorSlot::default();
-        let agent = loader
-            .create_instance(&parent, AGENT_GROUP)
-            .with(slot.clone())
-            .await
-            .map_err(loader_error)?;
-        owned.views.insert(0, agent.view);
-        let anchor = slot
-            .0
-            .get()
-            .cloned()
-            .ok_or_else(|| AgentError::Build("Agent anchor did not load".into()))?;
-        Ok(anchor)
-    }
-    .await;
-    match placed {
-        Ok(anchor) => Ok((Placement { loader, anchor }, owned)),
-        Err(error) => Err(match release(owned).await {
-            Ok(()) => error,
-            Err(cleanup) => error.with_cleanup(cleanup),
-        }),
-    }
-}
-/// Closes what [`own_placement`] created.
-pub(crate) async fn release(owned: Owned) -> Result<()> {
-    let mut errors = vec![];
-    match owned.root {
-        Some(root) => errors.extend(root.shutdown().await.err().map(AgentError::from)),
-        None => {
-            for view in owned.views {
-                errors.extend(view.shutdown().await.err().map(AgentError::from));
-            }
-        }
-    }
-    AgentError::aggregate(errors)
-}
-#[derive(Clone, Default)]
-struct AnchorSlot(Arc<std::sync::OnceLock<Ctx>>);
-/// The Agent instance's plugin when the Agent hosts itself: Sessions are
-/// created from its context.
-struct AgentAnchor(AnchorSlot);
-impl DynPlugin for AgentAnchor {
-    fn name(&self) -> &str {
-        "AgentAnchor"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> RutisFuture<'a, std::result::Result<Effect, Error>> {
-        Box::pin(async move {
-            self.0.0.set(ctx.clone()).map_err(|_| {
-                rutis::Error::from(ErrorKind::PluginFailed("Agent anchor reloaded".into()))
-            })?;
-            Ok(Effect::Done)
-        })
-    }
 }
 
 /// A loaded scope plugin: its own context and the capability plugins it installed.
@@ -1400,6 +1256,7 @@ impl TimelineFactory {
                     move |create| create.with(value),
                     self.startup_timeout(),
                     &cancel,
+                    &parent.assembly.abandoned,
                     {
                         let owner = owner.clone();
                         move || {
@@ -1509,13 +1366,15 @@ pub(crate) struct Created {
 }
 
 /// Creates an instance of `group` from `ctx` and waits until its registered
-/// rows are Active, within `timeout`. On failure the instance, when one was
-/// created, comes back with the error for the caller to roll back; when a
-/// timeout or cancellation leaves the creation running before the instance
-/// can be found, a task disposes it once the creation ends.
+/// rows are Active, within the opening's inactivity window `timeout`. On
+/// failure the instance, when one was created, comes back with the error for
+/// the caller to roll back; when a timeout or cancellation leaves the creation
+/// running before the instance can be found, a task disposes it once the
+/// creation ends.
 ///
 /// `instance` reads its identity and the scope's registered row IDs; the
 /// identity locates an instance whose creation is still running.
+#[allow(clippy::too_many_arguments)]
 async fn create_instance(
     loader: &Loader,
     ctx: &Ctx,
@@ -1523,6 +1382,7 @@ async fn create_instance(
     configure: impl for<'a> FnOnce(CreateInstance<'a>) -> CreateInstance<'a> + Send + 'static,
     timeout: Duration,
     cancel: &CancellationToken,
+    abandoned: &tokio_util::task::TaskTracker,
     instance: impl Fn() -> (
         Option<rutis::host::InstanceId>,
         Option<Arc<[String]>>,
@@ -1571,7 +1431,7 @@ async fn create_instance(
                 None => AgentError::Build(format!("initialization timed out: {group}")),
             };
             if found.is_none() {
-                tokio::spawn(async move {
+                abandoned.spawn(async move {
                     if let Ok(Ok(instance)) = creation.await {
                         let _ = instance.view.shutdown().await;
                     }
@@ -1699,7 +1559,7 @@ fn locate(loader: &Loader, ctx: &Ctx, instance: rutis::host::InstanceId) -> Opti
         view,
     })
 }
-fn loader_error(error: rutis_loader::LoaderError) -> AgentError {
+pub(crate) fn loader_error(error: rutis_loader::LoaderError) -> AgentError {
     match error {
         rutis_loader::LoaderError::Rejected { error, .. } => error.into(),
         error => AgentError::Build(error.to_string()),
@@ -1745,6 +1605,7 @@ pub(crate) async fn build_session(
             extension.group
         )));
     }
+    let startup_timeout = assembly.startup_timeout;
     let host = &placement.anchor;
     let owner = Arc::new(SessionAssembly {
         assembly,
@@ -1762,7 +1623,6 @@ pub(crate) async fn build_session(
         mounted: Arc::default(),
         copies: Arc::default(),
     });
-    let startup_timeout = owner.assembly.startup_timeout;
     let instance = |owner: &Arc<SessionAssembly>| {
         let owner = owner.clone();
         move || {
@@ -1785,6 +1645,7 @@ pub(crate) async fn build_session(
             move |create| create.with(value),
             startup_timeout,
             &owner.closing,
+            &owner.assembly.abandoned,
             instance(&owner),
         )
         .await
@@ -1877,6 +1738,25 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: Key<T>) -> Result
             key.erase().describe()
         ))
     })
+}
+/// Mounts `child` under `ctx` and waits until it is `Active` or `ctx`'s
+/// cancellation, then returns its view. A row or part that mounts a child in
+/// `apply` uses this rather than `(&view).await`: that is the settle fence,
+/// which returns while a child whose dependencies are not ready yet is still
+/// `Pending`, so the row would return before its child and creation would
+/// hand back a scope with a plugin below a required row not `Active`. That
+/// child would also miss the first request, until its own load finished.
+///
+/// The wait has no deadline of its own. During an opening, the opening's
+/// no-progress bound covers it, and on expiry it names the child and what it
+/// waits for. Outside an opening the row stays `Loading` until its child is
+/// `Active`, as any row with a missing dependency does, and the wait ends
+/// when the row's generation is cancelled. A child that fails or is disposed
+/// ends it with an error naming it.
+pub async fn mount_active(ctx: &Ctx, child: impl DynPlugin) -> Result<FiberView> {
+    let view = ctx.plugin(child);
+    active_rows(std::slice::from_ref(&view), &ctx.cancellation_token()).await?;
+    Ok(view)
 }
 /// Waits until every view is Active; a failure or disposal of any view,
 /// cancellation or an interval without progress ends the wait. First activation
@@ -2025,15 +1905,17 @@ impl std::fmt::Display for AssemblyFinding {
 }
 
 /// Checks one live scope of `snapshot`: its `required` rows, the parts its
-/// mounters mounted and everything else in the scope, as creation waited for
-/// them. `rows` is the loader's [index](scope_rows) of rows by instance,
-/// `view` the scope instance, `required` the loader row ids its profile
-/// requires, `parts` the required parts it mounted and `nested` the scopes
-/// nested inside it. `scope` names the Session the scope belongs to and, for
-/// a branch scope, the branch. Each plugin is checked once, by the innermost
-/// scope that contains it: a nested scope's subtree is left to that scope's
-/// own pass. A required row or part that has left the tree is reported too:
-/// nothing in the snapshot would otherwise remember it.
+/// mounters mounted and everything else in the scope, as creation waits for
+/// them: a required row or part returns from `apply` once its own mounted
+/// children are `Active` ([`mount_active`]), so a child it left behind is not
+/// `Active` and breaks the rule. `rows` is the loader's [index](scope_rows) of
+/// rows by instance, `view` the scope instance, `required` the loader row ids
+/// its profile requires, `parts` the required parts it mounted and `nested`
+/// the scopes nested inside it. `scope` names the Session the scope belongs to
+/// and, for a branch scope, the branch. Each plugin is checked once, by the
+/// innermost scope that contains it: a nested scope's subtree is left to that
+/// scope's own pass. A required row or part that has left the tree is reported
+/// too: nothing in the snapshot would otherwise remember it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,

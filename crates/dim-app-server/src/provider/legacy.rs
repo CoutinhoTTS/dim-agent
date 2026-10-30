@@ -1,4 +1,4 @@
-//! Explicit, read-only TS configuration import. No sessions or OAuth grants.
+//! Explicit, read-only legacy configuration import. No sessions or OAuth grants.
 use super::*;
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde::de::DeserializeOwned;
@@ -8,6 +8,27 @@ use std::path::PathBuf;
 const PROVIDER_COLUMNS: &str = "providerId source displayName driverKind defaultBaseUrl baseUrl auth credential accountUsageSettings headers proxy timeoutMs retryConfig models modelConfigOverrides capabilityDefaults activeModelId modelsSource catalogVersion modelsUpdatedAt metadata enabled createdAt updatedAt version";
 const SELECTION_COLUMNS: &str =
     "selectionId scope cwd providerId modelId createdAt updatedAt version";
+
+/// The legacy Provider columns the frozen mapping covers.
+pub const LEGACY_PROVIDER_FIELDS: &[&str] = &[
+    "source",
+    "displayName",
+    "driverKind",
+    "defaultBaseUrl",
+    "baseUrl",
+    "auth",
+    "credential",
+    "headers",
+    "proxy",
+    "timeoutMs",
+    "models",
+    "modelConfigOverrides",
+    "modelsSource",
+    "enabled",
+];
+/// The legacy metadata keys the frozen mapping covers.
+pub const LEGACY_METADATA_FIELDS: &[&str] =
+    &["enabledModelIds", "disabledModelIds", "modelPreferences"];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +44,8 @@ pub struct ImportItem {
     pub id: String,
     pub status: ImportStatus,
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,20 +53,30 @@ pub struct ImportResult {
     pub items: Vec<ImportItem>,
 }
 
-struct SourceRow {
-    id: String,
-    version: i64,
-    digest: String,
-    fields: Map<String, Value>,
+/// One legacy row, with its source identity and content digest.
+pub struct LegacyRow {
+    pub id: String,
+    pub version: i64,
+    pub digest: String,
+    pub fields: Map<String, Value>,
 }
 
-struct Snapshot {
-    schema: String,
-    providers: Vec<SourceRow>,
-    selections: Vec<SourceRow>,
+impl LegacyRow {
+    pub fn json_field<T: DeserializeOwned>(&self, name: &str) -> Result<T, String> {
+        json_field(&self.fields, name)
+    }
 }
 
-fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, HostError> {
+pub struct LegacySnapshot {
+    pub schema: String,
+    pub providers: Vec<LegacyRow>,
+    pub selections: Vec<LegacyRow>,
+}
+
+pub fn read_legacy_source(
+    path: PathBuf,
+    cancel: &CancellationToken,
+) -> Result<LegacySnapshot, HostError> {
     if !path.is_absolute() || !path.is_file() {
         return Err(failure("Import source must be an absolute SQLite file"));
     }
@@ -56,7 +89,7 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
         .map_err(|_| failure("Cannot read legacy snapshot"))?;
     let mut schema = Vec::new();
     let mut bytes = 0usize;
-    let mut read = |table: &str, columns: &str| -> Result<Vec<SourceRow>, HostError> {
+    let mut read = |table: &str, columns: &str| -> Result<Vec<LegacyRow>, HostError> {
         let table_type: String = tx
             .query_row(
                 "SELECT type FROM sqlite_master WHERE name=?1",
@@ -162,7 +195,7 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                         .map_err(|_| failure("Cannot fingerprint legacy row"))?
                 )
             );
-            result.push(SourceRow {
+            result.push(LegacyRow {
                 id,
                 version,
                 digest,
@@ -177,7 +210,7 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
         "{:x}",
         Sha256::digest(serde_json::to_vec(&schema).map_err(failure)?)
     );
-    Ok(Snapshot {
+    Ok(LegacySnapshot {
         schema,
         providers,
         selections,
@@ -207,6 +240,31 @@ fn retains(source: &Value, target: &Value) -> bool {
         }
         _ => source == target,
     }
+}
+
+/// The source fields of `source` the frozen mapping drops instead of rejecting.
+pub fn legacy_omitted_fields(source: &LegacyRow) -> Result<Vec<String>, String> {
+    let fields = &source.fields;
+    let mut omitted = Vec::new();
+    for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
+        let value: Option<Value> = json_field(fields, name)?;
+        if value.as_ref().is_some_and(|value| {
+            !matches!(value, Value::Object(fields) if fields.is_empty())
+                && !matches!(value, Value::Array(items) if items.is_empty())
+        }) {
+            omitted.push(name.into());
+        }
+    }
+    let metadata: Option<Map<String, Value>> = json_field(fields, "metadata")?;
+    for key in metadata
+        .into_iter()
+        .flat_map(|value| value.into_iter().map(|(key, _)| key))
+    {
+        if !LEGACY_METADATA_FIELDS.contains(&key.as_str()) {
+            omitted.push(format!("metadata.{key}"));
+        }
+    }
+    Ok(omitted)
 }
 
 #[derive(Deserialize)]
@@ -251,37 +309,50 @@ enum LegacyCredential {
     },
 }
 
-fn convert_provider(
-    source: &SourceRow,
+/// The native record a legacy row maps to, and the source fields it omits.
+pub struct LegacyConversion {
+    pub record: StaticProviderRecord,
+    pub omitted: Vec<String>,
+}
+
+/// Convert one legacy Provider row under the frozen mapping.
+pub fn convert_legacy_provider(
+    source: &LegacyRow,
     previous: Option<StaticProviderRecord>,
-) -> Result<StaticProviderRecord, String> {
+    bundled: &BundledCatalog,
+) -> Result<LegacyConversion, String> {
     let fields = &source.fields;
     if managed_authority(&source.id) != CredentialAuthority::Static {
         return Err("Managed OAuth requires its owner's explicit recovery".into());
     }
-    for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
-        let value: Option<Value> = json_field(fields, name)?;
-        if value.as_ref().is_some_and(|value| {
-            !matches!(value, Value::Object(fields) if fields.is_empty())
-                && !matches!(value, Value::Array(items) if items.is_empty())
-        }) {
-            return Err(format!("Unsupported legacy field: {name}"));
-        }
-    }
+    let omitted = legacy_omitted_fields(source)?;
     let _: Option<String> = field(fields, "activeModelId")?;
     let source_kind: String = field(fields, "source")?;
+    let previous = match previous {
+        Some(previous) => Some(previous),
+        None if source_kind == "builtin" => Some(
+            bundled_seed_for(bundled, &source.id)
+                .map_err(|_| "Bundled catalog is unreadable".to_owned())?
+                .ok_or_else(|| "Builtin identity has no bundled definition".to_owned())?,
+        ),
+        None => None,
+    };
     let kind = match source_kind.as_str() {
-        "custom" if previous.is_none() => StaticRecordKind::Custom,
+        "custom" if bundled.provider(&source.id).is_some() => {
+            return Err("Builtin identity cannot be imported as custom".into());
+        }
+        "custom" if previous.is_some() => {
+            return Err("Target provider exists or is not a pristine builtin".into());
+        }
+        "custom" => StaticRecordKind::Custom,
         "builtin"
             if previous
                 .as_ref()
-                .is_some_and(|p| p.kind == StaticRecordKind::Builtin && p.version == 1) =>
+                .is_none_or(StaticProviderRecord::is_pristine_builtin) =>
         {
             StaticRecordKind::Builtin
         }
-        "custom" | "builtin" => {
-            return Err("Target provider exists or is not a pristine builtin".into());
-        }
+        "builtin" => return Err("Target provider exists or is not a pristine builtin".into()),
         _ => return Err("Unsupported source kind".into()),
     };
     let legacy_auth: LegacyAuth = json_field(fields, "auth")?;
@@ -432,14 +503,6 @@ fn convert_provider(
     }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
-    if metadata.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "enabledModelIds" | "disabledModelIds" | "modelPreferences"
-        )
-    }) {
-        return Err("Unsupported provider metadata; source preserved".into());
-    }
     let model_preferences: BTreeMap<String, ModelPreferences> = metadata
         .get("modelPreferences")
         .map(|value| serde_json::from_value(value.clone()))
@@ -519,7 +582,7 @@ fn convert_provider(
     }
     validate_static_record(&source.id, &mut record)
         .map_err(|_| "Invalid or unsupported provider configuration; source preserved")?;
-    Ok(record)
+    Ok(LegacyConversion { record, omitted })
 }
 
 impl ProviderService {
@@ -531,54 +594,64 @@ impl ProviderService {
         let owner = self.clone();
         self.owned(cancel, move |cancel| Box::pin(async move {
             let read_cancel = cancel.clone();
-            let snapshot = tokio::task::spawn_blocking(move || read_source(source_path, &read_cancel)).await.map_err(|_| failure("Legacy reader failed"))??;
+            let snapshot = tokio::task::spawn_blocking(move || read_legacy_source(source_path, &read_cancel)).await.map_err(|_| failure("Legacy reader failed"))??;
             owner.check(&cancel)?;
             let bundled = owner.bundled.clone();
             owner.db.run(move |connection| {
                 if cancel.is_cancelled() { return Err(storage("Provider import cancelled")); }
                 let tx = connection.transaction().map_err(storage)?;
                 let mut items = Vec::new();
-                let mut imported = HashSet::new();
+                let mut imported: HashMap<String, StaticProviderRecord> = HashMap::new();
+                let mut unreadable: HashMap<String, String> = HashMap::new();
                 for (kind, rows) in [("provider", snapshot.providers), ("selection", snapshot.selections)] {
                     for source in rows {
                         let seen: Option<String> = tx.query_row("SELECT source_digest FROM provider_imports WHERE kind=?1 AND id=?2", params![kind, source.id], |row| row.get(0)).optional().map_err(storage)?;
                         if let Some(digest) = seen {
-                            items.push(ImportItem { kind, id: source.id, status: ImportStatus::AlreadyImported, reason: Some(if digest == source.digest { "Source row was already imported" } else { "Previously imported identity changed; automatic replay refused" }.into()) });
+                            if kind == "provider" && digest == source.digest {
+                                let stored = tx.query_row("SELECT version,record FROM providers WHERE provider_id=?1", [&source.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))).optional().map_err(storage)?;
+                                match stored.map(|(version, body)| parse_static(&source.id, version, &body)) {
+                                    Some(Ok(record)) => { imported.insert(source.id.clone(), record); }
+                                    Some(Err(_)) => { unreadable.insert(source.id.clone(), "Target provider is unreadable; preserved".into()); }
+                                    None => {}
+                                }
+                            }
+                            items.push(ImportItem { kind, id: source.id, status: ImportStatus::AlreadyImported, reason: Some(if digest == source.digest { "Source row was already imported" } else { "Previously imported identity changed; automatic replay refused" }.into()), omitted: None });
                             continue;
                         }
-                        let result: Result<(), String> = if kind == "provider" {
+                        let result: Result<Option<Vec<String>>, String> = if kind == "provider" {
                             let previous = tx.query_row("SELECT version,record FROM providers WHERE provider_id=?1", [&source.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))).optional().map_err(storage)?;
                             let previous = previous.map(|(version, body)| parse_static(&source.id, version, &body)).transpose().map_err(|_| "Target provider is unreadable; preserved".to_owned());
-                            match previous.and_then(|previous| convert_provider(&source, previous)) {
+                            match previous.and_then(|previous| convert_legacy_provider(&source, previous, &bundled)) {
                                 Err(reason) => Err(reason),
-                                Ok(record) if record.kind == StaticRecordKind::Custom && bundled.provider(&source.id).is_some() => Err("Builtin identity cannot be imported as custom".into()),
-                                Ok(record) => {
-                                    tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![source.id, record.version, serde_json::to_string(&record).map_err(storage)?]).map_err(storage)?;
-                                    imported.insert(source.id.clone());
-                                    Ok(())
+                                Ok(conversion) => {
+                                    tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![source.id, conversion.record.version(), serde_json::to_string(&conversion.record).map_err(storage)?]).map_err(storage)?;
+                                    imported.insert(source.id.clone(), conversion.record);
+                                    Ok(Some(conversion.omitted))
                                 }
                             }
                         } else {
-                            match convert_selection(&source, &imported) {
-                                Err(reason) => Err(reason),
-                                Ok((scope, provider, model)) => {
-                                    let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_selections WHERE scope=?1)", [&scope], |row| row.get(0)).map_err(storage)?;
-                                    let record = read_static(&tx, &provider)?.ok_or_else(|| storage("Imported provider missing"))?;
-                                    if existing { Err("Target selection already exists".into()) }
-                                    else if static_catalog(&bundled, &provider, &record, true).selectable(&model).is_none() { Err("Selected model is unavailable".into()) }
-                                    else {
-                                        tx.execute("INSERT INTO provider_selections(scope,version,provider_id,model_id) VALUES (?1,1,?2,?3)", params![scope, provider, model]).map_err(storage)?;
-                                        Ok(())
+                            let blocked = source.fields.get("providerId").and_then(Value::as_str).and_then(|id| unreadable.get(id)).cloned();
+                            match blocked {
+                                Some(reason) => Err(reason),
+                                None => match convert_legacy_selection(&source, &imported, &bundled) {
+                                    Err(reason) => Err(reason),
+                                    Ok(selection) => {
+                                        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_selections WHERE scope=?1)", [&selection.scope], |row| row.get(0)).map_err(storage)?;
+                                        if existing { Err("Target selection already exists".into()) }
+                                        else {
+                                            tx.execute("INSERT INTO provider_selections(scope,version,provider_id,model_id) VALUES (?1,1,?2,?3)", params![selection.scope, selection.provider_id, selection.model_id]).map_err(storage)?;
+                                            Ok(None)
+                                        }
                                     }
-                                }
+                                },
                             }
                         };
                         match result {
-                            Ok(()) => {
+                            Ok(omitted) => {
                                 tx.execute("INSERT INTO provider_imports(kind,id,source_schema,source_version,source_digest) VALUES (?1,?2,?3,?4,?5)", params![kind, source.id, snapshot.schema, source.version, source.digest]).map_err(storage)?;
-                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None });
+                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None, omitted });
                             }
-                            Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason) }),
+                            Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason), omitted: None }),
                         }
                     }
                 }
@@ -589,12 +662,22 @@ impl ProviderService {
     }
 }
 
-fn convert_selection(
-    source: &SourceRow,
-    imported: &HashSet<String>,
-) -> Result<(String, String, String), String> {
-    let scope: String = field(&source.fields, "scope")?;
-    let cwd: Option<String> = field(&source.fields, "cwd")?;
+/// One native selection a legacy selection row maps to.
+pub struct LegacySelection {
+    pub scope: String,
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+/// Convert one legacy selection row under the frozen mapping.
+pub fn convert_legacy_selection(
+    source: &LegacyRow,
+    imported: &HashMap<String, StaticProviderRecord>,
+    bundled: &BundledCatalog,
+) -> Result<LegacySelection, String> {
+    let fields = &source.fields;
+    let scope: String = field(fields, "scope")?;
+    let cwd: Option<String> = field(fields, "cwd")?;
     let scope = match (scope.as_str(), cwd) {
         ("global", None) => "global".into(),
         ("workspace", Some(cwd)) => {
@@ -612,11 +695,21 @@ fn convert_selection(
         }
         _ => return Err("Invalid selection scope".into()),
     };
-    let provider: String = field(&source.fields, "providerId")?;
+    let provider: String = field(fields, "providerId")?;
     let model: String =
-        field(&source.fields, "modelId").map_err(|_| "Implicit model selection is not imported")?;
-    if !imported.contains(&provider) {
-        return Err("Selection requires its provider to be imported in this batch".into());
+        field(fields, "modelId").map_err(|_| "Implicit model selection is not imported")?;
+    let record = imported
+        .get(&provider)
+        .ok_or_else(|| "Selection requires its provider to be imported in this batch".to_owned())?;
+    if static_catalog(bundled, &provider, record, true)
+        .selectable(&model)
+        .is_none()
+    {
+        return Err("Selected model is unavailable".into());
     }
-    Ok((scope, provider, model))
+    Ok(LegacySelection {
+        scope,
+        provider_id: provider,
+        model_id: model,
+    })
 }

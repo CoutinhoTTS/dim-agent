@@ -214,9 +214,9 @@ enum TextMember {
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
 /// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
-/// description (timeline branches §12.4) are the texts exposed at a Rust
-/// factory configuration today; the other owners add their entries with their
-/// own factory members: Capabilities under
+/// texts (timeline branches §12.4) are the texts exposed at a Rust factory
+/// configuration today; the other owners add their entries with their own
+/// factory members: Capabilities under
 /// [#551](https://github.com/arcships/dim/issues/551), and ContextCompaction
 /// under [#554](https://github.com/arcships/dim/issues/554).
 /// A plugin's text is its manifest `config` member, which the plugin's row
@@ -229,6 +229,10 @@ const TEXTS: &[(&str, TextMember)] = &[
     (
         "timeline-tree/branch-description",
         TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
+    ),
+    (
+        "timeline-tree/roster-closing",
+        TextMember::Rust(|overrides, text| overrides.roster_closing = Some(text)),
     ),
     (
         "goal/objective",
@@ -2245,10 +2249,13 @@ mod tests {
             error.contains("timeline-tree/branch-description"),
             "{error}"
         );
+        assert!(error.contains("timeline-tree/roster-closing"), "{error}");
         let known = overrides("context-compaction/summary", Arc::from("candidate")).unwrap();
         assert_eq!(known.summary_prompt.as_deref(), Some("candidate"));
         let branch = overrides("timeline-tree/branch-description", Arc::from("candidate")).unwrap();
         assert_eq!(branch.branch_description.as_deref(), Some("candidate"));
+        let roster = overrides("timeline-tree/roster-closing", Arc::from("candidate")).unwrap();
+        assert_eq!(roster.roster_closing.as_deref(), Some("candidate"));
     }
 
     /// Goal's two texts are its manifest `config` members, patched into the
@@ -3458,6 +3465,9 @@ mod tests {
     }
     /// How many times one turn reads the workspace file before it answers.
     const READS: usize = 4;
+    /// The fixture models' output allowance: their `maxOutputTokens` and the
+    /// requests' `maxTokens`. The input budget is the window less this.
+    const OUTPUT_TOKENS: u64 = 200;
     /// The fixture model's declared window in the bytes of a request body, at
     /// the product's four bytes per token.
     const WINDOW_BYTES: usize = 24_000 * 4;
@@ -3514,7 +3524,19 @@ mod tests {
             scenario: Value,
             workspace: &[(&str, &str)],
         ) -> Self {
-            Self::holding(label, reply, holds_nothing, scenario, workspace).await
+            Self::with_window(label, reply, scenario, workspace, 24_000).await
+        }
+        /// [`start`](Self::start) with the run model's declared window set to
+        /// `window` instead of the fixture's own 24,000 tokens: a scenario
+        /// sized from the compaction rule declares the window it derives.
+        async fn with_window(
+            label: &str,
+            reply: Reply,
+            scenario: Value,
+            workspace: &[(&str, &str)],
+            window: u64,
+        ) -> Self {
+            Self::holding(label, reply, holds_nothing, scenario, workspace, window).await
         }
         /// [`start`](Self::start) with a provider that holds the answers
         /// [`Hold`] names before it sends them.
@@ -3524,6 +3546,7 @@ mod tests {
             hold: Hold,
             scenario: Value,
             workspace: &[(&str, &str)],
+            window: u64,
         ) -> Self {
             let provider = Arc::new(Provider {
                 requests: Mutex::default(),
@@ -3553,9 +3576,9 @@ mod tests {
                             "baseUrl": format!("http://{endpoint}/v1"),
                             "models": [{
                                 "id": "mock",
-                                "contextWindow": 24000,
-                                "maxOutputTokens": 200,
-                                "config": {"maxTokens": 200}
+                                "contextWindow": window,
+                                "maxOutputTokens": OUTPUT_TOKENS,
+                                "config": {"maxTokens": OUTPUT_TOKENS}
                             }]
                         },
                         // The same upstream model under its own provider, with
@@ -3569,8 +3592,8 @@ mod tests {
                             "models": [{
                                 "id": "mock",
                                 "contextWindow": 128000,
-                                "maxOutputTokens": 200,
-                                "config": {"maxTokens": 200}
+                                "maxOutputTokens": OUTPUT_TOKENS,
+                                "config": {"maxTokens": OUTPUT_TOKENS}
                             }]
                         }
                     ]
@@ -3765,13 +3788,84 @@ mod tests {
         }
     }
 
-    /// A message that crosses the fixture's compaction threshold: the system
-    /// prompt and the product's tool catalog take about 7,200 tokens of the
-    /// 24,000-token window, compaction triggers at 80% of it (19,040), and
-    /// 56,000 bytes count as 14,000 tokens at the product's 4 bytes per
-    /// token, so the request fits the window and still crosses the trigger.
-    fn compaction_message() -> String {
-        format!("first {}", "x".repeat(56_000))
+    /// A message whose serialized size is `bytes`: the product counts a
+    /// request's messages by their serialized JSON at four bytes per token
+    /// (`crates/dim-agent-capabilities/src/context_model.rs`, the window
+    /// facts' `BYTES_PER_TOKEN`), and a message's own envelope takes the rest.
+    fn compaction_message(bytes: usize) -> String {
+        let opening = "first ";
+        let envelope = serde_json::to_vec(&Message::text(Role::User, ""))
+            .unwrap()
+            .len();
+        format!("{opening}{}", "x".repeat(bytes - envelope - opening.len()))
+    }
+
+    /// The fixed request the fixture's runs build, in tokens: the system
+    /// prompt, the tool declarations and the delivered context, which every
+    /// request of the scenario carries, without the scenario's own message.
+    /// One run of the same assembly with a small message measures it the way
+    /// the product counts a request: its first `context/budget` estimate less
+    /// the probe message's own tokens at four bytes per token.
+    async fn fixed_request() -> f64 {
+        const PROBE_WINDOW: u64 = 128_000;
+        const PROBE_MESSAGE: &str = "Measure the fixed request.";
+        let fixture = Fixture::with_window(
+            "fixed-request",
+            judged,
+            json!({
+                "message": PROBE_MESSAGE,
+                "budget": {"turns": 1, "seconds": 60, "window": PROBE_WINDOW},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+            PROBE_WINDOW,
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
+        assert_eq!(
+            record.error,
+            None,
+            "the probe run finishes its turn: {}",
+            serde_json::to_string(&record).unwrap()
+        );
+        let export = std::fs::read_to_string(
+            options
+                .out
+                .join("current")
+                .join("case")
+                .join("run-0")
+                .join("timeline.jsonl"),
+        )
+        .unwrap();
+        let (mut estimate, mut message_tokens, mut prepared) = (None, 0., false);
+        for line in export.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let event = &value["event"];
+            match (event["type"].as_str(), event["name"].as_str()) {
+                (Some("context"), Some("prepare")) if !prepared => {
+                    prepared = true;
+                    for message in event["data"]["request"]["messages"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        let message: Message = serde_json::from_value(message.clone()).unwrap();
+                        let json = serde_json::to_vec(&message).unwrap();
+                        if String::from_utf8_lossy(&json).contains(PROBE_MESSAGE) {
+                            message_tokens += json.len() as f64 / 4.;
+                        }
+                    }
+                }
+                (Some("context"), Some("budget")) => {
+                    estimate = event["data"]["estimatedInputTokens"].as_f64();
+                }
+                _ => {}
+            }
+        }
+        estimate.expect("the probe run writes its context/budget estimate") - message_tokens
     }
 
     /// The relative path from the process's working directory to `target`:
@@ -3792,16 +3886,40 @@ mod tests {
     /// outgrow the run model's window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn only_the_candidate_arm_carries_the_candidate_text() {
-        let fixture = Fixture::start(
+        // The scenario makes the first turn's request cross the compaction
+        // threshold, and its cut replaces this run's whole history, so each
+        // arm's summarizer sees the message and the request after the change
+        // carries the compacted list. The sizes follow the compaction rule
+        // (`crates/dim-agent-capabilities/src/context_model.rs` and
+        // `context_policy.rs`) and the fixed request the assembly builds here,
+        // so a longer system prompt or tool catalog moves them with it.
+        //
+        // With B the input budget, the window less the output allowance, the
+        // trigger fires at B less its reserve: 10% of B, at least 16,000
+        // tokens and at most 20% of it, so at 0.8B while that cap binds
+        // (B under 80,000). A cut fits while its resident parts stay under
+        // 0.5B: the request's frame and baseline, the digest at 0.05B, the
+        // running turn's pinned input at 0.1B, and the replacement, a tenth
+        // of B at most, capped at half the output allowance.
+        //
+        // B at four times the fixed request leaves 0.35B = 1.4 fixed for the
+        // fixed request and its replacement, and a message of 2.5 fixed makes
+        // the first request 3.5 fixed: over the 3.2 fixed threshold, under
+        // the 4 fixed budget, and its cut's resident parts under half of it.
+        let fixed = fixed_request().await;
+        let window = (4. * fixed).ceil() as u64 + OUTPUT_TOKENS;
+        let message = compaction_message((10. * fixed) as usize);
+        let fixture = Fixture::with_window(
             "candidate",
             summaries_and_judgements,
             json!({
-                "message": compaction_message(),
+                "message": message,
                 "steers": [{"afterSeconds": 1.0, "text": "second"}],
-                "budget": {"turns": 6, "seconds": 120, "window": 24000},
+                "budget": {"turns": 6, "seconds": 120, "window": window},
                 "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
             }),
             &[],
+            window,
         )
         .await;
         let options = fixture.judge_options(fixture.directory.join("out"));
@@ -4348,6 +4466,7 @@ mod tests {
                 "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
             }),
             &[],
+            24_000,
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
@@ -4460,6 +4579,7 @@ mod tests {
                 "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
             }),
             &[],
+            24_000,
         )
         .await;
         let defaults = repository().join("runtime/default-plugins.json");

@@ -377,9 +377,47 @@ Full table: Appendix B.
 | Calling Session | `schedule` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive leaders) | Configuration; survives compaction |
 | Calling Session | `schedule` result | `ToolResult.content` | Batch result position; summary only after compaction |
 | Run Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed, so only via summary after compaction; child branches inherit it if consumed before the cut |
-| Saving branch | Run outcome with job/run ids, known Session id and reason (A.6) | One Steer input through existing `sessions.input` | At its consumed position; unkeyed; a failed or lost report is not resent |
+| Saving branch | `<dim-scheduler kind="report" job="..." run="...">`, then the run's outcome, the known Session id and the history path (A.6) | Raw marker block of one Steer input through existing `sessions.input` | At its consumed position; unkeyed; a failed or lost report is not resent |
 
 Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and their handlers refuse with an error result. Prior runs in a `reuse` Session remain history like any input. Job/run records reach a calling model through `ToolResult.content` or a consumed outcome report; there is no automatic context injection of the store, timers or diagnostics.
+
+### 5.1 Model-facing texts
+
+A text is protocol or policy as [model-facing prompts §4](../model-prompts.md#4-protocol-and-policy) decides. Two of them are mixed and are marked sentence by sentence.
+
+| Text | Class and sentences |
+| --- | --- |
+| `schedule` declaration, schema | Protocol: the action set, `job_id`, `enabled`, `limit` and the `job` object with its fields |
+| `schedule` declaration, description | Protocol: "Manage scheduled jobs across this host, including other workspaces." states the tool's reach; "Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." and "An omitted policy keeps its stored value, whose default can change with the saving origin." state runtime guarantees. Policy: "Inspect the old-to-new authority transition in the result." is guidance about how to work |
+| `schedule` result | Protocol: the `schedule: <code>` first line and its message, `schedule is available only in interactive leader Sessions.`, `schedule: cancelled before handover`, and the two unloading notices. The codes are `schedule_invalid`, `schedule_not_found`, `schedule_conflict`, `service_unavailable`, `service_reloading` and `invalid_data`; the model reads them and acts on them |
+| Run markers | Protocol: the element `dim-scheduler`, its kinds `scheduled-run` and `report`, the attributes `job` and `run`, and the input each opens. The scheduled-run body is the job's name and the text after it is the prompt saved for the job; the report body states the run's outcome, the Session id when there is one, and where the run's history is |
+| Run outcome report, body | Protocol: "Scheduled job …, run …: <state> (<detail>).", the Session id when there is one, and the outcome vocabulary a run can report. Policy: "Inspect schedule.history for this job." is guidance about how to work, on the body's last line; the method name it states is protocol |
+
+The report's body keeps its sentences and is escaped as one text with `escaped(...)`, as the Workflow report's is, so a job id or an outcome detail that carries markup cannot open or close the tag; the attributes are escaped the same way.
+
+The policy text is a factory member: `code.config.description` replaces the declaration's description and `code.config.report_guidance` replaces the report's guidance line; the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin loads (`scheduler/index.ts`). A profile that changes it keeps it to one line.
+
+Both kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
+
+A history resumed from before the report marker keeps its bare report as written: nothing rewrites history, so a resumed branch replays the older untagged text and the channel rule's exception list does not grow for it ([model-facing prompts §6.1](../model-prompts.md#61-what-it-covers)).
+
+### 5.2 The guide entry
+
+One entry covers both kinds, and its text is code ([Prompt §5](Prompt.md#5-facts-that-reproduce-it)):
+
+```
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.
+```
+
+Every sentence is protocol, and each states one thing the model needs in order to place the tags:
+
+- "a scheduled job's saved prompt, delivered when the job runs, and … how that run ended" — what each tag is.
+- "job names the job, run names the run, in both." — the attributes.
+- "In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel." — the scheduled-run input's shape and the channel its prompt arrives in.
+- "In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request." — the report's shape and its trust class.
+- "The report's last line is not part of that account: it is guidance on what to do next." — the closing line's class: guidance on what to do next, not part of the account above it.
+
+It follows the exec notification's entry (`<dim-notification>`, order 10, [WorkspaceTools](../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)) in form and length: a runtime notice whose attributes carry the identifiers of a run.
 
 ## 6. Interfaces (summary)
 
@@ -663,7 +701,7 @@ Run history contains job/run identity, Session identity when known, terminal sta
 | Tool | `skipped`, `missed` | History only; no report attempt |
 | Management | Any terminal outcome | History only; no report attempt or destination field in management requests |
 
-**Confirmed delivery policy:** for each outcome selected for reporting, the existing run task first persists its terminal state, then makes at most one `sessions.input` call with `mode:"steer"` to that `report_to`. The adopted content contains job/run ids, the known run Session id, the terminal outcome/reason and the `schedule.history` read path. Steer permits processing after the current tool batch and wakes an idle branch. Await the actual S2 reply; a timer, tool cancellation or unload does not abandon the admitted native call. Close storage only after that call and its record writes settle.
+**Confirmed delivery policy:** for each outcome selected for reporting, the existing run task first persists its terminal state, then makes at most one `sessions.input` call with `mode:"steer"` to that `report_to`. The input opens with the `<dim-scheduler kind="report" job="…" run="…">` marker; its body keeps its sentences and is escaped as one text with `escaped(...)`, as the Workflow report's is, and contains the known run Session id, the terminal outcome/reason and the `schedule.history` read path; the attributes carry the job and run ids, escaped the same way. Steer permits processing after the current tool batch and wakes an idle branch. Await the actual S2 reply; a timer, tool cancellation or unload does not abandon the admitted native call. Close storage only after that call and its record writes settle.
 
 On a failed or uncertain reply, including `reloading`, `publication_unknown`, a missing/closed target or a bridge exception, append fixed diagnostic text to the existing `Run.detail` and surface it through history. Preserve the run's terminal `state`; notification failure is not run failure. If that diagnostic cannot be persisted, surface the storage error without altering existing bytes. Do not retry, use lookup to justify a resend, or redirect to `main`, another Session or an external channel. A successful published input is not resent if later withdrawn.
 

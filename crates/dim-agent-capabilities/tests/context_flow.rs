@@ -4,6 +4,7 @@ use dim_agent_capabilities::{
     history::{HistoryEntry, HistoryRenderer, project_context_history, project_history},
     host::*,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
@@ -239,15 +240,16 @@ fn external_history(events: &ContextHistory) -> std::result::Result<Vec<HistoryE
 
 #[tokio::test]
 async fn external_pure_history_renderer_drives_the_final_request_and_context_budget() {
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer {
             render: external_history,
             ..HistoryRenderer::default()
         },
         Context::default(),
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -311,7 +313,7 @@ impl ModelDriver for SilentFirstCall {
 async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let model = Arc::new(SilentFirstCall::default());
-        let agent = builder(model.clone()).build();
+        let agent = MinimalHost::start(&builder(model.clone())).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -401,7 +403,9 @@ async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn
 async fn provider_budget_recovery_uses_one_fixed_source_and_retries_only_once() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let calls = Arc::new(AtomicUsize::new(0));
-        let agent = builder(Arc::new(BudgetFailure(calls.clone()))).build();
+        let agent = MinimalHost::start(&builder(Arc::new(BudgetFailure(calls.clone()))))
+            .await
+            .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -468,12 +472,11 @@ async fn provider_budget_recovery_uses_one_fixed_source_and_retries_only_once() 
 async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let calls = Arc::new(AtomicUsize::new(0));
-        let agent = builder_with_context(
+        let agent = MinimalHost::start(&builder_with_context(
             Arc::new(BudgetFailure(calls.clone())),
             HistoryRenderer::default(),
             Context { foreign_cursor: true, ..Context::default() },
-        )
-        .build();
+        )).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -530,7 +533,7 @@ async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let agent = builder_with_context(
+        let agent = MinimalHost::start(&builder_with_context(
             Arc::new(ToolThenBudgetFailure(AtomicUsize::new(0))),
             HistoryRenderer::default(),
             Context {
@@ -538,8 +541,9 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
                 threshold: Some(10_000.),
                 ..Context::default()
             },
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -631,8 +635,13 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         ..Context::default()
     };
 
-    let agent =
-        builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context).build();
+    let agent = MinimalHost::start(&builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        context,
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -707,7 +716,7 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             Ok(Box::new(RewriteBaseline::new(names)?))
         }),
     );
-    let forged_agent = forged_builder.build();
+    let forged_agent = MinimalHost::start(&forged_builder).await.unwrap();
     let forged_session = forged_agent
         .create_session(SessionConfig::default())
         .await
@@ -842,7 +851,7 @@ async fn before_modified_request_is_budget_checked_before_native_model_invocatio
         builder.require_feature(Feature::new("ExpandFinal").branch("ExpandFinal", |names| {
             Ok(Box::new(ExpandFinal::new(names)?))
         }));
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -905,7 +914,9 @@ impl ModelDriver for UsageModel {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_usage_baseline_counts_only_new_history_after_a_matching_request() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let agent = builder(Arc::new(UsageModel)).build();
+        let agent = MinimalHost::start(&builder(Arc::new(UsageModel)))
+            .await
+            .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1062,7 +1073,7 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
             Context::default(),
         );
         builder.timeline_store(store);
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent.restore_session("restore".into()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(3), session.idle("main"))
             .await
@@ -1153,7 +1164,7 @@ async fn restoring_idle_unpaused_queue_input_applies_it_without_a_new_submission
         Context::default(),
     );
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .restore_session("queued-restore".into())
         .await
@@ -1217,7 +1228,7 @@ async fn restoring_pending_inputs_runs_each_queued_input_in_its_own_turn() {
         Context::default(),
     );
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .restore_session("applied-restore".into())
         .await
@@ -1329,7 +1340,7 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
             }),
         );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1409,8 +1420,13 @@ async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
         threshold: Some(200.),
         ..Context::default()
     };
-    let agent =
-        builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context).build();
+    let agent = MinimalHost::start(&builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        context,
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec!["echo".into()]),

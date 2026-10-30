@@ -92,9 +92,9 @@ uses `Loader::restart(row_id)`.
 Session extension templates and returns the `session` row, nested under `agent` by App Server.
 `AgentBuilder::plugin_rows` registers the builder's plugins and the row providing
 `partRegistry` as process rows.
-Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
-isolated loader key under the host; both create an `AgentAnchor` instance.
-`build_at(loader, ctx)` uses the host's existing loader.
+一个宿主只有一个 loader，Agent 建在其中：`AgentBuilder::build(loader, anchor)` 使用宿主已有的 loader，Agent
+既不创建根也不创建 loader，关闭 Agent 只关闭它的 Session。测试、示例和 `xtask` 用 `testing` feature 下的最小宿主
+（`testing::MinimalHost`），它像 App Server 一样装配一个根和它的 loader、创建 `AgentAnchor` 实例，并拥有根的生命周期。
 
 登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待必需行：作用域根、必需挂载器和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。必需挂载器把 profile 要求的部件（`require_feature`、`require_part`）交给实例创建，创建等它们 Active；尚无插件登记的必需部件同样让创建等待。失败则回滚整个候选实例。
 
@@ -102,7 +102,7 @@ profile 未要求的已登记部件由可选挂载器挂载，宿主通过现有
 
 因此，ShellInput、Attachments 等由安装函数要求的第一方 Rust 部件属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。依赖可能长期不可用的服务的 Rust 功能，以 `AgentBuilder::feature` 加入而不要求其部件，由可选挂载器挂载。
 
-必需部件在 `apply` 中登记的子插件仍由该部件等待；返回意味着其服务和订阅已就绪。创建只等待自己的必需行和已挂载的必需部件，不再做全进程检查；`Agent::check_assembly()` 在测试创建 Session 与分支之后跑一次，检查必需行及其子树的 Active 状态，发现未等待的子插件就报告；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 与 debug 创建因此相同，每次创建都不做全进程诊断扫描。
+必需部件在 `apply` 中登记的子插件仍由该部件等待，等待指子插件 `Active` 而不是 settle：`(&view).await` 在子插件的依赖尚未就绪时也会返回，此时子插件仍是 `Pending`。部件用 `mount_active` 挂载子插件，等待本身没有期限：创建期间整次打开的无进展期限覆盖它，到期时报告子插件的名字和它缺的依赖，创建随之失败；创建之后，该部件与任何缺依赖的行一样保持 `Loading` 直到子插件 `Active`（rutis D22），其代被取消时结束等待；返回因此意味着其服务和订阅已就绪。创建只等待自己的必需行和已挂载的必需部件，不再做全进程检查；`Agent::check_assembly()` 在测试创建 Session 与分支之后跑一次，检查必需行及其子树的 Active 状态，发现未等待的子插件就报告；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 与 debug 创建因此相同，每次创建都不做全进程诊断扫描。
 
 这修正装配自身的等待范围（[#132](https://github.com/arcships/dim/issues/132)，[ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)、[Session access §9.4](../../design/contracts/session-access.md#94-optional-parts-per-enabled-plugin)、[规则 §4.8](principles.md#4-通过时间线扩展行为)）。输入仍经原有分支初始化、ToolBinding 取样和 BranchOpening；不增加发布阶段或工具专用接线。顺序、批次、Timeline 及重载语义均不变。
 
@@ -228,7 +228,7 @@ PartRegistry::register(ctx, scope, name, generator) 插件登记 Session 或分�
 Feature::new(name).session(..).branch(..)          不持有进程状态的插件，只登记部件
 ```
 
-部件的每个副本在构建时按名字生成 `Deps` 的键，每个实例只挂载一份。启动屏障覆盖作用域根、必需挂载器挂载的部件与请求的扩展；部件在 `apply` 中登记的子插件由该部件负责等待。带实例的键只对该实例作用域子树内的节点可见；严格读取分别报告越界与服务不可用。祖先节点提供的服务对子树直接可见。
+部件的每个副本在构建时按名字生成 `Deps` 的键，每个实例只挂载一份。启动屏障覆盖作用域根、必需挂载器挂载的部件与请求的扩展；部件在 `apply` 中登记的子插件由该部件负责等待，用 `mount_active` 等到 `Active`，settle 不算等待；创建期间这次打开的无进展期限覆盖该等待，到期时报告子插件及其缺的依赖，创建之后该部件保持 `Loading` 直到子插件 `Active` 或本代被取消。带实例的键只对该实例作用域子树内的节点可见；严格读取分别报告越界与服务不可用。祖先节点提供的服务对子树直接可见。
 
 | 方向 | 方式 |
 | --- | --- |
@@ -392,7 +392,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 | 步骤 | 状态 |
 | --- | --- |
-| runtime：作用域 Plugin 与实例键、实例事件派发、`build_in` | 完成 |
+| runtime：作用域 Plugin 与实例键、实例事件派发、唯一的放置 API `build(loader, anchor)` | 完成 |
 | App Server：进程层 Plugin、`serve`/`RunningServer`、显式 restart（限定集合）与 `service_reloading` | 完成 |
 | 能力重载协议与门面按调用查找 | 完成 |
 | FileStorage、SQLite 资源边界、Aimux 请求对象及开发 resolver 调用方接线 | 完成 |

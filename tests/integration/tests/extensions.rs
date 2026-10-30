@@ -1,11 +1,20 @@
+use dim_agent_capabilities::host::{HostFuture, ToolExecutionContext};
+use dim_agent_capabilities::tool_registry::{
+    ToolContribution, ToolHandler, ToolProvider, ToolRegistry, ToolSourceSet, definition,
+};
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::BranchSource;
+use dim_agent_types::EventKind;
 use dim_agent_types::InputMode;
-use rutis::Plugin;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, Key, TypeKey};
+use dim_agent_types::{ToolCall, ToolResult};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, FiberView, Key, TypeKey};
+use rutis::{Ctx, Plugin};
+use std::sync::Arc;
 use std::time::Duration;
 use test_extension_a::{Counter, Provider};
 use test_extension_b::{Consumer, Snapshot};
+use tokio_util::sync::CancellationToken;
 fn builder() -> AgentBuilder {
     let mut b = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut b);
@@ -30,7 +39,7 @@ async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_b
     test_extension_a::register_names(b.catalog_mut());
     b.require_feature(consumer(true))
         .require_feature(provider());
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     let one = agent
         .create_session(SessionConfig::default())
         .await
@@ -88,8 +97,9 @@ async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_b
             .iter()
             .any(|d| d.key.describe().contains("Counter"))
     );
+    let closed = agent.agent().clone();
     agent.close().await.unwrap();
-    assert!(agent.sessions().is_empty());
+    assert!(closed.sessions().is_empty());
 }
 /// Tags each input with the branch whose `before` chain it passed.
 struct TagOwnBranch {
@@ -135,7 +145,7 @@ async fn before_runs_only_on_its_own_branch() {
             Ok(Box::new(TagOwnBranch::new(names)?))
         }),
     );
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     let one = agent
         .create_session(SessionConfig::default())
         .await
@@ -188,7 +198,7 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     missing
         .startup_timeout(Duration::from_millis(50))
         .require_feature(consumer(true));
-    let agent = missing.build();
+    let agent = MinimalHost::start(&missing).await.unwrap();
     let error = agent
         .create_session(SessionConfig::default())
         .await
@@ -203,7 +213,7 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     undeclared
         .require_feature(provider())
         .require_feature(consumer(false));
-    let agent = undeclared.build();
+    let agent = MinimalHost::start(&undeclared).await.unwrap();
     let error = agent
         .create_session(SessionConfig::default())
         .await
@@ -214,19 +224,6 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
         "{error}"
     );
     assert!(agent.sessions().is_empty());
-    agent.close().await.unwrap();
-}
-
-/// A check that inspected nothing does not look like a pass: an Agent that
-/// never placed its Sessions has no diagnostics snapshot to inspect.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_assembly_check_with_nothing_to_inspect_is_an_error() {
-    let agent = builder().build();
-    let error = agent.check_assembly().unwrap_err();
-    assert!(
-        error.to_string().contains("no diagnostics snapshot"),
-        "{error}"
-    );
     agent.close().await.unwrap();
 }
 
@@ -261,7 +258,7 @@ async fn unawaited_children_are_reported() {
             "test.required-owner",
             |_| Ok(Some(Box::new(UnawaitedChild))),
         ));
-        let agent = b.build();
+        let agent = MinimalHost::start(&b).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -282,6 +279,481 @@ async fn unawaited_children_are_reported() {
     }
 }
 
+/// A tool source a mounted child registers from its own `apply`.
+struct SlowSource;
+impl ToolProvider for SlowSource {
+    fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
+        vec![Arc::new(ToolSourceSet {
+            key: "slow".into(),
+            version: "1".into(),
+            tools: vec![Arc::new(ToolContribution {
+                definition: definition(
+                    "slow",
+                    "A tool of a slow child",
+                    serde_json::json!({"type": "object"}),
+                ),
+                handler: Arc::new(SlowCall),
+            })],
+        })]
+    }
+}
+struct SlowCall;
+impl ToolHandler for SlowCall {
+    fn execute(
+        &self,
+        _: ToolCall,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async { Ok(ToolResult::text("slow")) })
+    }
+}
+
+/// The service the slow child waits for; the row below provides it late.
+struct SlowService;
+
+/// A required row that provides `SlowService` only after it takes its time,
+/// so the child mounted by another row cannot load before it.
+struct SlowProvider {
+    key: Key<SlowService>,
+}
+impl Plugin for SlowProvider {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ctx.provide_at(self.key.clone(), Arc::new(SlowService))?;
+        Ok(())
+    }
+}
+
+/// A child whose own `apply` takes a while before it registers its tool.
+struct SlowChild {
+    service: Key<SlowService>,
+    tools: Key<ToolRegistry>,
+}
+impl DynPlugin for SlowChild {
+    fn name(&self) -> &str {
+        "test.slow-child"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.service.erase(), self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let tools = ctx.require_at(&self.tools)?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tools.register_source(ctx, "slow", Arc::new(SlowSource))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The required row that mounts the slow child.
+struct SlowOwner {
+    service: Key<SlowService>,
+    tools: Key<ToolRegistry>,
+}
+impl Plugin for SlowOwner {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        mount_active(
+            ctx,
+            SlowChild {
+                service: self.service.clone(),
+                tools: self.tools.clone(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// The tools of the last model call on `branch`, in the order it offered them.
+async fn last_request_tools(session: &Session, branch: &str) -> Vec<String> {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(
+                data.request
+                    .tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect())
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        })
+        .expect("a model call")
+}
+
+/// #680: a required row waits for the child it mounts, so creation hands back
+/// a Session whose child is `Active`, the check reports nothing, and the first
+/// request offers the tool the child registers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_required_row_waits_for_the_child_it_mounts() {
+    let mut b = builder();
+    names::register::<SlowService>(b.catalog_mut(), Some(SESSION_GROUP));
+    b.require_feature(
+        Feature::new("test.slow-owner").session("test.slow-owner", |names| {
+            Ok(Box::new(SlowOwner {
+                service: names.key()?,
+                tools: names.key()?,
+            }))
+        }),
+    )
+    .require_feature(
+        Feature::new("test.slow-provider").session("test.slow-provider", |names| {
+            Ok(Box::new(SlowProvider { key: names.key()? }))
+        }),
+    );
+    let agent = MinimalHost::start(&b).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let findings = agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    session
+        .submit("hello".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let tools = last_request_tools(&session, "main").await;
+    assert!(tools.iter().any(|tool| tool == "slow"), "{tools:?}");
+    agent.close().await.unwrap();
+}
+
+/// A dependency nothing provides: the child below stays `Pending`.
+struct NeverProvided;
+struct MissingChild;
+impl DynPlugin for MissingChild {
+    fn name(&self) -> &str {
+        "test.missing-child"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![Key::<NeverProvided>::of().erase()]
+    }
+    fn apply<'a>(&'a self, _: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+struct MissingOwner;
+impl Plugin for MissingOwner {
+    type Deps = ();
+    async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
+        mount_active(ctx, MissingChild).await?;
+        Ok(())
+    }
+}
+
+/// #680: a child whose dependency never arrives fails creation at the
+/// opening's own no-progress bound, naming the child and what it waits for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_that_never_loads_fails_creation_and_is_named() {
+    let mut b = builder();
+    b.startup_timeout(Duration::from_millis(200));
+    b.require_feature(
+        Feature::new("test.missing-owner")
+            .session("test.missing-owner", |_| Ok(Box::new(MissingOwner))),
+    );
+    let agent = MinimalHost::start(&b).await.unwrap();
+    let error = agent
+        .create_session(SessionConfig::default())
+        .await
+        .err()
+        .expect("creation fails");
+    let text = error.to_string();
+    assert!(text.contains("test.missing-child"), "{text}");
+    assert!(text.contains("NeverProvided"), "{text}");
+    agent.close().await.unwrap();
+}
+
+/// A service a row depends on; the test withdraws it to take the row's
+/// generation away and provides it again to re-apply the row.
+struct Switch;
+
+/// A service a mounted child waits for; the test withholds it so the child
+/// stays `Pending` for as long as it likes.
+struct Late;
+
+/// Provides `T` while its toggle is open and withdraws it while it is closed,
+/// so the test decides when a dependency of other rows is there.
+struct Toggled<T: Send + Sync + 'static> {
+    name: &'static str,
+    key: Key<T>,
+    open: tokio::sync::watch::Receiver<bool>,
+    value: Arc<T>,
+}
+impl<T: Send + Sync + 'static> DynPlugin for Toggled<T> {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        let (ctx, key, value) = (ctx.clone(), self.key.clone(), self.value.clone());
+        let mut open = self.open.clone();
+        Box::pin(async move {
+            tokio::spawn(async move {
+                let mut provided: Option<rutis::Disposer> = None;
+                loop {
+                    let open_now = *open.borrow_and_update();
+                    match (open_now, provided.is_some()) {
+                        (true, false) => provided = ctx.provide_at(key.clone(), value.clone()).ok(),
+                        (false, true) => {
+                            if let Some(disposer) = provided.take() {
+                                let _ = disposer.dispose().await;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if open.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// A row that mounts its child and waits for it to be `Active`: the one
+/// scenario #680 is about. It reports each `apply` just before it mounts, so
+/// a test can take the generation away while the wait is under way.
+struct MountingOwner {
+    switch: Key<Switch>,
+    late: Key<Late>,
+    starts: Arc<tokio::sync::Notify>,
+}
+impl DynPlugin for MountingOwner {
+    fn name(&self) -> &str {
+        "test.mounting-owner"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.switch.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            self.starts.notify_one();
+            mount_active(
+                ctx,
+                MountedChild {
+                    late: self.late.clone(),
+                },
+            )
+            .await?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The child of [`MountingOwner`]: it cannot load until `Late` is provided.
+struct MountedChild {
+    late: Key<Late>,
+}
+impl DynPlugin for MountedChild {
+    fn name(&self) -> &str {
+        "test.mounted-child"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.late.erase()]
+    }
+    fn apply<'a>(&'a self, _: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+/// Registers `Switch` and `Late` in the Session group and installs the rows
+/// that provide them, whose toggles the test keeps, plus the owner's report
+/// of each apply that is about to mount.
+#[allow(clippy::type_complexity)]
+fn mounting_builder() -> (
+    AgentBuilder,
+    tokio::sync::watch::Sender<bool>,
+    tokio::sync::watch::Sender<bool>,
+    Arc<tokio::sync::Notify>,
+) {
+    let mut b = builder();
+    names::register::<Switch>(b.catalog_mut(), Some(SESSION_GROUP));
+    names::register::<Late>(b.catalog_mut(), Some(SESSION_GROUP));
+    let (switch, switch_open) = tokio::sync::watch::channel(true);
+    let (late, late_open) = tokio::sync::watch::channel(true);
+    let starts = Arc::new(tokio::sync::Notify::new());
+    let owner_starts = starts.clone();
+    b.require_feature(Feature::new("test.switch-provider").session(
+        "test.switch-provider",
+        move |names| {
+            Ok(Box::new(Toggled {
+                name: "test.switch-provider",
+                key: names.key()?,
+                open: switch_open.clone(),
+                value: Arc::new(Switch),
+            }))
+        },
+    ))
+    .require_feature(Feature::new("test.late-provider").session(
+        "test.late-provider",
+        move |names| {
+            Ok(Box::new(Toggled {
+                name: "test.late-provider",
+                key: names.key()?,
+                open: late_open.clone(),
+                value: Arc::new(Late),
+            }))
+        },
+    ))
+    .require_feature(Feature::new("test.mounting-owner").session(
+        "test.mounting-owner",
+        move |names| {
+            Ok(Box::new(MountingOwner {
+                switch: names.key()?,
+                late: names.key()?,
+                starts: owner_starts.clone(),
+            }))
+        },
+    ));
+    (b, switch, late, starts)
+}
+
+/// The live fiber of the plugin named `name`, found once so the test can
+/// watch it instead of reading diagnostics.
+fn fiber(agent: &Agent, root: &Ctx, name: &str) -> FiberView {
+    let id = agent
+        .diagnostics()
+        .expect("agent diagnostics")
+        .plugins
+        .into_iter()
+        .find(|plugin| plugin.name == name)
+        .unwrap_or_else(|| panic!("no plugin {name}"))
+        .id;
+    root.view(id).expect("a live fiber")
+}
+
+/// Waits through `view`'s own watch until it is in `state`.
+async fn in_state(view: &FiberView, state: FiberState) {
+    view.watch()
+        .wait_for(|snapshot| snapshot.state == state)
+        .await
+        .unwrap();
+}
+
+/// #680: after creation a row re-applies and mounts a child whose dependency
+/// is gone. The wait has no deadline of its own, so the child's dependency
+/// returning later than the scope's startup timeout still ends with the row
+/// and the child `Active` instead of a sticky `Failed` on the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reapplied_row_waits_for_a_child_whose_dependency_returns_late() {
+    let (mut b, switch, late, _starts) = mounting_builder();
+    b.startup_timeout(Duration::from_secs(1));
+    let agent = MinimalHost::start(&b).await.unwrap();
+    let root = agent.root().clone();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let owner = fiber(&agent, &root, "test.mounting-owner");
+    let child = fiber(&agent, &root, "test.mounted-child");
+
+    // The child itself shows `Late` is gone, before the row is taken away and
+    // mounted again.
+    late.send(false).unwrap();
+    in_state(&child, FiberState::Pending).await;
+    switch.send(false).unwrap();
+    in_state(&owner, FiberState::Pending).await;
+    switch.send(true).unwrap();
+    owner
+        .watch()
+        .wait_for(|snapshot| snapshot.generation > 1 && snapshot.state == FiberState::Loading)
+        .await
+        .unwrap();
+
+    // The child the row mounts now waits on `Late`; bring `Late` back later
+    // than the scope's startup timeout.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    late.send(true).unwrap();
+    in_state(&owner, FiberState::Active).await;
+
+    // Failed is sticky, so reaching Active proves the row never was.
+    assert!(owner.state().error.is_none(), "{:?}", owner.state().error);
+    let mounted = fiber(&agent, &root, "test.mounted-child");
+    assert_ne!(mounted.id, child.id, "the re-apply mounted a child");
+    assert_eq!(mounted.state().state, FiberState::Active);
+    let findings = agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    session.close().await.unwrap();
+    agent.close().await.unwrap();
+}
+
+/// #680: with no timer ending the wait, only the generation's cancellation
+/// does: a generation taken away while its child is `Pending` leaves
+/// `Loading`, and the child is disposed with its parent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_cancelled_while_its_child_waits_ends_the_wait() {
+    let (b, switch, late, starts) = mounting_builder();
+    let agent = MinimalHost::start(&b).await.unwrap();
+    let root = agent.root().clone();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let owner = fiber(&agent, &root, "test.mounting-owner");
+    let child = fiber(&agent, &root, "test.mounted-child");
+    // The creation apply reported; the next report is the re-apply's.
+    starts.notified().await;
+
+    late.send(false).unwrap();
+    in_state(&child, FiberState::Pending).await;
+    switch.send(false).unwrap();
+    in_state(&owner, FiberState::Pending).await;
+    switch.send(true).unwrap();
+    // The re-apply reports right before it mounts, so the generation is
+    // taken away either with the wait about to start or with it running.
+    starts.notified().await;
+    switch.send(false).unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        owner.watch().wait_for(|snapshot| {
+            !matches!(snapshot.state, FiberState::Loading | FiberState::Unloading)
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the wait ends with its generation: {:?}", owner.state()))
+    .unwrap();
+
+    let snapshot = agent.diagnostics().unwrap();
+    assert!(
+        snapshot
+            .plugins
+            .iter()
+            .all(|plugin| plugin.state != FiberState::Loading),
+        "{:?}",
+        snapshot
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.state == FiberState::Loading)
+            .map(|plugin| plugin.name.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        snapshot
+            .plugins
+            .iter()
+            .all(|plugin| plugin.name != "test.mounted-child"),
+        "{:?}",
+        snapshot
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.name == "test.mounted-child")
+            .map(|plugin| plugin.state)
+            .collect::<Vec<_>>()
+    );
+
+    session.close().await.unwrap();
+    agent.close().await.unwrap();
+}
+
 /// Two branches of one Session carry the same faulty plugin: the findings are
 /// told apart by the branch they name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -291,7 +763,7 @@ async fn findings_name_their_branch() {
         Feature::new("test.required-owner")
             .branch("test.required-owner", |_| Ok(Box::new(UnawaitedChild))),
     );
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -346,7 +818,7 @@ async fn undeclared_reads_are_reported() {
             Ok(Box::new(UndeclaredReader::new(names)?))
         }),
     );
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -395,7 +867,7 @@ async fn reads_of_a_withdrawn_generation_are_reported() {
             }))
         },
     ));
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -554,25 +1026,26 @@ impl DynPlugin for DeclaredReader {
 
 #[tokio::test]
 async fn abandoned_first_creation_is_owned_until_agent_close_finishes() {
-    let root = rutis::Ctx::root().unwrap();
-    let agent = builder().build_in(&root);
+    let agent = MinimalHost::start(&builder()).await.unwrap();
+    let root = agent.root().clone();
+    let host = root.diagnostics().plugins.len();
     let mut creating = Box::pin(agent.create_session(SessionConfig::default()));
     assert!(futures_util::poll!(creating.as_mut()).is_pending());
     drop(creating);
-    let (first, second) = tokio::join!(agent.close(), agent.close());
+    let (first, second) = tokio::join!(agent.agent().close(), agent.agent().close());
     first.unwrap();
     second.unwrap();
     assert!(agent.sessions().is_empty());
     assert_eq!(
         root.diagnostics().plugins.len(),
-        1,
-        "only the caller's root remains"
+        host,
+        "only the host remains"
     );
-    root.shutdown().await.unwrap();
+    agent.close().await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_continues_after_waiter_is_dropped_and_concurrent_closers_join() {
-    let agent = builder().build();
+    let agent = MinimalHost::start(&builder()).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -593,14 +1066,14 @@ fn owning_agent_can_close_or_drop_outside_the_runtime_enter_guard() {
         .enable_all()
         .build()
         .unwrap();
-    let agent = builder().build();
+    let agent = runtime.block_on(MinimalHost::start(&builder())).unwrap();
     let session = runtime
         .block_on(agent.create_session(SessionConfig::default()))
         .unwrap();
     let close = agent.close();
     runtime.block_on(close).unwrap();
     runtime.block_on(session.close()).unwrap();
-    let agent = builder().build();
+    let agent = runtime.block_on(MinimalHost::start(&builder())).unwrap();
     let session = runtime
         .block_on(agent.create_session(SessionConfig::default()))
         .unwrap();
@@ -658,7 +1131,7 @@ async fn initialization_preserves_each_distinct_cleanup_failure_once() {
                 }))
             }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let error = agent
         .create_session(SessionConfig::default())
         .await
@@ -717,7 +1190,7 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_are_reported
             }))
         },
     ));
-    let agent = scoped.build();
+    let agent = MinimalHost::start(&scoped).await.unwrap();
     let first = agent
         .create_session(SessionConfig::default())
         .await
@@ -742,7 +1215,7 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_are_reported
             }))
         }),
     );
-    let agent = unkeyed.build();
+    let agent = MinimalHost::start(&unkeyed).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -764,7 +1237,7 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_are_reported
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
-    let agent = builder().build();
+    let agent = MinimalHost::start(&builder()).await.unwrap();
     let mut baseline = None;
     for round in 0..20 {
         let session = agent
@@ -879,7 +1352,7 @@ async fn plugin_names_cannot_replace_other_capabilities_or_loader_groups() {
             pending: false,
         }))
     });
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     agent
         .create_session_with_extension(SessionConfig::default(), "trace", installed.clone())
         .await
@@ -912,7 +1385,7 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
                 }))
             }),
         );
-        let agent = b.build();
+        let agent = MinimalHost::start(&b).await.unwrap();
         for _ in 0..panic_at {
             agent
                 .create_session(SessionConfig::default())
@@ -937,7 +1410,7 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
             pending: false,
         }))
     });
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     let missing_value = agent
         .create_session_with_extension(SessionConfig::default(), "extension", "wrong value type")
         .await;
@@ -949,7 +1422,7 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
     assert!(agent.sessions().is_empty());
     agent.close().await.unwrap();
 
-    let agent = builder().build();
+    let agent = MinimalHost::start(&builder()).await.unwrap();
     assert!(
         agent
             .create_session_with_extension(SessionConfig::default(), "missing", ())
@@ -968,7 +1441,7 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
             pending: true,
         }))
     });
-    let agent = b.build();
+    let agent = MinimalHost::start(&b).await.unwrap();
     assert!(
         agent
             .create_session_with_extension(SessionConfig::default(), "pending", ())
@@ -1109,7 +1582,7 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let anchor_ctx = receive.recv().await.unwrap();
     let mut saved: Option<String> = None;
     for round in 0..2 {
-        let agent = b.build_at(loader.clone(), &anchor_ctx);
+        let agent = b.build(loader.clone(), &anchor_ctx);
         let session = match &saved {
             None => agent
                 .create_session(SessionConfig::default())

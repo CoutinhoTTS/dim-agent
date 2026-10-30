@@ -16,13 +16,14 @@ use dim_agent_capabilities::{
     host::{HostFuture, ModelConnection, ModelDriver, ModelStream},
     recall::{self, RECALL_TOOL, testing::Narrative},
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-fn agent() -> Agent {
+async fn agent() -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts_with_model(
         &mut builder,
@@ -31,7 +32,7 @@ fn agent() -> Agent {
     );
     defaults::install(&mut builder);
     recall::install(&mut builder);
-    builder.build()
+    MinimalHost::start(&builder).await.unwrap()
 }
 
 /// The echo model, still answering a `tool:` command when a line write of
@@ -201,7 +202,7 @@ fn line_of<'a>(text: &'a str, id: &str) -> &'a str {
 // §14 1.
 async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earlier() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         for index in 0..21 {
             session
@@ -261,7 +262,7 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
 // §14 1.
 async fn a_turn_is_indexed_by_its_first_user_text_not_by_the_block_that_came_first() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         // A Prompt source writes a rule as an Append input between turns; it
         // waits as pending until the next driven input consumes it (§3.6).
@@ -327,7 +328,7 @@ async fn a_turn_is_indexed_by_its_first_user_text_not_by_the_block_that_came_fir
 // §14 2.
 async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interrupt_in_order() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         session
             .submit(
@@ -428,7 +429,7 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
 // §14 3.
 async fn one_thing_shows_its_full_input_and_result_paged_by_characters() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         let long: String = std::iter::repeat_n("报告", 5_000).collect();
         session
@@ -517,7 +518,7 @@ async fn one_thing_shows_its_full_input_and_result_paged_by_characters() {
 // §14 4.
 async fn only_the_kinds_of_the_allowlist_are_told_and_nothing_in_context_is_missed() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         session
             .input(
@@ -674,7 +675,7 @@ async fn only_the_kinds_of_the_allowlist_are_told_and_nothing_in_context_is_miss
 // §14 6.
 async fn search_finds_earlier_words_in_any_order_and_case_and_a_word_deep_in_a_result() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         session
             .submit(
@@ -746,7 +747,7 @@ async fn search_finds_earlier_words_in_any_order_and_case_and_a_word_deep_in_a_r
 // §14 8.
 async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_parent_turn() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         session
             .submit("first parent task".into(), InputMode::Queue, "main")
@@ -876,7 +877,7 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
 // §14 9.
 async fn a_recall_call_writes_only_the_events_any_tool_call_writes() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = open(&agent).await;
         session
             .submit(
@@ -911,7 +912,7 @@ async fn a_recall_call_writes_only_the_events_any_tool_call_writes() {
 // §14 10.
 async fn the_read_only_preset_runs_recall_without_an_approval_request() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = agent
             .create_session(SessionConfig {
                 permission_policy: PermissionPolicy {

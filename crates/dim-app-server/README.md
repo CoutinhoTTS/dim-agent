@@ -2,7 +2,7 @@
 
 The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. Product and configured profiles require protected local transports for execution and management; their WebSocket endpoint supports only `hello` and `ping`. The explicit mock profile permits WebSocket execution for protocol testing.
 
-The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; without it, `<product home>/web`; the directory is looked at on each open; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
+The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; without it, `<product home>/web`; the directory is looked at on each open; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus the read-only model discovery methods in [Web workspace §2.5](../../docs/design/web-workspace.md#25-protocol-on-the-entry); other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
 
 The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)) is the daemon's record of the interfaces viewing its Sessions, any number per Session. `UiHostPlugin` is a process `Capability` providing `UiHost`. A terminal interface is a UI leaf: the interactive `dimcode` process is a rutis node waiting on a private address, and `ui.open` makes the daemon link to it with `PeerPlugin` and host the ordinary `Tui` plugin there with `plugins.load("Tui", {uiId, token, sessionId})`, unloading it in the same row's effect. The daemon starts no process and runs no UI control protocol; a leaf lives as long as its link. The hosted `Tui` keeps the ordinary protocol v3 business connection and registers it with `ui.attach {sessionId, kind, uiId, token}`.
 
@@ -93,6 +93,10 @@ the credential and sets `enabled:false` in one update. `provider.save` is absent
 User models survive refresh separately from defaults; descriptor resets and New API
 endpoint overrides have independent effects. Clients pass saved preferences with
 their exact model target when adopting it; the server never applies them implicitly.
+`provider.import_legacy` imports one legacy SQLite source explicitly and read-only;
+each imported provider item adds `omitted`, the source field names the frozen
+mapping dropped, and imported selections carry no such field. The field is
+additive and protocol v3 is unchanged.
 The [Provider contract](../../docs/design/appserver/provider-management.md) defines
 the methods, typed errors, account ownership and accepted old-v19 rewrite loss. v18 binaries reject the v19 database.
 
@@ -152,6 +156,24 @@ stays inside its owning service and is excluded from catalog replies, notificati
 
 A stdio server's stderr is discarded: arbitrary server output may contain secrets, so it never
 reaches tracing or the daemon log.
+
+### MCP tool declarations
+
+A server's tools are its author's. Mcp registers each as it was discovered: the
+declaration carries the server's `description` and `inputSchema` unchanged, and a
+call's `content` reaches the model as the server returned it. The server's author
+marks the declaration's protocol and policy parts ([model-facing prompts §4](../../docs/design/model-prompts.md#4-protocol-and-policy));
+Dim carries them and owns none of their words.
+
+Two refusals are Dim's, and each is mixed, marked sentence by sentence
+([model-facing prompts §4](../../docs/design/model-prompts.md#4-protocol-and-policy)):
+in "The MCP server \"<id>\" requires the user to sign in. Ask the user to sign in
+to it with /mcp." and the insufficient-scope form's "needs additional permissions
+for this tool …", the first sentence is protocol — it names the server and the
+condition, and the scopes in the second form. The closing "Ask the user to sign
+in to it with /mcp." ("again" in the second form) is policy: it is guidance, and
+the runtime does not depend on its words. A server's tools write no marker, so
+they contribute no guide entry.
 
 ### MCP OAuth
 

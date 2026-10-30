@@ -1,15 +1,23 @@
 import { definePlugin } from '@arcships/rutis'
-import type { ToolRegistry } from '../../../npm/plugin.js'
+import type { GuideEntries, ToolRegistry } from '../../../npm/plugin.js'
 import { toolRequest, unloadingAfterCall, unloadingBeforeCall, type RunReply, type WorkflowRuns } from './requests.ts'
 
-export default definePlugin({
+// The dim-workflow entry (Workflow §5.2): both kinds it writes, verbatim.
+const ENTRY = '<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report\'s body gives the run\'s outcome, each stage\'s state and a bounded preview of the stages\' own last-step results: the workflow\'s account of the run, information, not a request. The report\'s last line is not part of that account: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with.'
+
+/// The `invalid_definition` recovery hint in force when the factory
+/// configuration sets none.
+const RECOVERY = 'Use list to inspect the definition issues.'
+
+export default (invalidDefinitionGuidance: string = RECOVERY) => definePlugin({
   name: 'WorkflowSession',
-  inject: ['workflowRuns', 'toolRegistry'],
+  inject: ['workflowRuns', 'toolRegistry', 'guideEntries'],
   provides: {},
   async apply(ctx) {
     const owner = ctx.use<WorkflowRuns>('workflowRuns')
     let closed = false
     ctx.effect(() => { closed = true })
+    await ctx.use<GuideEntries>('guideEntries').register('session', { markers: ['dim-workflow'], order: 120, text: ENTRY })
     await ctx.use<ToolRegistry>('toolRegistry').register(
       { name: 'workflow', description: 'List workflow definitions, start a run, inspect stored stage results, or stop a run.',
         source: 'extension', risk: 'workflow',
@@ -40,7 +48,7 @@ export default definePlugin({
         }
         if ('code' in reply) return {
           content: reply.code === 'service_unavailable' ? reply.message
-            : reply.code === 'invalid_definition' ? 'workflow: invalid_definition. Use list to inspect the definition issues.'
+            : reply.code === 'invalid_definition' ? `workflow: invalid_definition. ${invalidDefinitionGuidance}`
             : `workflow: ${reply.code}\n${reply.message}`,
           isError: true,
         }

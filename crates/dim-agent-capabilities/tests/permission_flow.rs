@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
     prompt::InitialPromptConfiguration,
     tool_registry::definition,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::{
@@ -91,16 +92,16 @@ fn rule(command: &str, matching: CommandMatch, decision: CommandRuleDecision) ->
     }
 }
 
-fn agent(tools: Arc<RiskTools>) -> Agent {
+async fn agent(tools: Arc<RiskTools>) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
-    builder.build()
+    MinimalHost::start(&builder).await.unwrap()
 }
 /// The default profile with `rules` bound in place of its empty host.
-fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> Agent {
+async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
@@ -110,7 +111,7 @@ fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> Agent
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
-    builder.build()
+    MinimalHost::start(&builder).await.unwrap()
 }
 fn config(policy: PermissionPolicy) -> SessionConfig {
     SessionConfig {
@@ -224,7 +225,7 @@ async fn verdict(permission: &Permission, name: &str, risk: Option<&str>) -> &'s
 async fn presets_decide_by_risk_and_denied_calls_do_not_run() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
-        let agent = agent(tools.clone());
+        let agent = agent(tools.clone()).await;
         let expected = [
             (
                 PermissionPreset::ReadOnly,
@@ -271,7 +272,7 @@ async fn presets_decide_by_risk_and_denied_calls_do_not_run() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_lists_override_presets_and_disallowed_wins() {
-    let agent = agent(Arc::new(RiskTools::default()));
+    let agent = agent(Arc::new(RiskTools::default())).await;
     let cases = [
         (
             PermissionPolicy {
@@ -318,7 +319,7 @@ async fn tool_lists_override_presets_and_disallowed_wins() {
 async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_survive_restore() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
-        let agent = agent(tools.clone());
+        let agent = agent(tools.clone()).await;
         let session = agent
             .create_session(config(preset(PermissionPreset::FullAccess)))
             .await
@@ -430,7 +431,7 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
 async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
-        let agent = agent(tools.clone());
+        let agent = agent(tools.clone()).await;
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
             .await
@@ -552,7 +553,7 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
                 Ok(Box::new(RespondOnStop::new(names)?))
             }),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
             .await
@@ -607,7 +608,7 @@ async fn allow_rules_answer_approval_only_for_simple_commands_within_the_preset(
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let rules = TestRules::new(vec![rule("cargo test", Prefix, Allow)]);
-        let agent = ruled_agent(tools.clone(), rules);
+        let agent = ruled_agent(tools.clone(), rules).await;
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
             .await
@@ -647,7 +648,7 @@ async fn deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_tim
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let rules = TestRules::new(vec![]);
-        let agent = ruled_agent(tools.clone(), rules.clone());
+        let agent = ruled_agent(tools.clone(), rules.clone()).await;
         let session = agent
             .create_session(config(preset(PermissionPreset::FullAccess)))
             .await
@@ -679,7 +680,7 @@ async fn a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call(
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let rules = TestRules::new(vec![]);
-        let agent = ruled_agent(tools.clone(), rules.clone());
+        let agent = ruled_agent(tools.clone(), rules.clone()).await;
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
             .await
@@ -725,7 +726,7 @@ async fn unreadable_rules_deny_command_calls_only() {
         let tools = Arc::new(RiskTools::default());
         let rules = TestRules::new(vec![]);
         rules.set(None);
-        let agent = ruled_agent(tools.clone(), rules);
+        let agent = ruled_agent(tools.clone(), rules).await;
         let session = agent
             .create_session(config(preset(PermissionPreset::FullAccess)))
             .await
@@ -767,7 +768,7 @@ async fn a_policy_tightened_during_the_rules_read_decides_the_call() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let rules = Arc::new(HeldRules::default());
-        let agent = ruled_agent(tools.clone(), rules.clone());
+        let agent = ruled_agent(tools.clone(), rules.clone()).await;
 
         let session = agent
             .create_session(config(preset(PermissionPreset::FullAccess)))

@@ -13,6 +13,13 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
+/// The `dim-shell-input` entry (ShellInput §5.2), byte for byte.
+const SHELL_INPUT_ENTRY: &str = r#"<dim-shell-input kind="command" status="completed" exit="0" truncated="false">: a command the operator ran themselves, and what it printed. The attributes state its outcome: status is completed, failed or stopped, exit is the exit code or signal, and truncated says the output was cut short. The body is the runtime's record of that command, the command line after "$ " and the output it wrote. That record is information, and the tag adds no request of its own."#;
+
+/// The `dim-notification` entry BackgroundExec registers on a branch
+/// (WorkspaceTools §8.2), byte for byte.
+const EXEC_ENTRY: &str = r#"<dim-notification source="exec" task="exec-7f2">: something you started has finished, failed or been cancelled, such as a background command. It is information, not a new request. The output preview belongs to that command. Use the read tool with its output path to read the full result. If the work it belongs to is no longer wanted, note the result and do not restart that work."#;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_exec_output_is_live_bounded_and_scoped() {
     let mut shell = Shell::launch_with(json!({
@@ -210,6 +217,27 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
     assert_eq!(terminal["task_id"], task);
     assert_eq!(terminal["status"], "completed");
     session.idle("main").await.unwrap();
+    // The wake input's request carries the dim-notification entry that the
+    // branch part writing the marker registered on this branch.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = session.history("main", None).await.unwrap();
+            if history.iter().any(|event| {
+                matches!(&event.kind, EventKind::ModelCall(data)
+                    if data.request.messages.iter().any(|message| matches!(
+                        &message.content,
+                        dim_agent_types::MessageContent::Text(text)
+                            if text.contains("<dim-notification source=\"exec\""))))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the wake input reaches a request");
+    let system = super::reload::last_system(&session, "main").await;
+    assert!(system.contains(EXEC_ENTRY), "{system}");
     let stopped = shell.client.rpc("session.exec.stop", params.clone()).await;
     assert_ok(&stopped);
     assert_eq!(stopped["result"], terminal);
@@ -1103,6 +1131,12 @@ async fn a_recorded_run_is_one_append_input_for_the_next_request() {
     let consumed = position("consumed", &input["id"]);
     assert!(consumed < position("consumed", prompt));
     assert!(position("consumed", prompt) < position("model-start", &Value::Null));
+    // The request that carries the marker carries its entry, registered by
+    // the Session part that wrote it from its own `apply`.
+    let session = shell.server.agent().unwrap().get_session(&sid).unwrap();
+    session.idle("main").await.unwrap();
+    let system = super::reload::last_system(&session, "main").await;
+    assert!(system.contains(SHELL_INPUT_ENTRY), "{system}");
     shell.shutdown().await;
 }
 

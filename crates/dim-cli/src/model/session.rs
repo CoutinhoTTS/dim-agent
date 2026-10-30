@@ -398,6 +398,7 @@ pub struct ModelItem {
     pub provider_version: u32,
     pub model_id: String,
     pub display_name: String,
+    pub zdr: bool,
     /// Advertised reasoning efforts, in cycle order. Empty when the model
     /// offers no choice.
     pub efforts: Vec<String>,

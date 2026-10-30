@@ -209,10 +209,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell-Ausgabe nicht gespeichert: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Lese Zwischenablage…",
+        "Reading image…" => "Lese Bild…",
+        "Wait for the image insertion before sending" => {
+            "Vor Senden auf das Einfügen des Bildes warten"
+        }
+        "The image could not be read" => "Das Bild konnte nicht gelesen werden",
+        "An image is still being inserted; paste again when it is in" => {
+            "Ein Bild wird noch eingefügt; fügen Sie danach erneut ein"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Die Zwischenablage wird noch eingefügt; fügen Sie danach erneut ein"
+        }
         "Clipboard: {reason}" => "Zwischenablage: {reason}",
         "Wait for clipboard insertion before sending" => "Vor Senden auf Zwischenablage warten",
         "A submission accepts at most 20 images" => "Pro Sendung höchstens 20 Bilder",
         "[Image #{index}]" => "[Bild #{index}]",
+        "[Image #{index}{details}]" => "[Bild #{index}{details}]",
+        "first frame" => "nur erstes Einzelbild",
+        "re-encoded" => "neu kodiert",
         "The current model does not accept images; remove {label} to send" => {
             "Modell akzeptiert keine Bilder; {label} entfernen"
         }
@@ -472,8 +486,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"
         }
         "Fullscreen" => "Vollbild",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown scrollen · Home/End Anfang/Ende · Tab Nachricht wählen, e bearbeiten, q zitieren"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown scrollen · Home/End Anfang/Ende (bei leerem Entwurf) · Tab Nachricht wählen, e bearbeiten, q zitieren"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "Mausrad scrollen · ziehen markiert+kopiert · Klick öffnet Link, klappt Tool-Gruppe aus"

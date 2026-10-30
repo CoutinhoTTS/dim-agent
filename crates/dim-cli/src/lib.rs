@@ -675,7 +675,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {
-            session::chat(&mut client, &options, images).await
+            session::chat(&mut client, &options, images.blocks, images.notes).await
         }
         Action::Acp { .. }
         | Action::Migration(_)

@@ -211,10 +211,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Saída da shell não registada: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "A ler área de transferência…",
+        "Reading image…" => "A ler imagem…",
+        "Wait for the image insertion before sending" => {
+            "Aguarde a inserção da imagem antes de enviar"
+        }
+        "The image could not be read" => "Não foi possível ler a imagem",
+        "An image is still being inserted; paste again when it is in" => {
+            "Uma imagem está a ser inserida; cole novamente quando terminar"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "A área de transferência está a ser inserida; cole novamente quando terminar"
+        }
         "Clipboard: {reason}" => "Área de transferência: {reason}",
         "Wait for clipboard insertion before sending" => "Aguarde a colagem antes de enviar",
         "A submission accepts at most 20 images" => "Máximo de 20 imagens por envio",
         "[Image #{index}]" => "[Imagem #{index}]",
+        "[Image #{index}{details}]" => "[Imagem #{index}{details}]",
+        "first frame" => "apenas o primeiro fotograma",
+        "re-encoded" => "recodificada",
         "The current model does not accept images; remove {label} to send" => {
             "Modelo atual não aceita imagens; remova {label} para enviar"
         }
@@ -480,8 +494,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C limpar, duas vezes para sair · Ctrl+D sair com rascunho vazio"
         }
         "Fullscreen" => "Ecrã inteiro",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown deslocar · Home/End topo ou fundo · Tab escolher mensagem, e editar, q citar"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown deslocar · Home/End topo ou fundo (com rascunho vazio) · Tab escolher mensagem, e editar, q citar"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "roda deslocar · arrastar selecionar e copiar · clicar ligação para abrir, grupo de ferramentas para expandir"

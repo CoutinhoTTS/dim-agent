@@ -958,15 +958,14 @@ struct GuideProbeOwner {
 impl rutis::Plugin for GuideProbeOwner {
     type Deps = ();
     async fn apply(&self, ctx: &rutis::Ctx, _: ()) -> rutis::Result {
-        let view = ctx.plugin(GuideProbe {
-            flag: self.flag.clone(),
-            guide: self.guide.clone(),
-        });
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("guide probe failed: {error}").into(),
-            ))
-        })?;
+        let view = dim_agent_runtime::mount_active(
+            ctx,
+            GuideProbe {
+                flag: self.flag.clone(),
+                guide: self.guide.clone(),
+            },
+        )
+        .await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

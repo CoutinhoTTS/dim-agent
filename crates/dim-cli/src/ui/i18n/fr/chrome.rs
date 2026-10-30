@@ -205,10 +205,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Sortie shell non enregistrée: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Lecture du presse-papiers…",
+        "Reading image…" => "Lecture de l'image…",
+        "Wait for the image insertion before sending" => {
+            "Attendez l'insertion de l'image avant d'envoyer"
+        }
+        "The image could not be read" => "L'image n'a pas pu être lue",
+        "An image is still being inserted; paste again when it is in" => {
+            "Une image est en cours d'insertion ; collez à nouveau une fois terminée"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Le presse-papiers est en cours d'insertion ; collez à nouveau une fois terminé"
+        }
         "Clipboard: {reason}" => "Presse-papiers: {reason}",
         "Wait for clipboard insertion before sending" => "Attendre le collage avant d'envoyer",
         "A submission accepts at most 20 images" => "20 images max par envoi",
         "[Image #{index}]" => "[Image #{index}]",
+        "[Image #{index}{details}]" => "[Image #{index}{details}]",
+        "first frame" => "première image seulement",
+        "re-encoded" => "réencodée",
         "The current model does not accept images; remove {label} to send" => {
             "Le modèle n'accepte pas les images; retirer {label} pour envoyer"
         }
@@ -468,8 +482,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C effacer, deux fois pour quitter · Ctrl+D quitter si brouillon vide"
         }
         "Fullscreen" => "Plein écran",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown défiler · Home/End haut ou bas · Tab choisir un message, e modifier, q citer"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown défiler · Home/End haut ou bas (brouillon vide) · Tab choisir un message, e modifier, q citer"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "molette défiler · glisser sélectionner et copier · clic: ouvrir un lien, déplier un groupe d'outils"

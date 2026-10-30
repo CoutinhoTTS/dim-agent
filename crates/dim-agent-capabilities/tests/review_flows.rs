@@ -2,6 +2,7 @@
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin, defaults, host::*, tool_registry::definition,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::CtxHost;
@@ -113,15 +114,16 @@ async fn one_tool_panic_does_not_abandon_other_native_cleanup_or_reorder_actual_
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let finished = Arc::new(AtomicUsize::new(0));
-    let agent = builder(
+    let agent = MinimalHost::start(&builder(
         Arc::new(TwoToolsModel),
         Arc::new(PanicAndSlowTools {
             entered: entered.clone(),
             release: release.clone(),
             finished: finished.clone(),
         }),
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = soon(agent.create_session(SessionConfig {
         tools: Some(vec!["panic".into(), "slow".into()]),
         permission_policy: PermissionPolicy {
@@ -174,7 +176,7 @@ async fn append_only_input_remains_pending_while_idle_returns_and_a_later_queue_
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -270,7 +272,7 @@ async fn a_branch_failing_after_its_root_is_built_rolls_it_back_before_releasing
                     Ok(Box::new(ExtensionControls(resources.clone(), names.key()?)))
                 }),
         );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
