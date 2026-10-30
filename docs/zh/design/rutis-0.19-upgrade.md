@@ -1,4 +1,4 @@
-# 升级到 rutis 0.19.0
+# 升级到 rutis 0.19.1
 
 [English](../../design/rutis-0.19-upgrade.md)
 
@@ -10,22 +10,22 @@ Issue：[#681](https://github.com/arcships/dim/issues/681)。
 [ADR 006](../adr/006-plugin-contract.md)、[Dim 如何使用 rutis](rutis-usage.md)。
 
 本次升级把 `rutis`、`rutis-loader`、`rutis-bridge`、随附的 Node 运行时、仓库内的 TypeScript 插件以及
-Python SDK 从 0.17.1 升到 0.19.0。rutis 0.18 和 0.19 都有不兼容变更（[0.18 迁移指南](https://github.com/arcships/rutis/blob/v0.19.0/docs/migration-0.18.md)、
-[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.0/docs/migration-0.19.md)）。本次升级不保留兼容路径。
+Python SDK 从 0.17.1 升到 0.19.1。rutis 0.18 和 0.19 都有不兼容变更（[0.18 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.18.md)、
+[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.md)）。本次升级不保留兼容路径。
 rutis 删掉的 API，Dim 一律改用 rutis 规定的新写法，不加重建旧 API 的包装层。
 
 ## 1. 范围，以及为什么一步做完
 
 | 项 | 现状 | 目标 |
 | --- | --- | --- |
-| `Cargo.toml` 工作区依赖 | `rutis`、`rutis-bridge` 0.17.1；`rutis-loader` 0.17.1，带 `node`、`python` | 0.19.0；`rutis-loader` 只带 `node`（0.19 没有 `python` feature，`node` 会启用 `runtimes`） |
+| `Cargo.toml` 工作区依赖 | `rutis`、`rutis-bridge` 0.17.1；`rutis-loader` 0.17.1，带 `node`、`python` | 0.19.1；`rutis-loader` 只带 `node`（0.19 没有 `python` feature，`node` 会启用 `runtimes`） |
 | 新增依赖 | — | 无。Dim 自己拉起运行时（M4）；npm 上的 `@arcships/rutis-host` 只是测试用的开发依赖（M10） |
-| `xtask` | `rutis-bridge`，带 `exports` | `rutis-types` 0.19.0 |
-| `runtime/package.json` 及锁文件 | `@arcships/rutis-runtime`、`@arcships/rutis` 0.17.1 | 0.19.0；另加开发依赖 `@arcships/rutis-host` 0.19.0（M10） |
-| `runtime/plugins/{goal,scheduler,session-title,workflow}/package.json` 及锁文件 | `@arcships/rutis` 0.17.1 | 0.19.0 |
+| `xtask` | `rutis-bridge`，带 `exports` | `rutis-types` 0.19.1 |
+| `runtime/package.json` 及锁文件 | `@arcships/rutis-runtime`、`@arcships/rutis` 0.17.1 | 0.19.1；另加开发依赖 `@arcships/rutis-host` 0.19.1（M10） |
+| `runtime/plugins/{goal,scheduler,session-title,workflow}/package.json` 及锁文件 | `@arcships/rutis` 0.17.1 | 0.19.1 |
 | `npm/package.json` 的 peer 依赖 | `@arcships/rutis` `~0.17.0` | `~0.19.0` |
-| `runtime/python-requirements.txt` | `rutis==0.17.1` 及其哈希 | `rutis==0.19.0` 及其哈希 |
-| 作者指南的固定版本 | [作者指南](../../typescript-plugin-authoring.md) | 0.19.0 |
+| `runtime/python-requirements.txt` | `rutis==0.17.1` 及其哈希 | `rutis==0.19.1` 及其哈希 |
+| 作者指南的固定版本 | [作者指南](../../typescript-plugin-authoring.md) | 0.19.1 |
 | `.github/workflows/ci.yml` | Node 绑定一步用 0.17.1 的测试工具跑插件测试 | 为 0.19 的测试工具导出 `RUTIS_HOST`（M10） |
 
 0.19 使用会话协议 4，握手时会拒绝 0.18 及更早的对端，两个方向都是如此。因此 App Server、Node 运行时、
@@ -33,26 +33,28 @@ Python 运行时和交互式 `dimcode` 进程（UI leaf，M8）必须一起升�
 Python 行都无法连接。
 
 目标是 0.19，而不是 0.18。0.18 的大部分不兼容变化（诊断、配置校验）原样延续到 0.19；而如果先升到 0.18，
-要适配的那些 API（链接、`LocalRuntime`、`RuntimeResolver`）在 0.19 里又都被删掉了。固定版本写的是第一个包含
-[rutis#947](https://github.com/arcships/rutis/pull/947) 的 rutis 发布版本（M2 需要它），它在 0.19.0 之后；
-本文写作 0.19.0 的固定版本，指的都是这个版本。
+要适配的那些 API（链接、`LocalRuntime`、`RuntimeResolver`）在 0.19 里又都被删掉了。固定版本是 0.19.1（tag `v0.19.1`）：
+它补回了 M2 需要的同步 waterfall（[rutis#947](https://github.com/arcships/rutis/pull/947)），并公开了
+[#684](https://github.com/arcships/dim/pull/684) 依赖的 `mark_scope`（[rutis#948](https://github.com/arcships/rutis/issues/948)）。
+它和 0.19.0 使用同一个协议，所以 `npm` 的 peer 范围仍是 `~0.19.0`。
 
 不在范围内：Go、Swift、Kotlin 运行时，dylib 插件，远程运行时与节点连接行（`rutis-host/dial`、
 `rutis-host/listen`），`rutis-host` 命令，以及 Cordis 宿主。Dim 都不使用。`rutis-migrate` 停在 0.18，不使用它。
 
-## 2. 0.17.1 到 0.19.0 之间的变化
+## 2. 0.17.1 到 0.19.1 之间的变化
 
 | 版本 | 与 Dim 相关的内容 |
 | --- | --- |
 | 0.17.2 | 无 API 变化。坏值只让这一次调用失败；运行时退出不再连累其他行；10 秒后报告 `StillWaiting` |
 | 0.18 | 错误文案带错误码（`session::Error::Binding`）；默认错误 sink 写标准错误；配置按 schema 校验并填入默认值；`reconcile` 不再等待仍在启动的运行时；带方法的对象可以传给每种语言 |
 | 0.19 | 本地运行时是一个会话的对端；链接、peer、传输和身份这一层整个删除；服务目录共享所有未登记的名字；运行时的行遵守 `isolate`；运行时的每次 emit 都经过宿主；`LoaderPlugin` 提供服务 `loader`；每个 loader 只用一个 `rutis/row` 监听器，而不是每行一个（[rutis#808](https://github.com/arcships/rutis/pull/808)，即 [#518](https://github.com/arcships/dim/issues/518) 在等的修复）；SDK 测试工具运行在真实的 `rutis-host` 上；要求 Python 3.12 及以上；线上错误名 `CordisError` 改为 `Error` |
+| 0.19.1 | 同步 waterfall 以 `waterfall(event).sync(terminal)` 的形式补回（M2）；外语插件定义的副本可以挂在宿主自己的实例里，`mark_scope` 公开（rutis#948，#684 使用）；`Loader::instance_rows`；运行时 `ready()` 之后的 `reconcile` 一定装载它的行 |
 
 ### 2.1 Dim 调用的内核 API
 
-| 0.17.1 | 0.19.0 |
+| 0.17.1 | 0.19.1 |
 | --- | --- |
-| `Ctx::waterfall_sync(event, terminal)` | 在 0.19.0 中删除，迁移指南给的替代是 `waterfall`（异步）或同步的 `bail`，两者都不适用于 `before` 链。rutis#946 在 0.19.0 之后补回了 `ctx.waterfall(event).sync(terminal)`，M2 用它 |
+| `Ctx::waterfall_sync(event, terminal)` | 在 0.19.0 中删除，迁移指南给的替代是 `waterfall`（异步）或同步的 `bail`，两者都不适用于 `before` 链。0.19.1 补回了 `ctx.waterfall(event).sync(terminal)`（rutis#946），M2 用它 |
 | 同步监听器里的 `SyncCall::next()` | 总是返回 `Err(WaterfallNext)`：同步监听器后面没有链可以继续执行 |
 | `Ctx::root()` 的默认错误 sink | 仍把每一种上报的错误写到标准错误，只是去掉了 `[rutis]` 前缀；0.18 上报的种类更多：`StartFailed`、`RuntimeDown`、`StillWaiting` |
 | `ErrorKind` | 新增 `StartFailed`、`RuntimeDown`、`NotServedByName`、`StillWaiting`；`DisposeWaitError::TimedOut` 新增字段 `stuck` |
@@ -62,7 +64,7 @@ Python 行都无法连接。
 
 ### 2.2 Dim 调用的 bridge 与 loader API
 
-| 0.17.1 | 0.19.0 |
+| 0.17.1 | 0.19.1 |
 | --- | --- |
 | `rutis_bridge::runtime::LocalRuntime`（`node`、`python`、`named`、`interpreter`、`python_path`、stdio、`handle`） | 宿主自己的连接插件：`rutis_bridge::runtime::Launcher`、`pipe::greeted`、`Session::new`、`RuntimeStates`。迁移指南给的 `rutis_host::connect::SpawnPlugin` 用的也是这些零件；Dim 不链接它（M4） |
 | `RuntimePlugin`、服务 `runtime::Runtime` | 删除；状态通过 `RuntimeHandle::state()` 读取，取值不变 |
@@ -127,9 +129,9 @@ Python 行都无法连接。
 
 - [#518](https://github.com/arcships/dim/issues/518) 在等 rutis#808，0.19 带上了它。本次升级凭 §6 的测量结果关闭它。
 - [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
-  引入 rutis#920。那个 pull request 已经关闭、没有合并，0.19 里也没有这个 API（rutis#941 打算在之后的版本提供）。所以 #645
-  既不在 0.17.1 上合入，也不随本次升级合入。#594 改走它自己的 Dim 侧方案：由 scope 和 mounter 插件记住自己挂载的行。
-  这不需要任何 rutis API，可以在升级之前或之后合入。
+  引入 rutis#920。那个 pull request 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
+  [#684](https://github.com/arcships/dim/pull/684)：Session 和分支变成用 0.19.1 公开的 `mark_scope` 标记自己的插件，
+  不再有实例行可查。#684 在本次升级之后合入，#645 关闭。
 
 ## 4. 决策
 
@@ -149,8 +151,8 @@ Python 行都无法连接。
 - **同步的 `bail`**：没有 `next`，串不成中间件。
 
 [rutis#946](https://github.com/arcships/rutis/issues/946) 把同步 waterfall 补了回来，写作
-`ctx.waterfall(event).sync(terminal)`。它在 0.19.0 之后由 [rutis#947](https://github.com/arcships/rutis/pull/947)
-合入，还没有进入任何发布版本。`before` 链改用它：
+`ctx.waterfall(event).sync(terminal)`。它由 [rutis#947](https://github.com/arcships/rutis/pull/947)
+合入，在 0.19.1 发布。`before` 链改用它：
 
 - `commit` 在现在调用 `waterfall_sync` 的地方改为调用
   `ctx.waterfall(offered).sync(|offered| Ok(Some(offered.draft.clone())))`。各个变形仍用 `on_sync` 注册，并像现在
@@ -161,7 +163,7 @@ Python 行都无法连接。
   - 顺序：先注册的中间件包住后注册的，后注册的先变形；
   - 失败规则：某个变形失败时，保留原始 draft，不记录任何步骤。
 
-目前没有任何产品代码注册 `before` 变形，只有测试在用。步骤 2（§5）要等包含 rutis#947 的发布版本。
+目前没有任何产品代码注册 `before` 变形，只有测试在用。
 
 ### M3. 服务目录共享所有未登记的名字
 
@@ -178,7 +180,7 @@ Python 行都无法连接。
 Dim 本身就是宿主，拉起运行时本来就是 RuntimeManager 的事。rutis 对需要的两点都有文档：
 
 - 自己的连接，就是一个把 `Channel` 交给 `Session::new` 的连接插件；
-- 由宿主启动的运行时，命令行是 `<channel> --id <name> <project>`（[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.0/docs/migration-0.19.md)
+- 由宿主启动的运行时，命令行是 `<channel> --id <name> <project>`（[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.md)
   "一起升级"一节）。
 
 `SpawnPlugin` 用到的零件在 rutis-bridge 里都是公开的。所以 Dim 不链接 `rutis-host`。
@@ -403,7 +405,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 步骤 | 工作 | 门槛 |
 | --- | --- | --- |
 | 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供最小宿主，并把 41 个文件迁到它上面 | `cargo test --workspace --locked`；`xtask check` 和 `graph`，并对照 §6 中步骤 0 的图 diff；§6 中放置的检查 |
-| 1 | 固定版本和锁文件（M1），升到第一个包含 rutis#947 的发布版本；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是这个版本 |
+| 1 | 固定版本和锁文件（M1），升到 0.19.1；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.1 |
 | 2 | 内核与服务目录：M2、M3 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 的检查 |
 | 3 | 运行时：M4、M5、M9 | App Server 和 `tests/integration` 中由 Node、Python 驱动的流程测试 |
 | 4 | leaf：M7、M8 | `cargo test -p dimcode --test ui_leaf`；`transport_flow ui_host::` |
@@ -505,8 +507,8 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | leaf 建立了会话，但它的 `Tui` 一直不 attach | 在 `START` 之后关闭；替换时在新界面 attach 之前保留旧界面（M8） |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
-| 其余工作都已就绪时，包含 rutis#947 的版本还没发布 | 步骤 2 等它；没有任何产品流程注册 `before` 变形 |
-| #645 先通过 Git 固定版本合入 | 它在 0.19 上无法编译（没有 `instance_rows`）；§3 让 #594 改走它的 Dim 侧方案 |
+| 0.19.1 已打 tag，但它的包还没发到 crates.io、npm 和 PyPI | 步骤 1 等这些包 |
+| #645 先合入 | §3 让 #594 改走 #684，#645 关闭 |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
@@ -518,7 +520,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 一项，已有答复：为 Timeline 的 `before` 链提供同步 waterfall（M2），即
 [rutis#946](https://github.com/arcships/rutis/issues/946)，已由 [rutis#947](https://github.com/arcships/rutis/pull/947)
-合入。本次升级以第一个包含它的发布版本为目标。其余决策都按 rutis 的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
+合入，在 0.19.1 发布，本次升级以 0.19.1 为目标。其余决策都按 rutis 的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
 这正好符合 loader 按宿主划分（M6）。
 
 ## 10. 规则检查
@@ -529,7 +531,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | --- | --- |
 | 原则 §4 规则 1–3、5–7、9 | 不变：命令、交接、`before` 契约、批次、上下文路径和事实都不变；M2 保留 `before` 的契约、顺序和失败规则 |
 | §4 规则 4（状态归属） | 行仍只由 PluginManager 写入：没有可编辑层时，插件可以通过 `loader` 重新加载某一行，但不能增删行（M5）。运行时状态仍归 `RuntimeManager`，从 rutis 的句柄读取 |
-| §4 规则 8（基础设施默认不变） | 改动来自依赖升级，限定在 runtime crate、App Server 和 CLI 之内；唯一向 rutis 提出的需求是 M2 的，已由 rutis#947 答复（§9） |
+| §4 规则 8（基础设施默认不变） | 改动来自依赖升级，限定在 runtime crate、App Server 和 CLI 之内；唯一向 rutis 提出的需求是 M2 的，已由 0.19.1 中的 rutis#947 答复（§9） |
 | §4 规则 11（受信插件，明确的边界） | M8 写明 leaf 链接暴露了什么，信任边界保持在本地用户；审批和权限都不变 |
 | AGENTS 规则 6（冻结的夹具） | 不动 `crates/dim-agent-types/tests/fixtures/` |
 | ADR 002 D1–D5 | 作用域放置、接线、依赖和配置都不变：运行时仍是进程部件，leaf 仍属于 CLI 进程。M6 把 Agent 的放置 API 改成唯一的 `build(loader, anchor)`，遵循 [ADR 004](../../adr/004-loader-plugin-management.md) 的"不引入第二个 loader" |
