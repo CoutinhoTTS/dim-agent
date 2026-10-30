@@ -462,6 +462,34 @@ impl SqliteStorage {
         .await
         .map_err(storage)?
     }
+    pub(crate) async fn run_cancellable<T: Send + 'static>(
+        self: &Arc<Self>,
+        cancel: tokio_util::sync::CancellationToken,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run(move |connection| {
+            if cancel.is_cancelled() {
+                return Err(AgentError::Cancelled("session catalog".into()));
+            }
+            let interrupt = cancel.clone();
+            connection
+                .progress_handler(1000, Some(move || interrupt.is_cancelled()))
+                .map_err(storage)?;
+            let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+            connection
+                .progress_handler(0, None::<fn() -> bool>)
+                .map_err(storage)?;
+            match result {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(_) if cancel.is_cancelled() => {
+                    Err(AgentError::Cancelled("session catalog".into()))
+                }
+                Ok(result) => result,
+            }
+        })
+        .await
+    }
+
     pub async fn close(self: &Arc<Self>) -> Result<()> {
         self.admission.lock().unwrap().closed = true;
         let db = self.clone();

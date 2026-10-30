@@ -446,8 +446,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"
         }
         "Fullscreen" => "全画面",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown スクロール · Home/End 先頭/末尾 · Tab メッセージ選択、e 編集、q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown スクロール · Home/End 先頭/末尾 (下書きが空の場合) · Tab メッセージ選択、e 編集、q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "ホイール スクロール · ドラッグ 選択・コピー · クリック リンクを開く/ツールグループ展開"

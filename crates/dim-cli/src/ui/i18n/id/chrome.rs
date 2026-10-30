@@ -464,8 +464,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"
         }
         "Fullscreen" => "Layar penuh",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown gulir · Home/End atas/bawah · Tab pilih pesan, e edit, q kutip"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown gulir · Home/End atas/bawah (saat draf kosong) · Tab pilih pesan, e edit, q kutip"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "roda gulir · seret pilih dan salin · klik tautan/grup tool untuk membukanya"
