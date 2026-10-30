@@ -720,8 +720,12 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
         .unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
+        // The fixed request, the shell-input guide entry included, crosses the
+        // threshold at 0.8 × (window − output) while the window still leaves
+        // room for the requested output, so the turn meets no output-budget
+        // recovery and the threshold skip is what it measures.
         let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 2_700,
+            context_window: 2_900,
             max_output_tokens: 200,
             ..Default::default()
         };
@@ -741,10 +745,11 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
             .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
             .await;
         assert_ok(&usage);
-        assert_eq!(usage["result"]["thresholdTokens"], 2_000.0);
+        let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
+        assert_eq!(threshold, 2_160.0);
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(
-            overhead > 2_000.0,
+            overhead > threshold,
             "the fixed request alone crosses the threshold: {overhead}"
         );
 
