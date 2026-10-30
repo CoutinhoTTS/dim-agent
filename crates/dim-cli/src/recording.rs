@@ -1,4 +1,4 @@
-//! `recording` and `/recording`: show or switch the daemon's model request
+//! `recording` and `/settings recording`: show or switch the daemon's model request
 //! record (the `model-log` Settings source, `docs/design/appserver/model-log.md`).
 use crate::{Result, args::Options, client::Client};
 use serde::Deserialize;
@@ -73,7 +73,7 @@ pub async fn set(client: &mut Client, enabled: bool) -> Result<State> {
     })
 }
 
-/// `dimcode recording [on|off|status]`: prints the state after the switch.
+/// `dimcode recording [on|off]`: prints the state after the switch.
 pub async fn run(client: &mut Client, options: &Options, enabled: Option<bool>) -> Result<i32> {
     let state = match enabled {
         Some(enabled) => set(client, enabled).await?,
