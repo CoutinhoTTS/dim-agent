@@ -4,6 +4,7 @@
 //! Shell resolution copies ADR 020 and TS `packages/agent/src/exec-shell.ts`.
 //! Process facts are captured at apply; exec shell preferences are read at use
 //! time. Shell problems are returned as data, never raised during assembly.
+use crate::execution_settings::{ExecutionSettingsHost, ExecutionSettingsSource};
 use crate::file_storage::{FileStorage, FileStorageError};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
@@ -160,6 +161,7 @@ pub struct HostPlatform {
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
     #[cfg(unix)]
     isolation_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
+    pub(crate) execution: Option<Arc<dyn ExecutionSettingsSource>>,
 }
 
 struct ResolvedShell {
@@ -282,6 +284,7 @@ impl HostPlatform {
             shell_file: None,
             #[cfg(unix)]
             isolation_file: None,
+            execution: None,
         })
     }
     /// Reads the configured exec shell for this invocation without reloading
@@ -674,6 +677,8 @@ impl Drop for ProcessTree {
 
 #[derive(Debug, Clone, Default)]
 pub struct HostPlatformConfig {
+    /// Optional execution-settings port provided by the App Server.
+    pub execution: Option<Key<ExecutionSettingsHost>>,
     /// `exec-shell.json`: FileStorage root index and relative path. `None`
     /// means the profile has no home; the shell is resolved automatically.
     pub exec_shell_file: Option<(usize, PathBuf)>,
@@ -686,13 +691,19 @@ pub struct HostPlatformPlugin {
     config: HostPlatformConfig,
     /// File storage only when a local configuration source is configured.
     storage: Option<Key<FileStorage>>,
+    execution: Option<Key<ExecutionSettingsHost>>,
 }
 impl HostPlatformPlugin {
     pub fn new(names: &Names<'_>, config: HostPlatformConfig) -> rutis::Result<Self> {
         let storage = uses_storage(&config)
             .then(|| names.key::<FileStorage>())
             .transpose()?;
-        Ok(Self { config, storage })
+        let execution = config.execution.clone();
+        Ok(Self {
+            config,
+            storage,
+            execution,
+        })
     }
 }
 /// File storage only when a local configuration source is configured.
@@ -704,7 +715,11 @@ impl DynPlugin for HostPlatformPlugin {
         "HostPlatform"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        self.storage.iter().map(|storage| storage.erase()).collect()
+        self.storage
+            .iter()
+            .map(|storage| storage.erase())
+            .chain(self.execution.iter().map(|execution| execution.erase()))
+            .collect()
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -735,6 +750,10 @@ impl DynPlugin for HostPlatformPlugin {
                     .clone()
                     .zip(storage)
                     .map(|((root, relative), storage)| (storage, root, relative));
+            }
+            if let Some(execution) = &self.execution {
+                let host = ctx.require_at(execution)?;
+                platform.execution = Some(host.0.clone());
             }
             platform.shell.lock().await.config = config;
             ctx.provide_as::<HostPlatform>(Arc::new(platform))?;

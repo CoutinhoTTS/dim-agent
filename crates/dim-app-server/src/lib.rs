@@ -7,6 +7,7 @@ pub mod collaboration;
 mod collaboration_model_policy;
 mod connection;
 mod control;
+mod execution_settings;
 pub mod grok_oauth;
 mod isolation_policy;
 mod managed_oauth;
@@ -700,6 +701,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             builder.catalog(),
             move |names| Ok(Box::new(mcp::McpPlugin::new(names, home_root)?)),
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(execution_settings::ExecutionSettingsPlugin::new(
+                names,
+            )?))
+        })?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -708,6 +714,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
+                            execution: Some(names.key()?),
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
                             isolation_file: Some((home_root, "host-isolation.json".into())),
                         },

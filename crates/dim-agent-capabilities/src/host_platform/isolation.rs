@@ -118,28 +118,51 @@ impl HostPlatform {
             code: "isolation_config_invalid",
             reason,
         };
-        let bytes = match &self.isolation_file {
-            Some((storage, root, relative)) => {
-                let path = storage
-                    .path(*root, relative)
-                    .map_err(|e| invalid(e.to_string()))?;
-                match storage.read(&path, &CancellationToken::new()).await {
-                    Ok(bytes) => Some(bytes),
-                    Err(FileStorageError::Io(error))
-                        if error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        None
-                    }
-                    Err(error) => return Err(invalid(error.to_string())),
-                }
+        let policy = if let Some(source) = &self.execution {
+            let settings = source
+                .read(CancellationToken::new())
+                .await
+                .map_err(|error| invalid(error.to_string()))?;
+            let sandbox = if !settings.sandbox {
+                Sandbox::Host
+            } else if settings.network {
+                Sandbox::Network
+            } else {
+                Sandbox::Workspace
+            };
+            Policy {
+                sandbox,
+                read_only_paths: None,
+                writable_paths: None,
+                environment: None,
             }
-            None => None,
+        } else {
+            let bytes = match &self.isolation_file {
+                Some((storage, root, relative)) => {
+                    let path = storage
+                        .path(*root, relative)
+                        .map_err(|e| invalid(e.to_string()))?;
+                    match storage.read(&path, &CancellationToken::new()).await {
+                        Ok(bytes) => Some(bytes),
+                        Err(FileStorageError::Io(error))
+                            if error.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            None
+                        }
+                        Err(error) => return Err(invalid(error.to_string())),
+                    }
+                }
+                None => None,
+            };
+            match bytes {
+                Some(bytes) => Policy::decode(&bytes).map_err(invalid)?,
+                None => Policy::default_policy(),
+            }
         };
-        let policy = match bytes {
-            Some(bytes) => Policy::decode(&bytes).map_err(invalid)?,
-            None => Policy::default_policy(),
-        };
-        let location = self.isolation_location();
+        let location = self.execution.as_ref().map_or_else(
+            || self.isolation_location(),
+            |_| "/settings > Execution".into(),
+        );
         let sandbox = policy.sandbox;
         let enabled = sandbox != Sandbox::Host;
         let environment = policy.environment.unwrap_or_else(|| {
