@@ -27,6 +27,13 @@ pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct OpeningAdvanced(pub PluginId);
+impl rutis::Event for OpeningAdvanced {
+    const NAME: &'static str = "dim/opening-advanced";
+    type Value = ();
+}
+
 /// Bounds an opening by inactivity in its own fiber subtrees, including rows
 /// created while the opening is in flight. Other scopes cannot extend it.
 pub struct StartupProgress {
@@ -34,7 +41,7 @@ pub struct StartupProgress {
     started: tokio::time::Instant,
     timeout: Duration,
     active: Arc<Mutex<HashMap<PluginId, tokio::time::Instant>>>,
-    listener: Option<rutis::Disposer>,
+    listeners: Vec<rutis::Disposer>,
 }
 
 impl StartupProgress {
@@ -47,20 +54,33 @@ impl StartupProgress {
                 changes
                     .lock()
                     .unwrap()
-                    .insert(event.plugin_id, tokio::time::Instant::now());
+                    .entry(event.plugin_id)
+                    .or_insert_with(tokio::time::Instant::now);
             }
             Ok(None)
         })?;
-        Ok(Self {
+        let mut progress = Self {
             ctx: ctx.clone(),
             started,
             timeout,
             active,
-            listener: Some(listener),
-        })
+            listeners: vec![listener],
+        };
+        let changes = progress.active.clone();
+        progress
+            .listeners
+            .push(ctx.on_sync::<OpeningAdvanced>(move |event, _| {
+                changes
+                    .lock()
+                    .unwrap()
+                    .insert(event.0, tokio::time::Instant::now());
+                Ok(None)
+            })?);
+        Ok(progress)
     }
 
-    /// Returns `None` after no row in `roots` became Active for the timeout.
+    /// Returns `None` after no first activation, opening dispatch or receipt
+    /// completion in `roots` for the timeout.
     /// The root identities are read when the inactivity interval expires.
     pub async fn wait<F: std::future::Future>(
         &mut self,
@@ -99,11 +119,14 @@ impl StartupProgress {
 
 impl Drop for StartupProgress {
     fn drop(&mut self) {
-        if let Some(listener) = self.listener.take() {
+        let listeners = std::mem::take(&mut self.listeners);
+        if !listeners.is_empty() {
             let sink = self.ctx.error_sink();
             self.ctx.handle().spawn(async move {
-                if let Err(error) = listener.dispose().await {
-                    sink(error);
+                for listener in listeners {
+                    if let Err(error) = listener.dispose().await {
+                        sink(error);
+                    }
                 }
             });
         }
@@ -137,7 +160,7 @@ const PROCESS_VALUES: &str = "ProcessValues";
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
-    /// Maximum time without an opening Session or branch row becoming Active.
+    /// Maximum inactivity interval while opening a Session or branch.
     pub startup_timeout: Duration,
     pub store: Arc<dyn TimelineStore>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
@@ -198,7 +221,8 @@ impl AgentBuilder {
         self.custom_store = true;
         self
     }
-    /// Maximum time without a row becoming Active in an opening scope.
+    /// Maximum interval without first activation, opening dispatch advancement
+    /// or receipt completion in an opening scope.
     pub fn startup_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.assembly.startup_timeout = timeout;
         self
@@ -1855,8 +1879,8 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: Key<T>) -> Result
     })
 }
 /// Waits until every view is Active; a failure or disposal of any view,
-/// cancellation or an interval without progress ends the wait. Active rows
-/// in any view’s subtree renew the interval. A Failed view ends the wait even
+/// cancellation or an interval without progress ends the wait. First activation
+/// or opening progress in any view's subtree renews the interval. A Failed view ends the wait even
 /// while a dependent stays Pending. `ctx` observes those rows and supplies
 /// unmet dependencies on timeout.
 pub async fn wait_active(

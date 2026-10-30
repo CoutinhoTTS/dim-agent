@@ -642,6 +642,52 @@ async fn activity_outside_an_opening_cannot_keep_a_stuck_session_alive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarting_an_optional_row_cannot_keep_a_stuck_opening_alive() {
+    let root = Ctx::root().unwrap();
+    let mut builder = builder();
+    builder
+        .startup_timeout(Duration::from_millis(500))
+        .require_feature(
+            Feature::new("test.stuck")
+                .session("test.stuck", |names| Ok(Box::new(Stuck::new(names)?))),
+        );
+    builder.feature(Feature::new("test.churn").session("test.churn", |names| {
+        Ok(Box::new(SessionPart::new(names, Arc::default())?))
+    }));
+    let agent = builder.build_in(&root);
+    let opening = agent.create_session(SessionConfig::default());
+    tokio::pin!(opening);
+    let churn = async {
+        let view = loop {
+            if let Some(view) = root
+                .diagnostics()
+                .plugins
+                .iter()
+                .find(|plugin| {
+                    plugin.name == "test.session-part"
+                        && plugin.state == rutis::host::FiberState::Active
+                })
+                .and_then(|plugin| root.view(plugin.id))
+            {
+                break view;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        for _ in 0..24 {
+            let _ = view.restart().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let error = tokio::select! {
+        result = &mut opening => result.err().expect("the stuck opening fails"),
+        () = churn => panic!("repeated activation of one row kept startup alive"),
+    };
+    assert!(error.to_string().contains("test.stuck"), "{error}");
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_rows_extend_a_session_or_branch_opening_until_required_rows_are_ready() {
     for branch in [false, true] {
         let root = Ctx::root().unwrap();

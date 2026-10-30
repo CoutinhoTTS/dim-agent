@@ -552,7 +552,6 @@ impl TimelineTree {
                     Ok(context) => context,
                 };
                 acquired = Some(context.clone());
-                let deadline = tokio::time::Instant::now() + owner.factory.startup_timeout();
                 owner
                     .state
                     .lock()
@@ -565,9 +564,9 @@ impl TimelineTree {
                     Opening::Start { start, first } => (EventKind::BranchStart(start), first),
                     Opening::Resume { head, lines } => {
                         let history = tokio::select! {
-                            result = context.timeline().local(..=head) => result?,
+                            result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().local(..=head)) =>
+                                result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                             _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
-                            _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                         };
                         let mut facts = LineFacts::default();
                         for event in &history {
@@ -592,31 +591,9 @@ impl TimelineTree {
                     }
                 };
                 let opened = context.timeline().append(opening.into())?;
-                let mut dispatch = context.branch().dispatch_watch();
-                loop {
-                    let state = dispatch.borrow_and_update().clone();
-                    if let Some(error) = state.failure {
-                        return Err(error);
-                    }
-                    if state.sequence >= opened.sequence {
-                        break;
-                    }
-                    tokio::select! {
-                        changed = dispatch.changed() => if changed.is_err() {
-                            return Err(AgentError::Closed("branch dispatch".into()));
-                        },
-                        _ = owner.cancel.cancelled() => {
-                            return Err(AgentError::Cancelled("branch creation".into()));
-                        }
-                        _ = tokio::time::sleep_until(deadline) => {
-                            return Err(AgentError::Build("branch opening timed out".into()));
-                        }
-                    }
-                }
                 tokio::select! {
-                    result = context.finish_opening() => result?,
+                    result = context.finish_opening(opened.sequence, owner.factory.startup_timeout()) => result?,
                     _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
-                    _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                 }
                 if let Some(first) = first {
                     context.branch().input(first).await?;

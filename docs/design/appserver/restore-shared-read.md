@@ -192,8 +192,9 @@ its own; a lifecycle dropped with its scope drops it too.
 A restore opens branches one at a time, so at most one copy of the Session exists at a time during a restore, and the
 last one is dropped before the Session is published. Branches created at runtime open independently: concurrent child
 builds each hold their own copy of their ancestry (§5). Assembly follows the opening's scoped inactivity interval
-([How Dim uses rutis](../rutis-usage.md#appendix-a-rust-binding)); row activation renews that interval. Opening handlers
-have a fresh I/O cancellation budget after assembly. Failure or cancellation rolls back the opening and leaves `Loading`.
+([How Dim uses rutis](../rutis-usage.md#appendix-a-rust-binding)); first row activation, opening dispatch advancement and
+receipt completion renew that interval. Storage reads have an I/O cancellation budget; replay has no fixed total deadline.
+Failure or cancellation rolls back the opening and leaves `Loading`.
 
 The opening is the runtime's own unit; a restore is a Session whose branches all open with `branch/resume`. The same
 opening also serves a branch created at runtime (TimelineTree `branch`, `create_main`) and a prepared Session (fork):

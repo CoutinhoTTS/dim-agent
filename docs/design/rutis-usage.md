@@ -479,8 +479,10 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   one used only if present is read with `get_at` and not listed in `injects`. Its name must still be
   registered.
 - **Startup progress.** `startup_timeout` bounds an interval without progress, across loader startup,
-  reconcile and required rows becoming Active. Each row becoming Active in the opening scope resets
-  that interval; activity in another Session does not. There is no fixed total startup deadline. The
+  reconcile, required rows becoming Active and opening replay. A row's first activation during the
+  opening, advancement of its branch's dispatch sequence, or completion of an opening receipt resets
+  that interval. Restarting the same row does not renew it; activity in another Session does not.
+  There is no fixed total startup deadline. The
   same rule applies to Session and branch opening, process startup and restart. A branch waiting for
   its parent follows that parent's bounded opening rather than imposing another total deadline.
   A stalled opening fails with its inactive rows and unmet dependencies, and rollback cancels them.

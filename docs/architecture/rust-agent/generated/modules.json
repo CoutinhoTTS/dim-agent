@@ -13042,12 +13042,15 @@
       "from": "dim_agent_runtime::timeline_context",
       "to": "dim_agent_runtime::assembly",
       "references": [
+        "path OpeningAdvanced",
+        "path StartupProgress::new",
         "path crate::BRANCH_GROUP",
         "path crate::assembly::retain_scope",
         "path crate::assembly::shutdown_scope",
         "path crate::assembly::with_copies",
         "path required",
-        "path rows"
+        "path rows",
+        "use crate::assembly::OpeningAdvanced"
       ]
     },
     {
@@ -13066,7 +13069,8 @@
         "path BranchLifecycle",
         "path BranchPhase::Active",
         "path BranchPhase::Closed",
-        "path BranchPhase::Closing"
+        "path BranchPhase::Closing",
+        "path BranchPhase::Loading"
       ]
     },
     {
