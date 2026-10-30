@@ -9,7 +9,6 @@ mod connection;
 mod control;
 mod execution_settings;
 pub mod grok_oauth;
-mod isolation_policy;
 mod managed_oauth;
 pub mod managed_provider;
 pub mod mcp;
@@ -708,17 +707,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
                             execution: Some(names.key()?),
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                            isolation_file: Some((home_root, "host-isolation.json".into())),
                         },
                     )?,
                 ))
             },
         )?);
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(isolation_policy::IsolationPolicyPlugin::new(
-                names,
-            )?))
-        })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(skills_management::SkillsCatalogPlugin::new(
                 names,
