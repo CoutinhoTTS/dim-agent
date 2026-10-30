@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, useId, watch } from "vue"
-import { useRouter } from "vue-router"
+import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import { ArrowUp, Square } from "lucide-vue-next"
 import type { ModelId } from "../../rpc/protocol"
 import { useModelsStore } from "../../stores/models"
+import { useSessionsStore } from "../../stores/sessions"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
 import { quoteInto } from "./quote"
 
@@ -30,8 +31,10 @@ const props = defineProps<{
   openLines?: () => void
 }>()
 const { t } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const models = useModelsStore()
+const sessions = useSessionsStore()
 const field = ref<HTMLTextAreaElement>()
 const modelMenu = ref<InstanceType<typeof ComposerModelMenu>>()
 const menuId = useId()
@@ -137,7 +140,8 @@ async function runCommand(name: typeof availableCommands.value[number]["name"]):
   else if (name === "lines") props.openLines?.()
   else {
     try {
-      await router.push({ name: "chat-new" })
+      const cwd = typeof route.params.sessionId === "string" ? sessions.byId.get(route.params.sessionId)?.cwd : undefined
+      await router.push({ name: "chat-new", ...(cwd === undefined ? {} : { query: { cwd } }) })
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)
     }
@@ -146,18 +150,16 @@ async function runCommand(name: typeof availableCommands.value[number]["name"]):
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.isComposing || composing.value || event.keyCode === 229) return
-  if (menuOpen.value) {
-    if (event.key === "Escape") {
-      event.preventDefault()
-      event.stopPropagation()
-      dismissed.value = true
-      return
-    }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault()
-      activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + matches.value.length) % matches.value.length
-      return
-    }
+  if (event.key === "Escape" && text.value.startsWith("/") && !dismissed.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    dismissed.value = true
+    return
+  }
+  if (menuOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    event.preventDefault()
+    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + matches.value.length) % matches.value.length
+    return
   }
   if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
     event.preventDefault()

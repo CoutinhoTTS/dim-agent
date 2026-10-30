@@ -26,28 +26,31 @@ export const useModelsStore = defineStore("models", () => {
     const connection = useConnectionStore()
     const client = connection.client
     error.value = ""
-    try {
-      const [list, managed] = await Promise.all([
-        client.call("provider.list", {}, readProviderList),
-        connection.supports("account.providers") ? client.call("account.providers", {}, readAccountProviders) : [],
-      ])
-      const usable = [...list.filter((provider) => provider.enabled), ...managed]
-      const catalogs = await Promise.allSettled(usable.map((provider) => client.call("provider.catalog", { providerId: provider.providerId }, readProviderCatalog)))
-      providers.value = usable.flatMap((provider, index) => {
-        const result = catalogs[index]!
-        if (result.status === "rejected") {
-          error.value = result.reason instanceof Error ? result.reason.message : String(result.reason)
-          return []
-        }
-        const catalog = result.value
-        if (catalog === undefined) return []
-        const disabled = new Set(catalog.disabledModelIds)
-        const models = catalog.models.filter((model) => model.unavailableReason === undefined && !disabled.has(model.id))
-        return models.length === 0 ? [] : [{ providerId: provider.providerId, name: provider.displayName, models }]
-      })
-    } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : String(cause)
-    }
+    const discovery = await Promise.allSettled([
+      client.call("provider.list", {}, readProviderList).then((list) => list.filter((provider) => provider.enabled)),
+      connection.supports("account.providers") ? client.call("account.providers", {}, readAccountProviders) : [],
+    ])
+    const candidates = discovery.flatMap((result) => {
+      if (result.status === "rejected") {
+        error.value = result.reason instanceof Error ? result.reason.message : String(result.reason)
+        return []
+      }
+      return result.value
+    })
+    const usable = [...new Map(candidates.map((provider) => [provider.providerId, provider])).values()]
+    const catalogs = await Promise.allSettled(usable.map((provider) => client.call("provider.catalog", { providerId: provider.providerId }, readProviderCatalog)))
+    providers.value = usable.flatMap((provider, index) => {
+      const result = catalogs[index]!
+      if (result.status === "rejected") {
+        error.value = result.reason instanceof Error ? result.reason.message : String(result.reason)
+        return []
+      }
+      const catalog = result.value
+      if (catalog === undefined) return []
+      const disabled = new Set(catalog.disabledModelIds)
+      const models = catalog.models.filter((model) => model.unavailableReason === undefined && !disabled.has(model.id))
+      return models.length === 0 ? [] : [{ providerId: provider.providerId, name: provider.displayName, models }]
+    })
   }
 
   /** The default model a new session in `cwd` would get, when the entry reports one. */

@@ -189,14 +189,16 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 Model discovery adds only `account.providers` to the web-readable methods. Its
 existing descriptors identify managed Providers without account identity or
 credentials. The client combines these descriptors with enabled entries from
-`provider.list`, then reads each Provider through `provider.catalog`. The catalog
+`provider.list`, merging by Provider ID with the managed descriptor taking
+precedence, then reads each Provider through `provider.catalog`. The catalog
 owner determines account availability; a missing catalog contributes no models.
 No `account.status`, login, logout, refresh or settings method is added to the web
 allowlist. Static Providers are not excluded merely because
 `credentialConfigured` is false: anonymous Providers require no credential, and
 the catalog already marks unavailable models. Disabled and unavailable models
-remain unselectable. Catalog read failures must not be presented as a successful
-empty list and must offer retry; successfully loaded Providers remain selectable.
+remain unselectable. Discovery and catalog reads settle independently: a failed
+read must offer retry without discarding successfully loaded Providers or being
+presented as a successful empty list.
 
 Each editable composer opens a command menu for a leading `/` followed by an optional
 command-name prefix, not for a slash inside ordinary prose. Search filters the
@@ -211,7 +213,7 @@ commands are handled locally rather than submitted as model input.
 | `model` | `/models` | Open the existing model picker when model selection is available |
 | `session` | `/branch <prompt>` | Create a line from the shown line's newest finished turn and use the inline prompt as its opening input |
 | `session` | `/lines` | Open the existing Session lines panel |
-| `session` | `/new` | Navigate to the existing new-Session page |
+| `session` | `/new` | Navigate to the existing new-Session page, seeded with the current Session's working directory |
 
 Commands whose action is unavailable are omitted. Native-only commands are not
 advertised. Shared actions follow the TUI's canonical names and argument flow,
@@ -226,8 +228,9 @@ never submit a recognized branch command as model input unless explicitly escape
 Only successful creation clears the submitted draft. The existing transcript
 actions and new-child buttons retain their point-based dialogs. `/btw` is not an
 alternate command name.
-Unknown slash-prefixed text remains ordinary input; dismissing the menu allows
-the user to send literal slash-prefixed text.
+Unknown slash-prefixed text remains ordinary input. Escape marks the current
+slash-prefixed draft as literal and preserves its text, including after the
+menu closes while typing `/branch <prompt>`; Enter then sends it as a message.
 
 ```text
 ┌──────────────────────────────────────────────────┐
