@@ -1,6 +1,8 @@
 //! Input history: the last submitted drafts of one working directory, kept in
 //! `<home>/input-history.json` (`{"version":1,"buckets":{cwd:[...]}}`, at most
-//! ten entries per directory, a repeated entry moves to the end).
+//! ten entries per directory, a repeated entry moves to the end). A file that
+//! does not parse is replaced by one holding the appended entry: history is a
+//! recall convenience, and refusing would stop recording for good.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -106,13 +108,19 @@ mod tests {
         }
     }
 
+    /// A file that does not parse is replaced by a valid one holding the
+    /// appended entry, so recording goes on instead of stopping for good.
     #[test]
-    fn a_corrupt_file_reads_as_empty() {
+    fn a_corrupt_file_is_replaced_by_one_holding_the_entry() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE), "not json").unwrap();
         assert!(load(dir.path(), "/x").is_empty());
         append(dir.path(), "/x", "ok").unwrap();
         assert_eq!(load(dir.path(), "/x"), vec!["ok"]);
+        let store: Store = serde_json::from_slice(&std::fs::read(path(dir.path())).unwrap())
+            .expect("the appended file must parse");
+        assert_eq!(store.version, 1);
+        assert_eq!(store.buckets["/x"], vec!["ok"]);
     }
 
     /// Concurrent CLIs appending to one home keep every entry.

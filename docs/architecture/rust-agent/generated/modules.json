@@ -3144,6 +3144,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/config.rs",
       "unexpandedMacros": [
+        "format",
         "serde_json::json"
       ]
     },
@@ -24522,8 +24523,10 @@
       "to": "dim_cli::ui::composer::history",
       "references": [
         "path FILE",
+        "path Store",
         "path append",
-        "path load"
+        "path load",
+        "path path"
       ]
     },
     {
@@ -24811,6 +24814,7 @@
       "to": "dim_cli::ui::config",
       "references": [
         "path path",
+        "path remove",
         "path text",
         "path write"
       ]

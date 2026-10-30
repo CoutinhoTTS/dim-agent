@@ -1,5 +1,8 @@
 //! Interface settings in `<home>/config.json`, one top-level key each; a
-//! write keeps the other keys, under the lock that makes it atomic.
+//! write keeps the other keys, under the lock that makes it atomic. A file
+//! that exists but does not hold a JSON object is refused: `write` and
+//! `remove` return its parse error and leave it as it was, while `read`
+//! treats it as absent and the defaults apply.
 
 use std::path::{Path, PathBuf};
 
@@ -16,8 +19,12 @@ pub fn read(home: &Path, key: &str) -> Option<Value> {
 
 /// Saves `value` under `key`; the error text on failure.
 pub fn write(home: &Path, key: &str, value: Value) -> Option<String> {
-    atomic::update(&path(home), None, |current| {
-        let mut config = stored(current).unwrap_or_else(|| serde_json::json!({}));
+    let file = path(home);
+    atomic::update(&file, None, |current| {
+        let mut config = match stored(current, &file)? {
+            Some(config) => config,
+            None => serde_json::json!({}),
+        };
         config[key] = value;
         Ok(Some(text(config)?))
     })
@@ -27,8 +34,9 @@ pub fn write(home: &Path, key: &str, value: Value) -> Option<String> {
 
 /// Removes `key`; the error text on failure.
 pub fn remove(home: &Path, key: &str) -> Option<String> {
-    atomic::update(&path(home), None, |current| {
-        let Some(mut config) = stored(current) else {
+    let file = path(home);
+    atomic::update(&file, None, |current| {
+        let Some(mut config) = stored(current, &file)? else {
             return Ok(None);
         };
         if let Some(map) = config.as_object_mut() {
@@ -40,11 +48,25 @@ pub fn remove(home: &Path, key: &str) -> Option<String> {
     .map(|error| error.to_string())
 }
 
-/// The stored object, when the file holds one.
-fn stored(current: Option<&[u8]>) -> Option<Value> {
-    current
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-        .filter(Value::is_object)
+/// The stored object, when the file holds one; a file that exists but does
+/// not hold a JSON object is an error naming the file and what is wrong.
+fn stored(current: Option<&[u8]>, file: &Path) -> std::io::Result<Option<Value>> {
+    let Some(bytes) = current else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not valid JSON: {error}", file.display()),
+        )
+    })?;
+    if !value.is_object() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} does not hold a JSON object", file.display()),
+        ));
+    }
+    Ok(Some(value))
 }
 
 fn text(config: Value) -> std::io::Result<Vec<u8>> {
@@ -141,6 +163,24 @@ mod tests {
         assert_eq!(std::fs::read(path(home)).unwrap(), before);
         assert_eq!(read(home, "kept"), Some(true.into()));
         assert_eq!(read(home, "lost"), None);
+    }
+
+    /// A file that exists but does not hold a JSON object is refused: both
+    /// `write` and `remove` return its parse error, and the bytes stay as
+    /// they were instead of being replaced by a file the change cannot keep.
+    #[test]
+    fn a_malformed_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        for malformed in [&b"{\"kept\": true, \"broken\": }"[..], b"[1, 2]"] {
+            std::fs::write(path(home), malformed).unwrap();
+            for error in [write(home, "lost", 1.into()), remove(home, "kept")] {
+                let error = error.expect("a malformed file must be reported");
+                assert!(error.contains("config.json"), "{error}");
+                assert_eq!(std::fs::read(path(home)).unwrap(), malformed);
+            }
+            assert_eq!(read(home, "kept"), None);
+        }
     }
 
     /// A file that cannot be read is not replaced by one holding a single
