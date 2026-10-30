@@ -1,0 +1,45 @@
+# Path rules that mark a merge visible without asking the L1 review agent.
+#
+# A dependency bump's diff is only version numbers; the behaviour change lives
+# upstream, so the agent has nothing to judge. Running a deterministic rule
+# through a nondeterministic model buys nothing, so these paths bypass it.
+#
+# Source and semantics: docs/eval/trigger-policy.md (L1 trigger section).
+# A merge matched here is recorded in the ledger with l1_trigger = "path_rule".
+#
+# The control plane is not listed. The L1 prompt, this file, the runner and the
+# scheduling scripts are not the agent's model-visible surface: running L2 for
+# them compares the same agent with itself and only spends machine time.
+#
+# That exemption has no enforcement yet: there is no CODEOWNERS and no fixed
+# test covering the eval control plane, so it rests on whoever edits these
+# files knowing they are changing the ruler. A CODEOWNERS entry for
+# benchmarks/** and docs/eval/** would make it a mechanism. The task corpus and
+# the baselines are the ruler too; changing them calls for a new baseline, not
+# a gate run.
+
+schema_version = "1"
+
+[[rule]]
+id = "lockfile"
+reason = "a dependency change shows only as version numbers; provider SDK and runtime defaults can change silently"
+paths = [
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  "runtime/package-lock.json",
+  "runtime/plugins/*/package-lock.json",
+]
+
+[[rule]]
+id = "vendored-deps"
+reason = "vendored code changes upstream runtime behaviour; the diff says nothing about this repository's code"
+paths = [
+  "vendor/**",
+]
+
+[[rule]]
+id = "provider-catalog"
+reason = "the catalog decides provider routing, model choice and sampling (axis two); default-catalog.json is a large generated file the agent cannot and need not read"
+paths = [
+  "crates/dim-app-server/resources/default-catalog.json",
+]
