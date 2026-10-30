@@ -495,11 +495,22 @@ async fn a_checkpointed_step_renders_its_context_once() {
         branch_id: "main".into(),
     };
     let default = HistoryRenderer::default();
-    let snapshot = store
-        .latest_snapshot(&key, through, default.checkpoint_interpreter)
-        .await
-        .unwrap()
-        .unwrap();
+    // The step saves the snapshot after it publishes the fact, so wait for the
+    // save instead of reading the snapshot before it exists.
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = store
+                .latest_snapshot(&key, through, default.checkpoint_interpreter)
+                .await
+                .unwrap();
+            if let Some(snapshot) = snapshot {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the compaction step saves its snapshot");
     let events = session.history("main", None).await.unwrap();
     let anchor = events
         .iter()
