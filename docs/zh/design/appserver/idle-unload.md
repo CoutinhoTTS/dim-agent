@@ -330,7 +330,6 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 | 卸载检查 | agents.rs | 有原生存储时由 `AgentsPlugin` 为本代索引启动；本代的清理停止它并等待其完成。其标记持有各自的槽，每一轮结束时移除可以移除的槽（§6.1、§6.4） |
 | 读取关闭标志 | agents.rs `session_directory`、`session_available` | 查找槽而不是创建槽（§6.4） |
 | 不取租约的读取 | agents.rs `session_directory`、`session_summary`、`read_page` | 已装载的 Session 在读取过程中被释放时，改读存储（D8） |
-| Agent 的已卸载 Session | agents.rs `unloaded_sessions` | 该 Agent 已存储、在本进程中既未装载也未关闭的 Session；由 Agents 报告，Collaboration 不再用它们结束被拥有 Agent（其记录随成员行，§7） |
 | 删除已卸载的 Session | agents.rs `delete`、`UnloadedSessionDeleted` | 一个既未装载也未关闭的 Session 的行删除后，把它的 Agent id 和 Session id 告知进程状态的所有者。它在进程根上发出，因为删除可能比它所在的索引代活得更久。Collaboration 像监听 `SessionRestored` 一样监听它，按关闭后的方式结束该 Session，并在装载时核对因重载而错过的删除（§7） |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | 一个字段及其默认值，属于装配负责线（zerob13），与 S2 在那里加的一行相同 |
 

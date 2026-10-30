@@ -376,7 +376,6 @@ creation drops those of Sessions no longer loaded, as before.
 | Unload pass | agents.rs | Started by `AgentsPlugin` for its index generation when a native store is present; stopped and drained by the generation's cleanup. Its marks hold their slots, and it ends by removing the slots that can go (§6.1, §6.4) |
 | Closed-flag reads | agents.rs `session_directory`, `session_available` | Look the slot up instead of creating it (§6.4) |
 | Lease-free reads | agents.rs `session_directory`, `session_summary`, `read_page` | Fall back to the store when the loaded Session is released under them (D8) |
-| Unloaded Sessions of an Agent | agents.rs `unloaded_sessions` | The Agent's stored Sessions that are neither loaded nor closed in this process; Agents reports them and Collaboration no longer counts them to end an owned Agent, whose record follows its member rows (§7) |
 | Delete of an unloaded Session | agents.rs `delete`, `UnloadedSessionDeleted` | Once the rows of a Session that was neither loaded nor closed are gone, announces its Agent and Session ids to the owners of process state. It emits on the process root, because a delete can outlive its index generation. Collaboration listens as it does for `SessionRestored`, ends the Session as after a close, and reconciles at load what a reload made it miss (§7) |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | One field with its default, in the assembly lane (zerob13), as S2 added one line there |
 

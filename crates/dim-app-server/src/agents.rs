@@ -597,26 +597,6 @@ impl AgentIndex {
     pub(crate) fn session_available(&self, id: &str) -> bool {
         self.host_by_session(id).is_some() && !self.closed(id)
     }
-    /// The unloaded Sessions of Agent `agent_id`: stored, not loaded, and
-    /// neither closed nor deleted in this process, so the next `acquire`
-    /// restores each. Only a native store unloads.
-    pub(crate) fn unloaded_sessions(&self, agent_id: &str) -> Vec<String> {
-        if self.session_store.is_none() {
-            return vec![];
-        }
-        let inner = self.directory.inner.lock().expect("agent index");
-        let Some(entry) = inner.agents.get(agent_id) else {
-            return vec![];
-        };
-        inner
-            .versions
-            .iter()
-            .filter(|(id, (owner, _))| {
-                owner == agent_id && entry.host.agent.get_session(id).is_none() && !inner.closed(id)
-            })
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
     pub(crate) async fn read_page(
         &self,
         id: &str,
@@ -1241,7 +1221,7 @@ impl AgentIndex {
                 .sessions()
                 .iter()
                 .any(|session| !session.is_closing())
-        }) || !self.unloaded_sessions(agent_id).is_empty()
+        })
     }
     /// Removes what a delegation cannot leave behind: an owned Agent with no
     /// member Session, and one whose owner Session is gone with its members.
@@ -1288,7 +1268,7 @@ impl AgentIndex {
         let session = &usage.session;
         if session.config().collaboration_role == CollaborationRole::Member {
             return Err(AgentError::InvalidInput(
-                "a member conversation is read-only".into(),
+                "a member conversation cannot be forked".into(),
             ));
         }
         let prefix = async {

@@ -4474,7 +4474,7 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
         forked["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("read-only"),
+            .contains("cannot be forked"),
         "{forked}"
     );
     drop(client);

@@ -430,7 +430,7 @@ ProjectionCheckpoint = {
 
 ### #593 v26 格式决定
 
-[Collaboration](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)（#593）的格式决定：升级到 **v26**，从 v25 原地升级。
+[Collaboration](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)（#593）的格式决定：升级到 **v26**，从 v25 原地升级。若在本实现之前另有格式变更先合入（[#671](https://github.com/arcships/dim/pull/671) 为 v26、[#717](https://github.com/arcships/dim/pull/717) 为 v27），实现取当时的下一个编号，本节其余内容与列定义不随编号改变。
 
 - **只加两个可空列与两个索引**：`agents.owner_session_id TEXT REFERENCES agent_sessions(session_id)` 与 `agent_sessions.leader_session_id TEXT REFERENCES agent_sessions(session_id)`，以及 `agents_by_owner`、`agent_sessions_by_leader`。其他表、列、持久化 JSON、内容寻址与既有索引不变。
   - `agents.owner_session_id` 非空表示该 leader Session 拥有这个私有 Agent；NULL 表示公开 Agent（默认 Agent 与 `agent.create` 创建的）。它就是"临时 Agent"的唯一标志，不另设布尔列。
