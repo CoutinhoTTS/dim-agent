@@ -160,7 +160,7 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
   其他组合，祖先链未填充 ............................ store.read / read_segments    同现在
 ```
 
-- **每次存储读取。** 本分支接缝服务对本分支已存储事件的每次读取：`local`、`history` 和 `context` 的本分支段，以及锚点在本分支上时 `context_with_checkpoint` 的锚点读取（`records(branch, snapshot.sequence, cut)`）。祖先接缝服务对祖先的每次读取：`history` 和 `context` 的祖先段、`history_records` 的单段捷径（只有一段时经按分支的读取而不是 `read_segments` 读取；新子分支的 `history(Some(0))` 就是这样的读取），以及锚点在祖先上时的锚点读取。Timeline 中没有其他读取已存储事件的路径。
+- **每次存储读取。** 本分支接缝服务对本分支已存储事件的每次读取：`local`、`history` 和 `context` 的本分支段，以及锚点在本分支上时 `context_with_checkpoint` 的锚点读取（`records(branch, snapshot.sequence, snapshot.sequence)`，锚点行位于原子批次内部时改为读取该段）。祖先接缝服务对祖先的每次读取：`history` 和 `context` 的祖先段、`history_records` 的单段捷径（只有一段时经按分支的读取而不是 `read_segments` 读取；新子分支的 `history(Some(0))` 就是这样的读取），以及锚点在祖先上时的锚点读取。Timeline 中没有其他读取已存储事件的路径。
 
 - **按序号切片。** 切片取序号落在区间内的条目（在 `event.sequence` 上二分查找），所以其中的事件就是存储对该区间的返回：每个序号一个事件，合并的输出行已拆成各自的事件。
 - **终点检查。** 提供切片 `a..=e` 之前（本分支部分的 `e` 是 `min(b, h)`，祖先段的 `e` 是该段的终点），先应用存储对区间的规则：起点可以位于原子批次内部，终点必须是批次边界。若 `e` 处条目的 `batch_end > e`，读取以 `AgentError::InvalidInput("sequence {e} is inside an atomic batch")` 失败，即两种存储（`MemoryTimelineStore` 与 SQLite 存储）返回的错误，不提供任何事件。若序号 1 和 2 是一个已持久化的批次且 `h >= 2`，无论副本是否已填充，`local(..=1)`、`history(Some(1))` 和 `context(1)` 都会失败，而 `local(..=2)` 返回事件 1 和 2，`local(2..=2)` 返回事件 2。`h` 是批次边界，所以 `b > h` 时缓存部分总能通过检查，`b` 由现有的 `h` 之后的读取检查。每个祖先切片都用同一个函数执行同样的检查：祖先段终止于它的截点，填充读取已经检查过截点，所以现有读者都不会让它失败，但没有切片会绕过它被提供。
@@ -238,7 +238,7 @@ Timeline 的每次已提交历史读取都经过同一条内部路径，它把�
 | `branch/resume` 时的打开处理器 | 1 次全量（ToolBinding） | 3 次，从 `resume` 起（ToolBinding、Prompt 两次） | 切片，各带一个单事件尾段 |
 | Wait、BackgroundExec、Collaboration（产品装配，未测） | 3 次全量 | 3 次全量 | 切片 |
 
-这里的一次检查点读取是两次存储调用：从快照序号到截点的锚点读取，以及从 `resume` 起的上下文，10,000 条 product 事件时分别是 354 和 212 条事件。
+这里的一次检查点读取是两次存储调用：快照序号那一个锚点事件的读取，以及从 `resume` 起的上下文，10,000 条 product 事件时分别是 1 和 212 条事件。
 
 子分支现在除上述本分支读取外，还要读五次祖先链：TimelineTree 在父分支上的截点校验（读取 C）、Permission、Prompt，以及 ToolBinding 两次。有副本后，它读一次本分支部分、两次祖先链（读取 C 与一次填充）。在 v17 上跟踪一个截于 `main` 第 3,002 条事件的子分支：它自己的事件被读了 11 次，`main` 的前缀被读了 5 次；原型下各两次（本分支：扫描和填充；前缀：读取 C 和填充），外加一个单事件尾段。
 
