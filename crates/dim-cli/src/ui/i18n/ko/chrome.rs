@@ -445,8 +445,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 지우기, 두 번 누르면 종료 · 빈 초안에서 Ctrl+D 종료"
         }
         "Fullscreen" => "전체 화면",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown 스크롤 · Home/End 맨 위/아래 · Tab 메시지 선택, e 편집, q 인용"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 스크롤 · Home/End 맨 위/아래 (초안이 비어 있을 때) · Tab 메시지 선택, e 편집, q 인용"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "휠 스크롤 · 드래그 선택·복사 · 링크 클릭 시 열기, 도구 그룹 클릭 시 펼치기"

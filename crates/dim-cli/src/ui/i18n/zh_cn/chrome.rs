@@ -411,8 +411,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }
         "Fullscreen" => "全屏",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑，q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 (草稿为空时) · Tab 选择消息，e 编辑，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滚轮滚动 · 拖动选择并复制 · 点击链接打开，点击工具组展开"

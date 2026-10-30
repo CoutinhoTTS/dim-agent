@@ -241,10 +241,11 @@ ancestor parts [(branch, a..=b), ...]
 
 - **Every stored read.** The own seam serves every read of the branch's own stored events: `local`, the own segment
   of `history` and `context`, and the anchor read of `context_with_checkpoint` (`records(branch, snapshot.sequence,
-  cut)`) for an anchor on the branch itself. The ancestor seam serves every read of an ancestor's: the ancestor
-  segments of `history` and `context`, the single-segment shortcut of `history_records` (one segment is read through
-  the per-branch read instead of `read_segments`; a new child's `history(Some(0))` is such a read), and the anchor
-  read for an anchor on an ancestor. No other path in the Timeline reads stored events.
+  snapshot.sequence)`, or the segment read when the anchor row is inside an atomic batch) for an anchor on the branch
+  itself. The ancestor seam serves every read of an ancestor's: the ancestor segments of `history` and `context`, the
+  single-segment shortcut of `history_records` (one segment is read through the per-branch read instead of
+  `read_segments`; a new child's `history(Some(0))` is such a read), and the anchor read for an anchor on an ancestor.
+  No other path in the Timeline reads stored events.
 
 - **Slices by sequence.** A slice takes the entries whose sequence lies in the range (a binary search on
   `event.sequence`), so its events are what the store returns for that range: one event per sequence, merged output
@@ -373,8 +374,8 @@ Reads of `main` in one restore of a `main`-only Session, from the traces of §2.
 | Opening handlers on `branch/resume` | 1 full (ToolBinding) | 3 from `resume` (ToolBinding, Prompt twice) | slices, each with a one-event tail |
 | Wait, BackgroundExec, Collaboration (product assembly, not measured) | 3 full | 3 full | slices |
 
-A checkpoint read here is two store calls: the anchor read from the snapshot's sequence to the cut and the context from
-`resume`, 354 and 212 events at 10,000 product events.
+A checkpoint read here is two store calls: the anchor read of the snapshot's sequence and the context from `resume`, 1
+and 212 events at 10,000 product events.
 
 A child branch adds, today, its own reads as above and five reads of its ancestry: TimelineTree's cut validation on the
 parent (read C), Permission, Prompt and ToolBinding twice. With the copy it adds its own part once and its ancestry

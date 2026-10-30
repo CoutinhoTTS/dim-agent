@@ -485,8 +485,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"
         }
         "Fullscreen" => "Vollbild",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown scrollen · Home/End Anfang/Ende · Tab Nachricht wählen, e bearbeiten, q zitieren"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown scrollen · Home/End Anfang/Ende (bei leerem Entwurf) · Tab Nachricht wählen, e bearbeiten, q zitieren"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "Mausrad scrollen · ziehen markiert+kopiert · Klick öffnet Link, klappt Tool-Gruppe aus"
