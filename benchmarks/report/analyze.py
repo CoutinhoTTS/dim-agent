@@ -175,7 +175,8 @@ def tail(path: Path, count: int) -> str:
 def without_expected(text: str) -> str:
     """Drop the answer a verifier may print. The analysis prompt goes to an
     external endpoint, and the answer is not ours to send."""
-    return re.sub(r"^expected:.*$", "expected: <redacted>", text, flags=re.MULTILINE)
+    text = re.sub(r"(?im)(expected\s*:).*$", r"\1 <redacted>", text)
+    return re.sub(r'(?i)("expected"\s*:\s*)("[^"]*"|[^,}\n]+)', r'\1"<redacted>"', text)
 
 
 def window_changes(repo: Path, run: dict) -> tuple[str, list[str]]:
@@ -278,7 +279,8 @@ def analyze(run_dir: Path, repo: Path, known: dict,
             evidence["outcome"] += (f"; the task failed {failure.failed_trials} of its "
                                     f"{failure.scored_trials} scored trials, this is the first")
         try:
-            reply = parse_reply(ask(PROMPT.format(known=known_text, changes=changes, **evidence)))
+            prompt = without_expected(PROMPT.format(known=known_text, changes=changes, **evidence))
+            reply = parse_reply(ask(prompt))
         except Exception as error:  # noqa: BLE001 - one bad reply must not lose the night
             failure.error = f"{type(error).__name__}: {error}"[:300]
             # Already failing: not news, whatever tonight's reply was.

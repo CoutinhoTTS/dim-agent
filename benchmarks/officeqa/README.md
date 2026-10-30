@@ -22,8 +22,11 @@ L2 的第二个语料：Databricks OfficeQA Pro 的 133 道 hard 题。设计与
 | tolerance | 0 |
 
 失败分析会把题目文本、判分输出末尾和 Timeline 末段发给分析模型（默认 DeepSeek），题目文本
-因此离开评测机；这是已知并接受的决定。标准答案不进这条链：verifier 不打印 `expected`，
-`report/analyze.py` 在发给模型前再抹一次，`report/issues.py` 在写进 issue 前抹第三次。
+因此离开评测机；这是已知并接受的决定。标准答案不进这条链：`report/analyze.py` 在发给模型前
+过滤 `expected`，`report/issues.py` 在写进 issue 前再过滤一次。当前 pin 的任务树早于模板
+改动，verifier 仍会打印 `expected`，现在靠这两层过滤拦住；新模板和重新生成的任务树不再打印，
+重新生成并移动 pin 后 verifier 这一层才真正生效（见“升级 pin”）。当前 pin 的重采另开
+follow-up，不在这条改动里。
 
 语料镜像是 harbor officeqa adapter 公开在 Docker Hub 上的那个，没有自建。采用前把镜像内
 697 个文件的 sha256 与上表 revision 的 `treasury_bulletins_parsed/transformed/` 逐个比对过，
@@ -86,7 +89,8 @@ python3 benchmarks/daily_run.py --run-type baseline --head <commit> \
 ```
 
 任务树、`MANIFEST.json` 与新 baseline 放在同一个 MR 里。换语料镜像、换 tolerance、
-升级 `reward.py` 都会移动 pin，都要走这一整套。
+升级 `reward.py` 都要走这一整套。改 `officeqa/template/` 也一样：模板本身不会移动 pin，
+必须重新生成任务树、更新 `MANIFEST.json` 并重冻 baseline；只改模板，评测机仍跑旧任务树。
 
 ## 定时运行
 

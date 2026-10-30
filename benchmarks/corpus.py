@@ -29,23 +29,43 @@ def verify(manifest_path: Path, tasks_dir: Path) -> list[str]:
     """What differs between ``tasks_dir`` and the pinned manifest; empty if nothing."""
     try:
         pinned = json.loads(manifest_path.read_text())
-    except (OSError, ValueError) as error:
+        tasks = pinned["tasks"]
+        tree_digest = pinned["tree_digest"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
         return [f"cannot read the pinned manifest {manifest_path}: {error}"]
+    if not isinstance(tasks, dict) or not isinstance(tree_digest, str):
+        return [f"cannot read the pinned manifest {manifest_path}: tasks/tree_digest missing or malformed"]
     if not tasks_dir.is_dir():
         return [f"{tasks_dir} is not a directory"]
-    tasks = pinned["tasks"]
+    try:
+        entries = list(tasks_dir.iterdir())
+    except OSError as error:
+        return [f"cannot read {tasks_dir}: {error}"]
     problems = []
-    if hashlib.sha256(json.dumps(tasks, sort_keys=True).encode()).hexdigest() != pinned["tree_digest"]:
+    if hashlib.sha256(json.dumps(tasks, sort_keys=True).encode()).hexdigest() != tree_digest:
         problems.append(f"{manifest_path}: tree_digest does not match its own task list")
     copy = tasks_dir / "MANIFEST.json"
-    if not copy.is_file() or json.loads(copy.read_text()) != pinned:
-        problems.append(f"{copy} differs from the pinned {manifest_path}")
+    try:
+        copied = json.loads(copy.read_text())
+    except (OSError, ValueError) as error:
+        problems.append(f"{copy} cannot be read: {error}")
+    else:
+        if copied != pinned:
+            problems.append(f"{copy} differs from the pinned {manifest_path}")
     for name, entry in sorted(tasks.items()):
-        if not (tasks_dir / name).is_dir():
+        if not isinstance(entry, dict) or not isinstance(entry.get("digest"), str):
+            problems.append(f"{name}: malformed entry in the pinned manifest")
+        elif not (tasks_dir / name).is_dir():
             problems.append(f"{name}: missing")
-        elif digest_dir(tasks_dir / name) != entry["digest"]:
-            problems.append(f"{name}: content differs from its pinned digest")
-    extra = sorted(p.name for p in tasks_dir.iterdir()
+        else:
+            try:
+                digest = digest_dir(tasks_dir / name)
+            except OSError as error:
+                problems.append(f"{name}: cannot be read: {error}")
+            else:
+                if digest != entry["digest"]:
+                    problems.append(f"{name}: content differs from its pinned digest")
+    extra = sorted(p.name for p in entries
                    if p.is_dir() and not p.name.startswith(".") and p.name not in tasks)
     problems += [f"{name}: not in the pinned manifest" for name in extra]
     return problems

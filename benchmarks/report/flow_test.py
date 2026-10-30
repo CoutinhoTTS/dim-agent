@@ -374,6 +374,19 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertNotIn("1002", track.body)
         self.assertNotIn("1002", track.news)
 
+    def test_an_expected_answer_is_redacted_in_other_formats(self) -> None:
+        """A verifier or a model may print the answer with different casing,
+        indentation, or as JSON; none of those forms may reach the prompt or
+        the public issue."""
+        reply = {"category": "agent", "cause": "Wrong.", "evidence": "Expected: 1002",
+                 "same_as_known": False, "suspects": []}
+        _, _, track, _ = self.night(
+            {"answer": 0.0}, {"answer": reply}, {},
+            verifier='  Expected: 1002\n{"expected": "1002"}\n')
+        self.assertNotIn("1002", self.prompts[0])
+        self.assertNotIn("1002", track.body)
+        self.assertNotIn("1002", track.news)
+
     def test_an_unscoreable_night_leaves_the_body_as_last_measured(self) -> None:
         """A tracked task left unscored tonight must not drop out of the body."""
         reply = {"category": "agent", "cause": "Broke.", "evidence": "x",

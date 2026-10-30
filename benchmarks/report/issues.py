@@ -104,7 +104,8 @@ def redact(text: str) -> str:
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", text)
     text = re.sub(r"\b(sk-|ghp_|gho_|ghs_|github_pat_|hf_|xox[abprs]-)[A-Za-z0-9_-]{8,}",
                   "<token>", text)
-    text = re.sub(r"expected:.*", "expected: <redacted>", text)
+    text = re.sub(r"(?im)(expected\s*:).*$", r"\1 <redacted>", text)
+    text = re.sub(r'(?i)("expected"\s*:\s*)("[^"]*"|[^,}\n]+)', r'\1"<redacted>"', text)
     return re.sub(r"\bAKIA[0-9A-Z]{16}\b", "<token>", text)
 
 

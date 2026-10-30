@@ -68,6 +68,26 @@ class CorpusPinFlowTest(unittest.TestCase):
         self.assertEqual(corpus.verify(self.pinned, self.checkout),
                          [f"{self.checkout / 'MANIFEST.json'} differs from the pinned {self.pinned}"])
 
+    def test_a_malformed_pinned_manifest_is_refused_without_a_traceback(self) -> None:
+        self.pinned.write_text('{"tasks": {}}')
+        self.assertIn("cannot read the pinned manifest",
+                      corpus.verify(self.pinned, self.checkout)[0])
+
+    def test_a_malformed_checkout_manifest_is_refused_without_a_traceback(self) -> None:
+        (self.checkout / "MANIFEST.json").write_text("{")
+        problems = corpus.verify(self.pinned, self.checkout)
+        self.assertTrue(any("cannot be read" in problem for problem in problems), problems)
+
+    def test_a_malformed_task_entry_is_refused(self) -> None:
+        manifest = json.loads(self.pinned.read_text())
+        manifest["tasks"]["alpha"] = {"upstream": "tb"}
+        manifest["tree_digest"] = hashlib.sha256(
+            json.dumps(manifest["tasks"], sort_keys=True).encode()).hexdigest()
+        self.pinned.write_text(json.dumps(manifest))
+        (self.checkout / "MANIFEST.json").write_text(json.dumps(manifest))
+        self.assertEqual(corpus.verify(self.pinned, self.checkout),
+                         ["alpha: malformed entry in the pinned manifest"])
+
 
 if __name__ == "__main__":
     unittest.main()

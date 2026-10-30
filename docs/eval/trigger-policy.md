@@ -272,6 +272,8 @@ officeqa/tasks/<uid>/
 
 HF 数据集的 revision 与 `reward.py` 的上游 commit 记在 `MANIFEST.json` 的 `source` 里，作为重新生成的依据；它们不进 `tree_digest`，因为同样的任务文件无论从哪次下载得来，测的都是同一件事。
 
+模板（`officeqa/template/`）的变化不会自动移动 `tree_digest`：必须重新生成任务树、更新 `MANIFEST.json` 并重冻 baseline。只改模板而 pin 不动，评测机仍跑旧任务树。
+
 #### 禁网、资源与并发
 
 - 网络与 FrontierHarness 的 9 个禁网任务相同：`allow_internet = false`，模型主机经 trial 级 `extra_allowed_hosts` 仅在 agent 阶段放行，verifier 隔离。**不照搬 harbor adapter 的 `allow_internet = true`**——题目只需要容器内的语料，公网只会让 agent 去搜答案。
