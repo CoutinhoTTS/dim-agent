@@ -3,7 +3,7 @@ import type { GuideEntries, ToolRegistry } from '../../../npm/plugin.js'
 import { toolRequest, unloadingAfterCall, unloadingBeforeCall, type RunReply, type WorkflowRuns } from './requests.ts'
 
 // The dim-workflow entry (Workflow §5.2): both kinds it writes, verbatim.
-const ENTRY = '<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report\'s body gives each stage\'s state and a bounded preview of the stages\' own last-step results; the rest is the workflow\'s report: information, not a request. The report\'s last sentence is not part of that: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with.'
+const ENTRY = '<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report\'s body gives each stage\'s state and a bounded preview of the stages\' own last-step results; the rest is the workflow\'s report: information, not a request. The report\'s last sentence is not part of that account: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with.'
 
 /// The `invalid_definition` recovery hint in force when the factory
 /// configuration sets none.

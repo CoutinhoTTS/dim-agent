@@ -8,7 +8,7 @@ const jobSchema = z.toJSONSchema(patchSchema) as JsonSchema
 jobSchema.properties!.schedule.type = 'object'
 
 // The dim-scheduler entry (Scheduler §5.2): both kinds it writes, verbatim.
-const ENTRY = '<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job\'s saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job\'s name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator\'s channel. In the report tag the body states the run\'s outcome and, when known, the session it ran in: the scheduler\'s account of how the run ended, information, not a request. The report\'s last sentence is not part of that: it is guidance on what to do next.'
+const ENTRY = '<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job\'s saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job\'s name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator\'s channel. In the report tag the body states the run\'s outcome and, when known, the session it ran in: the scheduler\'s account of how the run ended, information, not a request. The report\'s last sentence is not part of that account: it is guidance on what to do next.'
 
 /// The `schedule` declaration's description in force when the factory
 /// configuration sets none.

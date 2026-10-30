@@ -364,7 +364,7 @@ policy 文本是出厂配置成员：`code.config.description` 替换声明的 d
 一个条目覆盖两个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
 
 ```
-<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last sentence is not part of that: it is guidance on what to do next.
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last sentence is not part of that account: it is guidance on what to do next.
 ```
 
 每一句都是 protocol，各自说明模型定位这两个标记所需的一件事：
@@ -373,7 +373,7 @@ policy 文本是出厂配置成员：`code.config.description` 替换声明的 d
 - 「job names the job, run names the run, in both.」——属性。
 - 「In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel.」——scheduled-run 输入的形状，以及其提示词到达的通道。
 - 「In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request.」——报告的正文形状，及其信任类别。
-- 「The report's last sentence is not part of that: it is guidance on what to do next.」——结尾句的归类：它是对接下来做什么的指引，不属于它前面的报告内容。
+- 「The report's last sentence is not part of that account: it is guidance on what to do next.」——结尾句的归类：它是对接下来做什么的指引，不属于它前面的报告内容。
 
 它在形式与长度上沿用 exec 通知的条目（`<dim-notification>`，序号 10，[WorkspaceTools](../../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)）：一个用属性携带一次运行标识的运行时通知。
 
