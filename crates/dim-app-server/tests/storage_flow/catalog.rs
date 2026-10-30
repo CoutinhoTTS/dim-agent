@@ -173,7 +173,7 @@ async fn catalog_projection_preserves_the_preview_window_and_commits_atomically(
         .into();
     store.close().await.unwrap();
     db.close().await.unwrap();
-    connection.execute_batch("DROP TABLE session_catalog; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 21)); INSERT INTO agent_store_format VALUES (21)").unwrap();
+    connection.execute_batch("CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE session_catalog; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 21)); INSERT INTO agent_store_format VALUES (21)").unwrap();
     drop(connection);
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), Some(21));
