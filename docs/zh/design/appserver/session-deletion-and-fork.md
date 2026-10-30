@@ -96,12 +96,12 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | exec 输出和转存的 `read` 结果 | `<数据库目录>/command-output/<S>/` | 第 3 步 |
 | 已加载实例、租约、订阅、在途使用 | 进程内存 | 第 2 步 |
 | 协议版本、准入槽位、不可用 Session 条目 | Agents 内存 | 第 6 步 |
-| 指向 S 的 Collaboration 关系，以及 S 领导或拥有的 Agent | 持久：`agent_sessions.leader_session_id` 与 `agents.owner_session_id`（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）；Collaboration 的关系由它们重建 | Agents 随 leader 一起删除 Team：每个成员自己的删除、Agent 记录，最后是 S。Collaboration 在观察到成员关闭（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `session_ended`）或删除已卸载成员时移除关系，装载时重建其余（[空闲卸载 §7](idle-unload.md#7-竞争与交互)） |
+| 指向 S 的 Collaboration 关系、S 领导的成员 Session 与 S 拥有的 Agent | 持久：`agent_sessions.leader_session_id` 与 `agents.owner_session_id`（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）；Collaboration 的关系由它们重建 | Agents 随 leader 一起删除 Team：每个成员自己的删除（其行由 SessionStore 删除）、Agents 拥有的 Agent 记录，最后是 S。Collaboration 在观察到成员关闭（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `session_ended`）或删除已卸载成员时移除关系，装载时重建其余（[空闲卸载 §7](idle-unload.md#7-竞争与交互)） |
 
 删除不移除：
 
 - **其他所有者记录中指向 S 的内容**，例如 Scheduler 与 Workflow 存在 `pluginFiles` 中的运行记录。这些所有者使用该 id 时会得到 `session_closed`，与 Session 已关闭时相同。
-- **其他 Session。** S 的分叉是有自己行的 Session。被删除 leader 的成员与它拥有的 Agent 属于它的 Team，随它一起删除（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）；它们不是其他所有者的记录。
+- **其他 Session。** S 的分叉是有自己行的 Session。被删除 leader 的成员与它拥有的 Agent 属于它的 Team，随它一起删除（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)）：SessionStore 删除每个成员的行，Agents 删除 Agent 记录，各自拥有自己的记录。
 - **宿主配置**（按工作区的 Provider 选择、MCP 项目启用），不属于任何 Session。
 
 ### 3.4 客户端与订阅
