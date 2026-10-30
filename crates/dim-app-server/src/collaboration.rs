@@ -698,8 +698,10 @@ struct Op {
 }
 struct BranchRecord {
     ctx: Ctx,
-    approvals: BTreeMap<String, Arc<approvals::Relay>>,
+    dispatcher: Arc<Dispatcher>,
+    approvals: BTreeMap<String, approvals::Route>,
     approval_calls: BTreeMap<(String, String), String>,
+    observed_approvals: BTreeMap<String, Arc<approvals::Observation>>,
     timeline: Arc<Timeline>,
     tasks: TaskTracker,
     /// Cancels waiting for members on unload.
@@ -1246,6 +1248,12 @@ impl CollaborationSession {
         event: Arc<AgentEvent>,
     ) -> BoxFuture<'static, dim_agent_runtime::Result<()>> {
         self.approval_event(branch_id, &event);
+        if matches!(
+            event.kind,
+            EventKind::ApprovalRequest(_) | EventKind::InputMessage(_)
+        ) {
+            self.observe_member_approvals(branch_id);
+        }
         match &event.kind {
             EventKind::TurnStart(data) => {
                 self.with_branch(branch_id, |branch| {
@@ -2650,10 +2658,11 @@ impl DynPlugin for CollaborationTimelinePlugin {
                     "collaboration/delivered",
                     "collaboration/result",
                     "input/message",
-                    "input/applied",
+                    "input/consumed",
                     "input/deleted",
                     "step/tool-call",
                     "step/tool-result",
+                    "approval/request",
                 ],
                 move |event| {
                     let gate = gate.clone();
@@ -2698,8 +2707,10 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 branch_id.clone(),
                 BranchRecord {
                     ctx: ctx.clone(),
+                    dispatcher: dispatcher.clone(),
                     approvals: BTreeMap::new(),
                     approval_calls: BTreeMap::new(),
+                    observed_approvals: BTreeMap::new(),
                     timeline,
                     tasks,
                     abort: CancellationToken::new(),
@@ -2717,6 +2728,16 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 },
             );
             drop(rebuilding);
+            if service.role == CollaborationRole::Member {
+                let observer = service.clone();
+                let observed = branch_id.clone();
+                let activation = phase.clone();
+                cleanup_tasks.spawn(async move {
+                    if activation.activated().await {
+                        observer.observe_member_approvals(&observed);
+                    }
+                });
+            }
             if !stale_inputs.is_empty() {
                 cleanup_tasks.spawn(async move {
                     if !phase.activated().await {

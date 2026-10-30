@@ -81,6 +81,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tokio::select",
         "vec"
       ]
@@ -5126,6 +5127,7 @@
         "path MEMBER_APPROVAL_ALLOW",
         "path MEMBER_APPROVAL_GET",
         "path MemberApprovalDetail",
+        "path MemberApprovalDetail::Ended",
         "path MemberApprovalDetail::Pending",
         "use dim_agent_types::MEMBER_APPROVAL_ALLOW",
         "use dim_agent_types::MEMBER_APPROVAL_GET",
@@ -15762,7 +15764,8 @@
       "to": "dim_app_server::collaboration::approvals",
       "references": [
         "mod approvals",
-        "path approvals::Relay",
+        "path approvals::Observation",
+        "path approvals::Route",
         "path approvals::install"
       ]
     },
@@ -15845,15 +15848,10 @@
       "from": "dim_app_server::collaboration::approvals",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
-        "path SessionBroadcast",
         "path SessionNotice",
         "path notify",
-        "path session_channel",
-        "use dim_agent_capabilities::session_broadcast::SessionBroadcast",
-        "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent",
         "use dim_agent_capabilities::session_broadcast::SessionNotice",
-        "use dim_agent_capabilities::session_broadcast::notify",
-        "use dim_agent_capabilities::session_broadcast::session_channel"
+        "use dim_agent_capabilities::session_broadcast::notify"
       ]
     },
     {
@@ -15864,13 +15862,6 @@
         "path ToolHandler",
         "path ToolRegistry",
         "path definition"
-      ]
-    },
-    {
-      "from": "dim_app_server::collaboration::approvals",
-      "to": "dim_agent_runtime::agent",
-      "references": [
-        "path Session"
       ]
     },
     {
@@ -15904,17 +15895,18 @@
         "path AgentEvent",
         "path ApprovalDecision::Allow",
         "path ApprovalDecision::Deny",
-        "path ApprovalRequestData",
         "path EventKind::CollaborationCancel",
         "path EventKind::CollaborationClose",
-        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
         "path EventKind::ToolCall",
         "path EventKind::ToolResult",
         "path EventKind::TurnEnd",
+        "path InputBlock::Raw",
         "path InputMessageData",
+        "path InputMode::Append",
         "path InputMode::Steer",
         "path InputWithdrawData"
       ]

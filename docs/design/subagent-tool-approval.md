@@ -60,27 +60,28 @@ Consequences visible to users:
 ## 3. Ownership and dependencies
 
 No new plugin or wiring part is introduced. Collaboration's process directory owns team identity;
-its Session part owns registered tools/methods and Session observations; its branch part owns the
-routes derived from its submitted inputs and the tasks it starts. Branch business state belongs
-to the branch part, not a new process-wide or Session-wide route cache. Session observations are
-I/O subscriptions: they deliver requests to the owning branch part, without becoming the authority
-for their state. All resources register cleanup before use and start consumption after publication.
+its Session part owns registered tools/methods; each member branch observes its own Approval facts
+and owns the corresponding submission resources. The leader branch creates and retires routes by
+consuming its own committed source inputs. A member never calls a leader operation that mutates
+that leader's route table. Branch business state belongs to the branch part, not a new process-wide
+or Session-wide route cache. All resources register cleanup before use and start consumption after publication.
 
 | Existing public dependency | Use |
 | --- | --- |
 | Agents' Session access and usage holds | Reach native members, retain an accepted delegation, observe public history/state and call their public services |
 | Requesting branch's public Permission state | Sample a new member's creation policy |
-| Session broadcast and Approval pending replay | Coalesce notifications and reread the live pending set, including requests that predate observation; no second history cache |
+| Member branch Dispatcher and Approval pending replay | Observe committed request/terminal facts and find pending requests at activation; no Session-wide observation loop or second history cache |
 | Member Approval's pending replay and respond operation | Establish live pending status and submit an answer; no direct modification of Approval state |
 | Branch Timeline and Dispatcher | Consume delegation, submitted-input and decision-tool facts in order |
 | Session/branch input and input withdrawal | Deliver final request content and retire unapplied requests |
 | ToolRegistry, PromptRegistry guide entries and Session method registry | Publish decision tools, the producer-owned `dim-agent-approval` input guide and the detail query below |
 | Session and branch lifecycle | Bound route admission, observation tasks and cleanup |
 
-Subscriptions are installed before the initial pending replay, deduplicating by the original
-request identity. Every notification wakes a reread of the current pending set, so coalescing
-notifications loses no live request. Historical requests are never independently actionable. A branch part schedules its own work from handlers and returns; no member
-wait or network I/O blocks a Dispatcher handler. The route uses the already accepted delegation's
+Branch subscriptions are installed before the initial pending replay and begin observation after
+activation. Observations are deduplicated by original request identity while their submission and
+terminal-delivery resources are live. Historical requests are never independently actionable.
+A branch part schedules its own work from handlers and returns; no member wait or network I/O
+blocks a Dispatcher handler. The route uses the already accepted delegation's
 hold and member lease; it creates no independent reason to keep a completed delegation alive.
 
 ## 4. Route identity, facts and model input
@@ -91,7 +92,8 @@ this assignment, including approvals already pending when observation starts. En
 retires its routes before the member can be reused, so an old branch ask cannot transfer to a later
 assignment. Approvals without an active delegation are denied, not guessed onto `main`.
 
-A route has one opaque `approvalId`, allocated by Collaboration, and an immutable descriptor:
+A route has one opaque `approvalId`, deterministically derived by Collaboration from the delegation
+and original approval identity, and an immutable descriptor:
 
 | Field | Meaning |
 | --- | --- |
@@ -118,33 +120,51 @@ arguments as data, not instructions. Collaboration alone interprets its own sour
 [the source-input convention](contracts/session-access.md#a2-source-input-conventions); clients
 obtain presentation data through the query in §5. Only the adopted input enters model context.
 
-The submitted input is the durable route record: its receipt supplies the final input id to
-withdraw. No separate routed, resolved or cancelled fact is needed. Submission identity makes a
-retry after an uncertain input reply idempotent; use lookup before deciding that delivery failed.
-The producer registers its live relay before submitting and binds it to the final committed receipt;
-a decision or detail query racing the receipt waits for that binding in the owner's task, not
-in a Dispatcher handler. No effect or detail lookup treats an uncommitted input as delivered. If a supported
-`before` transform changes final routing content, the producer uses that final content or fails
-the relay closed; it does not reconstruct an alias to the proposed target.
+The submitted input is the durable route record. The member branch registers only its own
+submission resource, pinning the original Approval generation and immutable source content; it
+then submits the request to the owning leader branch. The request submission identity is stable
+for the delegation and original approval identity. An uncertain input reply is looked up before
+retry; duplicate delivery uses the existing committed input.
 
-The live relay is the observation/respond operation's resource, like a tool's I/O waiter.
-It retains the original Approval generation: reload closes that waiter rather than rebinding
-an old identity to a replacement service. Route admission closes synchronously when cancellation
-is consumed or settlement begins; the retired identity remains reserved until denial and input
-cleanup finish, so a concurrent observation cannot recreate the same ask. Concurrent cleanup
-callers await that one settlement before releasing the assignment. Its
-descriptor and submitted receipt reconstruct its identity from history, but a new generation
-retires rather than resumes it. Merely copying, replaying or imitating an input block cannot create
-a live relay: only the owner observing an actual pending approval of its active delegation can do
-that. No new persistence format, reserved event key or database change is introduced. Detail/input
-size limits remain those of their existing boundaries. If the complete action cannot be delivered
-or rendered within them, report unavailable and deny; never approve a truncated substitute.
+Only consumption of that committed input creates a leader route. The leader branch checks its
+active assignment and resolves the exact source through the member's public observation service.
+That service verifies the leader, destination branch, descriptor and still-owned submission
+resource, and returns the original Approval generation. It does not mutate the leader. Copied,
+foreign, transformed or historical blocks cannot manufacture this resource. Inactive request
+inputs are withdrawn while still held. Supported `before` transforms that change source content
+fail closed. No decision or detail query waits for a proposed input's receipt or treats an
+uncommitted input as delivered.
+
+The member's submission task observes its own original Approval and the owning leader's dispatch
+progress. Original termination, assignment cancellation, destination closure or generation loss
+ends that task; it denies any remaining ask. For a delivered request it submits a terminal
+`input/message` with `submission_id = "collaboration-approval-ended:<approvalId>"`, Append mode,
+and a raw `dim-agent-approval-ended` element containing the same `{approvalId, descriptor}`.
+The owning leader consumes this committed terminal input to retire its route. Terminal inputs
+carry no authority and do not start a model turn. Existing decision-tool results, turn-end,
+interrupt and delegation settlement facts also retire routes in the leader's own sequence.
+
+A live relay is the original observation/respond operation's resource, like a tool's I/O waiter.
+It retains the original Approval generation: reload closes that waiter rather than rebinding an
+old identity to a replacement service. Route admission closes synchronously when cancellation is
+consumed or settlement begins. One shared cleanup completion remains necessary so concurrent
+callers finish denial, input withdrawal and prompt retirement before releasing the assignment.
+Consumption turn and retirement are ordinary state under the owning branch's lock; no precommit binding
+channel or atomic flags are needed. InputQueue decides whether withdrawal still applies, so
+cleanup does not duplicate its adoption check.
+
+Descriptors and source identities remain in history, but a new generation retires rather than
+resumes old operations. No new persistence format, reserved event key or database change is
+introduced. Detail/input size limits remain those of their existing boundaries. If the complete
+action cannot be delivered or rendered within them, report unavailable and deny; never approve
+a truncated substitute.
 
 Collaboration consumes existing delegation/cancel/close/result and branch turn/interrupt facts,
-its submitted `input/message`, `input/applied` / `input/deleted`, decision `step/tool-call` /
+its request/terminal `input/message`, `input/consumed` / `input/deleted`, decision `step/tool-call` /
 `step/tool-result`, and the original member's `approval/request`, `approval/respond` and
-`approval/cancelled`. Original Approval and existing tool results record the answer. Live pending
-status comes from that Approval, never from a model echo or a historical route block alone.
+`approval/cancelled`. Original Approval and existing tool results record the answer. The leader's detail query reads its own committed route state. Original Approval.respond is the
+answer authority and maps an already-ended request to `not_pending`; no separate foreign pending
+read immediately before responding adds another answer guarantee.
 
 ## 5. Decision tools and detail query
 
@@ -165,8 +185,8 @@ for command-rule matching, and no permanent-allow operation. Member Permission a
 still apply to the original call and its final recheck.
 
 Only `approvalId` is model supplied. The handler resolves its immutable descriptor from its own
-branch state, checks that the assignment and original request remain live, then uses the member
-Approval's public respond operation. The model cannot replace the member, command, path or reason.
+branch state, checks the assignment's admission, then uses the pinned original Approval's public
+respond operation. That operation decides whether the original request is still pending. The model cannot replace the member, command, path or reason.
 The member Approval chooses the first response in its own sequence order, including responses
 from a separately attached trusted client. A tool result says the answer was accepted, not that
 the original action ran. Every result writes its route id and outcome into `content`, with the target only for an
@@ -195,7 +215,7 @@ The same owner registers read-only Session method `session.collaboration.approva
 | Request | `{sessionId, branchId, requestId}` naming the **leader Approval request**, not the member request |
 | Reply | `{state: "pending", approvalId, descriptor}` or `{state: "ended"}` |
 | Admission | Attached leader Session's normal read access; unknown/foreign requests return `ended` |
-| Binding | Read the live leader Approval request, require its call to be `member_approval_allow`, resolve its `approvalId` on this branch, and require the original request/assignment still pending |
+| Binding | Read the live leader Approval request, require its call to be `member_approval_allow`, resolve its `approvalId` on this branch, and require its committed route and assignment to remain active; original termination is folded from the terminal source input |
 | Errors | Normal Session errors and retryable `service_reloading`; no fallback descriptor from model arguments |
 | Mutation/interruption | Non-mutating; report interruption; no state change on read or disconnect |
 
@@ -220,14 +240,14 @@ cannot reopen it. It uses the [existing notice contract](appserver/session-notic
 | Member answers/cancels before leader decision | Retire route and withdraw its input if still held. A later decision returns `not_pending` |
 | Original request ends while user prompt is open | The terminal notice retires the client prompt; detail lookup also returns `ended`; the client denies the still-pending leader wrapper. A late allow cannot target a different request |
 | Input was already applied | Do not delete adopted context or stop unrelated leader work. The old input remains history; decision tools check live status and return `not_pending` |
-| Leader rejects or declines to decide | Reject tool answers deny. If the deciding leader turn ends with an unanswered adopted ask, deny it; do not wait indefinitely for a model decision |
-| Leader turn ends before request input is adopted | A still-pending driving input follows normal InputQueue scheduling; it can start the next turn. An interrupted branch instead withdraws it and denies the request |
+| Leader rejects or declines to decide | Reject tool answers deny. If the leader turn that consumed the request ends with that ask unanswered, deny it; do not wait indefinitely for a model decision |
+| Leader turn ends before request input is adopted | A still-pending driving input follows normal InputQueue scheduling; it can start the next turn. Applying an input just before the previous turn ends does not bind it to that turn; only `input/consumed` binds its decision turn. An interrupted branch instead withdraws it and denies the request |
 | Leader stop/branch end or delegation cancel/close/result | Close route admission, withdraw unapplied request inputs and deny outstanding original asks before releasing assignment resources. Do not cancel unrelated members or branches |
-| Member stop/close or Approval reload | Observe original terminal state, retire routes and inputs; no synthetic successful answer |
+| Member stop/close or Approval reload | The member branch submits terminal input from its original waiter; the leader consumes it, retiring routes and inputs; no synthetic successful answer |
 | Collaboration branch reload | Stop observation, deny its pending original asks, withdraw held inputs and join tasks before withdrawing services. New generation rebuilds route identities only to retire stale work, never to replay an allow |
 | Restart/fork | Old executions and route ids confer no authority. Native Approval performs its own abandoned-request recovery; copied leader facts do not recreate a team or pending decision |
 | Leader detaches / client disconnects | Detach is not Session close. Pending requests remain answerable on another attached client; attach replays leader pending Approval requests and clients query details again |
-| Leader closes while detached member work continues | Existing detached-work contract remains. Pending asks are denied; member-side Collaboration observation denies later asks with no live assignment instead of forwarding to a dead leader |
+| Leader closes while detached member work continues | Existing detached-work contract remains. Pending asks are denied; member branch observation denies later asks with no live assignment instead of forwarding to a dead leader |
 | Non-interactive leader (`interactive: false`) | Before denying, send an ordinary leader message to the original member branch explaining that the leader is non-interactive; create no driving leader approval input |
 | Headless `dimcode exec` needs leader approval | Existing client denies it, stops/settles and exits 3; cancellation settles the member ask. No unattended allow fallback |
 
@@ -259,16 +279,16 @@ No `before` hook, cross-branch service dependency, generic approval router or ne
 
 | Rule | Application |
 | --- | --- |
-| Principles §1; ADR 002 D1 | Existing branch Collaboration is the Capability consuming delegation and route-input facts; Session registration/observation and process team directory retain their own scope. No new business logic in Rpc |
-| §4.1 | Member answers use Approval's public respond command; input withdrawal goes through its owner |
+| Principles §1; ADR 002 D1 | Existing branch Collaboration is the Capability consuming delegation and route-input facts; Session registration and process team directory retain their own scope; member branch submission resources do not mutate leader branch state. No new business logic in Rpc |
+| §4.1 | Member branches submit request/end inputs; only the owning leader's ordered consumption changes its routes. Answers and input withdrawal use their owners' public commands |
 | §4.2 | Applied inputs remain adopted; live request checks prevent stale decisions |
 | §4.3 | No new `before` behavior; producers retain final committed identities |
 | §4.4 | Timeline and Dispatcher do not interpret member approvals |
 | §4.5 | One input commits its identity and descriptor together; no cross-Timeline transaction is claimed |
-| §4.6 | Only adopted request inputs and decision tool results enter model context |
+| §4.6 | Only adopted source inputs and decision tool results enter model context |
 | §4.7 | Public Session state, history, broadcast and Approval operations only |
 | §4.8 | Mechanisms unchanged; cross-module UI requirements are at their owning layer |
-| §4.9 | The existing request input preserves identity needed by decisions/withdrawal; no new event or UI-only durable state |
+| §4.9 | Existing request/end input shapes preserve facts needed by routing and withdrawal; no new event family or UI-only durable state |
 | ADR 002 D2 | No wiring plugin or second approval service |
 | ADR 002 D3 | Dependencies point to existing core owners; core Approval/Permission never depend on Collaboration |
 | ADR 002 D4 | No new configuration source or reload on policy update |
@@ -295,12 +315,12 @@ Observable flow verification accompanying implementation must cover:
    applied input, member/delegation end, detached work, reload/restart/fork and non-interactive/headless
    flows terminate the original wait. Cleanup failure is reported rather than hidden.
 6. Route inputs survive storage roundtrip using the existing event format; uncertain submissions
-   deduplicate by submission identity, a decision racing receipt binding is safe, and no replay
+   deduplicate by submission identity, a decision before request consumption returns `not_pending` without waiting, and no replay
    executes an allow. Copied or forged source blocks create no live authority.
 
 Ablation: reuse the original Approval waiter and the delegation hold; remove any second answer
-queue, resolved-event family, policy cache or per-member settings source. The existing idempotent
-input alone records the route descriptor and withdrawal id; no additional route fact is required.
+queue, resolved-event family, policy cache or per-member settings source. Existing idempotent source inputs record the descriptor, request receipt and original termination;
+no new public event family or precommit receipt waiter is required.
 The read method is retained because tool arguments contain only an opaque route id and cannot safely
 supply the action the user must review. Separate allow/reject tools express different risks without
 weakening reject or requiring a new risk mechanism. The terminal notice retires an open user
