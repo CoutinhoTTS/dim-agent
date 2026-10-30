@@ -53,7 +53,7 @@ of them. `rutis-migrate` stops at 0.18 and is not used.
 | 0.17.2 | No API change. A bad value fails only its call; a runtime exit blames no other row; `StillWaiting` after 10 s |
 | 0.18 | Error texts carry codes (`session::Error::Binding`); the default error sink writes to standard error; configurations are validated against their schema and filled with defaults; `reconcile` no longer waits for a runtime still starting; objects with methods cross to every language |
 | 0.19 | A local runtime is the far end of a session; the link, peer, transport and identity layer is gone; the catalog shares every unregistered name; runtime rows honour `isolate`; every runtime emit goes through the host; `LoaderPlugin` provides the service `loader`; one `rutis/row` listener per loader instead of one per row ([rutis#808](https://github.com/arcships/rutis/pull/808), the fix [#518](https://github.com/arcships/dim/issues/518) waits for); the SDK test tools run on a real `rutis-host`; Python 3.12 or later; `CordisError` is `Error` on the wire |
-| 0.19.1 | The synchronous waterfall is back as `waterfall(event).sync(terminal)` (M2); foreign definition copies resolve in a host's own instances, and `mark_scope` is public (rutis#948, used by #684); `Loader::instance_rows`; a `reconcile` after a runtime's `ready()` loads its rows |
+| 0.19.1 | The synchronous waterfall is back as `waterfall(event).sync(terminal)` (M2); foreign definition copies resolve in a host's own instances, and `mark_scope` is public (rutis#948, used by #684); `Loader::instance_rows`; a `reconcile` after a runtime's `ready()` loads its rows; a runtime plugin is Starting from when it is made (rutis#964, M4) |
 
 ### 2.1 Kernel APIs Dim calls
 
@@ -147,7 +147,8 @@ build on its own base before it starts.
   and 0.19.1 adds `Loader::instance_rows` (rutis#941). #594 takes
   [#684](https://github.com/arcships/dim/pull/684) instead: Sessions and branches become plugins that
   mark their scope with 0.19.1's public `mark_scope`, so there are no instance rows left to query.
-  #684 lands after this upgrade, and #645 is closed.
+  #684 lands after this upgrade. #645 does not land: #684 supersedes it, and it stays open until #684
+  lands.
 
 ## 4. Decisions
 
@@ -216,7 +217,10 @@ Every part `SpawnPlugin` composes is public in rutis-bridge. Dim therefore links
     at `session_key("session-node")` / `session_key("py")`, where the `SessionResolver` finds it. No
     internal API is needed;
   - it keeps the runtime's `RuntimeStates`: starting, ready, failed or stopped, and how the process
-    ended (`ended_status`);
+    ended (`ended_status`). It calls `starting()` when it is made, before it is mounted, as 0.19.1's
+    `SpawnPlugin` does (rutis#964): `RuntimeHandle::ready()` waits only while the runtime is Starting
+    and answers `None` at `Idle`, so a `ready()` asked before `apply` would otherwise report no
+    runtime;
   - it forwards standard error line by line to `tracing` through `pipe::Stdio::Pipe`. Standard input
     and output are null, as today.
 - **Launch commands.** Dim keeps the two commands rutis-host's own launchers use for these packages
@@ -607,7 +611,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each minimal host hold one |
 | Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 states its expected graph diff |
 | 0.19.1 is tagged, but its packages are not yet on crates.io, npm and PyPI | Step 1 waits for them |
-| #645 lands first | §3 routes #594 to #684, and #645 is closed |
+| #645 lands first | Its Git pin of rutis#920 conflicts with the 0.19.1 pins (M1), and the instance rows it queries go with #684. It does not land; §3 routes #594 to #684 |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |
 | Unknown npm names wait instead of failing | `RuntimeManager`'s status shows the wait; M9 adjusts the test that relied on the failure |

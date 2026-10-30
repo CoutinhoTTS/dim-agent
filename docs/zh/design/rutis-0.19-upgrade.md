@@ -48,7 +48,7 @@ Python 行都无法连接。
 | 0.17.2 | 无 API 变化。坏值只让这一次调用失败；运行时退出不再连累其他行；10 秒后报告 `StillWaiting` |
 | 0.18 | 错误文案带错误码（`session::Error::Binding`）；默认错误 sink 写标准错误；配置按 schema 校验并填入默认值；`reconcile` 不再等待仍在启动的运行时；带方法的对象可以传给每种语言 |
 | 0.19 | 本地运行时是一个会话的对端；链接、peer、传输和身份这一层整个删除；服务目录共享所有未登记的名字；运行时的行遵守 `isolate`；运行时的每次 emit 都经过宿主；`LoaderPlugin` 提供服务 `loader`；每个 loader 只用一个 `rutis/row` 监听器，而不是每行一个（[rutis#808](https://github.com/arcships/rutis/pull/808)，即 [#518](https://github.com/arcships/dim/issues/518) 在等的修复）；SDK 测试工具运行在真实的 `rutis-host` 上；要求 Python 3.12 及以上；线上错误名 `CordisError` 改为 `Error` |
-| 0.19.1 | 同步 waterfall 以 `waterfall(event).sync(terminal)` 的形式补回（M2）；外语插件定义的副本可以挂在宿主自己的实例里，`mark_scope` 公开（rutis#948，#684 使用）；`Loader::instance_rows`；运行时 `ready()` 之后的 `reconcile` 一定装载它的行 |
+| 0.19.1 | 同步 waterfall 以 `waterfall(event).sync(terminal)` 的形式补回（M2）；外语插件定义的副本可以挂在宿主自己的实例里，`mark_scope` 公开（rutis#948，#684 使用）；`Loader::instance_rows`；运行时 `ready()` 之后的 `reconcile` 一定装载它的行；运行时插件从创建起就是 Starting（rutis#964，M4） |
 
 ### 2.1 Dim 调用的内核 API
 
@@ -131,7 +131,7 @@ Python 行都无法连接。
 - [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
   引入 rutis#920。那个 pull request 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
   [#684](https://github.com/arcships/dim/pull/684)：Session 和分支变成用 0.19.1 公开的 `mark_scope` 标记自己的插件，
-  不再有实例行可查。#684 在本次升级之后合入，#645 关闭。
+  不再有实例行可查。#684 在本次升级之后合入。#645 不合入：#684 取代了它，它保持打开，直到 #684 合入。
 
 ## 4. 决策
 
@@ -191,7 +191,9 @@ Dim 本身就是宿主，拉起运行时本来就是 RuntimeManager 的事。rut
     并等它问候（`pipe::greeted`）；
   - 挂载 `Session::new(channel)`。loader 会标记这一行，所以会话在 `session_key("session-node")` /
     `session_key("py")` 提供自己的句柄，`SessionResolver` 就在那里找到它。不需要任何内部 API；
-  - 维护运行时的 `RuntimeStates`：正在启动、就绪、失败或已停止，以及进程是怎么结束的（`ended_status`）；
+  - 维护运行时的 `RuntimeStates`：正在启动、就绪、失败或已停止，以及进程是怎么结束的（`ended_status`）。
+    它在创建时、挂载之前就调用 `starting()`，与 0.19.1 的 `SpawnPlugin` 相同（rutis#964）：`RuntimeHandle::ready()`
+    只在运行时处于 Starting 时等待，处于 `Idle` 时直接返回 `None`，否则在 `apply` 之前问 `ready()` 会得到"没有运行时"；
   - 通过 `pipe::Stdio::Pipe` 把标准错误逐行转给 `tracing`。标准输入和输出为空，与现在相同。
 - **启动命令。** Dim 保留 rutis-host 自己的启动器为这两个包用的两条命令（`languages/node.rs`、
   `languages/python.rs`），解释器和路径沿用 Dim 现在的配置：
@@ -508,7 +510,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
 | 0.19.1 已打 tag，但它的包还没发到 crates.io、npm 和 PyPI | 步骤 1 等这些包 |
-| #645 先合入 | §3 让 #594 改走 #684，#645 关闭 |
+| #645 先合入 | 它对 rutis#920 的 Git 固定版本与 0.19.1 的固定版本（M1）冲突，它查询的实例行也会随 #684 去掉。它不合入；§3 让 #594 改走 #684 |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
