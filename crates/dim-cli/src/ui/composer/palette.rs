@@ -135,8 +135,7 @@ fn filter_skills<'a>(skills: &'a [Skill], query: &str) -> Vec<&'a Skill> {
 
 /// Palette rows for `query`: commands and skills share the list, told apart
 /// by their category; skills lead when a skill name matches and no command
-/// name does. A slash command reads `/name` and its description; an action
-/// reached by a key reads as its description.
+/// name does. A command reads `/name` and its description.
 pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
     let commands = filter_commands(query, context);
     let matched_skills = filter_skills(skills, query);
@@ -144,15 +143,11 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
         .iter()
         .map(|command| {
             let description = t(command.describe(context));
-            let (label, detail) = if command.slash {
-                let label = match command.argument {
-                    Some(argument) => format!("/{} {argument}", command.name),
-                    None => format!("/{}", command.name),
-                };
-                (label, description.to_owned())
-            } else {
-                (description.to_owned(), String::new())
+            let label = match command.argument {
+                Some(argument) => format!("/{} {argument}", command.name),
+                None => format!("/{}", command.name),
             };
+            let detail = description.to_owned();
             Row {
                 kind: Kind::Command(command),
                 category: t(command.category).to_owned(),

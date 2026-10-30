@@ -9,7 +9,7 @@ pub struct Command {
     pub category: &'static str,
     pub description: &'static str,
     pub aliases: &'static [&'static str],
-    /// Typed as `/name`; otherwise reached by its key or the palette only.
+    /// Typed as `/name`; otherwise reached only by its key.
     pub slash: bool,
     /// The key that runs it, as the palette shows it.
     pub key: Option<&'static str>,
@@ -28,7 +28,7 @@ pub enum Needs {
     Run,
     /// A queued message.
     Queue,
-    /// The fullscreen interface; elsewhere the action is not listed.
+    /// The fullscreen interface; unavailable elsewhere.
     Fullscreen,
 }
 
@@ -38,6 +38,7 @@ pub struct Context {
     pub session: bool,
     pub running: bool,
     pub queued: bool,
+    /// Whether fullscreen actions are available to the command dispatcher.
     pub fullscreen: bool,
     /// The Dim account is signed in: `/login` opens the account rather
     /// than a sign-in.
