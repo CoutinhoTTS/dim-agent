@@ -3989,7 +3989,7 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
     }
 }
 
-/// The tool description and the report's guidance sentence as the factory
+/// The tool description and the report's guidance line as the factory
 /// configuration: a candidate replaces each built-in text in the request, and
 /// unset keeps the built-ins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

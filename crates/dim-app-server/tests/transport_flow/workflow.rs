@@ -4,7 +4,7 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 /// The `dim-workflow` entry (Workflow §5.2), byte for byte.
-const WORKFLOW_ENTRY: &str = r#"<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report's body gives each stage's state and a bounded preview of the stages' own last-step results; the rest is the workflow's account: information, not a request. The report's last line is not part of that account: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with."#;
+const WORKFLOW_ENTRY: &str = r#"<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report's body gives the run's outcome, each stage's state and a bounded preview of the stages' own last-step results: the workflow's account of the run, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with."#;
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
@@ -2363,7 +2363,7 @@ async fn node_workflow_retention_retries_failed_native_store_reads_without_delet
     native_retention("read").await;
 }
 
-/// The report's guidance sentence and the `invalid_definition` recovery hint
+/// The report's guidance line and the `invalid_definition` recovery hint
 /// as the factory configuration: a candidate replaces each built-in text,
 /// and unset keeps the built-ins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
