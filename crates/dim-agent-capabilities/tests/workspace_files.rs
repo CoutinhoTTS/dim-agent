@@ -1310,6 +1310,18 @@ async fn read_recognizes_an_image_ahead_of_the_binary_extension_refusal() {
     );
 }
 
+/// The extension refusal comes after the file is opened, so a missing binary
+/// file reports its missing path rather than its extension.
+#[tokio::test]
+async fn read_reports_a_missing_file_before_its_binary_extension() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    assert_eq!(
+        code(&workspace.read(&reads, "missing.zip").await),
+        "file_not_found"
+    );
+}
+
 #[tokio::test]
 async fn read_scales_a_large_jpeg_within_the_limits() {
     let workspace = Workspace::new();
