@@ -2,7 +2,7 @@
 
 Status: Draft ([#551](https://github.com/arcships/dim/issues/551)). Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §4 and §5, [ADR 002](../../adr/002-plugin-scope.md). Scope: Session and branch. Language: Rust. The capability is [collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs).
 
-This page owns what Collaboration writes for the model: the two markers it writes, the `agent` tool's coordination text and results, and the guide entries its Session part registers. The delegation mechanism — the facts, the member kinds, the settlement and the member-approval route — is the [overview](../overview.md#56-collaboration-delegation-to-an-external-agent) and [ExternalAgent](ExternalAgent.md)'s, and is not restated here.
+This page owns what Collaboration writes for the model — the two markers it writes, the `agent` tool's coordination text and results, and the guide entries its Session part registers — and the delegation's ownership and lifetime (§6). The delegation mechanism — the facts, the member kinds, the settlement and the member-approval route — is the [overview](../overview.md#56-collaboration-delegation-to-an-external-agent) and [ExternalAgent](ExternalAgent.md)'s, and is not restated here.
 
 ## 1. Model-facing texts
 
@@ -50,18 +50,70 @@ Rules: [design rules](../../architecture/rust-agent/principles.md) §1, §3, §4
 | §4 rule 6 Context from handed-over events | A marker reaches the model only as a consumed input, and a tool result only as `step/tool-result`; the page adds no context path |
 | §4 rule 7 Public events and services only | The Session part uses the Session's `collaboration`, `sessionIdentity`, `sessionConfig`, `treeCommands`, `sessionLifecycle`, `toolRegistry` and `guideEntries`; the branch part injects the Session's `CollaborationSession`, `timeline`, `dispatcher`, `timelineIdentity` and `branchLifecycle`. Nothing reads another plugin's internal state |
 | §4 rule 8 Requirements to mechanism owners | None: the entry route is Prompt's existing contract, the declaration is ToolRegistry's, and the inputs are the branch's existing operation |
-| §4 rule 9 Only facts later decisions use | No fact is added. The two markers are the model-visible results the delegation exists for, and the guide entries are registrations inside Prompt's scope |
+| §4 rule 9 Only facts later decisions use | No Timeline fact is added. The two markers are the model-visible results the delegation exists for, and the guide entries are registrations inside Prompt's scope. A delegation's ownership and leader are business records without a Timeline: they go through Agents' and SessionStore's typed writes (§6), not events |
 | §1 Plugin, part and Capability boundaries | Collaboration stays the App Server capability it is. The Session part registers a declaration, a tool and the entries; the branch part consumes the delegation's facts. No Capability is added and no core module gains business code |
 | §3 Orthogonality | The texts travel on the channels [model-facing prompts §3](../model-prompts.md#3-channels) names: a declaration, a tool result and two markers. The entries use Prompt's route, which any capability uses |
 | §5 Ownership | Each text belongs to Collaboration, and the guide's frame stays Prompt's |
-| ADR 002 D1 Scope | The markers are written into branches, so their entries are registered at the Session, the nearest common owner of the writers; the delegation's state stays where it is today |
+| ADR 002 D1 Scope | The markers are written into branches, so their entries are registered at the Session, the nearest common owner of the writers. A delegation's ownership is stored by the owner of each record — Agents for the Agent, SessionStore for the Session — and Collaboration reads it (§6.1) |
 | D2 No wiring modules | None is added |
 | D3 Scope dependencies | The Session part depends on the Session's `guideEntries`, an enclosing scope, and nothing depends on a narrower one |
 | D4 Configuration | The two description members are the plugin's factory configuration; no file, source or setting is added |
 | D5 Language-neutral contracts | The texts are Rust-side and the registration is Prompt's language-neutral contract; the page defines no new contract |
 | ADR 008 D2 No delivery status | The page states the design only |
-| ADR 008 D3 Own scope only | The mechanism stays with the overview and ExternalAgent; this page owns the texts and the entries |
+| ADR 008 D3 Own scope only | The mechanism stays with the overview and ExternalAgent; this page owns the texts, the entries and the delegation's ownership and lifetime |
 
 ## 5. Requirements raised to mechanism owners
 
 None. The declaration uses ToolRegistry's existing registration, the two markers use the branch's existing `input` operation, and the entries use Prompt's `guideEntries` contract ([Prompt §2](Prompt.md#2-the-entry-route)). Collaboration raises no requirement to the runtime, rutis, the loader, the lifecycle or the tool contracts.
+
+## 6. Delegation ownership and lifetime
+
+Issue: [#593](https://github.com/arcships/dim/issues/593). This section owns which Agent and Sessions a delegation creates, who owns them, who may address them and when they end. The columns that carry the facts are [native storage format](../appserver/native-storage-format.md)'s.
+
+### 6.1 Durable facts
+
+| Fact | Record | Owner |
+| --- | --- | --- |
+| An Agent's owner: the leader Session whose Team may address it, or no owner for a public Agent | `agents.owner_session_id` | Agents |
+| A member's leader: the leader Session whose Team this member Session works for | `agent_sessions.leader_session_id` | SessionStore |
+| The member Session, its branches, Timeline and files | the existing Session records | SessionStore |
+
+A temporary Agent is an Agent that has an owner. There is no separate flag: one field decides both whether the Agent is public and which Team may address it. The default Agent and the Agents `agent.create` creates have no owner and are public.
+
+The producer keeps these invariants:
+
+- An owned Agent's owner is the leader Session whose `request` created it, and it never changes.
+- A member Session's leader is the leader that created it, and it equals its Agent's owner whenever that Agent is owned.
+- A Team is one leader Session and the member Sessions whose leader it is. A member Session is itself a leader of the Team it creates.
+
+### 6.2 Who may address what
+
+- The `agent` tool resolves a target Agent only when it is public, or its owner is the caller's own Session or the leader of the Team the caller belongs to. Every other id, and an id that does not exist, are `agent_not_found`.
+- A member of another Team is `team_member_not_found`; a member Session id addresses nothing outside its Team.
+- Visibility never follows from what the process happens to hold: a relation that is absent is a refusal, never a public record. A restart, a reload of Agents or Collaboration, and a fork all keep this rule.
+- `agent.list` and `inspect` report an Agent to the Teams above. Owner Session ids are Collaboration's records and stay out of the client protocol.
+
+### 6.3 Lifetime
+
+- A restart restores Teams from the durable facts: owned Agents load owned, and member Sessions load with their leader. Nothing becomes public by being unloaded, unread or reloaded.
+- `close` settles the request and closes the member Session. The Session records, its leader and its Agent's record stay, so the leader addresses that member again after a restart; closed is process state and is not stored.
+- Deleting the owner Session deletes its owned Agents and their member Sessions, because an owned Agent has no meaning without its owner. This is the cascade ownership requires; [session deletion and fork](../appserver/session-deletion-and-fork.md) states it with the delete's other effects.
+- Deleting the last member Session of a loaded owned Agent closes the Agent and keeps its record: the leader may delegate to it again, and the record ends only with its owner.
+- A fork leads no member. It is a new leader Session, and the source's owned Agents and members stay with the source.
+- A delegation whose own creation fails removes the Agent record it created: an owned Agent with no member Session and no completed delegation is not left behind.
+
+### 6.4 Errors
+
+| Situation | Result |
+| --- | --- |
+| A target Agent is public or owned by the caller's Team | The request proceeds |
+| A target Agent is owned by another Team, or absent | `agent_not_found`, with the existing text |
+| A member Session belongs to another Team, or is absent | `team_member_not_found` |
+| The owned Agent or its first member Session cannot be created | `member_create_failed: <reason>`; the record created for the request is removed |
+| A stored owned Agent whose owner row is absent at startup | The Agent and its member Sessions are removed as an unfinished delete; it is never served as public |
+
+### 6.5 Requirements raised to other owners
+
+- **Agents.** Store `agents.owner_session_id`; create an Agent with its owner and delete an Agent record as typed operations; load a stored Agent as owned; delete an owner's owned Agents when that Session is deleted; expose ownership and the leader relation to Collaboration without adding either to the client protocol; remove an owned Agent whose owner row is absent at startup.
+- **SessionStore and native storage.** Store `agent_sessions.leader_session_id`; decide both columns' format version and upgrade, and delete a Session's owned Agents and member Sessions in the delete's own transaction.
+- **Session deletion and fork.** Record the ownership cascade among a delete's effects (§6.3), and keep a fork's Team separate from the source's.
