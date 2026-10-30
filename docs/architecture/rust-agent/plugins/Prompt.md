@@ -87,11 +87,19 @@ has run it composes the branch's guide again on every change and adopts it with
 the settings unchanged on every open branch whose composition moved, a
 registration made while the open runs included. A branch whose composition did
 not move reads nothing, because the composition reads the in-memory entries
-only. A tools-only or model-only adoption re-renders the guide over the source
-text the configuration records, and one written before the source was recorded
-keeps its adopted System. Entries reach the model only through the System a
-branch adopted or through the request Loop assembles, never through a request
-of their own.
+only. One more adoption runs right after every open, over the configuration the
+branch carries, so a fork and a restore converge on the entries in force at
+load; it costs one context read per open and publishes nothing when the adopted
+System already equals the composition. The listener ends when the branch starts
+closing, and an adoption that already started reading refuses its append then,
+so entries that withdraw only because the branch shuts down are never recorded.
+A writer's tools can reach a request one step before its entry: the tools bind through the tool adoption as soon as their source loads,
+while the entry arrives through the guide adoption and its queue, so a step
+between the two carries the new tools with the previous System. A tools-only or
+model-only adoption re-renders the guide over the source text the configuration
+records, and one written before the source was recorded keeps its adopted
+System. Entries reach the model only through the System a branch adopted or
+through the request Loop assembles, never through a request of their own.
 
 ### Tests
 
