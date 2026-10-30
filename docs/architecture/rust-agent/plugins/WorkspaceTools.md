@@ -120,8 +120,10 @@ decodes. An image whose longest edge exceeds 2048 px or whose encoding exceeds
 upright, and re-encoded to fit: a PNG source stays PNG while its scaled PNG
 fits, everything else becomes JPEG at quality 85, and the long edge steps down
 until the encoding fits. An image within both limits with no orientation to
-apply is sent byte for byte. One guard keeps memory bounded: a header claiming
-more than 100 megapixels is refused from its dimensions before the pixels are
+apply is sent byte for byte. An animation is always re-encoded from its first
+frame, its EXIF orientation applied the same way, so the frame sent is upright
+as a still's pixels are. One guard keeps memory bounded: a header claiming more
+than 100 megapixels is refused from its dimensions before the pixels are
 decoded, and the refusal names the dimensions and asks for a smaller copy.
 HEIC/HEIF and AVIF are refused with the format named; every other binary file is
 refused as before. `read` never decides for the model: the same image block goes

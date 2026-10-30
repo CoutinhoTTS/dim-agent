@@ -1329,8 +1329,8 @@ async fn read_scales_a_large_jpeg_within_the_limits() {
     assert_eq!(structured(&result)["sentWidth"], 2048);
 }
 
-/// A JPEG with an EXIF APP1 orientation segment in front of its frame.
-fn with_orientation(jpeg: Vec<u8>, orientation: u16) -> Vec<u8> {
+/// A TIFF block whose EXIF orientation tag holds `orientation`.
+fn tiff_orientation(orientation: u16) -> Vec<u8> {
     let mut tiff = Vec::new();
     tiff.extend_from_slice(b"II\x2a\x00");
     tiff.extend_from_slice(&8u32.to_le_bytes());
@@ -1341,9 +1341,14 @@ fn with_orientation(jpeg: Vec<u8>, orientation: u16) -> Vec<u8> {
     tiff.extend_from_slice(&orientation.to_le_bytes());
     tiff.extend_from_slice(&0u16.to_le_bytes());
     tiff.extend_from_slice(&0u32.to_le_bytes());
+    tiff
+}
+
+/// A JPEG with an EXIF APP1 orientation segment in front of its frame.
+fn with_orientation(jpeg: Vec<u8>, orientation: u16) -> Vec<u8> {
     let mut app1 = Vec::new();
     app1.extend_from_slice(b"Exif\x00\x00");
-    app1.extend_from_slice(&tiff);
+    app1.extend_from_slice(&tiff_orientation(orientation));
     let mut out = Vec::new();
     out.extend_from_slice(&jpeg[..2]);
     out.extend_from_slice(&[0xFF, 0xE1]);
@@ -1425,6 +1430,97 @@ async fn read_returns_the_first_frame_of_an_animated_gif() {
     let pixel = image.get_pixel(10, 10);
     assert!(pixel[0] > 200 && pixel[2] < 60, "{pixel:?}");
     assert_eq!(structured(&result)["animated"], true);
+}
+
+/// One RIFF chunk: fourcc, little-endian payload size, payload, padded to
+/// even.
+fn riff_chunk(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = fourcc.to_vec();
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        out.push(0);
+    }
+    out
+}
+
+/// The `VP8L` bitstream the lossless WebP encoder writes for a frame.
+fn vp8l(frame: &RgbaImage) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut encoded)
+        .encode(
+            frame.as_raw(),
+            frame.width(),
+            frame.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    assert_eq!(&encoded[..4], b"RIFF");
+    assert_eq!(&encoded[12..16], b"VP8L");
+    let size = u32::from_le_bytes(encoded[16..20].try_into().unwrap()) as usize;
+    encoded[20..20 + size].to_vec()
+}
+
+/// An animated WebP carrying an EXIF orientation: a `VP8X` header marking the
+/// animation and the EXIF chunk, `ANIM`, one `ANMF` per frame and `EXIF`.
+fn animated_webp(frames: [&RgbaImage; 2], orientation: u16) -> Vec<u8> {
+    let (width, height) = frames[0].dimensions();
+    let mut body = Vec::new();
+    let mut vp8x = vec![0x0A, 0, 0, 0];
+    vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    body.extend_from_slice(&riff_chunk(b"VP8X", &vp8x));
+    body.extend_from_slice(&riff_chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    for frame in frames {
+        let mut anmf = vec![0; 16];
+        anmf[6..9].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
+        anmf[9..12].copy_from_slice(&(height - 1).to_le_bytes()[..3]);
+        anmf[12..15].copy_from_slice(&100u32.to_le_bytes()[..3]);
+        anmf.extend_from_slice(&riff_chunk(b"VP8L", &vp8l(frame)));
+        body.extend_from_slice(&riff_chunk(b"ANMF", &anmf));
+    }
+    body.extend_from_slice(&riff_chunk(b"EXIF", &tiff_orientation(orientation)));
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    out
+}
+
+#[tokio::test]
+async fn read_turns_an_animated_webp_first_frame_upright() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let first = RgbaImage::from_fn(40, 20, |x, _| {
+        if x < 20 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    let second = RgbaImage::from_pixel(40, 20, Rgba([0, 255, 0, 255]));
+    workspace.put("anim.webp", &animated_webp([&first, &second], 6));
+    let result = workspace.read(&reads, "anim.webp").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("(40x20 px)"), "{line}");
+    assert!(
+        line.contains("Animated WebP: only the first frame was sent."),
+        "{line}"
+    );
+    assert!(line.contains("Sent 20x40 px as image/jpeg"), "{line}");
+    let image = decoded(source);
+    assert_eq!(image.dimensions(), (20, 40), "the sent pixels are upright");
+    // The first frame is stored left half red, right half blue, rotated
+    // clockwise like the JPEG orientation test.
+    let top = image.get_pixel(0, 0);
+    let bottom = image.get_pixel(0, 39);
+    assert!(top[0] > 200 && top[2] < 60, "top {top:?}");
+    assert!(bottom[2] > 200 && bottom[0] < 60, "bottom {bottom:?}");
+    let structured = structured(&result);
+    assert_eq!(structured["animated"], true);
+    assert_eq!(structured["sentWidth"], 20);
+    assert_eq!(structured["sentHeight"], 40);
 }
 
 fn crc32(bytes: &[u8]) -> u32 {

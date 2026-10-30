@@ -200,13 +200,16 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             let stored = size(decoder.dimensions());
             guard(stored)?;
             let mut decoder = decoder;
-            if decoder.has_animation() {
-                let (image, animated) = first_frame(kind, decoder.into_frames())?;
-                return reencoded(kind, stored, Orientation::NoTransforms, image, animated);
-            }
+            // The EXIF chunk sits beside the frames: an animation is oriented
+            // like a still, so read it before `into_frames` consumes the
+            // decoder.
             let orientation = decoder
                 .orientation()
                 .map_err(|error| invalid(kind, error))?;
+            if decoder.has_animation() {
+                let (image, animated) = first_frame(kind, decoder.into_frames())?;
+                return reencoded(kind, stored, orientation, image, animated);
+            }
             drop(decoder);
             if let Some(image) = unchanged(&mut source, kind, stored, orientation, false)? {
                 return Ok(image);
