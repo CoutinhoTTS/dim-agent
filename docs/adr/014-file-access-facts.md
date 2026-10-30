@@ -27,9 +27,13 @@ the session's own artifact. The facts have to be named once, with an owner for e
 | preset | the dispatched branch's permission mode |
 
 The platform-roots list is HostPlatform state; the facts service and the sandbox builder read the
-same list, so the fact is non-empty when the sandbox is off. The facts service calls the
-session-files owner for the ownership fact; it does not import SessionStore. `Permission` passes
-the branch preset into the query; the preset is branch state, not the Session's initial config.
+same list, so the fact is non-empty when the sandbox is off.
+
+The `FileAccessFacts` Session part registers the service `fileAccessFacts`. Its query is
+`facts(session_id, preset, path, mode) -> FileFacts`, with `workspace`, `system`, `owned` and
+`grant` fields; it calls `SessionFiles.owns` and `SessionGrants.lookup`. It does not import
+SessionStore. `Permission` passes the branch preset and applies the table below. A query failure
+denies. The service holds no state; it reads at use time, so a restart changes nothing.
 
 ### D2. Read and write
 
@@ -45,20 +49,23 @@ sandbox setting and the execute-process approval.
 - Under `read-only`, the workspace is read-only and a write grant is inert. Under
   `workspace-write`, the workspace and write grants are writable.
 - System roots and session-owned artifacts are read-only under `read-only` and `workspace-write`.
-  Under `full-access`, file-tool writes are admitted anywhere, including them; the process mounts
-  in ADR 013 are unchanged.
+  Under `full-access`, file-tool writes are admitted anywhere, including them. The process mounts
+  are owned by ADR 010 (workspace and platform roots), ADR 012 (grants) and ADR 013 (artifacts);
+  this decision changes none. The trust consequence is stated in ADRs 011 and 012.
 - A write grant also permits reads; a read grant never permits writes.
 
 ### D3. Matching
 
 Read and write calls resolve the path before admission, like `write` and `edit` do today: cwd,
 `~`, `..` and symlinks are settled, and `Permission` compares the canonical path. A workspace
-symlink to a path outside the workspace does not match the workspace fact.
+symlink to a path outside the workspace does not match the workspace fact. The fact paths are
+compared resolved too, with the same longest-existing-prefix rule: a Session started through a
+symlinked directory still matches its workspace.
 
 The path check runs before the tool lists and `allowedTools`, so an allowed tool does not bypass
 a path fact. A directory operation is decided on the directory path; a prefix covers its
 children; `grep`/`glob` over a directory use that directory. ADR 012 owns the grant's directory
-rule.
+rule and the grant mounts.
 
 There are no path deny rules or glob patterns.
 
@@ -70,8 +77,10 @@ is announced in the CLI documentation and release notes and tracked in #691.
 
 ## Consequences
 
-- `Permission.md` and the CLI permission tables describe the fixed facts, the pre-admission read
-  resolution and the read change.
+- `Permission.md`, `session-files.md` §11.1/§11.2, `Attachments.md`, the CLI permission and
+  command tables, and their Chinese mirrors describe the fixed facts, the pre-admission read
+  resolution and the read change. ADR 012's “outside the facts asks” is this decision's D2; 012
+  cites it.
 - HostPlatform owns the platform-roots list used by both the facts service and the sandbox
   builder.
 - AGENTS.md rule 11's “file-root authorization” clause is superseded: workspace, system-root,
@@ -109,4 +118,4 @@ extends ADR 010 and depends on ADRs 012 and 013. ADR 003 remains as written.
 | ADR 002 D2 | No wiring plugin. |
 | ADR 002 D3 | Facts are Session-scoped; `Permission` depends on them. |
 | ADR 002 D4 | Business configuration, read at use time. |
-| ADR 002 D5 | The facts query is a language-neutral contract; grants and ownership carry paths/modes. |
+| ADR 002 D5 | The facts service key `fileAccessFacts`, its `facts(session_id, preset, path, mode)` query and the `FileFacts` result are the language-neutral contract; grants and ownership carry paths/modes. |
