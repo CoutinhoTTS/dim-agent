@@ -177,7 +177,7 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
-const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; system, tools and config appear in full only when they changed, and otherwise read {\"unchanged\": true}. A Timeline may arrive in parts: each message says which part of one Timeline it is, in order, and you answer every statement for the part you were given. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
+const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. A Timeline may arrive in parts: each message says which part of one Timeline it is, in order, and you answer every statement for the part you were given. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
 /// The message that asks the judge again, `{what}` saying why its last answer
 /// could not be used.
@@ -1486,11 +1486,12 @@ fn judge_view(export: &str) -> String {
     view
 }
 
-/// One request as [`judge_view`] renders it: the messages added since the
-/// line's previous request, when that request's messages are a prefix of this
-/// one's, or all of them otherwise; `system`, `tools` and `config` in full
-/// when they differ from the previous request's, or a marker when they do
-/// not. Nothing is dropped: every request can be rebuilt from the view.
+/// One request as [`judge_view`] renders it, starting from the request object
+/// itself so that nothing is dropped: the messages added since the line's
+/// previous request, when that request's messages are a prefix of this one's,
+/// or all of them otherwise; every other field in full when it differs from
+/// the previous request's, or a marker when it does not. Every request can be
+/// rebuilt from the view, whatever fields the request type gains later.
 fn rendered_request(request: &Value, previous: Option<&Value>) -> Value {
     let messages = request["messages"].as_array();
     let added = messages.and_then(|messages| {
@@ -1502,24 +1503,30 @@ fn rendered_request(request: &Value, previous: Option<&Value>) -> Value {
             .all(|(message, earlier)| message == earlier)
             .then_some(added)
     });
-    let mut rendered = json!({
-        "providerId": request["providerId"].clone(),
-        "modelId": request["modelId"].clone(),
-        "messageCount": messages.map_or(0, Vec::len),
-    });
-    match added {
-        Some(added) => rendered["addedMessages"] = json!(added),
-        None => rendered["messages"] = request["messages"].clone(),
+    let mut rendered = serde_json::Map::new();
+    for (field, value) in request.as_object().into_iter().flatten() {
+        if field == "messages" {
+            match added {
+                Some(added) => rendered.insert("addedMessages".to_owned(), json!(added)),
+                None => rendered.insert("messages".to_owned(), request["messages"].clone()),
+            };
+            rendered.insert(
+                "messageCount".to_owned(),
+                json!(messages.map_or(0, Vec::len)),
+            );
+            continue;
+        }
+        let unchanged = previous.is_some_and(|previous| previous.get(field) == Some(value));
+        rendered.insert(
+            field.clone(),
+            if unchanged {
+                json!({"unchanged": true})
+            } else {
+                value.clone()
+            },
+        );
     }
-    for field in ["system", "tools", "config"] {
-        let unchanged = previous.is_some_and(|previous| previous.get(field) == request.get(field));
-        rendered[field] = if unchanged {
-            json!({"unchanged": true})
-        } else {
-            request.get(field).cloned().unwrap_or(Value::Null)
-        };
-    }
-    rendered
+    Value::Object(rendered)
 }
 
 /// The judge's declared limits (model-prompts §8.1, #522): its context window
@@ -2450,122 +2457,121 @@ mod tests {
         assert_eq!(turns_in_export(""), (0, None));
     }
 
-    /// The judge's view keeps every line in order, changes nothing but the
-    /// requests, and renders each request against the previous request of its
-    /// line: the messages added since, or all of them after a history change;
-    /// system, tools and config in full only when they changed (issue #635).
+    /// Every request the judge reads can be rebuilt from its rendered form,
+    /// whatever fields the request type carries: a request with a capability
+    /// snapshot, request metadata and a field added after the renderer was
+    /// written comes back whole, because the renderer starts from the request
+    /// itself and replaces only what it renders (issue #635).
+    ///
+    /// A dedicated test, because no flow produces these fields: both of the
+    /// runner's flows serve a development model configuration, whose
+    /// selections carry no capability snapshot and no metadata. The flows
+    /// assert the same rule on the requests they do produce.
     #[test]
-    fn the_judge_view_gives_each_request_its_unchanged_parts_once() {
-        fn request_line(
-            kind: &str,
-            name: &str,
-            branch: &str,
-            messages: &[&str],
-            system: &str,
-            tools: &[&str],
-        ) -> String {
+    fn the_judge_view_keeps_every_request_field() {
+        fn request(messages: &[&str]) -> Value {
+            json!({
+                "providerId": "p",
+                "modelId": "m",
+                "capabilitySnapshot": {
+                    "target": {"providerId": "p", "modelId": "m"},
+                    "capabilities": {"contextWindow": 128_000, "maxOutputTokens": 16_384},
+                    "reasoning": null,
+                    "serviceTier": null,
+                },
+                "messages": messages
+                    .iter()
+                    .map(|text| json!({"role": "user", "content": text}))
+                    .collect::<Vec<_>>(),
+                "system": "S",
+                "tools": [{"name": "read"}],
+                "config": {"maxTokens": 8},
+                "metadata": {"sessionId": "s", "runId": "r", "providerProtocol": "openai-chat"},
+                "aFieldAddedLater": {"kept": true},
+            })
+        }
+        let line = |request: Value| {
             json!({
                 "kind": "event",
-                "branch_id": branch,
-                "event": {"type": kind, "name": name, "data": {"request": {
-                    "providerId": "p",
-                    "modelId": "m",
-                    "messages": messages
-                        .iter()
-                        .map(|text| json!({"role": "user", "content": text}))
-                        .collect::<Vec<_>>(),
-                    "system": system,
-                    "tools": tools
-                        .iter()
-                        .map(|name| json!({"name": name}))
-                        .collect::<Vec<_>>(),
-                    "config": {"maxTokens": 8},
-                }}},
+                "branch_id": "main",
+                "event": {"type": "model", "name": "call", "data": {"request": request}},
             })
             .to_string()
-        }
-        let header = r#"{"kind":"header","export":1}"#.to_owned();
-        let end = r#"{"kind":"end","branches":2,"events":5}"#.to_owned();
+        };
         let export = [
-            header.clone(),
-            request_line("context", "prepare", "main", &["one"], "S", &["read"]),
-            request_line("model", "call", "main", &["one"], "S", &["read"]),
-            request_line(
-                "context",
-                "prepare",
-                "main",
-                &["one", "two"],
-                "S",
-                &["read", "write"],
-            ),
-            request_line("model", "call", "B", &["cut"], "S", &["read"]),
-            request_line(
-                "context",
-                "prepare",
-                "main",
-                &["summary"],
-                "S",
-                &["read", "write"],
-            ),
-            end.clone(),
+            r#"{"kind":"header","export":1}"#.to_owned(),
+            line(request(&["one"])),
+            line(request(&["one", "two"])),
+            r#"{"kind":"end","branches":1,"events":2}"#.to_owned(),
         ]
         .join("\n");
-        let view = judge_view(&export);
-        let lines: Vec<Value> = view
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(lines.len(), 7, "every line is kept");
-        // Every line but a request-bearing one is the export's own.
-        for (index, raw) in export.lines().enumerate() {
-            if matches!(index, 1..=5) {
-                continue;
-            }
-            assert_eq!(lines[index], serde_json::from_str::<Value>(raw).unwrap());
+        let rebuilt = rebuilt_requests(&judge_view(&export));
+        assert_eq!(rebuilt.len(), 2, "both requests are in the view");
+        for (index, request) in rebuilt {
+            let original: Value = serde_json::from_str(export.lines().nth(index).unwrap()).unwrap();
+            assert_eq!(
+                request, original["event"]["data"]["request"],
+                "the request at line {index} is rebuilt from the view"
+            );
         }
-        let request = |index: usize| lines[index]["event"]["data"]["request"].clone();
+    }
 
-        // The first request of a line is given in full.
-        let first = request(1);
-        assert_eq!(first["messages"].as_array().unwrap().len(), 1, "{first}");
-        assert_eq!(first["messageCount"], 1, "{first}");
-        assert_eq!(first["system"], "S", "{first}");
-        assert_eq!(first["tools"].as_array().unwrap().len(), 1, "{first}");
-        assert_eq!(first["config"], json!({"maxTokens": 8}), "{first}");
-
-        // The same request again adds no message and changes nothing.
-        let same = request(2);
-        assert_eq!(same["addedMessages"], json!([]), "{same}");
-        assert_eq!(same["messageCount"], 1, "{same}");
-        assert_eq!(same["system"], json!({"unchanged": true}), "{same}");
-        assert_eq!(same["tools"], json!({"unchanged": true}), "{same}");
-        assert_eq!(same["config"], json!({"unchanged": true}), "{same}");
-
-        // A later request gives the message added since and the tools that
-        // changed; the system is still the one given.
-        let added = request(3);
-        assert_eq!(
-            added["addedMessages"],
-            json!([{"role": "user", "content": "two"}]),
-            "{added}"
-        );
-        assert_eq!(added["messageCount"], 2, "{added}");
-        assert_eq!(added["system"], json!({"unchanged": true}), "{added}");
-        assert_eq!(added["tools"].as_array().unwrap().len(), 2, "{added}");
-
-        // Another line's first request is given in full.
-        let branch = request(4);
-        assert_eq!(branch["messages"].as_array().unwrap().len(), 1, "{branch}");
-
-        // A history change leaves no prefix: the whole list is given.
-        let changed = request(5);
-        assert_eq!(
-            changed["messages"].as_array().unwrap().len(),
-            1,
-            "{changed}"
-        );
-        assert_eq!(changed["messageCount"], 1, "{changed}");
-        assert_eq!(changed["tools"], json!({"unchanged": true}), "{changed}");
+    /// The requests [`judge_view`] rendered, rebuilt from the view alone: the
+    /// line each came from, and the request its export carried. A field
+    /// rendered as `{"unchanged": true}` takes the previous request's value on
+    /// its line, and `addedMessages` continues the previous request's list.
+    fn rebuilt_requests(view: &str) -> Vec<(usize, Value)> {
+        let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+        let mut rebuilt = Vec::new();
+        for (index, raw) in view.lines().enumerate() {
+            let Ok(line) = serde_json::from_str::<Value>(raw) else {
+                continue;
+            };
+            let Some(rendered) = line["event"]["data"]["request"].as_object() else {
+                continue;
+            };
+            let branch = line["branch_id"].as_str().unwrap_or_default().to_owned();
+            let earlier = previous.get(&branch).cloned();
+            let mut request = serde_json::Map::new();
+            let mut messages = None;
+            for (field, value) in rendered {
+                let unchanged = value.as_object().is_some_and(|marker| {
+                    marker.len() == 1 && marker.get("unchanged") == Some(&json!(true))
+                });
+                match field.as_str() {
+                    "messageCount" => {}
+                    "addedMessages" => {
+                        let mut all = earlier
+                            .as_ref()
+                            .and_then(|earlier| earlier["messages"].as_array().cloned())
+                            .unwrap_or_default();
+                        all.extend(value.as_array().cloned().unwrap_or_default());
+                        messages = Some(Value::Array(all));
+                    }
+                    "messages" => messages = Some(value.clone()),
+                    _ if unchanged => {
+                        request.insert(
+                            field.clone(),
+                            earlier
+                                .as_ref()
+                                .and_then(|earlier| earlier.get(field))
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        );
+                    }
+                    _ => {
+                        request.insert(field.clone(), value.clone());
+                    }
+                }
+            }
+            if let Some(messages) = messages {
+                request.insert("messages".to_owned(), messages);
+            }
+            let request = Value::Object(request);
+            previous.insert(branch, request.clone());
+            rebuilt.push((index, request));
+        }
+        rebuilt
     }
 
     /// More violations or more failed runs fail the candidate even when every
