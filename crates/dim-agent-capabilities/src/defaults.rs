@@ -26,6 +26,17 @@ pub fn install(builder: &mut AgentBuilder) {
     install_with_prompt(builder, Arc::new(EmptyPromptHost), None);
 }
 
+/// [`install`] with the branch texts at a given factory configuration, for
+/// flows that test a member
+/// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+pub fn install_with_branch_config(builder: &mut AgentBuilder, branch_text: BranchToolConfig) {
+    builder
+        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
+        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
+    install_with_prompt_capability_and_branch(builder, ModelProviderPlugin::new, true, branch_text);
+}
+
 pub fn install_with_prompt(
     builder: &mut AgentBuilder,
     host: Arc<dyn LoadPrompt>,
@@ -162,6 +173,7 @@ fn install_with_prompt_capability_and_branch(
                 }),
         );
     if branch_tool {
+        let line_text = branch_text.clone();
         builder.require_feature(
             Feature::new("BranchTool")
                 .session("BranchTool", move |names| {
@@ -172,10 +184,13 @@ fn install_with_prompt_capability_and_branch(
                         )?,
                     ))
                 })
-                .branch("BranchLine", |names| {
-                    Ok(Box::new(crate::timeline_tree::BranchLinePlugin::new(
-                        names,
-                    )?))
+                .branch("BranchLine", move |names| {
+                    Ok(Box::new(
+                        crate::timeline_tree::BranchLinePlugin::with_config(
+                            names,
+                            line_text.clone(),
+                        )?,
+                    ))
                 }),
         );
     }

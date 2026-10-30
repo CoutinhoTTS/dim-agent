@@ -1734,6 +1734,11 @@ const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source
 /// `<dim-branch-lines>`, the roster BranchLine writes on main.
 const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
+/// The roster's closing sentence, coordination text for `main`
+/// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
+/// replaceable at [`BranchToolConfig::roster_closing`].
+const ROSTER_CLOSING: &str = "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them.";
+
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
 const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
 
@@ -1744,9 +1749,15 @@ pub struct BranchLinePlugin {
     lifecycle: Key<BranchLifecycle>,
     tree: Key<TreeCommands>,
     guide: Key<GuideEntries>,
+    config: BranchToolConfig,
 }
 impl BranchLinePlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Self::with_config(names, BranchToolConfig::default())
+    }
+    /// The plugin with a candidate's policy text at its factory
+    /// configuration ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+    pub fn with_config(names: &Names<'_>, config: BranchToolConfig) -> rutis::Result<Self> {
         Ok(Self {
             line: names.key()?,
             dispatcher: names.key()?,
@@ -1754,6 +1765,7 @@ impl BranchLinePlugin {
             lifecycle: names.key()?,
             tree: names.key()?,
             guide: names.key()?,
+            config,
         })
     }
 }
@@ -1799,6 +1811,7 @@ impl DynPlugin for BranchLinePlugin {
             let line = Arc::new(BranchLine {
                 own: identity.branch_id.clone(),
                 tree,
+                roster_closing: self.config.roster_closing.clone(),
                 view: Mutex::new(LineView::default()),
                 wanted: Mutex::new(std::collections::VecDeque::new()),
                 changed: tokio::sync::Notify::new(),
@@ -1861,6 +1874,8 @@ impl DynPlugin for BranchLinePlugin {
 pub struct BranchLine {
     own: String,
     tree: Arc<TreeCommands>,
+    /// The roster's closing sentence in place of [`ROSTER_CLOSING`].
+    roster_closing: Option<Arc<str>>,
     view: Mutex<LineView>,
     wanted: Mutex<std::collections::VecDeque<Decision>>,
     changed: tokio::sync::Notify,
@@ -2130,7 +2145,8 @@ impl BranchLine {
                 "dim-branch-lines",
                 &[("branch", &self.own)],
                 &format!(
-                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them."
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\n{}",
+                    self.roster_closing.as_deref().unwrap_or(ROSTER_CLOSING)
                 ),
             ),
             false,
@@ -2703,6 +2719,10 @@ pub struct BranchToolConfig {
     /// candidate keeps the description's protocol sentences byte-identical
     /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
     pub description: Option<Arc<str>>,
+    /// The roster's closing sentence in place of [`ROSTER_CLOSING`], read by
+    /// BranchLine, the part that writes the roster
+    /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+    pub roster_closing: Option<Arc<str>>,
 }
 
 fn branch_definition(description: &str) -> ToolDefinition {
