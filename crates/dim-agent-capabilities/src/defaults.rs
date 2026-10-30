@@ -30,11 +30,13 @@ pub fn install(builder: &mut AgentBuilder) {
 /// flows that test a member
 /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
 pub fn install_with_branch_config(builder: &mut AgentBuilder, branch_text: BranchToolConfig) {
-    builder
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
-        .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
-        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
-    install_with_prompt_capability_and_branch(builder, ModelProviderPlugin::new, true, branch_text);
+    install_profile(
+        builder,
+        Arc::new(EmptyPromptHost),
+        None,
+        ModelProviderPlugin::new,
+        branch_text,
+    );
 }
 
 pub fn install_with_prompt(
@@ -42,7 +44,13 @@ pub fn install_with_prompt(
     host: Arc<dyn LoadPrompt>,
     initial: Option<dim_agent_runtime::ConfigureUpdate>,
 ) {
-    install_profile(builder, host, initial, ModelProviderPlugin::new);
+    install_profile(
+        builder,
+        host,
+        initial,
+        ModelProviderPlugin::new,
+        BranchToolConfig::default(),
+    );
 }
 
 /// Install the same execution loop with process-owned network model services.
@@ -52,6 +60,7 @@ pub fn install_with_process_model(builder: &mut AgentBuilder) {
         Arc::new(EmptyPromptHost),
         None,
         ModelProviderPlugin::process,
+        BranchToolConfig::default(),
     );
 }
 
@@ -60,12 +69,13 @@ fn install_profile(
     host: Arc<dyn LoadPrompt>,
     initial: Option<dim_agent_runtime::ConfigureUpdate>,
     model: fn(&Names<'_>) -> Result<ModelProviderPlugin, Error>,
+    branch_text: BranchToolConfig,
 ) {
     builder
         .session_value(Arc::new(PromptHost(host)))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(initial)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
-    install_with_prompt_capability(builder, model);
+    install_with_prompt_capability_and_branch(builder, model, true, branch_text);
 }
 
 /// Installs the same capabilities without binding `PromptHost` or
