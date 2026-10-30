@@ -385,9 +385,13 @@ impl SessionState {
                     .settings
                     .read_declared("web", SettingsScope::User, &call_cancel)
                     .await
-                    .map_err(|_| WebError::new("cancelled", "Call cancelled."))?;
-                let document: WebDocument = serde_json::from_value(snapshot.document)
-                    .unwrap_or_default();
+                    .map_err(|_| {
+                        WebError::new("settings_unavailable", "Web settings could not be read.")
+                    })?;
+                let document: WebDocument =
+                    serde_json::from_value(snapshot.document).map_err(|_| {
+                        WebError::new("settings_unavailable", "Web settings are invalid.")
+                    })?;
                 secret = document
                     .search_service
                     .as_ref()

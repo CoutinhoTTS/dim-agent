@@ -7,7 +7,7 @@ The WorkspaceTools plugin registers WorkspaceTools in every Session and FileRead
 Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/mod.rs),
 [files.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs),
 [exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs).
-Provides ToolHost for read, write, edit, glob, grep and exec, and registers the
+Provides ToolHost for read, write, edit, glob, grep, exec and exec_stop, and registers the
 leaf namespace `session.exec.output` with `sessionMethods` for the active
 command's bounded tail preview. The WorkspaceTools plugin registers this part
 and the branch parts FileReads and BackgroundExec, and holds the file-write
@@ -58,6 +58,20 @@ after its environment line, so it stays stable for the Session. Exec keeps the
 the foreground or after the background handoff, appends HostPlatform's failure
 note to the result text when the shown output matches; stops, timeouts and
 offload failures get none. Codes and structured content are unchanged.
+
+`exec_stop {taskId}` stops a detached command owned by the calling branch through
+BackgroundExec. It waits for cleanup and returns the committed terminal
+`{task_id, status, result}` in the model-readable content. An already-ended task
+keeps its result. Only `cancelled` confirms cancellation; `failed` remains an error,
+including when the process tree could not be released. An unknown task fails
+without stopping any command. Detached exec results name this operation and
+distinguish their Task ID from Collaboration's Agent and Session identities.
+
+```text
+exec(command, runInBackground) -> Task ID: exec-...
+exec_stop(taskId)              -> {status: cancelled, result: ...}
+agent(cancel, agentId, sessionId) -> member task only
+```
 
 Exec retains its `cwd` argument resolution, POSIX `&` refusal, heavy-search
 refusal, timeouts and background ownership. Its existing `exec_shell_unavailable`

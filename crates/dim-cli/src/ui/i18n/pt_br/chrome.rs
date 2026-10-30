@@ -409,6 +409,32 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} modelos indisponíveis · dimcode models {id}"
         }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}: sem modelos · dimcode models {id} --refresh"
+        }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}: sem modelos · adicione um modelo com provider.models.create"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}: {unavailable} indisponíveis e {disabled} desativados · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}: catálogo ilegível · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "Nenhum catálogo em cache. Entre e execute models PROVIDER --refresh."
+        }
+        "Saved model preferences cleared" => "Preferências de modelo salvas apagadas",
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}: 1 modelo desativado · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}: {count} modelos desativados · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "Sem modelos. Execute dimcode models {id} --refresh para listá-los."
+        }
+        "No models. The provider listed none." => "Sem modelos. O provedor não listou nenhum.",
         "Enter select · Esc back" => "Enter selecionar · Esc voltar",
         "Subagent models" => "Modelos de subagentes",
         "Subagent models: {policy}" => "Modelos de subagentes: {policy}",

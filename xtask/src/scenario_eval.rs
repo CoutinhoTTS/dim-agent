@@ -101,8 +101,8 @@
 //! included, which the judge reads), `home/` and `workspace/`. The App
 //! Server's local endpoint sits under the system temporary directory, because
 //! a Unix socket's path is short and a run's directory is not; each run
-//! removes its socket when its server stops, and the evaluation removes the
-//! directory when it ends, on success and on error, so nothing is left there.
+//! owns its endpoint directory and removes it when the run ends, on success
+//! and on error, without affecting other runs.
 use crate::app_server::{self, Overrides, RunSettings};
 use crate::summary_eval::{Configuration, Judgement, Verdict, complete, parse_judgements};
 use dim_agent_capabilities::{
@@ -158,10 +158,6 @@ enum TextMember {
     /// member inside the manifest's `config`. The harness patches that
     /// plugin's row, so both arms run the same plugin code (model-prompts
     /// §8.1).
-    /// A plugin entry is added by its text's owner (#553 for Goal, #551 for
-    /// the capabilities); the runner's own test constructs the variant until
-    /// one lands.
-    #[allow(dead_code)]
     Plugin {
         plugin: &'static str,
         member: &'static str,
@@ -172,9 +168,9 @@ enum TextMember {
 /// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
 /// description (timeline branches §12.4) are the texts exposed at a Rust
 /// factory configuration today; the other owners add their entries with their
-/// own factory members: Goal under
-/// [#553](https://github.com/arcships/dim/issues/553), and Capabilities under
-/// [#551](https://github.com/arcships/dim/issues/551).
+/// own factory members: Capabilities under
+/// [#551](https://github.com/arcships/dim/issues/551), and ContextCompaction
+/// under [#554](https://github.com/arcships/dim/issues/554).
 /// A plugin's text is its manifest `config` member, which the plugin's row
 /// carries into its `apply`.
 const TEXTS: &[(&str, TextMember)] = &[
@@ -185,6 +181,20 @@ const TEXTS: &[(&str, TextMember)] = &[
     (
         "timeline-tree/branch-description",
         TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
+    ),
+    (
+        "goal/objective",
+        TextMember::Plugin {
+            plugin: "goal",
+            member: "texts.objective",
+        },
+    ),
+    (
+        "goal/continuation",
+        TextMember::Plugin {
+            plugin: "goal",
+            member: "texts.continuation",
+        },
     ),
 ];
 
@@ -207,7 +217,6 @@ async fn evaluate(options: &Options) -> Result<String> {
             return Err("set DIM_TEST_JS_RUNTIME: the default plugins import it".into());
         }
     }
-    let _sockets = Sockets;
     let overrides = overrides(&options.text, options.candidate.clone())?;
     let scenarios = read_scenarios(&options.scenarios)?;
     let home = isolated_home(&options.home)?;
@@ -710,10 +719,11 @@ async fn run_once(
     copy_tree(home, &run_home)?;
     let workspace = run_directory.join("workspace");
     copy_tree(&scenario.directory.join("workspace"), &workspace)?;
+    let sockets = Sockets::new()?;
     let settings = RunSettings {
         overrides: overrides.clone(),
         model_config: options.model_config.clone(),
-        unix_path: Some(endpoint()?),
+        unix_path: Some(sockets.0.join("rpc.sock")),
         defaults: options.defaults.clone(),
         node: options.node.clone(),
         js_runtime: options.js_runtime.clone(),
@@ -744,11 +754,7 @@ async fn run_once(
         Err(error) => Finished::failed(scenario, error.to_string()),
     };
     server.shutdown();
-    let joined = server.join().await;
-    if let Some(socket) = &settings.unix_path {
-        let _ = std::fs::remove_file(socket);
-    }
-    joined?;
+    server.join().await?;
     if let Some(export) = &finished.export {
         std::fs::write(run_directory.join("timeline.jsonl"), export)?;
     }
@@ -1838,29 +1844,24 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     text
 }
 
-/// The App Server endpoint one run serves: under the system temporary
-/// directory, because a run's own directory sits deeper than a Unix socket's
-/// short address allows and the endpoint needs a 0700 directory.
-fn socket_directory() -> PathBuf {
-    std::env::temp_dir().join(format!("dim-scenario-eval-sockets-{}", std::process::id()))
+/// One run's private endpoint directory, short enough for Unix socket addresses.
+/// Dropping it removes only that run's endpoints.
+struct Sockets(PathBuf);
+impl Sockets {
+    fn new() -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        private_directory(&directory)?;
+        Ok(Self(directory))
+    }
 }
-fn endpoint() -> Result<PathBuf> {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let directory = socket_directory();
-    private_directory(&directory)?;
-    Ok(directory.join(format!(
-        "{}.sock",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )))
-}
-/// Removes the endpoint directory when the evaluation ends, however it ends:
-/// every run removes its own socket once its server stops, and this removes
-/// the directory that held them, so nothing is left in the system temporary
-/// directory.
-struct Sockets;
 impl Drop for Sockets {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(socket_directory());
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -2022,6 +2023,23 @@ mod tests {
         assert_eq!(known.summary_prompt.as_deref(), Some("candidate"));
         let branch = overrides("timeline-tree/branch-description", Arc::from("candidate")).unwrap();
         assert_eq!(branch.branch_description.as_deref(), Some("candidate"));
+    }
+
+    /// Goal's two texts are its manifest `config` members, patched into the
+    /// plugin's row by name (Goal A.5.1, model-prompts §8.1).
+    #[test]
+    fn the_goal_texts_are_manifest_config_members() {
+        for (id, member) in [
+            ("goal/objective", "objective"),
+            ("goal/continuation", "continuation"),
+        ] {
+            let overrides = overrides(id, Arc::from("candidate")).unwrap();
+            assert_eq!(
+                overrides.plugin_configs["goal"]["texts"][member],
+                json!("candidate"),
+                "{id}"
+            );
+        }
     }
 
     /// A candidate exactly at `current − δ` passes the rule; one just below
@@ -3505,6 +3523,33 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completing_an_evaluation_preserves_another_runs_endpoint() {
+        let peer = Sockets::new().unwrap();
+        let address = peer.0.join("rpc.sock");
+        let _listener = tokio::net::UnixListener::bind(&address).unwrap();
+        let fixture = Fixture::start(
+            "endpoint-isolation",
+            summaries_and_judgements,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate passes"),
+            "{report}\nrecords: {:?}",
+            fixture.records(&options.out)
+        );
+        tokio::net::UnixStream::connect(address).await.unwrap();
+    }
+
     /// A turn that ends while the driver waits on `session.idle` is read like
     /// any other notice: the quiet period follows it, and the run closes at
     /// least `QUIET` after the turn's end instead of at it (issue #643).
@@ -3536,7 +3581,11 @@ mod tests {
         .await;
         let options = fixture.options(fixture.directory.join("out"));
         let report = evaluate(&options).await.unwrap();
-        assert!(report.contains("candidate passes"), "{report}");
+        assert!(
+            report.contains("candidate passes"),
+            "{report}\nrecords: {:?}",
+            fixture.records(&options.out)
+        );
         for arm in ["current", "candidate"] {
             let export = std::fs::read_to_string(
                 options
