@@ -3764,18 +3764,19 @@ mod tests {
                 .all(|request| !request.contains("You summarize a coding session")),
             "the candidate arm never carries the product prompt"
         );
-        // The compaction changes this run's history, so its view gives a
-        // request after the change the whole message list.
+        // The compaction changes this run's history: the request right after
+        // the change carries the whole message list, not the messages added
+        // since.
         for arm in ["current", "candidate"] {
             let directory = options.out.join(arm).join("case").join("run-0");
-            let requests = assert_view_rebuilds(&directory);
-            let whole = requests
-                .iter()
-                .filter(|request| request.get("messages").is_some())
-                .count();
+            assert_view_rebuilds(&directory);
+            let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+            let view = std::fs::read_to_string(directory.join("judge-view.jsonl")).unwrap();
+            let changed = after_history_change(&export);
+            let rendered: Value = serde_json::from_str(view.lines().nth(changed).unwrap()).unwrap();
             assert!(
-                whole > 1,
-                "{arm}: the request after the history change carries the whole list"
+                rendered["event"]["data"]["request"]["messages"].is_array(),
+                "{arm}: the request after the history change carries the whole list: {rendered}"
             );
         }
     }
@@ -3897,6 +3898,31 @@ mod tests {
                     .then(|| line["event"]["data"]["request"].clone())
             })
             .collect()
+    }
+
+    /// The line of a run's export holding the first request whose messages do
+    /// not extend its line's previous request's: the request a history change
+    /// produced.
+    fn after_history_change(export: &str) -> usize {
+        let mut previous: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for (index, raw) in export.lines().enumerate() {
+            let Ok(line) = serde_json::from_str::<Value>(raw) else {
+                continue;
+            };
+            let Some(messages) = line["event"]["data"]["request"]["messages"].as_array() else {
+                continue;
+            };
+            let branch = line["branch_id"].as_str().unwrap_or_default().to_owned();
+            if let Some(earlier) = previous.get(&branch) {
+                let extends =
+                    messages.len() >= earlier.len() && messages[..earlier.len()] == earlier[..];
+                if !extends {
+                    return index;
+                }
+            }
+            previous.insert(branch, messages.clone());
+        }
+        panic!("the run's export holds a request after a history change");
     }
 
     /// A run whose view does not fit the judge's budget is unjudged before
