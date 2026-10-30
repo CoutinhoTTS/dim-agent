@@ -3601,6 +3601,7 @@
       "parent": "dim_cli::ui::keys",
       "file": "crates/dim-cli/src/ui/keys.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -25651,7 +25652,8 @@
       "from": "dim_cli::ui::keys::tests",
       "to": "dim_cli::ui::keys",
       "references": [
-        "path history"
+        "path history",
+        "path report"
       ]
     },
     {

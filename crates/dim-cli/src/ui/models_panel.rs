@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! Select a model
-//! > Provider / model          ‹ high ›  current
+//! > Provider / model          ZDR  ‹ high ›  current
 //!   Other provider / model    low
 //!   Edit models
 //!   Subagent models: Agent choice
@@ -437,6 +437,14 @@ fn model_rows(
             ),
         );
         row.search = model.display_name.clone();
+        if model.zdr {
+            row.detail = if row.detail.is_empty() {
+                "ZDR".to_owned()
+            } else {
+                format!("ZDR  {}", row.detail)
+            };
+            row.search.push_str(" ZDR");
+        }
         items.push(row);
     }
     items
@@ -571,6 +579,7 @@ mod tests {
             provider_version: 1,
             model_id: id.into(),
             display_name: id.into(),
+            zdr: false,
             efforts: efforts.iter().map(|effort| (*effort).to_owned()).collect(),
             default_effort: default_effort.map(str::to_owned),
             saved_effort: saved.map(str::to_owned),
@@ -601,6 +610,37 @@ mod tests {
                 ),
             )
             .join("\n")
+    }
+
+    #[test]
+    fn zdr_tags_filter_select_and_follow_catalog_replacement() {
+        let mut panel = panel();
+        let mut models = panel.models().to_vec();
+        models[0].zdr = true;
+        panel.set_models(Ok(ModelList {
+            models: models.clone(),
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        assert!(screen.contains("ZDR  ‹ low ›"), "{screen}");
+        panel.paste("zdr");
+        let screen = drawn(&panel);
+        assert!(screen.contains("flash"), "{screen}");
+        assert!(!screen.contains("plain"), "{screen}");
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel { ref model_id, .. } if model_id == "flash"
+        ));
+        models[0].zdr = false;
+        panel.set_models(Ok(ModelList {
+            models,
+            current: None,
+            empty: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        assert!(screen.contains("No matching models."), "{screen}");
+        assert!(!screen.contains("ZDR"), "{screen}");
     }
 
     #[test]

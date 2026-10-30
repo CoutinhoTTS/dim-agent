@@ -2193,6 +2193,8 @@ impl Worker {
             name: String,
             unavailable_reason: Option<String>,
             #[serde(default)]
+            zdr: bool,
+            #[serde(default)]
             capabilities: dim_agent_types::ModelCapabilities,
             #[serde(default)]
             metadata: Option<CatalogReasoning>,
@@ -2323,6 +2325,7 @@ impl Worker {
                             provider_version: catalog.version,
                             model_id: model.id,
                             display_name: model.name,
+                            zdr: model.zdr,
                             efforts,
                             default_effort,
                             saved_effort,
