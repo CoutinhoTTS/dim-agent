@@ -537,6 +537,13 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::images",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/images.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::input_queue",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -6007,6 +6014,13 @@
       "references": [
         "mod host_platform",
         "path host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "mod images"
       ]
     },
     {

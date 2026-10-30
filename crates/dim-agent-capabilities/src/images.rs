@@ -1,0 +1,430 @@
+//! One scaling step for every place that turns a local image into an image
+//! block. `read` is the caller here; the CLI's attachments will add the second
+//! one (#657), so both send an image the same way.
+use image::{
+    AnimationDecoder, DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader,
+    codecs::jpeg::JpegEncoder, imageops::FilterType, metadata::Orientation,
+};
+use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
+
+/// The longest edge an image may have and still be sent as it is, in pixels.
+pub const MAX_EDGE: u32 = 2048;
+/// The largest encoding that is sent as it is, in bytes.
+pub const MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
+/// The pixel guard: a header claiming more pixels is refused before decoding.
+pub const MAX_PIXELS: u64 = 100_000_000;
+/// The quality of a JPEG this module encodes.
+const JPEG_QUALITY: u8 = 85;
+/// The leading bytes read to recognize the format.
+const SNIFF_BYTES: usize = 16;
+
+/// The image formats this module decodes and sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+    WebP,
+    Gif,
+}
+
+impl ImageKind {
+    /// The name the model-facing text writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::WebP => "WebP",
+            Self::Gif => "GIF",
+        }
+    }
+
+    /// The media type of the file's own bytes.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::WebP => "image/webp",
+            Self::Gif => "image/gif",
+        }
+    }
+
+    fn format(self) -> ImageFormat {
+        match self {
+            Self::Png => ImageFormat::Png,
+            Self::Jpeg => ImageFormat::Jpeg,
+            Self::WebP => ImageFormat::WebP,
+            Self::Gif => ImageFormat::Gif,
+        }
+    }
+}
+
+/// A width and height in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ImageSize {
+    pub fn pixels(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+}
+
+/// What a file's first bytes say it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sniffed {
+    /// An image this module decodes.
+    Image(ImageKind),
+    /// A known image format this build cannot decode.
+    Unsupported(&'static str),
+}
+
+/// The image a file's first bytes say it is, or `None` when they are not an
+/// image this module recognizes.
+pub fn sniff(bytes: &[u8]) -> Option<Sniffed> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(Sniffed::Image(ImageKind::Png));
+    }
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return Some(Sniffed::Image(ImageKind::Jpeg));
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some(Sniffed::Image(ImageKind::Gif));
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some(Sniffed::Image(ImageKind::WebP));
+    }
+    // ISO base media: the major brand names the format. `image` knows AVIF but
+    // this build carries no decoder for it, and it has no HEIC support at all.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some(match &bytes[8..12] {
+            b"avif" | b"avis" => Sniffed::Unsupported("AVIF"),
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs"
+            | b"mif1" | b"msf1" => Sniffed::Unsupported("HEIC/HEIF"),
+            _ => return None,
+        });
+    }
+    None
+}
+
+/// An image made acceptable to a model, within the edge and byte limits and
+/// upright.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScaledImage {
+    /// The bytes to send: the file's own bytes when nothing had to change.
+    pub bytes: Vec<u8>,
+    /// The media type of `bytes`.
+    pub media_type: &'static str,
+    /// The file's own format.
+    pub kind: ImageKind,
+    /// The pixel size the file's header stores, before the EXIF orientation.
+    pub original: ImageSize,
+    /// The pixel size of `bytes`: the header's size with the EXIF orientation
+    /// applied, scaled down when it exceeded a limit.
+    pub sent: ImageSize,
+    /// Whether `bytes` were re-encoded — scaled to fit, or turned upright.
+    /// When false they are the file's own bytes, unchanged.
+    pub scaled: bool,
+    /// Whether the source is an animation whose first frame `bytes` hold.
+    pub animated: bool,
+}
+
+/// Why an image was not turned into a [`ScaledImage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageRefusal {
+    /// The bytes are not an image in any format this module recognizes.
+    NotAnImage,
+    /// A known image format this build cannot decode.
+    UnsupportedFormat(&'static str),
+    /// The header claims more pixels than the guard allows; nothing was
+    /// decoded.
+    TooManyPixels(ImageSize),
+    /// The bytes are a recognized format but do not decode.
+    Invalid { kind: ImageKind, reason: String },
+}
+
+/// Makes an image acceptable to a model.
+///
+/// In: a seekable byte source — a file, or a `Cursor` over bytes that are
+/// already in memory. Out: the bytes to send, their media type, the size
+/// stored in the source's header, the size actually sent, and whether the bytes
+/// were re-encoded.
+///
+/// The whole source is never buffered: the first bytes are read to recognize
+/// the format, the header is read from the same source and the pixel guard
+/// runs, and only then are the pixels decoded. An image sent as it is is read
+/// back in full only when the source's length is within [`MAX_ENCODED_BYTES`],
+/// so memory stays within that bound and the pixel guard.
+///
+/// A PNG or GIF that fits both limits is returned unchanged. An image whose
+/// longest edge exceeds [`MAX_EDGE`], whose encoding exceeds
+/// [`MAX_ENCODED_BYTES`], whose EXIF orientation is not the identity, or which
+/// is animated is decoded and re-encoded: a PNG source stays PNG while its
+/// scaled PNG fits, and everything else becomes JPEG at quality 85, its long
+/// edge stepping down until the encoding fits. The EXIF orientation is applied
+/// before anything else, so the sent pixels are upright, and an animation is
+/// sent as its first frame. A header above [`MAX_PIXELS`] is refused before the
+/// pixels are decoded.
+pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, ImageRefusal> {
+    let kind = match sniffed(&mut source)? {
+        Some(Sniffed::Image(kind)) => kind,
+        Some(Sniffed::Unsupported(name)) => return Err(ImageRefusal::UnsupportedFormat(name)),
+        None => return Err(ImageRefusal::NotAnImage),
+    };
+    match kind {
+        ImageKind::Gif => {
+            rewind(&mut source, kind)?;
+            let (stored, _) = read_header(&mut source, kind)?;
+            rewind(&mut source, kind)?;
+            let (image, animated) = {
+                let decoder = image::codecs::gif::GifDecoder::new(&mut source)
+                    .map_err(|error| invalid(kind, error))?;
+                first_frame(kind, decoder.into_frames())?
+            };
+            if let Some(image) = unchanged(
+                &mut source,
+                kind,
+                stored,
+                Orientation::NoTransforms,
+                animated,
+            )? {
+                return Ok(image);
+            }
+            reencoded(kind, stored, Orientation::NoTransforms, image, animated)
+        }
+        ImageKind::WebP => {
+            rewind(&mut source, kind)?;
+            let decoder = image::codecs::webp::WebPDecoder::new(&mut source)
+                .map_err(|error| invalid(kind, error))?;
+            let stored = size(decoder.dimensions());
+            guard(stored)?;
+            let mut decoder = decoder;
+            if decoder.has_animation() {
+                let (image, animated) = first_frame(kind, decoder.into_frames())?;
+                return reencoded(kind, stored, Orientation::NoTransforms, image, animated);
+            }
+            let orientation = decoder
+                .orientation()
+                .map_err(|error| invalid(kind, error))?;
+            drop(decoder);
+            if let Some(image) = unchanged(&mut source, kind, stored, orientation, false)? {
+                return Ok(image);
+            }
+            rewind(&mut source, kind)?;
+            let decoder = image::codecs::webp::WebPDecoder::new(&mut source)
+                .map_err(|error| invalid(kind, error))?;
+            let image =
+                DynamicImage::from_decoder(decoder).map_err(|error| invalid(kind, error))?;
+            reencoded(kind, stored, orientation, image, false)
+        }
+        _ => {
+            rewind(&mut source, kind)?;
+            let (stored, orientation) = read_header(&mut source, kind)?;
+            if let Some(image) = unchanged(&mut source, kind, stored, orientation, false)? {
+                return Ok(image);
+            }
+            rewind(&mut source, kind)?;
+            let decoder = ImageReader::with_format(&mut source, kind.format())
+                .into_decoder()
+                .map_err(|error| invalid(kind, error))?;
+            let image =
+                DynamicImage::from_decoder(decoder).map_err(|error| invalid(kind, error))?;
+            reencoded(kind, stored, orientation, image, false)
+        }
+    }
+}
+
+/// The leading bytes of the source, recognizing its format.
+fn sniffed<R: BufRead + Seek>(source: &mut R) -> Result<Option<Sniffed>, ImageRefusal> {
+    let mut prefix = [0u8; SNIFF_BYTES];
+    let mut filled = 0;
+    while filled < prefix.len() {
+        match source.read(&mut prefix[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(sniff(&prefix[..filled]))
+}
+
+/// The header's pixel size and orientation; the guard runs before any pixel
+/// is decoded.
+fn read_header<R: BufRead + Seek>(
+    source: &mut R,
+    kind: ImageKind,
+) -> Result<(ImageSize, Orientation), ImageRefusal> {
+    let (stored, orientation) = {
+        let mut decoder = ImageReader::with_format(&mut *source, kind.format())
+            .into_decoder()
+            .map_err(|error| invalid(kind, error))?;
+        let stored = size(decoder.dimensions());
+        let orientation = decoder
+            .orientation()
+            .map_err(|error| invalid(kind, error))?;
+        (stored, orientation)
+    };
+    guard(stored)?;
+    Ok((stored, orientation))
+}
+
+/// The first frame and whether a second one follows.
+fn first_frame(
+    kind: ImageKind,
+    mut frames: image::Frames<'_>,
+) -> Result<(DynamicImage, bool), ImageRefusal> {
+    let first = frames
+        .next()
+        .ok_or_else(|| ImageRefusal::Invalid {
+            kind,
+            reason: "the animation has no frames".into(),
+        })?
+        .map_err(|error| invalid(kind, error))?;
+    let animated = frames.next().is_some();
+    Ok((DynamicImage::ImageRgba8(first.into_buffer()), animated))
+}
+
+/// The source's own bytes when nothing has to change and its length is within
+/// [`MAX_ENCODED_BYTES`]; `None` when the image has to be re-encoded instead.
+fn unchanged<R: BufRead + Seek>(
+    source: &mut R,
+    kind: ImageKind,
+    stored: ImageSize,
+    orientation: Orientation,
+    animated: bool,
+) -> Result<Option<ScaledImage>, ImageRefusal> {
+    let fits = !animated
+        && orientation == Orientation::NoTransforms
+        && stored.width <= MAX_EDGE
+        && stored.height <= MAX_EDGE
+        && source
+            .seek(SeekFrom::End(0))
+            .map_err(|error| invalid(kind, error))?
+            <= MAX_ENCODED_BYTES as u64;
+    if !fits {
+        return Ok(None);
+    }
+    rewind(source, kind)?;
+    let mut bytes = Vec::new();
+    (&mut *source)
+        .take(MAX_ENCODED_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| invalid(kind, error))?;
+    if bytes.len() > MAX_ENCODED_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(ScaledImage {
+        bytes,
+        media_type: kind.media_type(),
+        kind,
+        original: stored,
+        sent: stored,
+        scaled: false,
+        animated,
+    }))
+}
+
+/// The decoded image re-encoded to fit both limits.
+fn reencoded(
+    kind: ImageKind,
+    stored: ImageSize,
+    orientation: Orientation,
+    mut image: DynamicImage,
+    animated: bool,
+) -> Result<ScaledImage, ImageRefusal> {
+    if orientation != Orientation::NoTransforms {
+        image.apply_orientation(orientation);
+    }
+    let (bytes, media_type, sent) = encode(&image, kind)?;
+    Ok(ScaledImage {
+        bytes,
+        media_type,
+        kind,
+        original: stored,
+        sent,
+        scaled: true,
+        animated,
+    })
+}
+
+/// Rewinds the source to its first byte.
+fn rewind<R: Seek>(source: &mut R, kind: ImageKind) -> Result<(), ImageRefusal> {
+    source
+        .seek(SeekFrom::Start(0))
+        .map(|_| ())
+        .map_err(|error| invalid(kind, error))
+}
+
+/// The encoded image that fits both limits: PNG for a PNG source while its
+/// scaled PNG fits, JPEG at quality 85 otherwise, the long edge stepping down
+/// until the JPEG fits.
+fn encode(
+    image: &DynamicImage,
+    kind: ImageKind,
+) -> Result<(Vec<u8>, &'static str, ImageSize), ImageRefusal> {
+    let mut fitted = fit(image);
+    if kind == ImageKind::Png {
+        let encoded = png(&fitted).map_err(|error| invalid(kind, error))?;
+        if encoded.len() <= MAX_ENCODED_BYTES {
+            return Ok((encoded, "image/png", size(fitted.dimensions())));
+        }
+    }
+    loop {
+        let encoded = jpeg(&fitted)?;
+        if encoded.len() <= MAX_ENCODED_BYTES {
+            return Ok((encoded, "image/jpeg", size(fitted.dimensions())));
+        }
+        let (width, height) = fitted.dimensions();
+        let next = ((width * 7 / 8).max(1), (height * 7 / 8).max(1));
+        if next == (width, height) {
+            return Err(ImageRefusal::Invalid {
+                kind,
+                reason: "the image cannot be encoded within the byte limit".into(),
+            });
+        }
+        fitted = fitted.resize_exact(next.0, next.1, FilterType::Lanczos3);
+    }
+}
+
+/// The image fitted within [`MAX_EDGE`] on its longest edge, aspect kept.
+fn fit(image: &DynamicImage) -> DynamicImage {
+    if image.width() <= MAX_EDGE && image.height() <= MAX_EDGE {
+        return image.clone();
+    }
+    image.resize(MAX_EDGE, MAX_EDGE, FilterType::Lanczos3)
+}
+
+fn png(image: &DynamicImage) -> image::ImageResult<Vec<u8>> {
+    let mut encoded = Cursor::new(Vec::new());
+    image.write_to(&mut encoded, ImageFormat::Png)?;
+    Ok(encoded.into_inner())
+}
+
+fn jpeg(image: &DynamicImage) -> Result<Vec<u8>, ImageRefusal> {
+    let mut encoded = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut encoded, JPEG_QUALITY);
+    encoder
+        .encode_image(&image.to_rgb8())
+        .map_err(|error| invalid(ImageKind::Jpeg, error))?;
+    Ok(encoded)
+}
+
+fn guard(stored: ImageSize) -> Result<(), ImageRefusal> {
+    if stored.pixels() > MAX_PIXELS {
+        return Err(ImageRefusal::TooManyPixels(stored));
+    }
+    Ok(())
+}
+
+fn size((width, height): (u32, u32)) -> ImageSize {
+    ImageSize { width, height }
+}
+
+fn invalid(kind: ImageKind, error: impl std::fmt::Display) -> ImageRefusal {
+    ImageRefusal::Invalid {
+        kind,
+        reason: error.to_string(),
+    }
+}

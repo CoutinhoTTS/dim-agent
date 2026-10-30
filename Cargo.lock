@@ -1135,6 +1135,7 @@ dependencies = [
  "grep-searcher",
  "iana-time-zone",
  "ignore",
+ "image",
  "libc",
  "portable-pty",
  "regex",
