@@ -1,4 +1,4 @@
-# 009: Sessions, branches and their content are plugins, not loader instances
+# 015: Sessions, branches and their content are plugins, not loader instances
 
 Decision status: Proposed. The design is [Sessions and branches are plugins, not loader
 instances](../design/thin-instances.md), tracked by [#594](https://github.com/arcships/dim/issues/594).

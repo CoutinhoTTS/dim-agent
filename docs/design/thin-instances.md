@@ -11,7 +11,7 @@ Rules: [design rules](../architecture/rust-agent/principles.md), [ADR 002](../ad
 Builds on: rutis 0.19.1, which the 0.19 upgrade ([#677](https://github.com/arcships/dim/pull/677)) pins;
 #677 lands first. It supersedes [#645](https://github.com/arcships/dim/pull/645) and the "one row per
 instance" draft of this design.
-Decision: [ADR 009](../adr/009-scopes-are-plugins.md) (Proposed).
+Decision: [ADR 015](../adr/015-scopes-are-plugins.md) (Proposed).
 
 ## 1. Scope and non-goals
 
@@ -234,7 +234,7 @@ instances from its position in the tree, and a host marks its own scopes with `m
 | §4 rule 7 (public events and services) | No service is added; `SessionLoader` goes. Creation reads only the views the scope and the mounters hand it, not the loader's table |
 | §4 rule 8 (infrastructure unchanged by default) | The need is the assembly's own (#594's creation cost), and it closes inside the assembly, using rutis 0.19.1 as #677 pins it. Nothing is asked of rutis (§5) |
 | ADR 002 D1–D5 | Parts stay in their Session or branch. No wiring module, configuration or language contract changes; foreign parts still resolve their names |
-| ADR 004 | Its ownership stands: connections belong to a Session, closing a Session closes only its generations, configuration stays private and immutable, and no second loader or lifecycle manager comes in. Its mechanism, a connection generation as an instanced group with the loader owning disposal, is superseded by [ADR 009](../adr/009-scopes-are-plugins.md) |
+| ADR 004 | Its ownership stands: connections belong to a Session, closing a Session closes only its generations, configuration stays private and immutable, and no second loader or lifecycle manager comes in. Its mechanism, a connection generation as an instanced group with the loader owning disposal, is superseded by [ADR 015](../adr/015-scopes-are-plugins.md) |
 | ADR 006 D3 | The instance still mounts the parts registered for it, from its scope. The scope and the mounters are the instance's mounting mechanism, built by Dim, with no configuration, enablement or reload of their own, so "a plugin is one row" does not cover them. "Inside a part" now holds literally for McpSession and Skills |
 | ADR 006 D4 | Names resolve to the nearest enclosing instance of their group, now the nearest scope marked with it, through the same catalog |
 
