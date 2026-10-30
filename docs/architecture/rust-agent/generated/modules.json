@@ -855,6 +855,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::summary_strategy::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::summary_strategy",
+      "file": "crates/dim-agent-capabilities/src/summary_strategy.rs",
+      "unexpandedMacros": [
+        "assert"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::timeline_tree",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -10189,6 +10198,13 @@
         "use crate::prompt_guide::GuideEntries",
         "use crate::prompt_guide::GuideEntry",
         "use crate::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::summary_strategy::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
