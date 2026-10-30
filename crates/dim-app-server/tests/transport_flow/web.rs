@@ -258,6 +258,8 @@ async fn web_settings_permission_cancellation_and_restore() {
                         }
                         let (media, body) = if request.starts_with("GET /nonascii ") {
                             ("text/html", "<p>§ 中文 ⎯</p><p>tail</p>")
+                        } else if request.starts_with("GET /literal-lt ") {
+                            ("text/html", "<p>5 < 10</p><p>tail</p>")
                         } else if request.starts_with("GET /search?") {
                             assert!(request.to_lowercase().contains("x-subscription-token: fixture-web-key\r\n"));
                             ("application/json", r#"{"type":"search","web":{"results":[{"title":"fixture","url":"https://example.com/","description":"fixture-web-key snippet"}]}}"#)
@@ -528,6 +530,22 @@ async fn web_settings_permission_cancellation_and_restore() {
         assert_eq!(page.is_error, None, "{page:?}");
         assert!(text(&page).contains("§"), "{page:?}");
         assert!(text(&page).contains("中文"), "{page:?}");
+
+        let literal = tokio::time::timeout(Duration::from_secs(10), async {
+            submit(
+                &mut client,
+                &id,
+                "web_fetch",
+                json!({"url":format!("{base}/literal-lt")}),
+            )
+            .await;
+            idle(&mut client, &id).await;
+            result(&session).await
+        })
+        .await
+        .expect("a literal '<' in text terminates");
+        assert_eq!(literal.is_error, None, "{literal:?}");
+        assert!(text(&literal).contains("5 < 10"), "{literal:?}");
         for encoding in ["zlib", "raw"] {
             for ending in ["complete", "truncated", "limited"] {
                 submit(
