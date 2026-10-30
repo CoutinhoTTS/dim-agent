@@ -82,17 +82,9 @@ Local protocol-v3 clients read `provider.management {providerId?}` for one safe
 editing snapshot containing the record version, connection fields, full model
 descriptors, available actions and saved preferences. Credentials, secret
 references, header values and proxy authentication are never returned.
-`provider.list`, `provider.catalog` and `provider.selection` retain their read shapes; `provider.list` additionally reports `remoteModelList` per provider, whether `provider.refresh` can list that provider's models; a catalog model gains `missingLimits`, naming the context window and maximum output no source declares, and omits those limits from its `capabilities`.
-
-An absent `contextWindow` or `maxOutputTokens` is the undeclared value, and
-`missingLimits` names it. Every in-tree client reads both as optional: the CLI
-decodes catalog entries as `CatalogCapabilities`, ACP lists models by ID, name and
-unavailable reason, and the Web workspace reads those and the disable list, so
-none fails on a model that declares no limit. `PROTOCOL_VERSION` stays 3 because
-the clients ship with the daemon and the build that writes such a catalog is the
-build that reads it; the Web entry refuses assets built for another protocol
-version rather than negotiating one. A protocol-v3 client built before this
-change that requires both numbers cannot decode such a catalog.
+`provider.list`, `provider.catalog` and `provider.selection` retain their read shapes;
+`provider.list` additionally reports `remoteModelList` per provider, whether
+`provider.refresh` can list that provider's models.
 
 `provider.create` takes a fresh canonical UUID; `provider.update` applies only the
 supplied fields with record CAS. `provider.probe` tests a complete new connection
@@ -262,7 +254,7 @@ and paired devices cannot read or write them. See
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. The SQLite store uses native format v25. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18), Session configurations and Agent profiles that may omit their mount list (v19), the branch end events (v20) and the tool-effect and digest fields, which need no schema change either (v21), tool schemas that may omit `type` (v22), the Session catalog projection (v23), a configuration's System source, which needs no schema change either (v24), and Provider model limits that only a declaration writes (v25).
+`--home` and `--database` are mutually exclusive. The SQLite store uses native format v25. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18), Session configurations and Agent profiles that may omit their mount list (v19), the branch end events (v20) and the tool-effect and digest fields, which need no schema change either (v21), tool schemas that may omit `type` (v22), the Session catalog projection (v23) and a configuration's System source, which needs no schema change either (v24). Format v25 removes the unused timeline end-sequence index.
 
 Startup opens a store with the exact v25 schema and a single marker of 25. A store with the exact v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v25 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
 
@@ -271,7 +263,7 @@ Startup opens a store with the exact v25 schema and a single marker of 25. A sto
 - v16 → v17, v17 → v18, v18 → v19, v19 → v20, v20 → v21 and v21 → v22 change only the marker.
 - v22 → v23 adds the Session catalog table and indexes and backfills it once from committed main history.
 - v23 → v24 changes only the marker.
-- v24 → v25 changes only the marker and rewrites each Provider model limit: projection output (the remote listing, descriptor overrides and the managed catalog) drops each limit that neither `capabilityOverrideFields` marks nor the record's `metadata.raw` declares, while a custom provider's own models and its user models keep a typed value and drop only one equal to the old assumed 128000/16384 that no mark or raw declaration covers.
+- v24 → v25 removes `timeline_events_by_end` and replaces the marker; facts and other indexes are unchanged.
 
 Existing facts, v13 settings bytes and v16 request rows are preserved, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v25; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
@@ -431,11 +423,11 @@ type Usage = {
 
 Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`; a failed attempt reports only `Login failed`. Existing `account.codex.*` and `account.grok.*` retain their native contracts. Attempt secrets are memory-only and cleared on completion, cancellation or expiry; a terminal attempt stays queryable until its deadline.
 
-`ManagedModel` is `{entry: ModelEntry, protocol, unavailableReason, zdr}`. `ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A provider supplies final public model descriptions; `BundledCatalog::fallback` offers the provider service's bundled metadata (refreshed before each release) for what its source omits. An unavailable model keeps a reason and is unselectable. A model whose context window or maximum output no source declares omits that limit, reports it in `missingLimits` and is unselectable for that reason too; a managed catalog may omit a limit only on a model that keeps an `unavailableReason`.
+`ManagedModel` is `{entry: ModelEntry, protocol, unavailableReason, zdr}`. `ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A provider supplies final public model descriptions; `BundledCatalog::fallback` offers the provider service's bundled metadata (refreshed before each release) for what its source omits. An unavailable model keeps a reason and is unselectable.
 
 `CredentialLease` carries the account snapshot, protocol, final protocol base URL (the model adapter adds its endpoint), request headers and bearer. It has no `Debug` or serialization; credential methods are internal to the model resolver and never appear in terminal RPC, history, Timeline, configuration replies or logs. Refresh tokens stay inside the provider. A lease is released when its last holder drops it, including a result whose caller went away. Leases are bound to the provider instance, account and grant revision, expire after 30 minutes and are capped at 1024. `ManagedProviders` stamps each lease with the binding that issued it: recovery and final rejection of a lease whose binding was replaced fail with `service_reloading` before any provider sees them, even when the replacement reports an equal account and reuses its lease IDs. `recover_rejected` performs one controlled recovery: it adopts a newer persisted grant or performs one serialized refresh. `finish_rejected` signs out only if the rejected grant still owns the account. Host recovery is limited to HTTP 401; unrelated failures retain the account.
 
-`ManagedProviders` checks provider output once where it enters the host, and rejects it as `account_invalid_response`: provider descriptors (non-empty unique IDs, a display name, `browser`/`device` login methods; an invalid set also fails the binding), account snapshots (an epoch, a generation within the safe integer range, a non-empty issuer and subject), catalogs (a signed-in account, unique non-empty model IDs, display names, supported protocols, and limits that, when present, are 1 to the safe maximum; an absent limit requires an `unavailableReason`) and leases (an ID, a bearer, a signed-in account, a supported protocol, an `http`/`https` base URL without user information, query or fragment, and header names and values without CR or LF). A refused lease is dropped, which releases it.
+`ManagedProviders` checks provider output once where it enters the host, and rejects it as `account_invalid_response`: provider descriptors (non-empty unique IDs, a display name, `browser`/`device` login methods; an invalid set also fails the binding), account snapshots (an epoch, a generation within the safe integer range, a non-empty issuer and subject), catalogs (a signed-in account, unique non-empty model IDs, display names, supported protocols, limits from 1 to the safe maximum) and leases (an ID, a bearer, a signed-in account, a supported protocol, an `http`/`https` base URL without user information, query or fragment, and header names and values without CR or LF). A refused lease is dropped, which releases it.
 
 The provider owns every accepted operation: a caller dropping its future never abandons a token rotation or a persisted login, and disposal joins that work. Before draining Agent/RPC work, the host calls the idempotent `quiesce()`; binding unload does the same. Quiesce stops admission and cancels lock waits and login attempts without awaiting them; it does not abandon a refresh that holds the account lock or revoke delivered leases.
 

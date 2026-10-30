@@ -676,7 +676,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     Connection::open(&native_path)
         .unwrap()
         .execute_batch(
-            "DROP TABLE agent_store_format;
+            "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE agent_store_format;
              CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
              INSERT INTO agent_store_format VALUES (23);",
         )
@@ -714,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        i64::from(dim_app_server::storage::STORE_FORMAT)
+        25
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
@@ -959,16 +959,16 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     let db = fixture(&source);
     db.execute_batch("CREATE TABLE providers (providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT, defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT, accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER, retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT, activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT, metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER); CREATE TABLE provider_selections (selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT, createdAt TEXT, updatedAt TEXT, version INTEGER);").unwrap();
     let models = json!([
-        {"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
-        {"modelId":"disabled-model","displayName":"Disabled model","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
-        {"modelId":"unavailable-model","displayName":"Unavailable model","status":"unavailable","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}
+        {"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)},
+        {"modelId":"disabled-model","displayName":"Disabled model","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)},
+        {"modelId":"unavailable-model","displayName":"Unavailable model","status":"unavailable","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384)}
     ]);
     db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,accountUsageSettings,models,modelsSource,metadata,enabled,version) VALUES ('legacy-provider','custom','Legacy','openai-responses','https://model.example/v1',?1,?2,?3,?4,'remote',?5,1,1)",params![json!({"type":"bearer"}).to_string(),json!({"type":"bearer","token":"private-provider-secret"}).to_string(),json!({"unsupported":"private-unused-secret"}).to_string(),models.to_string(),json!({"disabledModelIds":["disabled-model"]}).to_string()]).unwrap();
     db.execute("INSERT INTO provider_selections (selectionId,scope,providerId,modelId,version) VALUES ('chosen','global','legacy-provider','legacy-model',1)",[]).unwrap();
     let router_models = json!([
-        {"modelId":"image-route","displayName":"Image route","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"endpointType":"image-generation"}}},
-        {"modelId":"ambiguous-route","displayName":"Ambiguous route","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"selectable_endpoint_types":["anthropic","gemini"]}}},
-        {"modelId":"claude-route","displayName":"Chat route","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"selectableEndpointTypes":["anthropic","gemini"]}}}
+        {"modelId":"image-route","displayName":"Image route","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"endpointType":"image-generation"}}},
+        {"modelId":"ambiguous-route","displayName":"Ambiguous route","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"selectable_endpoint_types":["anthropic","gemini"]}}},
+        {"modelId":"claude-route","displayName":"Chat route","status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"selectableEndpointTypes":["anthropic","gemini"]}}}
     ]);
     db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,models,modelsSource,metadata,enabled,version) SELECT 'router',source,displayName,'new-api-router',baseUrl,auth,credential,?1,modelsSource,'{}',enabled,version FROM providers WHERE providerId='legacy-provider'", [router_models.to_string()]).unwrap();
     for (id, provider, model) in [

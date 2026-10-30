@@ -12,6 +12,10 @@ use std::{
 
 /// The native store format this daemon creates and opens.
 pub const FORMAT: u32 = 25;
+const LEGACY_BY_END: (&str, &str) = (
+    "timeline_events_by_end",
+    "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
+);
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
@@ -68,10 +72,6 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "session_owners_by_agent",
         "CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id)",
-    ),
-    (
-        "timeline_events_by_end",
-        "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
     ),
     (
         "timeline_events_by_id",
@@ -149,8 +149,6 @@ const UPGRADES: [(u32, &[&str]); 11] = [
     // #555: a configuration's `system_source`, which a v23 daemon cannot
     // decode; the marker only.
     (23, &[]),
-    // #522: a Provider record's model limits may be absent, which a v24
-    // daemon cannot decode; the marker and the Provider-owned rewrite.
     (24, &[]),
 ];
 
@@ -160,10 +158,11 @@ fn format_table(version: u32) -> String {
     )
 }
 /// The exact schema of a format this daemon opens or upgrades: `SCHEMA`
-/// without the entries of the steps from `version` on, with its marker.
+/// without later additions, with its marker and the index removed after v24.
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
+        .chain((version <= 24).then_some(&LEGACY_BY_END))
         .filter(|(name, _)| {
             !UPGRADES
                 .iter()
@@ -332,7 +331,8 @@ impl SqliteStorage {
                         super::catalog::backfill(&tx)?;
                     }
                     if *from == 24 {
-                        crate::provider::rewrite_stored_limits(&tx)?;
+                        tx.execute_batch("DROP INDEX timeline_events_by_end")
+                            .map_err(storage)?;
                     }
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])

@@ -4,9 +4,8 @@ The current native format is **v25**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
-branch end events, the tool-effect and digest fields, tool schemas that may
-omit `type`, the Session catalog projection, a configuration's System source,
-and Provider model limits that only a declaration writes. Startup requires the
+branch end events, the tool-effect and digest fields, and tool schemas that may
+omit `type`, the Session catalog projection and a configuration's System source. Startup requires the
 exact v25 SQL schema and a single format marker of 25 before writable PRAGMAs,
 or the exact v24, v23, v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
 which the same startup transaction upgrades in place to v25 one step after
@@ -15,12 +14,11 @@ another ([S5a v15 decision](#s5a-v15-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
 [#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定),
 [#580 v22 decision](#580-v22-格式决定), [#556 v23 decision](#556-v23-格式决定),
-[#555 v24 decision](#555-v24-格式决定),
-[#522 v25 decision](#522-格式决定)).
+[#555 v24 decision](#555-v24-格式决定), [#596 v25 decision](#596-v25-格式决定),
+[#522 v26 decision](#522-格式决定)).
 Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20, v21, v22,
-v23 or v24.
+migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
 valid in v25, and v16 request rows stay readable as written.
@@ -240,7 +238,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件、#527 的工具效果和清单条目、#580 的工具 schema、#556 的目录投影与 #555 的 System 来源各自的格式决定见下文。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件、#527 的工具效果和清单条目、#580 的工具 schema、#556 的目录投影、#555 的 System 来源与 #596 的冗余索引移除各自的格式决定见下文。
 
 ### S5a v15 格式决定
 
@@ -366,7 +364,7 @@ ProjectionCheckpoint = {
 
 [Timeline 分支](../timeline-branches.md#16-format)（#427）的格式决定：升级到 **v20**，从 v19 原地升级。
 
-- **状态**：v20 已随 #427 的实现生效；当前格式先后由 [#527 v21 格式决定](#527-v21-格式决定)、[#580 v22 格式决定](#580-v22-格式决定)、[#556 v23 格式决定](#556-v23-格式决定) 与 [#555 v24 格式决定](#555-v24-格式决定) 升到 v24。
+- **状态**：v20 已随 #427 的实现生效；当前格式先后由 [#527 v21 格式决定](#527-v21-格式决定)、[#580 v22 格式决定](#580-v22-格式决定)、[#556 v23 格式决定](#556-v23-格式决定) 与 [#555 v24 格式决定](#555-v24-格式决定) 升到 v24；[#596 v25 格式决定](#596-v25-格式决定) 删除冗余索引后为 v25。
 - **只增两种核心事件**：两者都以 `encoding: "event"` 写入普通 `event` 行，不进输出行、不带请求引用。行结构、内容寻址和其他记录的字节不变。
   - `branch/end` 写在要结束的分支上，`data` 为 `{source, ancestor?}`。`source` 是 `branch/create` 已在用的 `BranchSource`：`{kind: "tool", turn_id, request_id, call_id}` 或 `{kind: "host", operation_id}`。`ancestor` 是分支 ID，只在因祖先结束而结束时出现。
   - `branch/ended` 写在其父分支上，`data` 为 `{branch, endEvent, source, ancestor?}`。`endEvent` 是 `branch/end` 在结束分支上的序号（安全整数），`source` 与 `ancestor` 取自 `branch/end`（[Timeline 分支 §10](../timeline-branches.md#10-ending-a-line)）。
@@ -398,7 +396,7 @@ ProjectionCheckpoint = {
 
 [工具效果](../contracts/session-boundary.md#a6-tool-effects)与[压缩清单](../plugins/ContextCompaction.md#510-class-3a-the-digest)（#527）的格式决定：升级到 **v21**，从 v20 原地升级。
 
-- **状态**：v21 的字段合同保持；当前格式由 [#580 v22 格式决定](#580-v22-格式决定)、[#556 v23 格式决定](#556-v23-格式决定) 与 [#555 v24 格式决定](#555-v24-格式决定) 升到 v24。
+- **状态**：v21 的字段合同保持；当前格式由 [#580 v22 格式决定](#580-v22-格式决定)、[#556 v23 格式决定](#556-v23-格式决定) 与 [#555 v24 格式决定](#555-v24-格式决定) 升到 v24；[#596 v25 格式决定](#596-v25-格式决定) 删除冗余索引后为 v25。
 - **只增两处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
   - `ToolResult.effects`：`step/tool-result` 的 `result` 上一个可选的效果声明数组；不声明任何效果的工具不写它，此前写下的事件也都没有它。
   - 已完成 `context/compaction` 的 `digest_entries`：清单条目（按顺序）与 `dropped`；没有清单消息的压缩不写它。
@@ -427,11 +425,20 @@ ProjectionCheckpoint = {
 - **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
 
+### #596 v25 格式决定
+
+[SessionStore #596](https://github.com/arcships/dim/issues/596) 的格式决定：升级到 **v25**，从 v24 原地升级。
+
+- **删除索引**：删除 `timeline_events_by_end`（`CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)`）。正向区间读取已按主键限定上下界，该索引没有读取方；合并输出行不再为它维护每次 `last_sequence` 更新。其他表、列、索引、持久化 JSON 与内容寻址不变。
+- **版本边界**：`agent_store_format` 改为 `CHECK (version = 25)`，唯一标记为 25。不能在 v24 内删除索引，因为启动门禁要求精确 SQL 结构；v24 守护进程拒绝 v25 库并保留数据。
+- **升级**：空库直接创建 v25。精确的 v24 库在同一启动准入事务内删除索引、重建标记并写入 25；精确的 v13、v15–v23 库先执行已有步骤，再删除索引。旧结构校验仍要求该索引存在，缺失索引、标记不符或半升级的库都拒绝并保留。失败回滚整个事务，不改写任何已有业务行。
+- **读取与迁移**：只读导出可以原样打开 v24 及既有受支持格式，也可读取 v25，不升级来源。迁移目标使用 v25；已有目标由同一存储准入路径升级。升级单向，不新增备份、降级或迁移选项。
+- **验证**：一次性 v24 库升级后精确结构、标记与业务行保持预期，重复打开不再升级；既有各版升级、损坏库保留、只读导出、迁移和主键区间计划由公共流程验证。`timeline_acceptance rounds` 报告前后的每事件 WAL 字节与 checkpoint sync 次数，测量结果放在 PR。
+
 ### #555 v24 格式决定
 
 [Prompt](../plugins/Prompt.md)（#555）的格式决定：升级到 **v24**，从 v23 原地升级。
 
-- **状态**：当前格式是 v24。
 - **只增一处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
   - `ContextConfiguredData.system_source`：`context/configured` 上 `system` 所依据的源文本，即 System 中除去 guide 的部分。它是模型或工具单独的 adoption 重渲染 guide 的依据：这类 adoption 用当前 frame 和当前 entries 在 `system_source` 上重渲染 System，并照旧记录新的 `system_source`。此前写下的记录没有它，按缺失读取，保留其已采用的 System，不做重渲染。
 - **不能留在 v23**：
@@ -533,7 +540,6 @@ ProjectionCheckpoint = {
 | 索引 | 精确列序/条件 | 查询 |
 | --- | --- | --- |
 | `session_owners_by_agent` | `(agent_id, protocol_version, session_id)` | 按 Agent 和协议过滤目录 |
-| `timeline_events_by_end` | `(session_id, branch_id, last_sequence, sequence)` | 当前格式保留；正向区间读取使用主键 |
 | `timeline_events_by_id` | `(session_id, event_id) WHERE event_id IS NOT NULL`，非唯一 | 按事件 ID 查找跨页 ToolCall |
 | `timeline_tool_use_starts` | `(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'` | 按请求与调用 ID 查找跨页 `step/tool-use-start`，为不带 `call_event_id` 的结果取调用名；查询须使用相同表达式与条件 |
 
