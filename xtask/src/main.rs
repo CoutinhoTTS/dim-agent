@@ -14,6 +14,10 @@ use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
@@ -669,11 +673,17 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_after_agent = allocation::live();
     let rss_after_agent = rss_kb();
     drop(db);
+    let trim_result = unsafe { malloc_trim(0) };
+    let rss_after_trim = rss_kb();
+    let live_after_trim = allocation::live();
     let report = json!({
         "modelHost": "mock",
         "store": "sqlite",
         "sessionId": session_id,
         "restoreMs": restore_ms,
+        "trimResult": trim_result,
+        "liveAfterTrim": live_after_trim,
+        "rssAfterTrim": rss_after_trim,
         "liveBaseline": baseline,
         "liveAfterAgent": live_agent,
         "liveRestored": live_restored,
