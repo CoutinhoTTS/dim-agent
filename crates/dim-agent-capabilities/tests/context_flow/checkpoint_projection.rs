@@ -39,15 +39,16 @@ fn keyed(text: &str, key: &str) -> InputBlock {
 
 #[tokio::test]
 async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() {
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
             threshold: Some(600.),
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

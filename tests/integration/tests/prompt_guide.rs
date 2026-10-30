@@ -21,7 +21,7 @@ use dim_agent_capabilities::{
     },
     workspace_tools::{self, WorkspaceToolsConfig},
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use local_support::{Dirs, HoldingStore, platform, run, system_text};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
@@ -88,12 +88,15 @@ fn mock_model_hosts(builder: &mut AgentBuilder) {
         );
 }
 
-/// The process root with the platform the workspace tools read.
-fn platform_root(dirs: &Dirs) -> Ctx {
-    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    root.provide_as::<HostPlatform>(Arc::new(platform(&dirs.home)))
-        .unwrap();
-    root
+/// A host for `builder` whose root holds the platform the workspace tools
+/// read.
+async fn platform_host(builder: &AgentBuilder, dirs: &Dirs) -> MinimalHost {
+    MinimalHost::start_with(builder, |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(platform(&dirs.home)))?;
+        Ok(())
+    })
+    .await
+    .unwrap()
 }
 
 fn workspace(builder: &mut AgentBuilder, dirs: &Dirs) {
@@ -238,7 +241,6 @@ async fn both_paths_carry_one_composition() {
 
     // The adopted path: PromptSources supplies the prompt host, the Session
     // adopts with it, and the System comes from `context/configured`.
-    let root = platform_root(&dirs);
     let mut builder = AgentBuilder::new(AgentConfig::default());
     mock_model_hosts(&mut builder);
     builder.session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
@@ -249,7 +251,7 @@ async fn both_paths_carry_one_composition() {
         Duration::from_secs(60),
     );
     workspace(&mut builder, &dirs);
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
     let session = agent
         .create_session(SessionConfig {
             system_prompt: "configured rules".into(),
@@ -299,12 +301,11 @@ async fn both_paths_carry_one_composition() {
 
     // The host-prepared path: the Session never adopts, and Loop composes
     // into the request it assembles.
-    let root = platform_root(&dirs);
     let mut builder = AgentBuilder::new(AgentConfig::default());
     mock_model_hosts(&mut builder);
     workspace(&mut builder, &dirs);
     defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
     let session = agent
         .create_session(SessionConfig {
             system_prompt: "host rules".into(),
@@ -367,7 +368,6 @@ async fn both_paths_carry_one_composition() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_adopted_request_and_the_summarizers_request_carry_one_system() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let (strategy, requests) = compaction_support::Window::recording();
     let strategy = Arc::new(strategy);
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -394,7 +394,7 @@ async fn an_adopted_request_and_the_summarizers_request_carry_one_system() {
         Duration::from_secs(60),
     );
     workspace(&mut builder, &dirs);
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
     let session = agent
         .create_session(SessionConfig {
             system_prompt: "configured rules".into(),
@@ -507,7 +507,7 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
             }))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -650,7 +650,6 @@ async fn an_entry_takes_effect_when_its_writer_loads_and_ends_when_it_unloads() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
@@ -671,7 +670,7 @@ async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
             }))
         },
     ));
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
@@ -792,7 +791,6 @@ async fn a_branch_scoped_entry_publishes_only_on_its_branch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_entry_registered_while_its_branch_opens_is_adopted() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
@@ -820,12 +818,14 @@ async fn an_entry_registered_while_its_branch_opens_is_adopted() {
             }))
         },
     ));
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
 
     // The open adoption composes the System, then waits for its publication.
     // The entry registers inside that window, after the composition.
     store.hold_next_configuration_on("main");
-    let creation = agent.create_session(SessionConfig {
+    // The pinned creation lives past the host's close: it borrows a clone.
+    let opener = agent.agent().clone();
+    let creation = opener.create_session(SessionConfig {
         system_prompt: "configured rules".into(),
         ..work_config(&dirs)
     });
@@ -893,21 +893,20 @@ async fn an_entry_registered_while_its_branch_opens_is_adopted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fork_composes_its_own_entries_at_its_open() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let flag = Arc::new(AtomicBool::new(true));
     let text = Arc::new(Mutex::new(None));
     let views = Arc::new(Mutex::new(Vec::new()));
     let tables = Arc::new(Mutex::new(Vec::new()));
     let agent = branch_probe_agent(
         &dirs,
-        &root,
         None,
         flag.clone(),
         text.clone(),
         None,
         views.clone(),
         tables.clone(),
-    );
+    )
+    .await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
@@ -1001,7 +1000,6 @@ async fn a_fork_composes_its_own_entries_at_its_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_fork_carries_its_own_entry_in_its_first_request() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(true));
     let text = Arc::new(Mutex::new(None));
@@ -1009,14 +1007,14 @@ async fn a_fork_carries_its_own_entry_in_its_first_request() {
     let tables = Arc::new(Mutex::new(Vec::new()));
     let agent = branch_probe_agent(
         &dirs,
-        &root,
         Some(store.clone()),
         flag.clone(),
         text.clone(),
         None,
         views.clone(),
         tables.clone(),
-    );
+    )
+    .await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
@@ -1088,7 +1086,7 @@ async fn a_restored_branch_converges_on_the_entries_its_writers_register() {
     let store = Arc::new(MemoryTimelineStore::default());
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
-    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone()).await;
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1114,7 +1112,7 @@ async fn a_restored_branch_converges_on_the_entries_its_writers_register() {
     // The writer joins the Session's set: the restored branch adopts the
     // entry at its open.
     flag.store(true, Ordering::SeqCst);
-    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone()).await;
     let session = agent.restore_session(id.clone()).await.unwrap();
     wait_for_configurations(&session, "main", 1).await;
     let adopted = last_configured(&session, "main").await;
@@ -1126,7 +1124,7 @@ async fn a_restored_branch_converges_on_the_entries_its_writers_register() {
 
     // The writer leaves it: the next restore drops the entry the same way.
     flag.store(false, Ordering::SeqCst);
-    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone()).await;
     let session = agent.restore_session(id).await.unwrap();
     wait_for_configurations(&session, "main", 2).await;
     let adopted = last_configured(&session, "main").await;
@@ -1147,7 +1145,7 @@ async fn a_restored_branch_carries_its_entries_in_its_first_request() {
     let store = Arc::new(MemoryTimelineStore::default());
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
-    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone());
+    let agent = restore_guide_agent(store.clone(), flag.clone(), views.clone()).await;
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1174,7 +1172,7 @@ async fn a_restored_branch_carries_its_entries_in_its_first_request() {
     // before it reports itself open, and the first request runs with no idle
     // between it and the open.
     flag.store(true, Ordering::SeqCst);
-    let agent = restore_guide_agent(store.clone(), flag, views);
+    let agent = restore_guide_agent(store.clone(), flag, views).await;
     let session = agent.restore_session(id).await.unwrap();
     session
         .submit("second".into(), InputMode::Queue, "main")
@@ -1196,7 +1194,6 @@ async fn a_restored_branch_carries_its_entries_in_its_first_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_guide_adoption_racing_its_branch_close_records_nothing() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(true));
     let text = Arc::new(Mutex::new(None));
@@ -1204,14 +1201,14 @@ async fn a_guide_adoption_racing_its_branch_close_records_nothing() {
     let tables = Arc::new(Mutex::new(Vec::new()));
     let agent = branch_probe_agent(
         &dirs,
-        &root,
         Some(store.clone()),
         flag.clone(),
         text.clone(),
         None,
         views.clone(),
         tables.clone(),
-    );
+    )
+    .await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
@@ -1334,7 +1331,6 @@ async fn a_guide_adoption_racing_its_branch_close_records_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_entry_withdrawing_as_the_session_unloads_is_not_recorded() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(true));
     let text = Arc::new(Mutex::new(None));
@@ -1342,14 +1338,14 @@ async fn an_entry_withdrawing_as_the_session_unloads_is_not_recorded() {
     let tables = Arc::new(Mutex::new(Vec::new()));
     let agent = branch_probe_agent(
         &dirs,
-        &root,
         Some(store.clone()),
         flag.clone(),
         text.clone(),
         None,
         views.clone(),
         tables.clone(),
-    );
+    )
+    .await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
@@ -1419,14 +1415,14 @@ async fn an_entry_withdrawing_as_the_session_unloads_is_not_recorded() {
     // The restored branch carries the entry its writer registers again.
     let agent = branch_probe_agent(
         &dirs,
-        &platform_root(&dirs),
         Some(store.clone()),
         flag.clone(),
         text.clone(),
         None,
         views.clone(),
         tables.clone(),
-    );
+    )
+    .await;
     let restored = agent.restore_session(id).await.unwrap();
     wait_for_configurations(&restored, "main", recorded).await;
     let adopted = last_configured(&restored, "main").await;
@@ -1442,7 +1438,6 @@ async fn an_entry_withdrawing_as_the_session_unloads_is_not_recorded() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reloaded_writer_that_keeps_its_entry_records_nothing() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let store = Arc::new(HoldingStore::default());
     let flag = Arc::new(AtomicBool::new(true));
     let text = Arc::new(Mutex::new(None));
@@ -1451,14 +1446,14 @@ async fn a_reloaded_writer_that_keeps_its_entry_records_nothing() {
     let tables = Arc::new(Mutex::new(Vec::new()));
     let agent = branch_probe_agent(
         &dirs,
-        &root,
         Some(store.clone()),
         flag.clone(),
         text.clone(),
         Some(gate.clone()),
         views.clone(),
         tables.clone(),
-    );
+    )
+    .await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session
@@ -1581,14 +1576,16 @@ async fn a_composition_that_moved_and_returned_while_its_branch_opens_is_adopted
             }))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
 
     // The open loads first, composes after its load returns, and then waits
     // for the publication. The entry withdraws inside the load and returns
     // inside the publication, so the adoption sees the composition moved
     // and came back.
     store.hold_next_configuration_on("main");
-    let creation = agent.create_session(SessionConfig::default());
+    // The pinned creation lives past the host's close: it borrows a clone.
+    let opener = agent.agent().clone();
+    let creation = opener.create_session(SessionConfig::default());
     tokio::pin!(creation);
     let session = tokio::select! {
         _ = &mut creation => panic!("the Session opened before its publication was held"),
@@ -1672,7 +1669,7 @@ async fn an_entry_that_returns_during_the_open_adoption_is_adopted() {
             }))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
 
     // The open loads and composes with the entry in force, and then waits
     // for the publication. The entry withdraws while that publication is
@@ -1681,7 +1678,9 @@ async fn an_entry_that_returns_during_the_open_adoption_is_adopted() {
     // before it is released, so the composition ends where the listener's
     // baseline started.
     store.hold_next_configuration_on("main");
-    let creation = agent.create_session(SessionConfig::default());
+    // The pinned creation lives past the host's close: it borrows a clone.
+    let opener = agent.agent().clone();
+    let creation = opener.create_session(SessionConfig::default());
     tokio::pin!(creation);
     let session = tokio::select! {
         _ = &mut creation => panic!("the Session opened before its publication was held"),
@@ -1722,7 +1721,7 @@ async fn the_frame_states_the_compaction_handle() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1981,16 +1980,15 @@ impl DynPlugin for BranchGuideProbe {
 /// The agent the branch-probe flows run on: the workspace tools, a branch
 /// probe on every branch, and the store the flow hands it.
 #[allow(clippy::too_many_arguments)]
-fn branch_probe_agent(
+async fn branch_probe_agent(
     dirs: &Dirs,
-    root: &Ctx,
     store: Option<Arc<HoldingStore>>,
     flag: Arc<AtomicBool>,
     text: Arc<Mutex<Option<String>>>,
     gate: Option<Arc<LoadGate>>,
     views: Arc<Mutex<Vec<(String, FiberView)>>>,
     tables: Arc<Mutex<Vec<Arc<GuideEntries>>>>,
-) -> Agent {
+) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     mock_model_hosts(&mut builder);
     if let Some(store) = store {
@@ -2011,16 +2009,16 @@ fn branch_probe_agent(
             )?))
         },
     ));
-    builder.build_in(root)
+    platform_host(&builder, dirs).await
 }
 
 /// The agent the restore flow runs on: one in-memory store across Agents, and
 /// the Session-scoped probe whose registration the flag controls.
-fn restore_guide_agent(
+async fn restore_guide_agent(
     store: Arc<MemoryTimelineStore>,
     flag: Arc<AtomicBool>,
     views: Arc<Mutex<Vec<FiberView>>>,
-) -> Agent {
+) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     builder.timeline_store(store);
@@ -2036,7 +2034,7 @@ fn restore_guide_agent(
             }))
         },
     ));
-    builder.build()
+    MinimalHost::start(&builder).await.unwrap()
 }
 
 /// Waits until `branch`'s guide composes no probe entry: its writer
@@ -2054,12 +2052,11 @@ async fn wait_until_withdrawn(table: &GuideEntries, branch: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_branch_keeps_its_own_entries() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let mut builder = AgentBuilder::new(AgentConfig::default());
     mock_model_hosts(&mut builder);
     workspace(&mut builder, &dirs);
     defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     run(&session, "on main").await;
     let main = last_system(&session, "main").await;
@@ -2225,7 +2222,6 @@ impl Plugin for GuideToolProbeOwner {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tools_only_adoption_carries_the_entry_its_writer_registers() {
     let dirs = Dirs::new();
-    let root = platform_root(&dirs);
     let flag = Arc::new(AtomicBool::new(false));
     let views = Arc::new(Mutex::new(Vec::new()));
     let (flag_owner, views_owner) = (flag.clone(), views.clone());
@@ -2244,7 +2240,7 @@ async fn a_tools_only_adoption_carries_the_entry_its_writer_registers() {
             }))
         },
     ));
-    let agent = builder.build_in(&root);
+    let agent = platform_host(&builder, &dirs).await;
     let session = agent.create_session(work_config(&dirs)).await.unwrap();
     assert_eq!(
         session

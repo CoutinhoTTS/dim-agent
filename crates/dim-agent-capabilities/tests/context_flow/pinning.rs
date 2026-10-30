@@ -85,16 +85,17 @@ async fn turn_with_steer(session: &dim_agent_runtime::Session, steer: &str) {
 async fn tool_session(
     model: Arc<ToolWait>,
     threshold: f64,
-) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
-    let agent = builder_with_context(
+) -> (MinimalHost, dim_agent_runtime::Session) {
+    let agent = MinimalHost::start(&builder_with_context(
         model,
         HistoryRenderer::default(),
         Context {
             threshold: Some(threshold),
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec!["wait".into()]),
@@ -321,7 +322,9 @@ async fn an_input_consumed_at_the_cut_is_not_duplicated() {
 /// (ContextCompaction §5.9): the replacement is the strategy's messages.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_compaction_with_no_running_turn_pins_nothing() {
-    let agent = configured(Arc::new(EchoModel), Context::default()).build();
+    let agent = MinimalHost::start(&configured(Arc::new(EchoModel), Context::default()))
+        .await
+        .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -416,13 +419,13 @@ async fn cycles_session(
     cycles: usize,
     planned: Option<f64>,
     renderer: HistoryRenderer,
-) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+) -> (MinimalHost, dim_agent_runtime::Session) {
     let model = Arc::new(WaitCycles {
         cycles,
         calls: AtomicUsize::new(0),
         text: "p".repeat(700),
     });
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         model,
         renderer,
         Context {
@@ -430,8 +433,9 @@ async fn cycles_session(
             replacement: planned,
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig {
             tools: Some(vec!["wait".into()]),

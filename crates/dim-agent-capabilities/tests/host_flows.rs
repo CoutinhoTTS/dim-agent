@@ -4,6 +4,7 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::definition,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -99,7 +100,9 @@ impl ModelDriver for OutputLimitedModel {
 
 #[tokio::test]
 async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit() {
-    let agent = builder(Arc::new(OutputLimitedModel), Arc::new(MockTools)).build();
+    let agent = MinimalHost::start(&builder(Arc::new(OutputLimitedModel), Arc::new(MockTools)))
+        .await
+        .unwrap();
     let mut config = SessionConfig::default();
     config.model.config = Some(ModelConfig {
         max_tokens: Some(16.0),
@@ -202,9 +205,9 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         let requests = Arc::new(Mutex::new(Vec::new()));
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let agent = builder(Arc::new(RecordingModel(requests.clone())), Arc::new(BoundaryTools {
+        let agent = MinimalHost::start(&builder(Arc::new(RecordingModel(requests.clone())), Arc::new(BoundaryTools {
             entered: entered.clone(), release: release.clone(),
-        })).build();
+        }))).await.unwrap();
         let session = agent.create_session(SessionConfig { tools: Some(vec!["boundary".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..Default::default() }).await.unwrap();
         session.submit("tool:boundary {}".into(), InputMode::Queue, "main").await.unwrap();
         entered.notified().await;
@@ -257,7 +260,7 @@ async fn model_receives_the_committed_before_result_and_fixed_history() {
         builder.require_feature(
             Feature::new("Rewrite").branch("Rewrite", |names| Ok(Box::new(Rewrite::new(names)?))),
         );
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -338,7 +341,7 @@ impl ToolDriver for DelayedTools {
 async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let started = Arc::new(Notify::new()); let cleaned = Arc::new(AtomicBool::new(false));
-        let agent = builder(Arc::new(EchoModel), Arc::new(DelayedTools { started: started.clone(), cleaned: cleaned.clone() })).build();
+        let agent = MinimalHost::start(&builder(Arc::new(EchoModel), Arc::new(DelayedTools { started: started.clone(), cleaned: cleaned.clone() }))).await.unwrap();
         let session = agent.create_session(SessionConfig { tools: Some(vec!["delayed".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..SessionConfig::default() }).await.unwrap();
         session.submit("tool:delayed {}".into(), InputMode::Queue, "main").await.unwrap();
         started.notified().await;
@@ -390,13 +393,14 @@ impl ModelDriver for BrokenStream {
 async fn invalid_model_stream_is_cancelled_and_drained_before_settlement() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let cleaned = Arc::new(AtomicBool::new(false));
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(BrokenStream {
                 cleaned: cleaned.clone(),
             }),
             Arc::new(MockTools),
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -743,8 +747,6 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 rejected: Default::default(),
                 drained: Default::default(),
             };
-            let root = Ctx::root().unwrap();
-            root.plugin(RecoveryHosts(probe.clone()));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -760,7 +762,9 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                     }),
                 );
             defaults::install_with_process_model(&mut builder);
-            let agent = builder.build_in(&root);
+            let hosts = probe.clone();
+            builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
+            let agent = MinimalHost::start(&builder).await.unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
                 .await
@@ -813,7 +817,6 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 assert!(probe.drained.load(Ordering::SeqCst));
             }
             agent.close().await.unwrap();
-            root.shutdown().await.unwrap();
         }
     })
     .await
@@ -844,8 +847,6 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 rejected: Default::default(),
                 drained: Default::default(),
             };
-            let root = Ctx::root().unwrap();
-            root.plugin(RecoveryHosts(probe.clone()));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -861,7 +862,9 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                     }),
                 );
             defaults::install_with_process_model(&mut builder);
-            let agent = builder.build_in(&root);
+            let hosts = probe.clone();
+            builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
+            let agent = MinimalHost::start(&builder).await.unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
                 .await
@@ -910,7 +913,6 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 "mode {mode}"
             );
             agent.close().await.unwrap();
-            root.shutdown().await.unwrap();
         }
     })
     .await
@@ -931,8 +933,6 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 rejected: Default::default(),
                 drained: Default::default(),
             };
-            let root = Ctx::root().unwrap();
-            let provider = root.plugin(RecoveryHosts(probe.clone()));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -948,7 +948,9 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                     }),
                 );
             defaults::install_with_process_model(&mut builder);
-            let agent = builder.build_in(&root);
+            let hosts = probe.clone();
+            builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
+            let agent = MinimalHost::start(&builder).await.unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
                 .await
@@ -977,7 +979,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                             .clone(),
                     );
                 }
-                "reload" => provider.restart().await.unwrap(),
+                "reload" => agent.loader().restart("test.recovery.hosts").await.unwrap(),
                 _ => unreachable!(),
             }
             session.idle("main").await.unwrap();
@@ -1036,7 +1038,6 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 _ => unreachable!(),
             }
             agent.close().await.unwrap();
-            root.shutdown().await.unwrap();
         }
     })
     .await
@@ -1086,13 +1087,14 @@ impl ModelDriver for CompletedThenDrained {
 async fn stop_during_native_drain_keeps_an_already_completed_model_result() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let draining = Arc::new(Notify::new());
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(CompletedThenDrained {
                 draining: draining.clone(),
             }),
             Arc::new(MockTools),
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1134,8 +1136,6 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             rejected: Default::default(),
             drained: Default::default(),
         };
-        let root = Ctx::root().unwrap();
-        root.plugin(RecoveryHosts(probe.clone()));
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -1151,7 +1151,9 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
                 }),
             );
         defaults::install_with_process_model(&mut builder);
-        let agent = builder.build_in(&root);
+        let hosts = probe.clone();
+        builder.plugin(move |_| Ok(Box::new(RecoveryHosts(hosts.clone()))));
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1198,7 +1200,6 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
                 ))
         );
         agent.close().await.unwrap();
-        root.shutdown().await.unwrap();
     }
 }
 
@@ -1208,7 +1209,7 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
 async fn an_idle_append_starts_no_turn_and_joins_the_next_one() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let agent = builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools)).build();
+        let agent = MinimalHost::start(&builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools))).await.unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let appended = session.submit("idle context".into(), InputMode::Append, "main").await.unwrap();
         session.idle("main").await.unwrap();
@@ -1279,10 +1280,10 @@ async fn a_steer_during_output_continues_the_turn_instead_of_ending_it() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(HeldOutput { requests: requests.clone(), release: release.clone() }),
             Arc::new(MockTools),
-        ).build();
+        )).await.unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         session.submit("first".into(), InputMode::Queue, "main").await.unwrap();
         let mut dispatch = session.dispatch_watch("main").unwrap();
@@ -1347,11 +1348,12 @@ impl ModelDriver for ChannelModel {
 async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let (chunks, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(ChannelModel(Mutex::new(Some(receiver)))),
             Arc::new(MockTools),
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1521,11 +1523,12 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
 async fn end_markers_do_not_split_adjacent_blocks() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let (chunks, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(ChannelModel(Mutex::new(Some(receiver)))),
             Arc::new(MockTools),
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1642,11 +1645,12 @@ async fn end_markers_do_not_split_adjacent_blocks() {
 async fn buffered_text_is_committed_once_a_second_old() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (chunks, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(ChannelModel(Mutex::new(Some(receiver)))),
             Arc::new(MockTools),
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -1713,14 +1717,15 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let agent = builder(
+        let agent = MinimalHost::start(&builder(
             Arc::new(RecordingModel(requests.clone())),
             Arc::new(BoundaryTools {
                 entered: entered.clone(),
                 release: release.clone(),
             }),
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig {
                 tools: Some(vec!["boundary".into()]),
@@ -1939,7 +1944,7 @@ fn sent_parts(request: &ModelRequest) -> Vec<String> {
 async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let agent = builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools)).build();
+        let agent = MinimalHost::start(&builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools))).await.unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         session
             .configure(ConfigureUpdate { model: Some(model_with_vision("seeing", true)), ..Default::default() }, "main")
@@ -2070,10 +2075,6 @@ impl ResolveModelConnection for NoConnection {
 /// The turn's context estimates, one per model call, for a tool that returns a
 /// text block with or without an image.
 async fn tool_result_estimates(image: bool) -> Vec<f64> {
-    let root = Ctx::root().unwrap();
-    root.provide(ModelHost(Arc::new(EchoModel))).unwrap();
-    root.provide(ProviderConnectionResolver(Arc::new(NoConnection)))
-        .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .session_value(Arc::new(ToolHost(Arc::new(Screenshot(image)))))
@@ -2092,7 +2093,14 @@ async fn tool_result_estimates(image: bool) -> Vec<f64> {
         Default::default(),
     );
     defaults::install(&mut builder);
-    let agent = builder.build_in(&root);
+    let agent = MinimalHost::start_with(&builder, |root, _| {
+        root.provide(ModelHost(Arc::new(EchoModel))).unwrap();
+        root.provide(ProviderConnectionResolver(Arc::new(NoConnection)))
+            .unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
     let mut config = SessionConfig {
         tools: Some(vec!["shot".into()]),
         ..Default::default()
@@ -2138,7 +2146,6 @@ async fn tool_result_estimates(image: bool) -> Vec<f64> {
         })
         .collect();
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
     estimates
 }
 
