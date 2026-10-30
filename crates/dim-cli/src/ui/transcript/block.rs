@@ -28,6 +28,7 @@ pub enum Block {
     /// A user message; `cut` is where a line or fork opened from it cuts.
     User {
         text: String,
+        display: Option<String>,
         cut: Option<u64>,
     },
     /// A shell-mode run: recorded (`!`) from the transcript, private (`!!`)
@@ -88,11 +89,13 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
     match row.kind {
         RowKind::UserMessage => Block::User {
             text: row.text.clone(),
+            display: row.display.clone(),
             cut: row.cut,
         },
         RowKind::Shell => ShellRun::parse(&row.text).map_or_else(
             || Block::User {
                 text: row.text.clone(),
+                display: row.display.clone(),
                 cut: row.cut,
             },
             Block::Shell,
@@ -173,6 +176,7 @@ mod tests {
             row_id: "r".into(),
             kind,
             text: text.into(),
+            display: None,
             streaming: false,
             elapsed_ms: None,
             tone: None,

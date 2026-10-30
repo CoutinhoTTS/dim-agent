@@ -3045,7 +3045,18 @@ impl App {
         }
         frame.dock = live.len();
         if self.prompt.is_none() {
-            let queued = self.queued();
+            let queued: Vec<_> = self
+                .snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|snapshot| &snapshot.queued)
+                .map(|input| {
+                    (
+                        input.id.clone(),
+                        input.display.as_deref().unwrap_or(&input.text).to_owned(),
+                    )
+                })
+                .collect();
             // An empty queue draws no strip; the composer keeps its row and
             // the strip's rows are given back above it.
             self.queue_rows = if queued.is_empty() {
@@ -3798,7 +3809,7 @@ impl App {
         self.history
             .iter()
             .rposition(|block| {
-                matches!(block, Block::User { text, cut } if *cut == row.cut && *text == row.text)
+                matches!(block, Block::User { text, cut, .. } if *cut == row.cut && *text == row.text)
             })
             .map(|index| self.dropped + index)
     }
@@ -5098,6 +5109,7 @@ mod tests {
                 row_id: text.into(),
                 kind,
                 text: text.into(),
+                display: None,
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
@@ -5336,6 +5348,7 @@ mod tests {
                         row_id: (*id).into(),
                         kind: RowKind::AssistantMessage,
                         text: (*text).into(),
+                        display: None,
                         streaming: false,
                         elapsed_ms: None,
                         tone: None,
@@ -5558,6 +5571,7 @@ mod tests {
                 row_id: "r1".into(),
                 kind: RowKind::UserMessage,
                 text: "line work".into(),
+                display: None,
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
@@ -5625,6 +5639,7 @@ mod tests {
                     row_id: format!("u{n}"),
                     kind: RowKind::UserMessage,
                     text: format!("ask {n}"),
+                    display: None,
                     streaming: false,
                     elapsed_ms: None,
                     tone: None,
@@ -5741,6 +5756,84 @@ mod tests {
         assert_eq!(
             drawn.app.jump,
             Some(Jump::Block(drawn.app.dropped + picked))
+        );
+    }
+
+    #[test]
+    fn image_markers_stay_out_of_reused_message_drafts() {
+        let mut projection = crate::projection::Projection::default();
+        let input: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "image", "sequence": 1, "create_at": 1, "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "look [Image #7]"},
+                {"type": "image", "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"}},
+            ]}, "mode": "queue"},
+        })).unwrap();
+        projection.apply("main", &input);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        assert!(drawn.transcript().contains("[Image #1]"));
+        let row_id = drawn.app.snapshot.as_ref().unwrap().rows[0].row_id.clone();
+        let message = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .unwrap();
+        assert_eq!(
+            Document::message(&drawn.app, message),
+            Some("look [Image #7]")
+        );
+        for action in [
+            TimelineAction::Edit,
+            TimelineAction::Quote,
+            TimelineAction::Branch,
+            TimelineAction::Fork,
+        ] {
+            drawn.app.composer.clear();
+            drawn.app.line_draft = None;
+            drawn.app.timeline(&row_id, action);
+            if action == TimelineAction::Fork {
+                drawn.key(KeyCode::Char('y'));
+                drawn.app.apply(Update::Switched {
+                    session_id: "forked".into(),
+                    kind: SwitchKind::Forked,
+                });
+            }
+            assert!(drawn.app.composer.text().contains("look [Image #7]"));
+            assert!(!drawn.app.composer.text().contains("[Image #1]"));
+            drawn.key(KeyCode::Enter);
+            match sent.borrow().last().unwrap() {
+                Command::Submit(text) => assert!(!text.contains("[Image #1]")),
+                Command::OpenLine { prompt, .. } => assert_eq!(prompt, "look [Image #7]"),
+                _ => panic!("message reuse must submit text or open a line"),
+            }
+        }
+        projection.set_running(true);
+        let mut queued = input;
+        queued.id = "queued-image".into();
+        queued.sequence = 2;
+        projection.apply("main", &queued);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.app.composer.clear();
+        drawn.key(KeyCode::Up);
+        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
+        );
+        drawn.key(KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Submit(text)) if text == "look [Image #7]")
         );
     }
 

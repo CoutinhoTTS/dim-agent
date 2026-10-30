@@ -681,6 +681,7 @@ impl Projection {
         };
         let index = self.push(format!("user-{sequence}"), kind, text);
         self.row(index).cut = Some(submitted.saturating_sub(1));
+        self.row(index).display = image_text(&user.content);
     }
 
     /// The content of a held message, to re-submit it as Steer.
@@ -739,6 +740,7 @@ impl Projection {
                 .map(|(id, _, user)| QueuedInput {
                     id: id.clone(),
                     text: text_of(&user.content),
+                    display: image_text(&user.content),
                 })
                 .collect(),
             tasks: self.tasks.clone(),
@@ -1014,6 +1016,7 @@ impl Projection {
             row_id,
             kind,
             text,
+            display: None,
             streaming: false,
             elapsed_ms: None,
             tone: None,
@@ -1298,6 +1301,28 @@ fn text_of(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn image_text(blocks: &[ContentBlock]) -> Option<String> {
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+    {
+        return None;
+    }
+    let mut images = 0;
+    let text = blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Image { .. } => {
+                images += 1;
+                format!("[Image #{images}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(text)
 }
 
 #[cfg(test)]
@@ -1687,6 +1712,67 @@ mod tests {
                 .any(|row| row.text == "This line ended (with b-7c)"),
             "a cascaded line's own transcript names its ancestor"
         );
+    }
+
+    #[test]
+    fn image_messages_remain_visible_in_history_queue_and_transcript() {
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"},
+        });
+        let input = |sequence, id, content| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": content}, "mode": "queue"},
+            })
+        };
+        let history = input(1, "history-image", serde_json::json!([image]));
+        let mixed = input(
+            2,
+            "mixed-images",
+            serde_json::json!([
+                {"type": "text", "text": "Compare"}, image,
+                {"type": "text", "text": "with"}, image,
+            ]),
+        );
+        let applied = serde_json::json!({
+            "id": "applied", "sequence": 3, "create_at": 3,
+            "type": "input", "name": "applied", "data": {"input_id": "mixed-images"},
+        });
+        let mut live = Projection::default();
+        apply(&mut live, std::slice::from_ref(&history));
+        assert!(live.snapshot().rows[0].text.is_empty());
+        assert_eq!(
+            live.snapshot().rows[0].display.as_deref(),
+            Some("[Image #1]")
+        );
+        live.set_running(true);
+        apply(&mut live, std::slice::from_ref(&mixed));
+        let expected = "Compare\n[Image #1]\nwith\n[Image #2]";
+        assert_eq!(live.snapshot().queued[0].text, "Compare\nwith");
+        assert_eq!(live.snapshot().queued[0].display.as_deref(), Some(expected));
+        assert_eq!(
+            serde_json::to_value(live.held_input("mixed-images").unwrap()).unwrap(),
+            mixed["data"]["user"],
+            "display markers preserve the original queued image blocks"
+        );
+        apply(&mut live, std::slice::from_ref(&applied));
+        assert!(live.snapshot().queued.is_empty());
+        assert_eq!(live.snapshot().rows[1].text, "Compare\nwith");
+        assert_eq!(live.snapshot().rows[1].display.as_deref(), Some(expected));
+        let previous = crate::ui::i18n::active();
+        crate::ui::i18n::set(crate::ui::i18n::Locale::ZhCn);
+        let mut replay = Projection::default();
+        apply(&mut replay, &[history, mixed, applied]);
+        assert!(replay.snapshot().rows[0].text.is_empty());
+        assert_eq!(
+            replay.snapshot().rows[0].display.as_deref(),
+            Some("[Image #1]")
+        );
+        assert_eq!(replay.snapshot().rows[1].text, "Compare\nwith");
+        assert_eq!(replay.snapshot().rows[1].display.as_deref(), Some(expected));
+        crate::ui::i18n::set(previous);
     }
 
     #[test]

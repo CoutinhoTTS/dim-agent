@@ -506,8 +506,8 @@ pub(crate) fn render_block(
 ) -> Vec<String> {
     match block {
         Block::Banner => Vec::new(),
-        Block::User { text, .. } => render_user(
-            &crate::sanitize::safe(text),
+        Block::User { text, display, .. } => render_user(
+            &crate::sanitize::safe(display.as_deref().unwrap_or(text)),
             width,
             &UserStyle {
                 color: &p.user,
