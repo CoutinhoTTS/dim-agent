@@ -2257,7 +2257,10 @@ impl BranchTool {
             "create" => self.create(&own, input, &context, &call.id, cancel).await,
             "message" => self.message(&own, input).await,
             "read" => self.read(&own, input).await,
-            "end" => self.end(&own, input, &context, &call.id).await,
+            "end" => tokio::select! {
+                result = self.end(&own, input, &context, &call.id) => result,
+                _ = cancel.cancelled() => Err(HostError::Cancelled("branch end cancelled".into())),
+            },
             action => Err(invalid(format!("unknown action {action}"))),
         }
     }

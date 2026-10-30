@@ -6,6 +6,21 @@ and the sets of the tool sources parts register, declaring those the Session
 mounts and exposing snapshots and a source-state watch for branch adoption and
 pinning.
 
+## Declarations
+
+ToolRegistry carries declarations and owns no wording: the names, descriptions
+and schemas it hands on are their owners', stored and declared unchanged
+([model-facing prompts §9.3](../../../design/model-prompts.md#93-toolregistry-and-toolbinding)).
+
+In a declaration, the description's guidance is policy; the schema, the result
+format and the refusal codes are protocol
+([§4](../../../design/model-prompts.md#4-protocol-and-policy)). A mixed
+description is marked sentence by sentence on its owner's page. A declaration's
+policy change is judged against the current text
+([§8](../../../design/model-prompts.md#8-judging-a-change)); its protocol change
+follows the behaviour it describes, and a schema or result-format change lands
+with the flow test that asserts it.
+
 ## Dependencies
 
 | Service | Purpose |

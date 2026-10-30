@@ -34,6 +34,10 @@ pub enum Command {
         allow: bool,
         remember: bool,
     },
+    RetryApproval {
+        request_id: String,
+        branch_id: String,
+    },
     AskAnswers {
         session_id: String,
         call: crate::question::Call,
@@ -432,6 +436,15 @@ pub struct EmptyProvider {
     pub reason: EmptyReason,
 }
 
+/// A usable provider whose catalog holds models no source declares a
+/// context window or maximum output for.
+#[derive(Debug, Clone)]
+pub struct NeedsLimitsProvider {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub count: usize,
+}
+
 /// Which model new Collaboration members use (`collaboration.model_policy`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
@@ -464,6 +477,9 @@ pub struct ModelList {
     /// The usable providers that offer no selectable model, with why, so the
     /// picker can name them.
     pub empty: Vec<EmptyProvider>,
+    /// The usable providers whose models include ones with undeclared
+    /// limits, with how many.
+    pub limits: Vec<NeedsLimitsProvider>,
 }
 
 /// One stored session as the picker shows it.
@@ -521,6 +537,10 @@ pub enum Update {
         service_tiers: bool,
     },
     Snapshot(Box<ViewSnapshot>),
+    ApprovalPending {
+        branch_id: String,
+        request_id: String,
+    },
     QuestionReply {
         session_id: String,
         call: crate::question::Call,

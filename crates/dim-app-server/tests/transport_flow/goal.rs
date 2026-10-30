@@ -32,7 +32,7 @@ fn product_home() -> PathBuf {
 async fn select_model(client: &mut Client) {
     let models = [
         json!({"modelId":"fixture","displayName":"fixture","status":"active",
-        "capabilities":dim_agent_types::ModelCapabilities::default()}),
+        "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}),
     ];
     assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":models,"enabled":true})).await);
     assert_ok(

@@ -2148,7 +2148,7 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
                 provider_id: "local".into(),
                 model_id: server.model_id().into(),
             },
-            capabilities: ModelCapabilities { vision: false, ..Default::default() },
+            capabilities: ModelCapabilities { vision: false, ..ModelCapabilities::with_limits(128_000, 4_096) },
             reasoning: None,
             service_tier: None,
         });

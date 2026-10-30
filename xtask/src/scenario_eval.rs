@@ -3060,7 +3060,7 @@ mod tests {
                 capabilities: dim_agent_types::ModelCapabilities {
                     context_window: 64_000,
                     max_output_tokens: 200,
-                    ..Default::default()
+                    ..dim_agent_types::ModelCapabilities::with_limits(64_000, 200)
                 },
                 reasoning: None,
                 service_tier: None,
@@ -3464,7 +3464,7 @@ mod tests {
             .then(|| content(r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#))
     }
     /// How many times one turn reads the workspace file before it answers.
-    const READS: usize = 4;
+    const READS: usize = 3;
     /// The fixture models' output allowance: their `maxOutputTokens` and the
     /// requests' `maxTokens`. The input budget is the window less this.
     const OUTPUT_TOKENS: u64 = 200;

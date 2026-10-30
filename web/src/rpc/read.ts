@@ -5,6 +5,7 @@
  */
 import type {
   ApprovalRequest,
+  MemberApprovalDetail,
   BranchCreateResult,
   BranchSource,
   CreateResult,
@@ -357,6 +358,21 @@ function readApproval(params: Json): ApprovalRequest {
   }
 }
 
+export function readMemberApproval(value: unknown): MemberApprovalDetail {
+  const at = "session.collaboration.approval.get"
+  const source = obj(value, at)
+  if (source.state === "ended") return { state: "ended" }
+  if (source.state !== "pending") fail(at, "pending or ended")
+  const descriptor = obj(source.descriptor, `${at}.descriptor`)
+  const member = obj(descriptor.member, `${at}.member`)
+  const call = obj(descriptor.call, `${at}.call`)
+  return { state: "pending", approvalId: str(source, "approvalId", at), descriptor: {
+    delegationId: str(descriptor, "delegationId", at), requestId: str(descriptor, "requestId", at), reason: str(descriptor, "reason", at),
+    member: { agentId: str(member, "agentId", at), sessionId: str(member, "sessionId", at), branchId: str(member, "branchId", at) },
+    call: { name: str(call, "name", at), input: obj(call.input, at) },
+  } }
+}
+
 /** Decodes a server notification; methods the web workspace does not use read as undefined. */
 export function readNotification(method: string, value: unknown): Notification | undefined {
   const params = obj(value ?? {}, method)
@@ -393,6 +409,7 @@ export function readNotification(method: string, value: unknown): Notification |
     }
     case "approval.request":
       return { method, request: readApproval(params) }
+    case "approval.resolved":
     case "approval.cancelled":
       return {
         method,
@@ -400,6 +417,11 @@ export function readNotification(method: string, value: unknown): Notification |
         branchId: str(params, "branchId", method),
         requestId: str(params, "requestId", method),
       }
+    case "session.notice": {
+      if (params.source !== "Collaboration" || params.kind !== "memberApprovalEnded") return undefined
+      const data = obj(params.data, method)
+      return { method: "memberApprovalEnded", sessionId: str(params, "sessionId", method), branchId: str(data, "branchId", method), approvalId: str(data, "approvalId", method) }
+    }
     case "session.closed": {
       const reason = optStr(params, "reason", method)
       return { method, sessionId: str(params, "sessionId", method), ...(reason === undefined ? {} : { reason }) }

@@ -246,7 +246,7 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 ## 5. 上下文映射
 
-PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的文本。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。该工具的文本按[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)归类：命令名与每个命令的参数文法、声明携带的单行命令表、usage 文本中的 `Usage:` 行是 protocol，因为工具按原样解析它们；usage 行之后的句子以及 `help` 中说明命令做什么、不碰什么的句子是 policy。格式错误的命令，其错误结果携带命令表或该命令的 usage；被拒绝的调用，其错误携带错误码（A.2）——两者都是 protocol。完成的调用结果说明变更了什么、状态是什么，以及适用时的 `restartRequired`；这也是 protocol，因为模型据此决定下一步。
+PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的文本。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。该工具的文本按[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)归类。声明的 schema 是 protocol，“Manage Dim plugins.” 也是 protocol，因为它陈述工具的触及范围；它携带的单行命令表（连同命令名与每个命令的参数文法）同样是 protocol，因为工具按原样解析它们。“Run `help <command>` for a command's details.” 是 policy 指引，其中 `help <command>` 是 protocol，因为它点明要调用的命令；这句话还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。usage 文本中的 `Usage:` 行是 protocol，usage 行之后的句子以及 `help` 中说明命令做什么、不碰什么的句子是 policy。格式错误的命令，其错误结果携带命令表或该命令的 usage；被拒绝的调用，其错误携带错误码（A.2）——两者都是 protocol。完成的调用结果说明变更了什么、状态是什么，以及适用时的 `restartRequired`；这也是 protocol，因为模型据此决定下一步。
 
 ## 6. 接口（摘要）
 

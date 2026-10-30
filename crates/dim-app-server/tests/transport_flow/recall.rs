@@ -126,11 +126,7 @@ async fn both_profiles_declare_recall() {
         let work = directory.join("work");
         std::fs::create_dir_all(&work).unwrap();
 
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 200_000,
-            max_output_tokens: 4_096,
-            ..Default::default()
-        };
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(200_000, 4_096);
         let mut product = launch(&directory, &["--product-home", home.to_str().unwrap()]).await;
         let mut client = connect(&product).await;
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active","capabilities":capabilities}],"enabled":true})).await);

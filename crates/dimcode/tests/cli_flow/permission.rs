@@ -419,7 +419,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("Preset (main branch) is already read-only");
     terminal.until("\n> ");
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("Preset (main branch): workspace-write. Child branches created later inherit it; agent members keep the Session's starting preset.");
+    terminal.until("Preset (main branch): workspace-write. Child branches and members created later from main inherit it; existing branches and members keep their policies.");
     terminal.until("\n> ");
     terminal.write(b"/approvals remove 1\n");
     terminal.until("Rule removed: allow exact `cargo test`");
@@ -763,4 +763,50 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     assert!(terminal.wait().success());
     let (code, _, stderr) = daemon.run(&["exec", "-p", "exec: printf always-ran"]);
     assert_eq!(code, Some(3), "{stderr}");
+}
+
+#[test]
+fn member_approval_in_line_mode_allows_rejection_during_loading_and_rechecks_an_allow() {
+    for reject_loading in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.start(false);
+            let submit = wire.read("session.submit"); wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Leader permission"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            let original = json!({"state":"pending","approvalId":"route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"cargo test line action"}},"reason":"Member process request"}});
+            if !reject_loading {
+                wire.reply(&detail, original.clone());
+                let refresh = wire.read("session.collaboration.approval.get");
+                wire.reply(&refresh, json!({"state":"ended"}));
+            }
+            let response = wire.read("approval.respond");
+            assert_eq!(response["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"deny"}));
+            wire.reply(&response, json!({}));
+            if reject_loading { wire.reply(&detail, original); }
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"end_turn"}));
+            wire.reply(&idle, json!({"sequence":9}));
+            wire.detach();
+        });
+        let mut terminal = Terminal::launch(home.command());
+        terminal.until("\n> ");
+        terminal.write(b"work\n");
+        if reject_loading {
+            terminal.until("Loading member action");
+            terminal.write(b"y\n");
+            terminal.until("Loading member action");
+            terminal.write(b"n\n");
+        } else {
+            terminal.until("Leader reason: Leader permission");
+            terminal.until("cargo test line action");
+            terminal.until("Allow this member action once?");
+            terminal.write(b"y\n");
+            terminal.until("Member request ended");
+        }
+        terminal.until("\n> ");
+        terminal.write(b"/exit\n");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
 }
