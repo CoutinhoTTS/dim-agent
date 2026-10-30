@@ -16,7 +16,7 @@ original text.
 | [006 — The plugin contract is concepts and conventions, not types](006-plugin-contract.md) | Accepted by the repository owner | Extends 002 D5; supersedes the 0.15 upgrade design's scope model; replaces the #377 draft; D3's first point corrected by 007 |
 | [007 — PluginManager keeps plugin configuration; rutis and content owners keep state](007-plugin-configuration.md) | Accepted by the repository owner | Corrects 002 D4 and 006 D3; withdraws 001's direction for #3 |
 | [008 — Documentation ownership and immutable ADRs](008-documentation-ownership.md) | Proposed | Supersedes 006 D9's sentence that puts delivery status in ADR tables and design documents |
-| [009 — An opt-in request record for model calls](009-model-request-log.md) | Proposed | Supersedes 005 D1's "no third channel" for opt-in model request recording |
+| [016 — An opt-in request record for model calls](016-model-request-log.md) | Proposed | Supersedes 005 D1's "no third channel" for opt-in model request recording |
 
 Source baseline: [initial foundation parent](https://github.com/arcships/dim/commit/aaaffa5768e031d781abb73e45b1915b05dc2aa0).
 This baseline includes lifecycle fixes not necessarily present on the default branch.

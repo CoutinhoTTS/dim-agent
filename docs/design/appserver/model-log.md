@@ -57,7 +57,7 @@ applied is logged as a warning and leaves the previous state.
 ## Observation layers
 
 [ADR 005](../adr/005-observability.md) D1 keeps the Timeline and process logs;
-[ADR 009](../adr/009-model-request-log.md) supersedes its "no third channel" for
+[ADR 016](../adr/016-model-request-log.md) supersedes its "no third channel" for
 this opt-in record and leaves the other two layers unchanged. The record is never
 read back into Dim.
 

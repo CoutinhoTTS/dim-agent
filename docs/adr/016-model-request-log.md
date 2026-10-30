@@ -1,4 +1,4 @@
-# 009: An opt-in request record for model calls
+# 016: An opt-in request record for model calls
 
 Decision status: Proposed.
 
