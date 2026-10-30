@@ -573,11 +573,11 @@ mod windows_flow {
         };
         assert_eq!(files, paths.map(PathBuf::from));
 
-        for width in [2, 8001] {
+        for width in [2u32, 8001] {
             let row = (width as usize * 3).div_ceil(4) * 4;
             let header = BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
+                biWidth: width as i32,
                 biHeight: 1,
                 biPlanes: 1,
                 biBitCount: 24,
