@@ -18622,7 +18622,17 @@
       "to": "dim_app_server::provider::legacy",
       "references": [
         "mod legacy",
-        "use legacy::ImportResult"
+        "use legacy::ImportResult",
+        "use legacy::LEGACY_METADATA_FIELDS",
+        "use legacy::LEGACY_PROVIDER_FIELDS",
+        "use legacy::LegacyConversion",
+        "use legacy::LegacyRow",
+        "use legacy::LegacySelection",
+        "use legacy::LegacySnapshot",
+        "use legacy::convert_legacy_provider",
+        "use legacy::convert_legacy_selection",
+        "use legacy::legacy_omitted_fields",
+        "use legacy::read_legacy_source"
       ]
     },
     {
@@ -18925,6 +18935,7 @@
       "from": "dim_app_server::provider::legacy",
       "to": "dim_app_server::model_catalog",
       "references": [
+        "path BundledCatalog",
         "path ModelEntry"
       ]
     },
@@ -18939,12 +18950,12 @@
         "path StaticAuth::AwsBedrock",
         "path StaticAuth::Bearer",
         "path StaticProviderRecord",
+        "path StaticProviderRecord::is_pristine_builtin",
         "path StaticRecordKind::Builtin",
         "path StaticRecordKind::Custom",
         "path failure",
         "path managed_authority",
         "path parse_static",
-        "path read_static",
         "path selection_scope",
         "path static_catalog",
         "path storage",

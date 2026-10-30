@@ -12,7 +12,11 @@ mod remote;
 mod secrets;
 mod view;
 pub use editing::{ConnectionInput, CreateProvider, ProbeProvider, ProbeResult, ProviderPatch};
-pub use legacy::ImportResult;
+pub use legacy::{
+    ImportResult, LEGACY_METADATA_FIELDS, LEGACY_PROVIDER_FIELDS, LegacyConversion, LegacyRow,
+    LegacySelection, LegacySnapshot, convert_legacy_provider, convert_legacy_selection,
+    legacy_omitted_fields, read_legacy_source,
+};
 pub use models::PreferencesPatch;
 pub use preferences::ModelPreferences;
 use secrets::StaticCredential;
@@ -230,7 +234,7 @@ fn parse_static_row(
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StaticProviderRecord {
+pub struct StaticProviderRecord {
     kind: StaticRecordKind,
     display_name: String,
     driver_kind: String,
@@ -275,6 +279,23 @@ struct StaticProviderRecord {
 enum StaticRecordKind {
     Builtin,
     Custom,
+}
+
+impl StaticProviderRecord {
+    pub fn is_builtin(&self) -> bool {
+        self.kind == StaticRecordKind::Builtin
+    }
+    /// A seeded bundled record no import has replaced yet.
+    pub fn is_pristine_builtin(&self) -> bool {
+        self.is_builtin() && self.version == 1
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+    pub fn with_version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -456,7 +477,7 @@ fn read_static(
         .map_err(storage)
 }
 
-fn parse_static(
+pub fn parse_static(
     provider_id: &str,
     version: u32,
     body: &str,
