@@ -1085,6 +1085,17 @@ JSON escaping can make a prompt exceed this limit even when its original text fi
 | `3` | Interactive approval or answer required |
 | `130` | Interrupted noninteractive turn or login |
 
+When a model reaches `max_tokens`, the CLI names its provider/model and asks for
+a larger output token limit. The turn fails with exit code `2`; the Session stays
+usable. Model request failures are also recorded in the private daemon log with their
+Session, turn and request identities.
+
+```text
+exec -> [failed] local: Model local/model stopped at max_tokens. Increase the output token limit and retry.
+TUI  -> model failed: Model local/model stopped at max_tokens. Increase the output token limit and retry.
+ACP  -> stopReason: max_tokens -> next prompt on the same Session
+```
+
 ## Focused checks
 
 The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, questions, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:

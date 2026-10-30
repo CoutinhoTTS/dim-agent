@@ -570,6 +570,7 @@
       "file": "crates/dim-agent-capabilities/src/model_provider.rs",
       "unexpandedMacros": [
         "matches",
+        "tracing::error",
         "tracing::info_span",
         "unreachable",
         "vec"
@@ -588,6 +589,7 @@
       "parent": "dim_agent_capabilities::model_provider",
       "file": "crates/dim-agent-capabilities/src/model_provider/recovery.rs",
       "unexpandedMacros": [
+        "matches",
         "tokio::select"
       ]
     },
@@ -4984,6 +4986,7 @@
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::ModelEnd",
         "path EventContent::PermissionChanged",
         "path EventContent::ToolCall",
         "path EventContent::ToolResult",
@@ -8410,6 +8413,7 @@
         "path HostError::Cancelled",
         "path HostError::Failed",
         "path HostError::failed",
+        "path HostErrorKind::Other",
         "path ModelChunk",
         "path ModelChunk::Content",
         "path ModelChunk::MessageStart",
@@ -8495,6 +8499,7 @@
         "path ModelCallData",
         "path ModelContentData",
         "path ModelUsageData",
+        "path ProviderPresentation",
         "path TextData",
         "path ThinkingData",
         "path ToolCallResult",
