@@ -15,14 +15,6 @@ pub(super) struct Route {
     turn_id: Option<String>,
 }
 
-/// A member ask already submitted to its leader branch, until the member's
-/// own Approval ends it.
-pub(super) struct Forwarded {
-    source: Source,
-    leader: String,
-    branch: String,
-}
-
 #[derive(Clone, PartialEq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Source {
@@ -229,7 +221,8 @@ impl CollaborationSession {
             call: request.call.clone(),
             reason: request.reason.clone(),
         });
-        {
+        let ended = CancellationToken::new();
+        let abort = {
             let mut state = self.state.lock().unwrap();
             let Some(branch) = state
                 .branches
@@ -238,15 +231,11 @@ impl CollaborationSession {
             else {
                 return;
             };
-            branch.forwarded_approvals.insert(
-                request.approval_id.clone(),
-                Forwarded {
-                    source: source.clone(),
-                    leader: leader.id().into(),
-                    branch: leader_branch.clone(),
-                },
-            );
-        }
+            branch
+                .forwarded_approvals
+                .insert(request.approval_id.clone(), ended.clone());
+            branch.abort.clone()
+        };
         let owner = self.clone();
         let branch_id = branch_id.to_owned();
         tasks.spawn(async move {
@@ -256,34 +245,23 @@ impl CollaborationSession {
             {
                 owner.end_approval(&branch_id, &source.descriptor.request_id);
                 owner.deny(&branch_id, &source.descriptor.request_id);
+                return;
             }
+            tokio::select! {
+                _ = ended.cancelled() => {},
+                _ = abort.cancelled() => {},
+            }
+            let _ = leader.input(source.input(true), &leader_branch).await;
         });
     }
 
     fn end_approval(self: &Arc<Self>, branch_id: &str, approval_id: &str) {
-        let Some((tasks, forwarded)) = ({
-            let mut state = self.state.lock().unwrap();
-            state.branches.get_mut(branch_id).map(|branch| {
-                (
-                    branch.tasks.clone(),
-                    branch.forwarded_approvals.remove(approval_id),
-                )
-            })
-        }) else {
-            return;
-        };
-        let Some(forwarded) = forwarded else {
-            return;
-        };
-        let owner = self.clone();
-        tasks.spawn(async move {
-            let Some((_, leader)) = owner.collaboration.index.session(&forwarded.leader) else {
-                return;
-            };
-            let _ = leader
-                .input(forwarded.source.input(true), &forwarded.branch)
-                .await;
-        });
+        let mut state = self.state.lock().unwrap();
+        if let Some(branch) = state.branches.get_mut(branch_id)
+            && let Some(ended) = branch.forwarded_approvals.remove(approval_id)
+        {
+            ended.cancel();
+        }
     }
 
     fn deny(self: &Arc<Self>, branch_id: &str, approval_id: &str) {
@@ -657,7 +635,10 @@ impl ToolHandler for DecisionTool {
                 ));
             };
             if cancel.is_cancelled() {
-                self.session.spawn_retire(&context.branch_id, vec![route]);
+                let routes = self
+                    .session
+                    .take_routes(&context.branch_id, |route| route.id == answer.approval_id);
+                self.session.spawn_retire(&context.branch_id, routes);
                 return Err(HostError::Cancelled(
                     "Member approval decision cancelled".into(),
                 ));
@@ -685,8 +666,10 @@ impl ToolHandler for DecisionTool {
                 }
                 Err(ApprovalRespondError::Closed) => "unavailable",
             };
-            self.session
-                .spawn_retire(&context.branch_id, vec![route.clone()]);
+            let routes = self
+                .session
+                .take_routes(&context.branch_id, |route| route.id == answer.approval_id);
+            self.session.spawn_retire(&context.branch_id, routes);
             Ok(success(
                 json!({"code":code,"approvalId":route.id,"target":route.descriptor.member,"decision":decision}),
             ))

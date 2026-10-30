@@ -4666,6 +4666,26 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
             if !ended_member { assert_ok(&response); }
             returned(&mut client, lead, &leader, index + 1).await;
             assert_eq!(runs.load(Ordering::SeqCst), 1);
+            let route = detail["result"]["approvalId"].as_str().unwrap();
+            let timeline = events(&leader).await;
+            let request_input = timeline.iter().find(|event| matches!(&event.kind,
+                EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(format!("collaboration-approval:{route}").as_str())
+            )).unwrap();
+            assert_eq!(timeline.iter().filter(|event| matches!(&event.kind,
+                EventKind::InputWithdraw(data) if data.input_id == request_input.id
+            )).count(), 1, "each member approval is withdrawn exactly once: {decision}");
+            let terminal = poll("member terminal follows its request", async || {
+                events(&leader).await.into_iter().find(|event| matches!(&event.kind,
+                    EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(format!("collaboration-approval-ended:{route}").as_str())
+                ))
+            }).await;
+            assert!(terminal.sequence > request_input.sequence);
+            idle(&mut client, lead).await;
+            assert_eq!(client.notices.iter().filter(|notice|
+                notice["method"] == "session.notice"
+                    && notice["params"]["kind"] == "memberApprovalEnded"
+                    && notice["params"]["data"]["approvalId"] == route
+            ).count(), 1, "each member approval ends once for attached clients: {decision}");
         }
         let (agent_id, member_id) = reused.unwrap();
         let cut = events(&leader).await.last().unwrap().sequence;
@@ -5035,6 +5055,23 @@ async fn member_routes_are_authorized_only_after_the_owning_branch_consumes_the_
             })
         }).await;
         assert_eq!(leader.input(terminal, "main").await.unwrap().id, terminal_id, "terminal source submission is idempotent");
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        let (ctx, timeline) = gate.contexts.lock().unwrap().get(lead).unwrap().clone();
+        timeline.before(&ctx, "replace-member-request", &["input/message"], |mut draft| {
+            if let EventKind::InputMessage(data) = &mut draft.kind
+                && data.submission_id.as_deref().is_some_and(|id| id.starts_with("collaboration-approval:"))
+            {
+                data.blocks = vec![InputBlock::Raw { text: "Member approval source replaced".into(), key: None, retire: false }];
+            }
+            Ok(draft)
+        }).unwrap();
+        let through = events(&leader).await.last().unwrap().sequence;
+        say(&mut client, lead, tool(json!({"action":"request","profile":{"name":"refused-worker","description":"fixture","systemPrompt":"work","tools":["danger"]},"prompt":"tool:danger {}"})), "queue").await;
+        returned(&mut client, lead, &leader, 2).await;
+        let refused = events(&leader).await;
+        assert!(!refused.iter().any(|event| event.sequence > through && matches!(&event.kind,
+            EventKind::InputMessage(data) if data.submission_id.as_deref().is_some_and(|id| id.starts_with("collaboration-approval-ended:"))
+        )), "a transformed request has no terminal input to deliver");
         assert_eq!(runs.load(Ordering::SeqCst), 0);
         let socket = server.unix_path.clone().unwrap();
         server.shutdown(); server.join().await.unwrap();

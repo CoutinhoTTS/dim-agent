@@ -722,7 +722,7 @@ struct BranchRecord {
     dispatcher: Arc<Dispatcher>,
     approvals: BTreeMap<String, approvals::Route>,
     approval_calls: BTreeMap<(String, String), String>,
-    forwarded_approvals: BTreeMap<String, approvals::Forwarded>,
+    forwarded_approvals: BTreeMap<String, CancellationToken>,
     timeline: Arc<Timeline>,
     tasks: TaskTracker,
     /// Cancels waiting for members on unload.

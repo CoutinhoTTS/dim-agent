@@ -122,8 +122,8 @@ arguments as data, not instructions. Collaboration alone interprets its own sour
 obtain presentation data through the query in §5. Only the adopted input enters model context.
 
 The submitted input is the durable route record. The member branch registers only its own
-submission resource, pinning the original Approval generation and immutable source content; it
-then submits the request to the owning leader branch. The request submission identity is stable
+submission resource with immutable source content, then submits the request to the owning leader
+branch. The request submission identity is stable
 for the delegation and original approval identity. An uncertain input reply is looked up before
 retry; duplicate delivery uses the existing committed input.
 
@@ -146,13 +146,16 @@ Original termination, assignment cancellation and destination closure settle thr
 own facts; the member runs no wait on the leader. For a delivered request the terminal
 `input/message` uses `submission_id = "collaboration-approval-ended:<approvalId>"`, Append mode,
 and a raw `dim-agent-approval-ended` element containing the same `{approvalId, descriptor}`.
+One member-owned task submits the request before its terminal input, even if the member's ask
+ends during request submission. If request submission fails, it sends no terminal input.
 The owning leader consumes this committed terminal input to retire its route. Terminal inputs
 carry no authority and do not start a model turn. A request input the leader withdraws while
 still unconsumed is denied on the member branch from that same fold. Existing decision-tool
 results, turn-end, interrupt and delegation settlement facts also retire routes in the leader's
 own sequence.
 
-The forwarding record is the member branch's own state: the committed source and leader branch id.
+The forwarding resource is the member branch's own termination signal; its task owns the source
+and leader branch id and ends on the member's own terminal fact or branch unload.
 No Approval generation is pinned; the decision tool resolves the member branch's public Approval
 at decision time, and a reloaded generation answers `Unknown` for an old request id. Removing a
 route under the owning branch's lock is its retirement: cleanup (terminal notice, denial and
@@ -194,7 +197,7 @@ for command-rule matching, and no permanent-allow operation. Member Permission a
 still apply to the original call and its final recheck.
 
 Only `approvalId` is model supplied. The handler resolves its immutable descriptor from its own
-branch state, checks the assignment's admission, then uses the pinned original Approval's public
+branch state, checks the assignment's admission, then uses the member branch's public Approval
 respond operation. That operation decides whether the original request is still pending. The model cannot replace the member, command, path or reason.
 The member Approval chooses the first response in its own sequence order, including responses
 from a separately attached trusted client. A tool result says the answer was accepted, not that
