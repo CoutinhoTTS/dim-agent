@@ -99,6 +99,8 @@ class Failure:
     first_seen: str = ""
     nights: int = 1
     error: str | None = None
+    #: Passes of this task in the baseline, or None without a baseline for it.
+    baseline_passes: int | None = None
 
 
 def clip(text: str, limit: int) -> str:
@@ -218,6 +220,14 @@ def evidence_for(trial: results.Trial, trial_dir: Path) -> dict:
     }
 
 
+def baseline_tasks(run: dict) -> dict | None:
+    """The per-task records of the baseline this run was compared against."""
+    path = run.get("baseline")
+    if not path or not Path(path).is_file():
+        return None
+    return json.loads(Path(path).read_text())["tasks"]
+
+
 def failed_trials(job: results.JobReport) -> list[results.Trial]:
     """Scored trials that did not pass. A trial nothing scored is not a failure:
     it makes the run unscoreable, which has its own pipeline issue."""
@@ -235,10 +245,12 @@ def analyze(run_dir: Path, repo: Path, known: dict,
     changes, names = window_changes(repo, run)
     failed = failed_trials(job)
     passed = {t.task_name for t in job.trials if t.reward == 1.0}
+    baseline = baseline_tasks(run)
 
     def one(trial: results.Trial) -> Failure:
         failure = Failure(task=trial.task_name, trial=trial.trial_name,
-                          reward=trial.reward, exception=trial.exception)
+                          reward=trial.reward, exception=trial.exception,
+                          baseline_passes=(baseline or {}).get(trial.task_name, {}).get("passes"))
         previous = known.get(trial.task_name)
         known_text = (f"Last time this task failed, the cause was recorded as: "
                       f"[{previous['category']}] {previous['cause']}\n"
@@ -250,6 +262,10 @@ def analyze(run_dir: Path, repo: Path, known: dict,
                 **evidence_for(trial, run_dir / "harbor" / trial.trial_name))))
         except Exception as error:  # noqa: BLE001 - one bad reply must not lose the night
             failure.error = f"{type(error).__name__}: {error}"[:300]
+            # Already failing: not news, whatever tonight's reply was.
+            failure.known = previous is not None
+            if previous:
+                failure.first_seen, failure.nights = previous["first_seen"], previous["nights"] + 1
             return failure
         failure.category = reply["category"]
         failure.cause = str(reply.get("cause", ""))
@@ -298,12 +314,13 @@ def main() -> int:
         return 2
 
     known = json.loads(args.known.read_text()) if args.known.exists() else {}
+    run = json.loads((args.run_dir / "run.json").read_text())
     failures, updated = analyze(
         args.run_dir, args.repo, known,
         lambda prompt: agent_reviewer.call_model(prompt, base_url, model, api_key),
         datetime.now(timezone.utc).date().isoformat(),
     )
-    write_json(args.out, {"model": model,
+    write_json(args.out, {"model": model, "baseline": baseline_tasks(run) is not None,
                           "failures": [asdict(f) for f in failures]})
     write_json(args.known_next or args.known, updated)
     errors = sum(1 for f in failures if f.error)

@@ -121,6 +121,7 @@ class IssueReporterFlowTest(unittest.TestCase):
         done = self.night(7, run_json(**MEASURED))
         self.assertEqual(done, ["opened #2 (frontier/no-baseline)",
                                 "closed #1 (frontier/l2-failed)"])
+        self.assertEqual(self.night(7, run_json(**MEASURED)), [])
 
     def test_a_blocking_breach_is_a_regression_issue(self) -> None:
         run = run_json(trials=30, trial_passes=20, infra_failures=0, comparison={
@@ -134,25 +135,25 @@ class IssueReporterFlowTest(unittest.TestCase):
         self.assertEqual(self.night(0, run_json(**MEASURED, comparison={"comparable": True})),
                          ["closed #1 (frontier/regression)"])
 
-    def test_an_unanalysed_failure_keeps_the_previous_nightly_open(self) -> None:
+    def open_tracking(self) -> None:
+        track = issues.Tracking("frontier/tracking", "tracked", "tracked", None, 1)
+        issues.report(self.github, "frontier", 0, run_json(**MEASURED), [],
+                      analysis_ok=True, track=track)
+
+    def test_an_unanalysed_night_leaves_the_tracking_issue_alone(self) -> None:
         """A missing analysis must not be read as "no failures"."""
-        previous = issues.Problem("frontier/nightly", "previous", "previous")
-        issues.report(self.github, "frontier", 0, run_json(**MEASURED), [previous],
-                      analysis_ok=True)
+        self.open_tracking()
         done = self.night(0, run_json(**MEASURED), analysis_failed=True, analysis_ok=False)
         self.assertEqual(done, ["opened #2 (frontier/analysis-failed)"])
         self.assertEqual(self.github.issues[1]["state"], "open")
 
-    def test_a_clean_night_closes_the_previous_nightly_without_analysis(self) -> None:
-        """All trials passed, so the old failure summary is resolved even if the
-        analyzer was not needed (or failed)."""
-        previous = issues.Problem("frontier/nightly", "previous", "previous")
-        issues.report(self.github, "frontier", 0, run_json(trials=30, trial_passes=30), [previous],
-                      analysis_ok=True)
+    def test_a_clean_night_closes_the_tracking_issue_without_analysis(self) -> None:
+        """Every trial passed, so nothing is failing even if the analyzer failed."""
+        self.open_tracking()
         done = self.night(0, run_json(trials=30, trial_passes=30),
                           analysis_failed=True, analysis_ok=False)
-        self.assertEqual(done, ["opened #2 (frontier/analysis-failed)",
-                                "closed #1 (frontier/nightly)"])
+        self.assertEqual(done, ["closed #1 (frontier/tracking)",
+                                "opened #2 (frontier/analysis-failed)"])
 
     def test_exit_8_with_a_ledger_push_failure_is_one_issue(self) -> None:
         self.assertEqual(self.night(8, run_json(), pushed=False),
@@ -188,8 +189,9 @@ def git(repo: Path, *args: str) -> str:
 
 
 class NightlyAnalysisFlowTest(unittest.TestCase):
-    """A night's failed trials are analyzed, known causes fold, and the summary
-    issue supersedes the previous night's."""
+    """A night's failed trials are analyzed, and the suite's tracking issue lives
+    for one window of tracked failures: opened when they appear, commented on
+    only for new ones, closed when none is left."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -213,7 +215,8 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def night(self, outcomes: dict[str, float], replies: dict[str, dict], known: dict) -> tuple:
+    def night(self, outcomes: dict[str, float], replies: dict[str, dict], known: dict,
+              baseline: dict[str, int] | None = None) -> tuple:
         run_dir = self.root / f"run{len(list(self.root.iterdir()))}"
         harbor = run_dir / "harbor"
         harbor.mkdir(parents=True)
@@ -241,8 +244,14 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         (harbor / "result.json").write_text(json.dumps({
             "id": "job", "n_total_trials": len(outcomes),
             "stats": {"evals": {"dim": {"reward_stats": {"reward": rewards}, "exception_stats": {}}}}}))
-        run = {"run_id": "2026-10-30T0300__daily__abc__0001", "run_type": "daily", "k": 1,
+        baseline_path = None
+        if baseline is not None:
+            baseline_path = self.root / "baseline.json"
+            baseline_path.write_text(json.dumps(
+                {"tasks": {f"tb/{t}": {"passes": n} for t, n in baseline.items()}}))
+        run = {"run_id": f"{run_dir.name}__daily", "run_type": "daily", "k": 1,
                "window": {"base": "a" * 40, "head": self.merge},
+               "baseline": str(baseline_path) if baseline_path else None,
                "merges": [{"sha": self.merge, "subject": "Merge pull request #548 from arcships/grep",
                            "verdict": "visible", "matched_rules": [], "visible_files": ["grep.rs"]}],
                "l2": {"trials": len(outcomes), "trial_passes": sum(r == 1.0 for r in outcomes.values())}}
@@ -254,13 +263,13 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
             return "Here you go:\n" + json.dumps(replies[task])
 
         failures, updated = analyze.analyze(run_dir, self.repo, known, ask, "2026-10-30")
-        analysis = {"model": "fake", "failures": [analyze.asdict(f) for f in failures]}
-        summary = issues.nightly("frontier", "daily", run, analysis, "arcships/dim")
-        done = issues.report(self.github, "frontier", 0, run, [summary] if summary else [],
-                             analysis_ok=True)
-        return failures, updated, summary, done
+        analysis = {"model": "fake", "baseline": baseline is not None,
+                    "failures": [analyze.asdict(f) for f in failures]}
+        track = issues.tracking("frontier", run, analysis, "arcships/dim")
+        done = issues.report(self.github, "frontier", 0, run, [], analysis_ok=True, track=track)
+        return failures, updated, track, done
 
-    def test_failures_are_explained_and_known_causes_fold(self) -> None:
+    def test_failures_are_explained_and_known_causes_are_not_news(self) -> None:
         regression = {"category": "agent", "cause": "The grep output was cut off.",
                       "evidence": "result: output truncated", "same_as_known": False,
                       "suspects": [{"pr": "#548", "confidence": "medium", "reason": "Lowers LIMIT."},
@@ -271,7 +280,7 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
                              "first_seen": "2026-10-20", "nights": 4},
                  "tb/fixed": {"category": "agent", "cause": "Old.", "first_seen": "2026-10-01",
                               "nights": 9}}
-        failures, updated, summary, done = self.night(
+        failures, updated, track, done = self.night(
             {"regex": 0.0, "hard": 0.0, "fixed": 1.0}, {"regex": regression, "hard": hard}, known)
 
         by_task = {f.task: f for f in failures}
@@ -284,22 +293,51 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertTrue(any("LIMIT: usize = 100" in prompt for prompt in self.prompts))
         self.assertTrue(any("Never finds the key." in prompt for prompt in self.prompts))
 
-        self.assertIn("2 failed (1 new) · suspects #548", summary.title)
-        self.assertIn("#### `tb/regex` — agent", summary.body)
-        self.assertIn("#548 (medium): Lowers LIMIT.", summary.body)
-        self.assertIn("| `tb/hard` | agent | 2026-10-20 | 5 |", summary.body)
-        self.assertNotIn("#### `tb/hard`", summary.body)
-        self.assertEqual(done, ["opened #1 (frontier/nightly)"])
-        self.assertIn(issues.NIGHTLY_LABEL, self.github.issues[1]["labels"])
+        self.assertEqual(track.title, "[eval] frontier: 2 tracked failure(s)")
+        self.assertIn("There is no baseline yet", track.body)
+        self.assertIn("#548 (medium): Lowers LIMIT.", track.body)
+        self.assertIn("#### `tb/hard` — agent · failing since 2026-10-20 (5 night(s))", track.body)
+        self.assertIn("tb/regex", track.news)
+        self.assertNotIn("tb/hard", track.news)
+        self.assertEqual(done, ["opened #1 (frontier/tracking)"])
+        self.assertIn(issues.TRACKING_LABEL, self.github.issues[1]["labels"])
 
-    def test_each_night_supersedes_the_last_and_a_clean_night_closes_it(self) -> None:
-        reply = {"category": "environment", "cause": "uv download failed.", "evidence": "curl: (28)",
+    def test_the_issue_lives_for_one_window_of_tracked_failures(self) -> None:
+        baseline = {"a": 1, "b": 1, "c": 1, "d": 1, "hard": 0}
+        replies = {t: {"category": "agent", "cause": f"{t} broke.", "evidence": "x",
+                       "same_as_known": True, "suspects": []} for t in baseline}
+        known: dict = {}
+
+        def night(failing: set[str]) -> list[str]:
+            nonlocal known
+            outcomes = {t: (0.0 if t in failing else 1.0) for t in baseline}
+            _, known, _, done = self.night(outcomes, replies, known, baseline)
+            return done
+
+        self.assertEqual(night({"a", "b", "c", "hard"}), ["opened #1 (frontier/tracking)"])
+        self.assertIn("Also failing, as in the baseline (1)", self.github.issues[1]["body"])
+        self.assertEqual(night({"a", "b", "c", "hard"}), ["updated #1 (frontier/tracking)"])
+        self.assertEqual(night({"a", "b", "c", "d", "hard"}), ["commented on #1 (frontier/tracking)"])
+        self.assertIn("tb/d", self.github.comments[1][-1])
+        self.assertNotIn("tb/a", self.github.comments[1][-1])
+        self.assertEqual(night({"a", "b", "c", "d", "hard"}), ["updated #1 (frontier/tracking)"])
+        self.assertEqual(night({"c", "d", "hard"}), ["updated #1 (frontier/tracking)"])
+        self.assertIn("2 tracked failure(s)", self.github.issues[1]["title"])
+        self.assertEqual(night({"hard"}), ["closed #1 (frontier/tracking)"])
+        self.assertEqual(len(self.github.comments[1]), 2)
+        self.assertEqual(night({"a", "hard"}), ["opened #2 (frontier/tracking)"])
+
+    def test_failures_the_baseline_shares_open_nothing(self) -> None:
+        reply = {"category": "agent", "cause": "Too hard.", "evidence": "x",
                  "same_as_known": False, "suspects": []}
-        self.night({"regex": 0.0}, {"regex": reply}, {})
-        *_, done = self.night({"regex": 0.0}, {"regex": reply}, {})
-        self.assertEqual(done, ["opened #2 (frontier/nightly)", "closed #1 (frontier/nightly)"])
-        *_, done = self.night({"regex": 1.0}, {}, {})
-        self.assertEqual(done, ["closed #2 (frontier/nightly)"])
+        *_, done = self.night({"hard": 0.0}, {"hard": reply}, {}, {"hard": 0})
+        self.assertEqual(done, [])
+
+    def test_environment_failures_are_tracked_whatever_the_baseline(self) -> None:
+        reply = {"category": "environment", "cause": "uv download failed.",
+                 "evidence": "curl: (28)", "same_as_known": False, "suspects": []}
+        *_, done = self.night({"hard": 0.0}, {"hard": reply}, {}, {"hard": 0})
+        self.assertEqual(done, ["opened #1 (frontier/tracking)"])
 
     def test_a_trial_nothing_scored_is_not_a_failure(self) -> None:
         failures, updated, _, _ = self.night({"regex": -1.0}, {}, {})
@@ -308,11 +346,11 @@ class NightlyAnalysisFlowTest(unittest.TestCase):
         self.assertEqual(self.prompts, [])
 
     def test_a_reply_that_cannot_be_read_is_listed_not_lost(self) -> None:
-        failures, updated, summary, _ = self.night(
+        failures, updated, track, _ = self.night(
             {"regex": 0.0}, {"regex": {"category": "vibes"}}, {})
         self.assertIn("unknown category", failures[0].error)
         self.assertEqual(updated, {})
-        self.assertIn("### Not analyzed", summary.body)
+        self.assertIn("#### `tb/regex` — not analyzed", track.body)
 
 
 if __name__ == "__main__":

@@ -4,14 +4,19 @@
 Run by benchmarks/host/nightly.sh after daily_run.py, the ledger push and
 report/analyze.py. Two kinds of issue:
 
-* The nightly summary (``eval-nightly``): every failed trial with its analyzed
-  cause and suspected PRs. Failures with the cause already reported on an
-  earlier night fold into one line each. Each night's summary supersedes and
-  closes the previous one, so only the latest is open.
-* Pipeline problems: each problem kind of each suite has at most one open
-  issue, found by a marker in its body: a repeat adds a comment instead of a
-  second issue, and a later scored run without that problem closes it. The exit codes are daily_run's, plus nightly's
-own 8 (ledger push failed); benchmarks/README.md lists them.
+* The tracking issue (``eval-failures``), one per suite. A failure is tracked
+  when the task passes in the baseline, when it is an environment, model API or
+  harness failure whatever the baseline says, or when there is no baseline. The
+  issue opens when a tracked failure appears, gets a comment only when a new one
+  does, has its body kept current silently otherwise, and closes when a night
+  that was analyzed has no tracked failure left. Tasks the baseline fails too
+  are listed in the body and never open or keep the issue open.
+* Pipeline problems (``eval-pipeline``): each problem kind of each suite has at
+  most one open issue, found by a marker in its body: a repeat adds a comment
+  instead of a second issue (except "no comparable baseline", which stays
+  quiet until a baseline exists), and a later scored run without that problem
+  closes it. The exit codes are daily_run's, plus nightly's own 8 (ledger push
+  failed); benchmarks/README.md lists them.
 
 Exits 2 when GitHub could not be reached, so nightly.sh can surface that the
 alerting itself is down; the run's own record is already in the ledger.
@@ -31,8 +36,11 @@ from pathlib import Path
 
 LABEL = "eval-pipeline"
 LABEL_COLOR = "d93f0b"
-NIGHTLY_LABEL = "eval-nightly"
-NIGHTLY_COLOR = "1d76db"
+TRACKING_LABEL = "eval-failures"
+TRACKING_COLOR = "1d76db"
+#: Failures that are tracked whatever the baseline says: they are about the
+#: machine, the endpoint or the harness, not about how hard the task is.
+ALWAYS_TRACKED = ("environment", "model_api", "harness")
 API = "https://api.github.com"
 LOG_TAIL_LINES = 80
 
@@ -66,7 +74,7 @@ LEDGER_PUSH = ("ledger-push", "Ledger push failed",
                "branch rules.")
 ANALYSIS_FAILED = ("analysis-failed", "Failure analysis failed",
                    "The run finished, but report/analyze.py could not explain its "
-                   "failed trials. The previous nightly summary was kept open; "
+                   "failed trials. The tracking issue was left as it was; "
                    "check the analysis endpoint and its credential on the eval "
                    "machine, then re-run.")
 
@@ -186,73 +194,88 @@ def problems(suite: str, run_type: str, exit_code: int, run: dict | None,
     return [Problem(p.key, redact(p.title), redact(p.body)) for p in found]
 
 
-def nightly(suite: str, run_type: str, run: dict, analysis: dict, repo: str) -> Problem | None:
-    """The night's summary of failed trials, or None when every trial passed."""
+@dataclass(frozen=True)
+class Tracking:
+    """The suite's tracking issue as this night leaves it."""
+
+    key: str
+    title: str
+    body: str
+    #: A comment for tracked failures not reported before, or None.
+    news: str | None
+    tracked: int
+
+
+def is_tracked(failure: dict) -> bool:
+    if failure["category"] in ALWAYS_TRACKED:
+        return True
+    passes = failure["baseline_passes"]
+    return passes is None or passes > 0
+
+
+def tracking(suite: str, run: dict, analysis: dict, repo: str) -> Tracking:
+    """The tracking issue's state after this analyzed night."""
     failures = analysis["failures"]
-    if not failures:
-        return None
-    l2 = run.get("l2") or {}
+    tracked = [f for f in failures if is_tracked(f)]
+    as_baseline = [f for f in failures if not is_tracked(f)]
+    new = [f for f in tracked if not f["known"]]
     head = (run.get("window") or {}).get("head") or ""
-    fresh = [f for f in failures if not f["known"] and not f["error"]]
-    known = [f for f in failures if f["known"]]
-    unanalyzed = [f for f in failures if f["error"]]
-    suspects = sorted({s["pr"] for f in fresh for s in f["suspects"]})
 
     def link(pr: str) -> str:
         return pr if pr.startswith("#") else f"[`{pr}`](https://github.com/{repo}/commit/{pr})"
 
-    lines = [f"**{suite} {run_type}** · run `{run['run_id']}` · head "
-             f"[`{head[:9]}`](https://github.com/{repo}/commit/{head})",
-             "",
-             f"{l2.get('trial_passes')}/{l2.get('trials')} trials passed. "
-             f"{len(failures)} failed: {len(fresh)} new or with a new cause, "
-             f"{len(known)} failing for a known reason, {len(unanalyzed)} not analyzed."]
-    if fresh:
-        lines += ["", "### New or changed failures"]
-        for f in fresh:
-            lines += ["", f"#### `{f['task']}` — {f['category']}",
-                      f"**Cause:** {f['cause']}", f"**Evidence:** {f['evidence']}"]
-            if f["suspects"]:
-                lines.append("**Suspected PRs:** " + "; ".join(
-                    f"{link(s['pr'])} ({s['confidence']}): {s['reason']}" for s in f["suspects"]))
-            else:
-                lines.append("**Suspected PRs:** none")
-    if known:
-        lines += ["", "### Still failing for a known reason", "",
-                  "| Task | Category | Failing since | Nights | Cause |", "|---|---|---|---|---|"]
-        lines += [f"| `{f['task']}` | {f['category']} | {f['first_seen']} | {f['nights']} | "
-                  f"{f['cause'].replace('|', '/')} |" for f in known]
-    if unanalyzed:
-        lines += ["", "### Not analyzed", ""]
-        lines += [f"- `{f['task']}`: {f['error']}" for f in unanalyzed]
+    def detail(f: dict) -> list[str]:
+        since = f" · failing since {f['first_seen']} ({f['nights']} night(s))" if f["first_seen"] else ""
+        if f["error"]:
+            return ["", f"#### `{f['task']}` — not analyzed{since}", f"{f['error']}"]
+        suspects = "; ".join(f"{link(s['pr'])} ({s['confidence']}): {s['reason']}"
+                             for s in f["suspects"]) or "none"
+        return ["", f"#### `{f['task']}` — {f['category']}{since}",
+                f"**Cause:** {f['cause']}", f"**Evidence:** {f['evidence']}",
+                f"**Suspected PRs:** {suspects}"]
+
+    footer = [f"<sub>Causes and suspects are judgements by `{analysis['model']}` from one "
+              f"run of each task (k={run['k']}), not verdicts.</sub>"]
+    lines = [f"**{suite}** · last updated by run `{run['run_id']}` · head "
+             f"[`{head[:9]}`](https://github.com/{repo}/commit/{head})", "",
+             f"{len(tracked)} tracked failure(s): tasks that pass in the baseline, or that "
+             "failed for environment, model API or harness reasons."
+             + ("" if analysis["baseline"] else " There is no baseline yet, so every failure is tracked.")]
+    for f in tracked:
+        lines += detail(f)
+    if as_baseline:
+        lines += ["", f"<details><summary>Also failing, as in the baseline ({len(as_baseline)})"
+                  "</summary>", "", "| Task | Category | Cause |", "|---|---|---|"]
+        lines += [f"| `{f['task']}` | {f['category']} | {f['cause'].replace('|', '/')} |"
+                  for f in as_baseline]
+        lines += ["", "</details>"]
     window = describe(run, repo).split("\nMerges in the window that reach the model:\n")
     if len(window) == 2:
-        lines += ["", "### Model-visible changes in this window", window[1].rstrip()]
-    lines += ["", f"<sub>Causes and suspects are judgements by `{analysis['model']}` from "
-              f"one run of each task (k={run['k']}), not verdicts.</sub>"]
-    title = (f"[eval] {suite} {run_type} {run['run_id'][:10]}: {len(failures)} failed "
-             f"({len(fresh)} new)" + (f" · suspects {' '.join(suspects)}" if suspects else ""))
-    return Problem(f"{suite}/nightly", title, "\n".join(lines))
+        lines += ["", "### Model-visible changes in the latest window", window[1].rstrip()]
+    lines += [""] + footer
+
+    news = None
+    if new:
+        news_lines = [f"New since the last report, in run `{run['run_id']}`:"]
+        for f in new:
+            news_lines += detail(f)
+        news = "\n".join(news_lines + [""] + footer)
+    title = f"[eval] {suite}: {len(tracked)} tracked failure(s)"
+    return Tracking(f"{suite}/tracking", redact(title), redact("\n".join(lines)),
+                    redact(news) if news else None, len(tracked))
 
 
 def closes(key: str, run: dict | None, analysis_ok: bool = False) -> bool:
     """Whether a scored run that did not show ``key`` shows it is gone.
 
     Only a run whose L2 ran can say a problem is gone, and only a comparable
-    comparison can say a regression is. A nightly summary is different: its
-    absence can mean either "no failures" or "analysis never ran", and only the
-    former may close the previous summary. A failed analysis also must not close
+    comparison can say a regression is. The tracking issue is closed by
+    ``report`` itself, from an analysis. A failed analysis also must not close
     its own ``analysis-failed`` issue until a later analysis succeeds.
     """
     l2 = (run or {}).get("l2")
-    if not l2:
+    if not l2 or key.endswith("/tracking"):
         return False
-    if key.endswith("/nightly"):
-        trials = l2.get("trials")
-        passes = l2.get("trial_passes")
-        if isinstance(trials, int) and trials > 0 and passes == trials:
-            return True
-        return analysis_ok
     if key.endswith("/analysis-failed"):
         return analysis_ok
     if key.endswith("/regression"):
@@ -291,10 +314,10 @@ class GitHub:
             if error.code != 422:
                 raise
 
-    def ensure_nightly_label(self) -> None:
+    def ensure_tracking_label(self) -> None:
         try:
-            self.request("POST", "/labels", {"name": NIGHTLY_LABEL, "color": NIGHTLY_COLOR,
-                                             "description": "Nightly eval failures"})
+            self.request("POST", "/labels", {"name": TRACKING_LABEL, "color": TRACKING_COLOR,
+                                             "description": "Tracked nightly eval failures"})
         except urllib.error.HTTPError as error:
             if error.code != 422:
                 raise
@@ -302,6 +325,9 @@ class GitHub:
     def create(self, title: str, body: str, labels: tuple[str, ...] = (LABEL,)) -> dict:
         return self.request("POST", "/issues", {"title": title, "body": body,
                                                 "labels": list(labels)})
+
+    def edit(self, number: int, title: str, body: str) -> None:
+        self.request("PATCH", f"/issues/{number}", {"title": title, "body": body})
 
     def comment(self, number: int, body: str) -> None:
         self.request("POST", f"/issues/{number}/comments", {"body": body})
@@ -313,7 +339,7 @@ class GitHub:
 
 def report(github: GitHub, suite: str, exit_code: int, run: dict | None,
            found: list[Problem], ledger_push_failed: bool = False,
-           analysis_ok: bool = False) -> list[str]:
+           analysis_ok: bool = False, track: Tracking | None = None) -> list[str]:
     """Open, update and close issues. Returns what was done, one line each."""
     open_by_key = {}
     for issue in github.open_issues():
@@ -324,18 +350,36 @@ def report(github: GitHub, suite: str, exit_code: int, run: dict | None,
     done = []
     if found:
         github.ensure_label()
+    l2 = (run or {}).get("l2") or {}
+    if track is None and l2.get("trials") and l2.get("trial_passes") == l2.get("trials"):
+        # Every trial passed: nothing is failing, analyzed or not.
+        track = Tracking(f"{suite}/tracking", "", "", None, 0)
+    if track is not None:
+        issue = open_by_key.get(track.key)
+        if track.tracked and issue is None:
+            github.ensure_label()
+            github.ensure_tracking_label()
+            created = github.create(track.title, f"{marker(track.key)}\n{track.body}",
+                                    (LABEL, TRACKING_LABEL))
+            done.append(f"opened #{created['number']} ({track.key})")
+        elif track.tracked:
+            github.edit(issue["number"], track.title, f"{marker(track.key)}\n{track.body}")
+            if track.news:
+                github.comment(issue["number"], track.news)
+                done.append(f"commented on #{issue['number']} ({track.key})")
+            else:
+                done.append(f"updated #{issue['number']} ({track.key})")
+        elif issue is not None:
+            run_id = (run or {}).get("run_id", "the latest run")
+            github.comment(issue["number"], f"No tracked failure in `{run_id}`; closing.")
+            github.close(issue["number"])
+            done.append(f"closed #{issue['number']} ({track.key})")
+
     for problem in found:
         existing = open_by_key.get(problem.key)
-        if problem.key.endswith("/nightly"):
-            github.ensure_nightly_label()
-            created = github.create(problem.title, f"{marker(problem.key)}\n{problem.body}",
-                                    (LABEL, NIGHTLY_LABEL))
-            done.append(f"opened #{created['number']} ({problem.key})")
-            if existing:
-                github.comment(existing["number"], f"Superseded by #{created['number']}.")
-                github.close(existing["number"])
-                done.append(f"closed #{existing['number']} ({problem.key})")
-        elif existing:
+        if existing and problem.key.endswith("/no-baseline"):
+            continue
+        if existing:
             github.comment(existing["number"], f"Seen again.\n\n{problem.body}")
             done.append(f"commented on #{existing['number']} ({problem.key})")
         else:
@@ -393,25 +437,27 @@ def main() -> int:
 
     found = problems(args.suite, args.run_type, args.exit_code, run, args.log, args.repo,
                      args.ledger_push_failed, analysis_failed)
+    track = None
     if run and analysis is not None:
         try:
-            summary = nightly(args.suite, args.run_type, run, analysis, args.repo)
+            track = tracking(args.suite, run, analysis, args.repo)
         except (KeyError, TypeError, ValueError) as error:
             print(f"[issues] unusable analysis {args.analysis}: {error}", file=sys.stderr)
             analysis_ok = False
             found = problems(args.suite, args.run_type, args.exit_code, run, args.log,
                              args.repo, args.ledger_push_failed, True)
-        else:
-            if summary:
-                found.insert(0, Problem(summary.key, redact(summary.title), redact(summary.body)))
     if args.dry_run:
+        if track is not None:
+            print(f"[issues] tracking {track.key}: {track.title}\n{track.body}")
+            if track.news:
+                print(f"[issues] would comment, if the issue is already open:\n{track.news}")
         for problem in found:
             print(f"[issues] would file {problem.key}: {problem.title}\n{problem.body}")
         return 0
     try:
         token = args.token_file.read_text().strip()
         for line in report(GitHub(args.repo, token), args.suite, args.exit_code, run, found,
-                           args.ledger_push_failed, analysis_ok):
+                           args.ledger_push_failed, analysis_ok, track):
             print(f"[issues] {line}")
     except (OSError, urllib.error.URLError, ValueError) as error:
         print(f"[issues] could not report to GitHub: {error}", file=sys.stderr)

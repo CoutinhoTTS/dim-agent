@@ -13,7 +13,7 @@ cron ─► nightly.sh ─► git fetch（SSH）─► daily_run.py ─► 推 e
 | [`nightly.sh`](nightly.sh) | cron 入口：取 main、跑一个语料、推 ledger、提 issue |
 | [`setup-toolchain.sh`](setup-toolchain.sh) | 把 Rust、Zig、cargo-zigbuild 与仓库钉住的 Node 装进一个私有目录 |
 | [`../report/analyze.py`](../report/analyze.py) | 逐个分析失败的 trial：原因与可疑 PR |
-| [`../report/issues.py`](../report/issues.py) | 每晚一份失败汇总 issue；流水线问题同类只开一个、复现时评论、消失时关闭 |
+| [`../report/issues.py`](../report/issues.py) | 每个语料一个失败跟踪 issue（出现开、新增评论、清零关）；流水线问题同类只开一个、复现时评论、消失时关闭 |
 
 机器相关的值（地址、路径、端点、凭据）只放在评测机上，不进仓库。
 

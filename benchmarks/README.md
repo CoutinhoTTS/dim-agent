@@ -102,22 +102,35 @@ review 的改动，不是 cron 的副产品；跑完后先分析失败、再提 
 
 ### 每晚的 issue
 
-**失败汇总**（标签 `eval-nightly`）。[report/analyze.py](report/analyze.py) 把每个没通过的 trial
-交给模型（默认与 L1 judge 相同的 DeepSeek）：题目、判分输出末尾、dimcode Timeline 的末段，
-以及窗口内影响模型的 PR 改了什么。模型给出失败类型（agent / environment / timeout /
-model_api / harness / unknown）、原因、证据和可疑 PR（只能从窗口内的 PR 里选，带置信度）。
-[report/issues.py](report/issues.py) 每晚开一份汇总，关闭上一份：
+**失败跟踪**（标签 `eval-failures`）。[report/analyze.py](report/analyze.py) 把每个打出了分、
+但没通过的 trial 交给模型（默认与 L1 judge 相同的 DeepSeek）：题目、判分输出末尾、dimcode
+Timeline 的末段，以及窗口内影响模型的 PR 改了什么。模型给出失败类型（agent / environment /
+timeout / model_api / harness / unknown）、原因、证据和可疑 PR（只能从窗口内的 PR 里选，带
+置信度），并判断原因是否与上次记录的相同。没打出分的 trial 不算失败，它属于下面的
+「打不出分」。
 
-- 新出现或原因变了的失败逐题展开；
-- 与上次记录原因相同的失败折叠成一行（自哪天起、连续几晚），一直过不了的难题不会让 issue 变长；
-- 题目通过后从记录里移除，下次失败重新展开。
+每个语料一个跟踪 issue，生命周期是「一个问题窗口」。被跟踪的失败是：
 
-已知失败的记录在评测机上（`$DIM_EVAL_HOME/known-failures-<suite>.json`），丢了只是下一晚
-全部重新展开。原因与可疑 PR 是模型对单次运行的判断，不是判定：k=1 的单晚结论本来就不成立。
+- 基线里通过过、这次没过的题；
+- environment / model_api / harness 类失败，不管基线；
+- 还没有基线时的所有失败。
+
+[report/issues.py](report/issues.py) 据此：
+
+```
+有被跟踪的失败、当前没有打开的跟踪 issue   ─► 开 issue（正文：每题的原因、证据与可疑 PR）
+又出现了新的被跟踪失败（或原因变了）       ─► 评论一条，只列新增的
+被跟踪的失败没有新增                       ─► 静默（只更新正文）
+一次分析过的运行里没有被跟踪的失败         ─► 关 issue；之后再出现就开新的
+```
+
+基线里本来就过不了的题只在正文里折叠列出，不开也不撑着 issue。失败分析没跑完时不动跟踪
+issue（全部通过的那晚除外），另开一个 `analysis-failed` issue。已知失败的记录在评测机上
+（`$DIM_EVAL_HOME/known-failures-<suite>.json`），丢了只是下一次全部当成新的。原因与可疑 PR
+是模型对单次运行的判断，不是判定：k=1 的单晚结论本来就不成立。
 
 **流水线问题**（标签 `eval-pipeline`）。按下面的退出码，每类问题一个 issue，复现时评论，
-在一次真正跑了 L2 的运行里不再出现时关闭。失败分析本身没跑完时，上一晚的失败汇总保持
-打开，并另开一个 `analysis-failed` issue；不会把“没有分析”误当成“没有失败”。
+在一次真正跑了 L2 的运行里不再出现时关闭。「没有可比的 baseline」只开一次，不每晚追加评论。
 
 ### 窗口
 
