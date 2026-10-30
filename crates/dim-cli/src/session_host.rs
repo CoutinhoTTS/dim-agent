@@ -13,7 +13,13 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId};
+use dim_agent_types::{
+    ApprovalCallData, ApprovalDecision, ModelId,
+    isolation::{
+        IsolationEscalation, IsolationPolicy, IsolationPolicyEffective, IsolationPolicySnapshot,
+        IsolationPolicySource, Sandbox,
+    },
+};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -1104,17 +1110,21 @@ impl Worker {
                 self.read_model_policy(false).await;
             }
             Command::ReadIsolation => {
-                if !self.client.supports(&[
-                    "host.isolation.get",
-                    "host.isolation.update",
-                    "host.isolation.reset",
-                ]) {
+                if !self.client.supports(&["settings.read", "settings.update"]) {
                     self.send(Update::Isolation(Err(
-                        "This daemon does not support Command isolation settings".into(),
+                        "This daemon does not support execution settings".into(),
                     )));
                 } else {
-                    let result = self.client.typed("host.isolation.get", json!({})).await;
-                    self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    let result = self
+                        .client
+                        .typed(
+                            "settings.read",
+                            json!({"source": "execution", "scope": "user"}),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(execution_snapshot);
+                    self.send(Update::Isolation(result));
                 }
             }
             Command::SaveIsolation {
@@ -1124,21 +1134,35 @@ impl Worker {
                 let result = self
                     .client
                     .typed(
-                        "host.isolation.update",
-                        json!({"expectedRevision": expected_revision, "policy": policy}),
+                        "settings.update",
+                        json!({
+                            "source": "execution",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": execution_document(&policy),
+                        }),
                     )
-                    .await;
-                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(execution_snapshot);
+                self.send(Update::Isolation(result));
             }
             Command::ResetIsolation(expected_revision) => {
                 let result = self
                     .client
                     .typed(
-                        "host.isolation.reset",
-                        json!({"expectedRevision": expected_revision}),
+                        "settings.update",
+                        json!({
+                            "source": "execution",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"sandbox": false, "network": false},
+                        }),
                     )
-                    .await;
-                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(execution_snapshot);
+                self.send(Update::Isolation(result));
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
@@ -3421,4 +3445,55 @@ mod tests {
             "an unknown branch has no transcript"
         );
     }
+}
+
+fn execution_snapshot(value: serde_json::Value) -> Result<IsolationPolicySnapshot, String> {
+    let revision = value
+        .get("revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "execution settings response has no revision".to_string())?
+        .to_owned();
+    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
+    let sandbox_on = document
+        .get("sandbox")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let network = document
+        .get("network")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let sandbox = if !sandbox_on {
+        Sandbox::Host
+    } else if network {
+        Sandbox::Network
+    } else {
+        Sandbox::Workspace
+    };
+    Ok(IsolationPolicySnapshot {
+        revision,
+        path: "execution.json".into(),
+        source: IsolationPolicySource::Defaults,
+        policy: IsolationPolicy {
+            version: 2,
+            enabled: None,
+            network: None,
+            sandbox: Some(sandbox),
+            escalation: Some(IsolationEscalation::Ask),
+            read_only_paths: None,
+            writable_paths: None,
+            environment: None,
+        },
+        effective: IsolationPolicyEffective {
+            sandbox,
+            escalation: IsolationEscalation::Ask,
+        },
+    })
+}
+
+fn execution_document(policy: &IsolationPolicy) -> serde_json::Value {
+    let sandbox = policy.sandbox.unwrap_or(Sandbox::Host);
+    json!({
+        "sandbox": sandbox != Sandbox::Host,
+        "network": sandbox == Sandbox::Network,
+    })
 }
