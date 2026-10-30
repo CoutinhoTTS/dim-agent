@@ -23,7 +23,7 @@ original text.
 | [013 — Command output ownership](013-command-output-ownership.md) | Proposed | Extends 010; output and logs join the session-owned fact |
 | [014 — File access facts](014-file-access-facts.md) | Proposed | Extends 010; fixed facts and one read/write table |
 | [015 — Sessions, branches and their content are plugins, not loader instances](015-scopes-are-plugins.md) | Proposed | Supersedes 004's mechanism for MCP connections; follows 006 D3 and D4 |
-| [016 — An opt-in request record for model calls](016-model-request-log.md) | Proposed | Supersedes 005 D1's "no third channel" for opt-in model request recording |
+| [016 — An opt-in request record for model calls](016-model-request-log.md) | Accepted by the repository owner | Supersedes 005 D1's "no third channel" for opt-in model request recording |
 
 Source baseline: [initial foundation parent](https://github.com/arcships/dim/commit/aaaffa5768e031d781abb73e45b1915b05dc2aa0).
 This baseline includes lifecycle fixes not necessarily present on the default branch.

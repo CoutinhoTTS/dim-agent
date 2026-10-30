@@ -1,6 +1,6 @@
 # 016: An opt-in request record for model calls
 
-Decision status: Proposed.
+Decision status: Accepted by the repository owner.
 
 Supersedes the sentence "There is no third channel" in [ADR 005](005-observability.md) D1,
 only for a user-enabled diagnostic record of model requests. The Timeline and the process
