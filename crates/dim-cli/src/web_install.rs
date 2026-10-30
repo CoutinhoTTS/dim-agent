@@ -1,4 +1,4 @@
-//! `dimcode web install`: the Web workspace of this CLI's version from the
+//! `dimcode web install`: the Web workspace of this build's version from the
 //! npm registry into `<home>/web`, verified against the registry's integrity
 //! (web-workspace.md §2.4).
 
@@ -11,10 +11,9 @@ use sha2::{Digest, Sha512};
 const PACKAGE: &str = "dimcode-web";
 const TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Installs `dimcode-web@<this version>` into `<home>/web`, replacing what
-/// was there only once the new tree is complete.
-pub async fn install(home: &Path) -> crate::Result<i32> {
-    let version = env!("CARGO_PKG_VERSION");
+/// Installs `dimcode-web@version` from `registry` into `<home>/web`, replacing
+/// what was there only once the new tree is complete.
+pub async fn install(home: &Path, version: &str, registry: &str) -> crate::Result<i32> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         dist: Dist,
@@ -25,7 +24,6 @@ pub async fn install(home: &Path) -> crate::Result<i32> {
         integrity: String,
     }
     let client = reqwest::Client::builder().timeout(TIMEOUT).build()?;
-    let registry = crate::update::registry();
     let manifest: Manifest = client
         .get(format!("{registry}/{PACKAGE}/{version}"))
         .send()
@@ -118,4 +116,124 @@ fn unpack(tarball: &[u8], into: &Path) -> crate::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use sha2::Digest;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+    };
+
+    /// A gzip'd `dimcode-web` tarball holding `web/index.html` and
+    /// `web/assets/app-1.js` beside a package manifest outside `web/`.
+    fn tarball() -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        for (path, contents) in [
+            ("package/package.json", "{}"),
+            ("package/web/index.html", "<!doctype html>"),
+            ("package/web/assets/app-1.js", "export {}"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(contents.len() as u64);
+            builder
+                .append_data(&mut header, path, contents.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn integrity(tarball: &[u8]) -> String {
+        format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(Sha512::digest(tarball))
+        )
+    }
+
+    /// A registry serving `version`'s metadata and one tarball; its base URL.
+    fn registry(version: &'static str, tarball: Vec<u8>, integrity: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let manifest = serde_json::json!({
+            "dist": {"tarball": format!("{base}/dimcode-web.tgz"), "integrity": integrity}
+        })
+        .to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut wire = BufReader::new(stream.unwrap());
+                let mut request = String::new();
+                wire.read_line(&mut request).unwrap();
+                let mut line = String::new();
+                while wire.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                let body = if request.starts_with(&format!("GET /dimcode-web/{version} ")) {
+                    manifest.as_bytes().to_vec()
+                } else {
+                    assert!(request.starts_with("GET /dimcode-web.tgz "), "{request}");
+                    tarball.clone()
+                };
+                let stream = wire.get_mut();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn install_puts_the_requested_versions_frontend_in_the_home() {
+        let tarball = tarball();
+        let base = registry("0.1.0-alpha.8", tarball.clone(), integrity(&tarball));
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("web")).unwrap();
+        std::fs::write(home.path().join("web/stale.js"), "").unwrap();
+
+        assert_eq!(
+            install(home.path(), "0.1.0-alpha.8", &base).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("web/assets/app-1.js")).unwrap(),
+            "export {}"
+        );
+        assert!(home.path().join("web/index.html").is_file());
+        assert!(!home.path().join("web/stale.js").exists());
+        assert!(!home.path().join("web/package.json").exists());
+        assert!(!home.path().join("web.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn install_rejects_a_tarball_that_does_not_match_its_integrity() {
+        let tarball = tarball();
+        let base = registry(
+            "0.1.0-alpha.8",
+            tarball.clone(),
+            format!("sha512-{}", "A".repeat(88)),
+        );
+        let home = tempfile::tempdir().unwrap();
+        let error = install(home.path(), "0.1.0-alpha.8", &base)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its registry integrity"),
+            "{error}"
+        );
+        assert!(!home.path().join("web").exists());
+    }
 }

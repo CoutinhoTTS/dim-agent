@@ -4528,14 +4528,17 @@ fn pad_block(rows: &[String]) -> String {
 }
 
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::version::current();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| t("Not available").into());
     let branch = branch.to_owned();
     let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
     let greeting = [
-        tf("Welcome to DIM {version}!", &[("version", version)]),
+        tf(
+            "Welcome to DIM {version}!",
+            &[("version", version.as_str())],
+        ),
         t("Type / for commands · Ctrl+O for the palette").to_owned(),
     ];
     let header = startup_header(&greeting, body_width);

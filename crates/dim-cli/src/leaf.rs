@@ -92,7 +92,7 @@ impl DynPlugin for LeafNode {
                 "Tui",
                 Described {
                     schema: Some(schema()),
-                    version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                    version: Some(crate::version::current()),
                     integrity: None,
                 },
                 TuiFactory {

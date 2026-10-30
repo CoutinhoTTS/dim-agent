@@ -2827,7 +2827,6 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/leaf.rs",
       "unexpandedMacros": [
-        "env",
         "format",
         "matches",
         "serde_json::json"
@@ -4534,7 +4533,6 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/tui.rs",
       "unexpandedMacros": [
-        "env",
         "eprintln",
         "format",
         "matches",
@@ -4600,15 +4598,47 @@
       ]
     },
     {
+      "id": "dim_cli::version",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/version.rs",
+      "unexpandedMacros": [
+        "env",
+        "format",
+        "option_env"
+      ]
+    },
+    {
+      "id": "dim_cli::version::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::version",
+      "file": "crates/dim-cli/src/version.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::web_install",
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/web_install.rs",
       "unexpandedMacros": [
-        "env",
         "format",
         "matches",
         "println"
+      ]
+    },
+    {
+      "id": "dim_cli::web_install::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::web_install",
+      "file": "crates/dim-cli/src/web_install.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "serde_json::json",
+        "write"
       ]
     },
     {
@@ -22353,7 +22383,8 @@
       "from": "dim_cli",
       "to": "dim_cli::update",
       "references": [
-        "mod update"
+        "mod update",
+        "path update::registry"
       ]
     },
     {
@@ -22361,6 +22392,15 @@
       "to": "dim_cli::usage",
       "references": [
         "mod usage"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::version",
+      "references": [
+        "mod version",
+        "path version::RELEASE",
+        "path version::VERSION"
       ]
     },
     {
@@ -23042,6 +23082,13 @@
       "references": [
         "path Leave",
         "use crate::ui::tui::Leave"
+      ]
+    },
+    {
+      "from": "dim_cli::leaf",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::current"
       ]
     },
     {
@@ -31008,6 +31055,13 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::current"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_client::question",
       "references": [
         "path crate::question::Reply::Accepted",
@@ -31278,11 +31332,25 @@
       ]
     },
     {
+      "from": "dim_cli::update",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::RELEASE"
+      ]
+    },
+    {
       "from": "dim_cli::update::tests",
       "to": "dim_cli::update",
       "references": [
         "path ALPHA_PACKAGE",
         "path installer"
+      ]
+    },
+    {
+      "from": "dim_cli::version",
+      "to": "dim_cli::version::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -31301,9 +31369,16 @@
     },
     {
       "from": "dim_cli::web_install",
-      "to": "dim_cli::update",
+      "to": "dim_cli::web_install::tests",
       "references": [
-        "path crate::update::registry"
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install::tests",
+      "to": "dim_cli::web_install",
+      "references": [
+        "path install"
       ]
     },
     {

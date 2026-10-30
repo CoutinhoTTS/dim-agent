@@ -136,10 +136,10 @@ All Actions artifacts, including the disabled npm publication receipt, use `rete
 
 ## Local packaging
 
-One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock`, `npm/package.json`, its exact optional dependencies, runtime package/lock metadata, native version output and the release tag. Keep them synchronized before building. `0.1.0` is a development baseline; check existing npm versions before enabling registry publication.
+One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock`, `npm/package.json`, its exact optional dependencies, runtime package/lock metadata, native version output and the release tag. Keep them synchronized before building. `0.1.0` is a development baseline; check existing npm versions before enabling registry publication. Every build command here sets `DIM_RELEASE_BUILD=1`, which makes the executable report the version above; a build without that mark reports the committed version marked `-source`, because the repository keeps the last released version.
 
 ```sh
-cargo build --release --locked -p dimcode
+DIM_RELEASE_BUILD=1 cargo build --release --locked -p dimcode
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT
 node scripts/pack-release.mjs staging/local release/local
 node scripts/stage-web.mjs release/web 0.1.0 FULL_SOURCE_COMMIT
@@ -152,7 +152,7 @@ For a cross build, set `DIM_BUILD_PLATFORM` to the intended platform, build with
 These commands stage an API-key-only distribution. An account build is the same `dimcode` compiled with the Dim account's OAuth client IDs, which never enter the repository:
 
 ```sh
-DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
+DIM_RELEASE_BUILD=1 DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
 ```
 

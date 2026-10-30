@@ -33,6 +33,7 @@ use std::{
     },
     path::PathBuf,
     process::{Child, Command, ExitStatus, Output, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -199,6 +200,22 @@ fn help_and_version_do_not_create_product_state() {
         assert!(output.status.success());
     }
     assert!(!home.0.join("rust").exists());
+}
+
+#[test]
+fn a_build_from_source_reports_its_version_as_source() {
+    let home = Home::new();
+    let output = home.command().arg("--version").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("dimcode {}-source\n", env!("CARGO_PKG_VERSION")),
+        "a build the release flow did not stamp reports the committed version marked -source"
+    );
 }
 
 #[test]
@@ -5845,144 +5862,42 @@ fn web_without_the_web_workspace_says_how_to_get_it() {
     }
 }
 
-/// A registry that serves `dimcode-web@<this version>` with `integrity`
-/// until the test ends; its base URL.
-fn web_registry(tarball: Vec<u8>, integrity: String) -> String {
+/// A registry that records the requests it receives; its base URL.
+fn recording_registry() -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let manifest =
-        json!({"dist":{"tarball":format!("{base}/dimcode-web.tgz"),"integrity":integrity}})
-            .to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
             let mut wire = BufReader::new(stream.unwrap());
             let mut request = String::new();
             wire.read_line(&mut request).unwrap();
-            let mut line = String::new();
-            while wire.read_line(&mut line).unwrap() > 2 {
-                line.clear();
-            }
-            let body = if request
-                .starts_with(&format!("GET /dimcode-web/{} ", env!("CARGO_PKG_VERSION")))
-            {
-                manifest.as_bytes().to_vec()
-            } else {
-                assert!(request.starts_with("GET /dimcode-web.tgz "), "{request}");
-                tarball.clone()
-            };
-            let stream = wire.get_mut();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(&body).unwrap();
+            recorded.lock().unwrap().push(request);
         }
     });
-    base
+    (base, requests)
 }
 
 #[test]
-fn web_install_puts_this_versions_frontend_in_the_home() {
-    use base64::Engine;
-    use sha2::Digest;
+fn web_install_refuses_for_a_build_from_source() {
     let home = Home::new();
-    let package = home.0.join("pack/package");
-    fs::create_dir_all(package.join("web/assets")).unwrap();
-    fs::write(package.join("package.json"), "{}").unwrap();
-    fs::write(package.join("web/index.html"), "<!doctype html>").unwrap();
-    fs::write(package.join("web/assets/app-1.js"), "export {}").unwrap();
-    let archive = home.0.join("pack/dimcode-web.tgz");
-    assert!(
-        Command::new("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(home.0.join("pack"))
-            .arg("package")
-            .status()
-            .unwrap()
-            .success()
-    );
-    let tarball = fs::read(&archive).unwrap();
-    let integrity = format!(
-        "sha512-{}",
-        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball))
-    );
-    fs::create_dir_all(home.0.join("web")).unwrap();
-    fs::write(home.0.join("web/stale.js"), "").unwrap();
-
+    let (registry, requests) = recording_registry();
     let output = home
         .command()
         .args(["web", "install"])
-        .env(
-            "DIMCODE_NPM_REGISTRY",
-            web_registry(tarball.clone(), integrity.clone()),
-        )
-        .env_remove("DIMCODE_WEB_ASSETS")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let version = env!("CARGO_PKG_VERSION");
-    assert_eq!(
-        stdout,
-        format!(
-            "Downloading dimcode-web@{version}…\nWeb workspace {version} installed in {}.\n",
-            home.0.join("web").display()
-        )
-    );
-    assert_eq!(
-        fs::read_to_string(home.0.join("web/assets/app-1.js")).unwrap(),
-        "export {}"
-    );
-    assert!(home.0.join("web/index.html").is_file());
-    assert!(!home.0.join("web/stale.js").exists());
-    assert!(!home.0.join("web/package.json").exists());
-    assert!(!home.0.join("web.partial").exists());
-
-    let output = home
-        .command()
-        .args(["web", "install"])
-        .env(
-            "DIMCODE_NPM_REGISTRY",
-            web_registry(tarball.clone(), format!("sha512-{}", "A".repeat(88))),
-        )
+        .env("DIMCODE_NPM_REGISTRY", registry)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains(&format!(
-            "dimcode-web@{version} does not match its registry integrity"
-        )),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("A build from source has no published Web workspace"),
+        "{stderr}"
     );
-    assert!(home.0.join("web/assets/app-1.js").is_file());
-
-    let first = home.0.join("npm-web");
-    fs::create_dir_all(&first).unwrap();
-    fs::write(first.join("index.html"), "<!doctype html>").unwrap();
-    let output = home
-        .command()
-        .args(["web", "install"])
-        .env("DIMCODE_NPM_REGISTRY", web_registry(tarball, integrity))
-        .env("DIMCODE_WEB_ASSETS", &first)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stdout).ends_with(&format!(
-            "The Web workspace in {} is used instead; remove it to use this one.\n",
-            first.display()
-        )),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
+        requests.lock().unwrap().is_empty(),
+        "a build from source sent a registry request"
     );
 }
 

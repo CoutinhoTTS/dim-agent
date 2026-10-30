@@ -29,6 +29,7 @@ mod session_host;
 mod ui;
 mod update;
 mod usage;
+mod version;
 mod web_install;
 mod wire;
 
@@ -442,7 +443,7 @@ fn prepare() -> Result<Option<Options>> {
         return Ok(None);
     }
     if matches!(options.action, Action::Version) {
-        println!("dimcode {}", env!("CARGO_PKG_VERSION"));
+        println!("dimcode {}", version::current());
         return Ok(None);
     }
     if matches!(options.action, Action::McpLogin(_)) && !std::io::stdin().is_terminal() {
@@ -583,7 +584,10 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         return open_tui_leaf(root, &options).await;
     }
     if matches!(options.action, Action::WebInstall) {
-        return web_install::install(&options.home).await;
+        if !version::RELEASE {
+            return Err("A build from source has no published Web workspace; set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature".into());
+        }
+        return web_install::install(&options.home, version::VERSION, &update::registry()).await;
     }
     if let Action::Web {
         port,
