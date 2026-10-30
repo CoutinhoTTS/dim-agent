@@ -1585,9 +1585,7 @@ async fn create_instance(
     let mut waiting = rows(&loader.entries(), &created.view, Some(&required));
     waiting.extend(instance().2.required);
     let ready = progress
-        .wait(wait_active(ctx, &waiting, timeout, cancel), || {
-            vec![created.view.id]
-        })
+        .wait(active_rows(&waiting, cancel), || vec![created.view.id])
         .await
         .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
     created.children = rows(&loader.entries(), &created.view, None);
@@ -1857,16 +1855,26 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: Key<T>) -> Result
     })
 }
 /// Waits until every view is Active; a failure or disposal of any view,
-/// cancellation or an interval without progress ends the wait. Views are watched together, so
-/// a Failed view ends the wait even while a dependent of it stays Pending.
-/// `ctx` only describes unmet dependencies on timeout.
+/// cancellation or an interval without progress ends the wait. Active rows
+/// in any view’s subtree renew the interval. A Failed view ends the wait even
+/// while a dependent stays Pending. `ctx` observes those rows and supplies
+/// unmet dependencies on timeout.
 pub async fn wait_active(
     ctx: &Ctx,
     views: &[FiberView],
     timeout: std::time::Duration,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let mut deadline = tokio::time::Instant::now() + timeout;
+    let mut progress = StartupProgress::new(ctx, timeout)?;
+    progress
+        .wait(active_rows(views, cancel), || {
+            views.iter().map(|view| view.id).collect()
+        })
+        .await
+        .unwrap_or_else(|| Err(timed_out(ctx, views)))
+}
+
+async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<()> {
     let mut waiting: Vec<_> = views.iter().map(|view| (view, view.watch())).collect();
     loop {
         let mut index = 0;
@@ -1875,7 +1883,6 @@ pub async fn wait_active(
             let snapshot = state.borrow_and_update().clone();
             match snapshot.state {
                 FiberState::Active => {
-                    deadline = tokio::time::Instant::now() + timeout;
                     waiting.swap_remove(index);
                     continue;
                 }
@@ -1901,7 +1908,6 @@ pub async fn wait_active(
         );
         let ended = tokio::select! {
             _ = cancel.cancelled() => return Err(AgentError::Cancelled("initialization".into())),
-            _ = tokio::time::sleep_until(deadline) => return Err(timed_out(ctx, views)),
             (changed, index, _) = changed => changed.is_err().then_some(index),
         };
         if let Some(index) = ended {

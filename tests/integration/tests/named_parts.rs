@@ -488,7 +488,7 @@ struct Stuck {
 
 struct Progressing {
     name: String,
-    identity: TypeKey,
+    dependencies: Vec<TypeKey>,
     step: usize,
     completed: tokio::sync::watch::Sender<usize>,
 }
@@ -497,7 +497,7 @@ impl DynPlugin for Progressing {
         &self.name
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.identity.clone()]
+        self.dependencies.clone()
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -530,7 +530,7 @@ async fn a_session_and_its_main_branch_keep_opening_while_rows_become_active() {
         feature = feature.session(name.clone(), move |names| {
             Ok(Box::new(Progressing {
                 name: name.clone(),
-                identity: names.key::<SessionIdentity>()?.erase(),
+                dependencies: vec![names.key::<SessionIdentity>()?.erase()],
                 step,
                 completed: completed.clone(),
             }))
@@ -542,7 +542,7 @@ async fn a_session_and_its_main_branch_keep_opening_while_rows_become_active() {
         feature = feature.branch(name.clone(), move |names| {
             Ok(Box::new(Progressing {
                 name: name.clone(),
-                identity: names.key::<TimelineIdentity>()?.erase(),
+                dependencies: vec![names.key::<TimelineIdentity>()?.erase()],
                 step,
                 completed: completed.clone(),
             }))
@@ -639,4 +639,61 @@ async fn activity_outside_an_opening_cannot_keep_a_stuck_session_alive() {
     assert!(error.to_string().contains("test.stuck"), "{error}");
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn optional_rows_extend_a_session_or_branch_opening_until_required_rows_are_ready() {
+    for branch in [false, true] {
+        let root = Ctx::root().unwrap();
+        let mut builder = builder();
+        builder.startup_timeout(Duration::from_millis(500));
+        names::register::<Clock>(builder.catalog_mut(), None);
+        let (completed, _) = tokio::sync::watch::channel(0);
+        for step in 0..4 {
+            let completed = completed.clone();
+            let name = format!("test.optional-progress-{step}");
+            let part = name.clone();
+            let make = move |names: &Names<'_>| -> rutis::Result<Box<dyn DynPlugin>> {
+                let identity = if branch {
+                    names.key::<TimelineIdentity>()?.erase()
+                } else {
+                    names.key::<SessionIdentity>()?.erase()
+                };
+                Ok(Box::new(Progressing {
+                    name: part.clone(),
+                    dependencies: vec![identity, names.key::<Clock>()?.erase()],
+                    step,
+                    completed: completed.clone(),
+                }))
+            };
+            let feature = Feature::new(name.clone());
+            let feature = if branch {
+                feature.branch(name, make)
+            } else {
+                feature.session(name, make)
+            };
+            if step == 3 {
+                builder.require_feature(feature);
+            } else {
+                builder.feature(feature);
+            }
+        }
+        let agent = builder.build_in(&root);
+        let opening = agent.create_session(SessionConfig::default());
+        tokio::pin!(opening);
+        tokio::select! {
+            result = &mut opening => panic!("gated opening finished before publication: {:?}", result.err()),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+        let clock = root.plugin(ClockPart);
+        (&clock).await.unwrap();
+        let session = tokio::time::timeout(Duration::from_secs(20), opening)
+            .await
+            .expect("progressing optional rows finish opening")
+            .unwrap();
+        assert_eq!(*completed.borrow(), 4);
+        assert!(session.state("main").is_ok());
+        agent.close().await.unwrap();
+        root.shutdown().await.unwrap();
+    }
 }

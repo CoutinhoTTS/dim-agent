@@ -13700,6 +13700,7 @@
       "from": "dim_app_server",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::Build",
         "path AgentError::aggregate",
         "path AgentError::from",

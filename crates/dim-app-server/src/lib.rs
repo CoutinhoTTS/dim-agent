@@ -278,20 +278,34 @@ impl Processes {
         std::iter::once(self.view.clone()).chain(rows).collect()
     }
 
+    fn roots(&self) -> Vec<rutis::host::PluginId> {
+        std::iter::once(self.view.id)
+            .chain(
+                self.loader
+                    .entries()
+                    .into_iter()
+                    .filter(|entry| entry.parent.is_none() && entry.instance.is_none())
+                    .filter_map(|entry| entry.view.map(|view| view.id)),
+            )
+            .collect()
+    }
+
     async fn wait_active(&self, root: &Ctx, timeout: Duration) -> dim_agent_runtime::Result<()> {
-        let mut deadline = tokio::time::Instant::now() + timeout;
-        let mut active = std::collections::HashSet::new();
+        let mut progress = StartupProgress::new(root, timeout)?;
+        match progress.wait(self.ready(root), || self.roots()).await {
+            Some(result) => result,
+            None => Err(self.timed_out(root).await),
+        }
+    }
+
+    async fn ready(&self, root: &Ctx) -> dim_agent_runtime::Result<()> {
         loop {
             let views = self.views();
             let mut ready = true;
             for view in &views {
                 let snapshot = view.watch().borrow().clone();
                 match snapshot.state {
-                    rutis::host::FiberState::Active => {
-                        if active.insert((view.id, snapshot.generation)) {
-                            deadline = tokio::time::Instant::now() + timeout;
-                        }
-                    }
+                    rutis::host::FiberState::Active => {}
                     rutis::host::FiberState::Failed => {
                         return Err(snapshot.error.map(AgentError::from).unwrap_or_else(|| {
                             AgentError::Build(format!("{}: Failed", view.name()))
@@ -300,28 +314,37 @@ impl Processes {
                     _ => ready = false,
                 }
             }
-            let unpublished = self
+            ready &= self
                 .runtime_rows
                 .iter()
-                .find(|key| root.get_at(key).is_none());
-            ready &= unpublished.is_none();
+                .all(|key| root.get_at(key).is_some());
             if ready {
                 return Ok(());
             }
-            if tokio::time::Instant::now() >= deadline {
-                if let Some(key) = unpublished {
-                    return Err(AgentError::Build(format!(
-                        "runtime row declarations were not published: {:?}",
-                        key.erase()
-                    )));
-                }
-                return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
-            }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
-            )
-            .await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn timed_out(&self, root: &Ctx) -> AgentError {
+        if let Some(key) = self
+            .runtime_rows
+            .iter()
+            .find(|key| root.get_at(key).is_none())
+        {
+            return AgentError::Build(format!(
+                "runtime row declarations were not published: {:?}",
+                key.erase()
+            ));
+        }
+        wait_active(
+            root,
+            &self.views(),
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| AgentError::Build("process assembly timed out".into()))
     }
 }
 
@@ -1032,24 +1055,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                         failures, report.issues
                     )));
                 }
-                processes.wait_active(&root, config.startup_timeout).await
+                processes.ready(&root).await
             },
-            || processes.views().iter().map(|view| view.id).collect(),
+            || processes.roots(),
         )
         .await;
     let started = match started {
         Some(result) => result,
-        None => match wait_active(
-            &root,
-            &processes.views(),
-            Duration::ZERO,
-            &CancellationToken::new(),
-        )
-        .await
-        {
-            Err(error) => Err(error),
-            Ok(()) => Err(AgentError::Build("process assembly timed out".into())),
-        },
+        None => Err(processes.timed_out(&root).await),
     };
     if let Err(error) = started {
         startup.armed = false;
