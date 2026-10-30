@@ -1628,9 +1628,11 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     listener.set_nonblocking(true).unwrap();
     let model = thread::spawn(move || {
         for (prompt, response) in [
+            ("ACP_REAL_LIMIT", "ACP_PARTIAL"),
             ("ACP_REAL_REQUEST", "ACP_REAL_OK"),
             ("ACP_REAL_FOLLOWUP", "ACP_REAL_FOLLOWUP_OK"),
             ("ACP_NEW_REQUEST", "ACP_NEW_OK"),
+            ("CLI_REAL_LIMIT", "CLI_PARTIAL"),
         ] {
             let deadline = Instant::now() + PATIENCE;
             let stream = loop {
@@ -1702,7 +1704,14 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
             let data = format!(
                 "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
                 chunk(json!({"role":"assistant","content":response}), Value::Null),
-                chunk(json!({}), json!("stop"))
+                chunk(
+                    json!({}),
+                    json!(if prompt.ends_with("_LIMIT") {
+                        "length"
+                    } else {
+                        "stop"
+                    })
+                )
             );
             write!(stream.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
             stream.get_mut().flush().unwrap();
@@ -1721,6 +1730,14 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     assert!(created.get("error").is_none(), "{created}");
     let default_mode = created["result"]["modes"]["currentModeId"].clone();
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    peer.send(
+        30,
+        "session/prompt",
+        json!({"sessionId":id,"prompt":[{"type":"text","text":"ACP_REAL_LIMIT"}]}),
+    );
+    let limited = peer.response(30);
+    assert_eq!(limited["result"]["stopReason"], "max_tokens", "{limited}");
+    peer.updates.clear();
     peer.send(
         3,
         "session/prompt",
@@ -1807,6 +1824,34 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         "Startup mode must not change the shared default"
     );
     peer.close();
+    let limited = home
+        .command()
+        .args([
+            "--model-config",
+            config.to_str().unwrap(),
+            "exec",
+            "-p",
+            "CLI_REAL_LIMIT",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&limited.stderr);
+    assert!(
+        stderr.contains("local/fixture-model stopped at max_tokens"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Increase the output token limit and retry"),
+        "{stderr}"
+    );
+    let log = fs::read_to_string(home.0.join("rust/daemon.log")).unwrap();
+    assert!(
+        log.contains("Model request failed")
+            && log.contains("max_tokens")
+            && log.contains("fixture-model"),
+        "{log}"
+    );
     model.join().unwrap();
     let shutdown = home.command().args(["daemon", "stop"]).output().unwrap();
     assert!(
@@ -1814,6 +1859,41 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         "{}",
         String::from_utf8_lossy(&shutdown.stderr)
     );
+}
+
+#[test]
+fn acp_stdio_recognizes_max_tokens_before_a_late_submit_reply() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let submit = wire.read("session.submit");
+        let input = event(9, "limited-input", "input", "message", json!({"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"Hello"}]},"mode":"queue"}));
+        let notice = |wire: &mut Wire, value: Value| wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":value}));
+        notice(wire, event(10,"start","turn","start",json!({"turn_id":"limited"})));
+        notice(wire, event(11,"consumed","input","consumed",json!({"input_id":"limited-input"})));
+        notice(wire, event(12,"model-end","step","model-output-end",json!({"turn_id":"limited","request_id":"model","status":"failed","error":"opaque internal detail","presentation":{"source":"fixture","reason":"max_tokens","action":"Increase the output token limit and retry."}})));
+        notice(wire, event(13,"end","turn","end",json!({"turn_id":"limited","status":"failed","error":"opaque internal detail"})));
+        wire.reply(&submit, json!({"event":input}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert_eq!(peer.response(2)["result"]["sessionId"], "session");
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Hello"}]}),
+    );
+    let limited = peer.response(3);
+    assert_eq!(limited["result"]["stopReason"], "max_tokens", "{limited}");
+    peer.close();
+    daemon.join().unwrap();
 }
 
 #[test]

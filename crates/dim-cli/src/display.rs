@@ -160,8 +160,22 @@ impl Display {
             EventContent::ModelEnd(data) => {
                 self.finished.insert(data.request_id);
                 self.finish_text()?;
-                if let ModelOutputOutcome::Failed { .. } = data.outcome {
+                if let ModelOutputOutcome::Failed { presentation, .. } = data.outcome {
                     self.failed = true;
+                    if let Some(presentation) = presentation {
+                        self.record(&format!(
+                            "[failed] {}: {}{}",
+                            presentation.source,
+                            presentation
+                                .server_message
+                                .as_deref()
+                                .unwrap_or(&presentation.reason),
+                            presentation
+                                .action
+                                .map(|action| format!(". {action}"))
+                                .unwrap_or_default(),
+                        ))?;
+                    }
                 }
             }
             EventContent::TurnEnd(data) => {
