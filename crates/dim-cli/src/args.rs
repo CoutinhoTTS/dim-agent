@@ -27,6 +27,9 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  recording [on|off|status]        Record model requests to the home's\n\
+                                   model-log/recordings.jsonl; prompts, code\n\
+                                   and tool output are written there\n\
   plugin list                      List plugins by name, the one in use and its status\n\
   plugin install PATH|GIT_URL [--ref R] [--id ID] [--no-enable]\n\
                                    Install a plugin and turn it on\n\
@@ -117,6 +120,10 @@ pub enum Action {
     McpEnable {
         id: String,
         enabled: bool,
+    },
+    /// `recording [on|off|status]`: the daemon's model request record.
+    Recording {
+        enabled: Option<bool>,
     },
     /// `plugin ...`: one of PluginManager's methods and its params.
     Plugin {
@@ -428,6 +435,29 @@ impl Options {
                             return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
+                }
+                "recording" if matches!(options.action, Action::Chat) => {
+                    let enabled = match args.peek().cloned().as_deref() {
+                        Some("status") => {
+                            args.next();
+                            None
+                        }
+                        Some("on" | "enable") => {
+                            args.next();
+                            Some(true)
+                        }
+                        Some("off" | "disable") => {
+                            args.next();
+                            Some(false)
+                        }
+                        Some(other) if !other.starts_with('-') => {
+                            return Err(
+                                format!("Use recording [on|off|status], not {other:?}").into()
+                            );
+                        }
+                        _ => None,
+                    };
+                    options.action = Action::Recording { enabled };
                 }
                 "web" if matches!(options.action, Action::Chat) => {
                     options.action = Action::Web {

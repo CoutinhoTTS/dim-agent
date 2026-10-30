@@ -294,6 +294,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash("settings", "app", "open settings", &[], Needs::Nothing),
+    slash(
+        "recording",
+        "app",
+        "record model requests to the home's model-log",
+        &[],
+        Needs::Nothing,
+    ),
     slash("keys", "app", "show the key bindings", &[], Needs::Nothing),
     slash(
         "suspend",

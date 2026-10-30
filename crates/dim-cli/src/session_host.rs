@@ -1317,6 +1317,12 @@ impl Worker {
                     self.report(mcp::error(error).to_string(), true);
                 }
             }
+            Command::Recording(args) => {
+                let result = self.recording(&args).await;
+                if let Err(error) = result {
+                    self.report(error.to_string(), true);
+                }
+            }
             Command::ListPlugins => {
                 let plugins = self.plugins().await;
                 self.send(Update::Plugins(plugins));
@@ -1806,6 +1812,20 @@ impl Worker {
             _ => return Err(USAGE.into()),
         }
         Ok(())
+    }
+
+    async fn recording(&mut self, args: &str) -> crate::Result<String> {
+        let enabled = match args.split_whitespace().next() {
+            None => None,
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            Some(_) => return Err("Usage: /recording [on|off]".into()),
+        };
+        let state = match enabled {
+            Some(enabled) => crate::recording::set(&mut self.client, enabled).await?,
+            None => crate::recording::read(&mut self.client).await?,
+        };
+        Ok(crate::recording::report(&state, &self.options))
     }
 
     async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {

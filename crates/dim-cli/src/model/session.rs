@@ -177,6 +177,8 @@ pub enum Command {
     },
     /// `/mcp ...`: the words after the command.
     Mcp(String),
+    /// `/recording ...`: the words after the command.
+    Recording(String),
     /// List the plugins of the `/plugins` panel (`plugin.list`).
     ListPlugins,
     /// Change one plugin; the worker lists the plugins again after it.

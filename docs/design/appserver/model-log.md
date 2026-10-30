@@ -34,6 +34,15 @@ With file-backed settings the document is `<home>/model-log.json`; with native
 storage it is the same document in the settings table, written through
 `settings.update` with `source: "model-log"` and `scope: "user"`.
 
+The line client and the terminal UI carry the switch:
+
+- `dimcode recording` prints whether it is on; `dimcode recording on|off`
+  switches it and prints the resulting state (the file path when on).
+- `/recording` and `/recording on|off` do the same from the terminal UI.
+
+Both read the current revision, write the new document and report the state the
+daemon stored; a daemon without the source reports the settings error.
+
 A line holds one call: the input prompt and options, the provider identity, one
 entry per HTTP exchange (request headers and body, response status, headers and
 body, chunk count, `latency_ms`, `ttfb_ms`) and the outcome (`success`, `error`,
@@ -67,3 +76,8 @@ read back into Dim.
   starts the recorder and creates the file.
 - `model_flow::recorded_requests_write_their_wire_exchange`: a turn records its
   request, exchange, provider and outcome.
+- `cli_flow::recording_on_switches_the_model_log` and
+  `recording_reports_whether_it_is_on`: the line client reads and writes the
+  source and prints the state.
+- `ui::tui::tests::recording_command_sends_its_words`: `/recording` reaches the
+  session host with its arguments.

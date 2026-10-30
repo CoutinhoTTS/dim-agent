@@ -2699,6 +2699,10 @@ impl App {
                 self.host.send(Command::Mcp(args.to_owned()));
                 Outcome::Continue
             }
+            "recording" => {
+                self.host.send(Command::Recording(args.to_owned()));
+                Outcome::Continue
+            }
             "effort" | "fast" | "agent" => {
                 let text = format!("/{name} {args}");
                 self.host
@@ -6380,5 +6384,25 @@ mod tests {
             ),
             _ => panic!("the answer carries the path"),
         }
+    }
+
+    #[test]
+    fn recording_command_sends_its_words() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.run_command("recording", "on");
+        assert!(matches!(sent.borrow().last(), Some(Command::Recording(words)) if words == "on"));
+        app.run_command("recording", "");
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Recording(words)) if words.is_empty())
+        );
     }
 }
