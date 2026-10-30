@@ -21,6 +21,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("measure") => measure().await?,
         Some("context-replay") => context_replay().await?,
         Some("restore-replay") => restore_replay().await?,
+        Some("context-breakdown") => context_breakdown().await?,
         Some("summary-eval") => summary_eval::run().await?,
         Some("scenario-eval") => scenario_eval::run().await?,
         Some("check") => {
@@ -31,7 +32,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|context-replay|restore-replay DB SESSION|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|context-replay|restore-replay DB SESSION|context-breakdown DB SESSION|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
                     .into(),
             );
         }
@@ -513,6 +514,110 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
         "steps": steps,
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Measures the four context stages of one stored branch: read, project,
+/// messages, request. Run with
+/// `cargo run --release -p xtask -- context-breakdown DB SESSION`.
+async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let (database, session_id) = match args.as_slice() {
+        [database, session] => (PathBuf::from(database), session.clone()),
+        _ => return Err("context-breakdown needs DB and SESSION".into()),
+    };
+    let db = dim_app_server::storage::SqliteStorage::open(database)?;
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let agent = agent_with_store(store);
+    let session = agent.restore_session(session_id.clone()).await?;
+    let through = session.sequence("main")?;
+    let mut phases = Vec::new();
+    let read_start = allocation::live();
+    let context = session.context("main", through).await?;
+    phases.push(json!({
+        "phase": "read",
+        "live": allocation::live(),
+        "delta": allocation::live() - read_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let project_start = allocation::live();
+    let history = dim_agent_capabilities::history::project_context_history(&context)?;
+    phases.push(json!({
+        "phase": "project",
+        "live": allocation::live(),
+        "delta": allocation::live() - project_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let history_entries = history.len();
+    let baseline_entries: usize = history.iter().map(|entry| entry.baseline.len()).sum();
+    let entry_message_bytes: usize = history
+        .iter()
+        .map(|entry| {
+            serde_json::to_vec(entry.message.as_ref())
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let baseline_message_bytes: usize = history
+        .iter()
+        .flat_map(|entry| entry.baseline.iter())
+        .map(|entry| {
+            serde_json::to_vec(&entry.message)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let messages_start = allocation::live();
+    let messages = dim_agent_capabilities::history::context_messages(&context, &history);
+    phases.push(json!({
+        "phase": "messages",
+        "live": allocation::live(),
+        "delta": allocation::live() - messages_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let request_start = allocation::live();
+    let request =
+        dim_agent_capabilities::host::ModelSettings::new("mock", "deterministic").request(messages);
+    let request_messages = request.messages.len();
+    phases.push(json!({
+        "phase": "request",
+        "live": allocation::live(),
+        "delta": allocation::live() - request_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let live_held = allocation::live();
+    let peak_held = allocation::peak();
+    drop(request);
+    let live_after_request = allocation::live();
+    drop(history);
+    let live_after_history = allocation::live();
+    drop(context);
+    let live_after_context = allocation::live();
+    let report = json!({
+        "store": "sqlite",
+        "sessionId": session_id,
+        "through": through,
+        "historyEntries": history_entries,
+        "baselineEntries": baseline_entries,
+        "baselineSlotsBytes": baseline_entries * std::mem::size_of::<dim_agent_types::ContextBaselineEntry>(),
+        "entryMessageBytes": entry_message_bytes,
+        "baselineMessageBytes": baseline_message_bytes,
+        "phases": phases,
+        "liveHeld": live_held,
+        "peakHeld": peak_held,
+        "liveAfterRequest": live_after_request,
+        "liveAfterHistory": live_after_history,
+        "liveAfterContext": live_after_context,
+        "requestMessages": request_messages,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    session.close().await?;
+    agent.close().await?;
+    drop(db);
     Ok(())
 }
 
