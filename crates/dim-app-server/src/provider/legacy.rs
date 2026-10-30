@@ -602,10 +602,19 @@ impl ProviderService {
                 let tx = connection.transaction().map_err(storage)?;
                 let mut items = Vec::new();
                 let mut imported: HashMap<String, StaticProviderRecord> = HashMap::new();
+                let mut unreadable: HashMap<String, String> = HashMap::new();
                 for (kind, rows) in [("provider", snapshot.providers), ("selection", snapshot.selections)] {
                     for source in rows {
                         let seen: Option<String> = tx.query_row("SELECT source_digest FROM provider_imports WHERE kind=?1 AND id=?2", params![kind, source.id], |row| row.get(0)).optional().map_err(storage)?;
                         if let Some(digest) = seen {
+                            if kind == "provider" && digest == source.digest {
+                                let stored = tx.query_row("SELECT version,record FROM providers WHERE provider_id=?1", [&source.id], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))).optional().map_err(storage)?;
+                                match stored.map(|(version, body)| parse_static(&source.id, version, &body)) {
+                                    Some(Ok(record)) => { imported.insert(source.id.clone(), record); }
+                                    Some(Err(_)) => { unreadable.insert(source.id.clone(), "Target provider is unreadable; preserved".into()); }
+                                    None => {}
+                                }
+                            }
                             items.push(ImportItem { kind, id: source.id, status: ImportStatus::AlreadyImported, reason: Some(if digest == source.digest { "Source row was already imported" } else { "Previously imported identity changed; automatic replay refused" }.into()), omitted: None });
                             continue;
                         }
@@ -621,16 +630,20 @@ impl ProviderService {
                                 }
                             }
                         } else {
-                            match convert_legacy_selection(&source, &imported, &bundled) {
-                                Err(reason) => Err(reason),
-                                Ok(selection) => {
-                                    let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_selections WHERE scope=?1)", [&selection.scope], |row| row.get(0)).map_err(storage)?;
-                                    if existing { Err("Target selection already exists".into()) }
-                                    else {
-                                        tx.execute("INSERT INTO provider_selections(scope,version,provider_id,model_id) VALUES (?1,1,?2,?3)", params![selection.scope, selection.provider_id, selection.model_id]).map_err(storage)?;
-                                        Ok(Vec::new())
+                            let blocked = source.fields.get("providerId").and_then(Value::as_str).and_then(|id| unreadable.get(id)).cloned();
+                            match blocked {
+                                Some(reason) => Err(reason),
+                                None => match convert_legacy_selection(&source, &imported, &bundled) {
+                                    Err(reason) => Err(reason),
+                                    Ok(selection) => {
+                                        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_selections WHERE scope=?1)", [&selection.scope], |row| row.get(0)).map_err(storage)?;
+                                        if existing { Err("Target selection already exists".into()) }
+                                        else {
+                                            tx.execute("INSERT INTO provider_selections(scope,version,provider_id,model_id) VALUES (?1,1,?2,?3)", params![selection.scope, selection.provider_id, selection.model_id]).map_err(storage)?;
+                                            Ok(Vec::new())
+                                        }
                                     }
-                                }
+                                },
                             }
                         };
                         match result {

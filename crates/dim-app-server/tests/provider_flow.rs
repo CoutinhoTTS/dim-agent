@@ -5474,6 +5474,57 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
             .filter(|item| item["status"] == "already_imported")
             .all(|item| item.get("omitted").is_none())
     );
+    let source_db = rusqlite::Connection::open(&source).unwrap();
+    source_db
+        .execute(
+            "INSERT INTO provider_selections(selectionId,scope,providerId,modelId,version) VALUES ('scope-later','global','legacy-clean','legacy-model',1)",
+            [],
+        )
+        .unwrap();
+    let later = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let later = later["items"].as_array().unwrap();
+    assert_eq!(
+        later
+            .iter()
+            .find(|item| item["id"] == "scope-later")
+            .unwrap()["status"],
+        "imported"
+    );
+    native
+        .execute(
+            "UPDATE providers SET record='{}' WHERE provider_id='legacy-clean'",
+            [],
+        )
+        .unwrap();
+    source_db
+        .execute(
+            "INSERT INTO provider_selections(selectionId,scope,providerId,modelId,version) VALUES ('scope-unreadable','global','legacy-clean','legacy-model',1)",
+            [],
+        )
+        .unwrap();
+    let guarded = serde_json::to_value(
+        provider
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let guarded = guarded["items"].as_array().unwrap();
+    let scope_unreadable = guarded
+        .iter()
+        .find(|item| item["id"] == "scope-unreadable")
+        .unwrap();
+    assert_eq!(scope_unreadable["status"], "rejected");
+    assert_eq!(
+        scope_unreadable["reason"],
+        "Target provider is unreadable; preserved"
+    );
     let imported_builtin = record("anthropic");
     drop(native);
     root.shutdown().await.unwrap();
