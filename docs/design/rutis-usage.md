@@ -22,7 +22,12 @@ Dim uses these directly, without wrapping them ([ADR 006 D2](../adr/006-plugin-c
 - dependency gating, Pending and reload propagation;
 - services by type and by name, instanced groups and per-instance name resolution;
 - loader rows and configuration;
-- language runtimes, cross-language calls, the event bus and diagnostics.
+- language runtimes as the far ends of rutis sessions, cross-language calls, the event bus and
+  diagnostics.
+
+A local runtime is a connection row of the host: its plugin starts the runtime's process with
+rutis-bridge's public parts and mounts the session on it (appendix A.4). This is the form rutis
+documents for a host's own connection, not a wrapper.
 
 Dim adds no plugin trait, author-facing scope type, resolver, manifest, role field, second service
 directory, second bus, or per-language relay or adapter.
@@ -37,7 +42,7 @@ Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-co
 | Row field | Meaning |
 | --- | --- |
 | `id` | Stable row identity in the configuration |
-| `name` | The module: a built-in name, a path, or a runtime prefix (`py:`, `bun:` …) |
+| `name` | The module: a built-in name; a path or npm name, which runs in the Node runtime; or `<runtime row>:<module>`, such as `py:<module>` for the Python runtime |
 | `config` | Structural configuration, validated by the plugin's schema |
 | `inject` | The names the plugin depends on. A foreign plugin's own `inject` must equal this list or be a subset of it |
 | `isolate`, `disabled` | rutis isolation labels; whether the row is off |
@@ -197,7 +202,15 @@ writes names only.
 | Rust | `injects` lists the name's key and `apply` reads it with `require_at`; it provides `T` at the same key | The binding takes the key from the catalog for the name and the copy's instances (appendix A) |
 
 - **Private names.** A part keeps a service to itself, or to a group of parts, with its row's
-  `isolate`. The catalog does not share such a name.
+  `isolate`, a runtime row as well as a Rust one. The catalog does not share such a name. A
+  Session or branch part of another language is a definition copy and has no row of its own, so it
+  carries no `isolate`: its names are its instance's.
+- **Runtime rows.** A TypeScript or Python plugin's row is resolved through its runtime's session
+  (`session-node` or `py`, appendix A.4). While that session is not there, the row waits for it, and
+  when the session ends its rows wait again. Dim writes no `isolate` on a runtime row.
+- **Sessions export.** Every rutis session exports to its far end each process-wide shared name that
+  a non-platform plugin provides, and announces every listener name. A language runtime and a UI
+  leaf reach these names alike; they are trusted local code (AGENTS rule 11).
 - **Rust keys.** A name registered with a Rust type is at that type's key; a name that crosses
   languages is at its dispatcher's key (`host_key`). Both are qualified by the group's instance. A Rust
   part reads a provider of any language at the dispatcher's key. An exported Rust service is at both.
@@ -246,7 +259,9 @@ Since rutis 0.15.1 there is one flat bus per root.
 How Dim's parts consume bus events and which public bus events Dim defines are in the
 [plugin contract §5.3](plugin-contract.md#53-bus-events).
 
-*Today:* Dim is on rutis 0.17.1, and this section holds.
+*Today:* Dim is on rutis 0.19.2, and this section holds. The bus spans every rutis session: each end
+announces its listener names, an event reaches the listeners of its name at either end, and every
+emit of a language runtime goes through the host.
 
 ## 6. Requirements raised to mechanism owners
 
@@ -488,6 +503,40 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   A composition error or failed required provider fails immediately. Rutis never aborts `apply`:
   rollback waits for it to return after `ctx.cancelled()` resolves.
 
+### A.4 Runtimes and sessions
+
+The App Server's root provides `rutis_bridge::LocalId("dim-daemon")`, the id it greets every session
+with. It does not mount `Session::service()`, whose name `sessions` is Dim's `AgentDirectory`.
+
+Each local runtime is a process connection row, `session-node` for Node and `py` for Python. Its
+plugin, `RuntimeConnection` (`dim-app-server/src/session_typescript.rs`):
+
+- injects a Rust-only process service carrying its launch command (`nodeRuntime`, `pythonRuntime`),
+  so the row starts once the command is provided. The App Server provides it at startup when the
+  runtime paths are configured, and RuntimeManager once it has acquired the runtime
+  ([RuntimeManager](plugins/RuntimeManager.md)); providing it again restarts the row;
+- starts the process with `rutis_bridge::runtime::Launcher` (`--id <row>`), records it in a
+  `pipe::Processes` of its own, waits for its greeting (`pipe::greeted`) and mounts
+  `Session::new(channel)`. Unloading kills a process that has not ended and waits for it. Standard
+  error goes to `tracing` line by line;
+- keeps the runtime's state in a value of Dim's own, `RuntimeStatus` (`starting`, `ready`, or `down`
+  with a reason), at `RuntimeStatus::key(row)`. The row stays Active when the runtime fails to start
+  or its process ends, so the status stays readable; the runtime's rows wait again.
+
+One `rutis_loader::runtime::SessionResolver::npm(catalog, "session-node")`, last in the resolver
+chain, resolves the rows of both runtimes: `py:<module>` on the `py` session, every other foreign
+name on `session-node`, where the Node runtime resolves npm names. It is attached to the loader
+before the loader mounts (`attach`), and follows each runtime row once the loader runs
+(`follow_row`). Dim's `SnapshotResolver` wraps it only for what rutis does not do: it checks each row
+against its `provides` snapshot and hands `workflowFiles` rows their packages. With configured runtime paths,
+admission waits for each runtime's rows (`SessionRows::key(row)`); a runtime RuntimeManager acquires
+is optional, so startup never waits for a download. `plugin.reload` is `Loader::reload(row)`; there
+is no resolver cache.
+
+rutis-loader's `LoaderPlugin` also serves the marked service `loader`. A foreign row that injects it
+can `reload` a row and read `status`; `create` and `remove` are refused, because Dim configures no
+editable layer, so PluginManager stays the only writer of rows.
+
 ## Appendix B: TypeScript and Python binding
 
 Parts use `definePlugin` (in Python `define_plugin`, or a module with `inject`, `provides` and
@@ -517,8 +566,9 @@ export default definePlugin({
 })
 ```
 
-A Python row names its module after the runtime, `py:<module>`; the App Server runs it in its Python
-runtime when one is configured, importing the module from the configured project directory.
+A Python row names its module after the runtime's row, `py:<module>`; the App Server runs it in its
+Python runtime when one is configured, importing the module from the configured project directory.
+The Python runtime needs Python 3.12 or later.
 
 ```json
 { "id": "python", "name": "py:python_plugin", "provides": {}, "config": {} }

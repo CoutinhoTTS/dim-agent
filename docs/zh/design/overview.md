@@ -83,7 +83,7 @@ flowchart TB
 | RemoteGateway | 远程入口、设备 | — | — | 一个外部入口 |
 | AcpGateway | 接入方宿主进程 | — | — | 可复用客户端进程插件，位于 daemon 外 |
 
-管理不是插件。管理方法是关于宿主而不是某个 Session 的客户端 RPC 方法（[定义](contracts/session-boundary.md)）；由进程插件提供，方式是把命名空间注册到进程的方法表 `managementMethods`。每个 rutis 会话都把该服务导出给它的远端（语言运行时或 UI 叶子），因此在那里运行的代码也能注册命名空间；它是受信任的本地代码（[rutis 0.19 升级 M8](rutis-0.19-upgrade.md#m8-ui-leaf-是一个插件它的生命周期就是一条会话)）。Session 方法没有级别。Rpc 为本地连接提供 Session 方法和管理方法，从不向带 `deviceId` 的连接（已配对设备）提供管理方法，只在导出时向导出的 rutis 链接提供管理方法。
+管理不是插件。管理方法是关于宿主而不是某个 Session 的客户端 RPC 方法（[定义](contracts/session-boundary.md)）；由进程插件提供，方式是把命名空间注册到进程的方法表 `managementMethods`。每个 rutis 会话都把该服务导出给它的远端（语言运行时或 UI 叶子），因此在那里运行的代码也能注册命名空间；它是受信任的本地代码（[rutis 0.19 升级 M8](rutis-0.19-upgrade.md#m8-ui-leaf-是一个插件它的生命周期就是一条会话)）。Session 方法没有级别。Rpc 为本地连接提供 Session 方法和管理方法，从不向带 `deviceId` 的连接（已配对设备）提供管理方法。rutis 会话的对端通过导出的 `managementMethods` 服务使用管理方法，不经过 Rpc。
 
 ## 3. 基于现有机制的集成
 
@@ -331,7 +331,7 @@ sequenceDiagram
 6. **中断**：插件先取消在途工作并释放资源，再写终态事实（[中断](../../architecture/rust-agent/interrupt.md)）。
 7. **准入**：新工具声明风险类别。不新增 Permission 类别：Permission 不认识的风险按未分类处理，ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许（`permission.rs`）；工具仍可声明 `persistent_configuration` 这类描述性的风险。由自动化启动的 Session 以启动方的策略为上限，Scheduler 任务和 Workflow 定义可以进一步收窄。由管理方法启动的运行除非另有声明，默认只读，并受宿主配置约束。`workflow` 使用 `agent` 工具的风险类别。
 8. **依赖方向与重载代价**：核心部件从不依赖可选插件；可选插件重载或失败只影响它自己的功能（D3）。重载传到真正的依赖方时，可能使其在途 turn 失败；这一点被接受，并记录在每个插件的冲突表中，从不加以阻止。
-9. **管理面**：管理方法（`account.*`、`provider.*`、`mcp.*`、`skills.*`、`settings.read`/`settings.update`，以及新进程插件的方法）由进程插件注册到 `managementMethods`；rutis 会话的远端也能访问该服务（[rutis 0.19 升级 M8](rutis-0.19-upgrade.md#m8-ui-leaf-是一个插件它的生命周期就是一条会话)）。Session 方法没有级别；`shell.*` 是普通 Session 方法。本地 RPC 服务两类方法，RemoteGateway 只服务 Session 方法，rutis 链接只在显式导出时服务管理方法（宿主管理员权限）。不存在身份分级。`hello`、`daemon.*`、`agent.*` 和现有的 `session.*` 方法保持为 Rpc 内建方法；`daemon.shutdown` 是内建方法，从不提供给已配对设备（带 `deviceId` 的连接）。
+9. **管理面**：管理方法（`account.*`、`provider.*`、`mcp.*`、`skills.*`、`settings.read`/`settings.update`，以及新进程插件的方法）由进程插件注册到 `managementMethods`；rutis 会话的远端也能访问该服务（[rutis 0.19 升级 M8](rutis-0.19-upgrade.md#m8-ui-leaf-是一个插件它的生命周期就是一条会话)）。Session 方法没有级别；`shell.*` 是普通 Session 方法。本地 RPC 服务两类方法，RemoteGateway 只服务 Session 方法，rutis 会话的对端通过导出的 `managementMethods` 服务使用管理方法（受信的本地代码）。不存在身份分级。`hello`、`daemon.*`、`agent.*` 和现有的 `session.*` 方法保持为 Rpc 内建方法；`daemon.shutdown` 是内建方法，从不提供给已配对设备（带 `deviceId` 的连接）。
 10. **远程 Session 方法**：已配对设备可调用所有 Session 方法，包括 `session.permission.update` 和 `shell.*`（兼容性变更，[方法 A.4](contracts/session-boundary.md#a4-迁移与兼容性)）。
 11. **在途工作**：没有共享注册表。每个所有者提供自己的查询与停止，由 CLI 汇总。
 12. **撤回**：由 InputQueue 拥有的单一合同。`input/withdraw {input_id, reason?}` 是一个指令事件，可由任何合法生产方写入：客户端经 `session.input.withdraw`（InputQueue 通过 `sessionMethods` 提供的 Session 方法），进程调用方经 `sessions.withdraw`。InputQueue 按序消费它；只有当它仍持有该输入且尚未应用（无 `input/applied`）时，才写入结果事实 `input/deleted {input_id}`，且永不应用该输入。否则（未知、已应用或已删除）不写入任何内容，调用方收到的回复为 `notHeld`。已应用的输入无法撤回，Loop 不变。“撤回并作为 Steer 重新提交”是一个原子批次。每个待处理输入推导都排除已删除的输入，它们从不进入模型上下文（其带 key 的块从不生效）。
@@ -341,16 +341,16 @@ sequenceDiagram
 
 ### 6.3 多节点
 
-rutis 节点通过链接相连，导出和导入服务，在对端运行插件（`peer:<node>/<plugin>`）并转发事件（[rutis 节点](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)，[#5](https://github.com/arcships/dim/issues/5)）。
+rutis 节点通过连接行相连：连接把一个通道交给 rutis session，两个内核以各自的 id（`LocalId`）互相握手。session 把每个进程级共享名字导出给远端，并宣告自己的监听名，因此事件能到达任一端的监听器；插件以 loader 行 `<row>:<plugin>` 在远端运行，其中 `<row>` 是该连接的行。rutis-host 的 `dial` 和 `listen` 行就是这样的连接；Dim 目前都不使用（[rutis 0.19 迁移](https://github.com/arcships/rutis/blob/v0.19.2/docs/migration-0.19.en.md)，[#5](https://github.com/arcships/dim/issues/5)）。
 
 | 规则 | 内容 |
 | --- | --- |
 | 控制节点 | 承载 App Server：Timeline、Session、配置来源、Provider、调度 |
 | 资源节点 | 宿主资源所在之处（文件、进程、shell、隔离、本地 CLI）。每个 Session 将绑定一个，记为 `SessionConfig.resourceNode`，创建时固定；这是 P3 新增的可选字段，缺省即控制节点；P1/P2 中每个 Session 都使用控制节点 |
-| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（对端为 `peer:<node>/external-agent-bridge`），该行在自身存续期间把自己挂接到 ExternalAgent（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
+| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（其他节点上为 `<node>:external-agent-bridge`，`<node>` 是该节点的连接行），该行在自身存续期间把自己挂接到 ExternalAgent（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
 | 节点绑定数据 | 隔离配置和外部 Agent 目录以节点和路径标识 |
-| 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点服务在每次调用时按 `resourceNode` 查找，因此节点离线只让这些调用以 `node_unavailable` 失败；不向 rutis 提需求（#38）。链接断开时，由资源节点自己的 HostPlatform 结束它启动的进程 |
-| 认证 | 复用 rutis 链接 token；管理方法只在配置后才导出 |
+| 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点服务在每次调用时按 `resourceNode` 查找，因此节点离线只让这些调用以 `node_unavailable` 失败；不向 rutis 提需求（#38）。该节点的 session 结束时，由资源节点自己的 HostPlatform 结束它启动的进程 |
+| 认证 | 由连接的通道认证远端；握手中的 id 是自报的。session 导出每个共享名字，包括 `managementMethods`，所以已连接的节点被当作宿主代码信任（AGENTS 第 11 条） |
 | 未来 | 跨控制节点协作不在此设计 |
 
 ### 6.4 约定

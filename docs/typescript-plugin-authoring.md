@@ -13,7 +13,7 @@ The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts). The types of th
 Rust types serve to other languages are generated into
 [npm/branch-services.d.ts](../npm/branch-services.d.ts) and re-exported through the same entry
 point as `Services`.
-The pinned rutis 0.16 declarations pass `tsc --strict` without `skipLibCheck`.
+The pinned rutis 0.19.2 declarations pass `tsc --strict` without `skipLibCheck`.
 This does not disable checking a plugin's calls against the service interfaces.
 
 ## Available services
@@ -154,8 +154,8 @@ Keep module top-level code to imports, constant metadata and plugin declarations
 Do no business I/O or asynchronous business initialization there, including
 top-level `await` on a network request. Node evaluates a module to discover its
 declaration before the plugin has an owned context or effects. One load that
-never finishes can keep the shared `RuntimeRows` gate unpublished and cause
-host startup to time out, even when native rows are ready. Put resource
+never finishes can keep the Node runtime's rows from being released (`SessionRows`)
+and cause host startup to time out, even when native rows are ready. Put resource
 acquisition and work in the owned lifecycle below.
 
 During `apply`, acquire owned resources and register services, subscriptions and
@@ -813,7 +813,8 @@ branch's.
 - **Not available yet:** an injected name gates the part or row; it loads once a provider is there and
   unloads when the provider goes, in any language.
 
-Python rows are named `py:<module>` and run in the host's Python runtime when one is configured;
+Python rows are named `py:<module>` and run in the host's Python runtime (Python 3.12 or later)
+when one is configured;
 the Python binding is in [How Dim uses rutis, appendix B](design/rutis-usage.md#appendix-b-typescript-and-python-binding).
 An unmodified plugin for rutis's Cordis 4 (`@deepseek-ai/cordis`) can be registered as a part:
 pass the plugin module, or its object or function, to `registerDefinition`, and its `inject` and

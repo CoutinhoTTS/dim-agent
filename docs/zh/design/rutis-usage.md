@@ -20,7 +20,10 @@ TypeScript 的绑定。
 - 依赖门控、Pending 与重载传播；
 - 按类型和按名字的服务、实例化组，以及按实例解析名字；
 - loader 行与配置；
-- 语言运行时、跨语言调用、事件总线与诊断。
+- 作为 rutis session 远端的语言运行时、跨语言调用、事件总线与诊断。
+
+本地运行时是宿主的一个连接行：它的插件用 rutis-bridge 的公开部件启动运行时进程，并在其上挂载 session
+（附录 A.4）。这是 rutis 为宿主自己的连接写明的形式，不是包装。
 
 Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifest、role 字段、第二套服务目录、第二条总线，
 也不增加按语言的中继或适配器。
@@ -34,7 +37,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 | 行字段 | 含义 |
 | --- | --- |
 | `id` | 配置中稳定的行标识 |
-| `name` | 模块：内置名称、路径，或运行时前缀（`py:`、`bun:` …） |
+| `name` | 模块：内置名称；路径或 npm 名称，在 Node 运行时中运行；或 `<运行时行>:<模块>`，例如 Python 运行时的 `py:<module>` |
 | `config` | 结构性配置，由插件的 schema 校验 |
 | `inject` | 插件依赖的名称。外来插件自身的 `inject` 必须等于这个列表，或是它的子集 |
 | `isolate`、`disabled` | rutis 隔离标签；该行是否关闭 |
@@ -148,7 +151,12 @@ loader 为每个副本解析每个名字，各运行时落实结果。部件代�
 | Python 和其他运行时 | `inject`、`use`、`provide` | 同上，通过该运行时的隔离表 |
 | Rust | 在 `injects` 中列出名字的 key，在 `apply` 中用 `require_at` 读取；在同一个 key 上提供 `T` | 绑定按名字和副本的实例链从目录取得 key（附录 A） |
 
-- **私有名字。** 部件用自己行上的 `isolate` 把一个服务留给自己或一组部件。目录不共享这样的名字。
+- **私有名字。** 部件用自己行上的 `isolate` 把一个服务留给自己或一组部件，运行时行和 Rust 行都一样。目录不共享
+  这样的名字。其他语言的 Session 部件或分支部件是定义副本，没有自己的行，因此不带 `isolate`：它的名字就是所在实例的。
+- **运行时行。** TypeScript 或 Python 插件的行经它所在运行时的 session（`session-node` 或 `py`，附录 A.4）解析。
+  session 不在时，该行等它；session 结束时，它的行重新等待。Dim 不在运行时行上写 `isolate`。
+- **session 导出。** 每个 rutis session 都把非平台插件提供的每个进程级共享名字导出给远端，并宣告每个监听名。
+  语言运行时和 UI leaf 都同样能拿到这些名字；它们是受信任的本地代码（AGENTS 第 11 条）。
 - **Rust 的 key。** 用 Rust 类型登记的名字位于该类型的 key；跨语言的名字位于它的分发器的 key（`host_key`）。
   两者都用组的实例限定。Rust 部件在分发器的 key 上读取任何语言的提供方。导出的 Rust 服务两者都有。
 - **提供的名字。** 行没有声明、在运行时才宣告的服务，rutis 以其普通名字在整个进程内发布。在 Session 或分支内，
@@ -187,7 +195,8 @@ Dim 在此之上增加发布与关闭两个阶段（[插件契约 §7](plugin-co
 
 Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线事件，见[插件契约 §5.3](plugin-contract.md#53-总线事件)。
 
-*现状：*Dim 已在 rutis 0.17.1 上，本节成立。
+*现状：*Dim 已在 rutis 0.19.2 上，本节成立。总线跨越每个 rutis session：两端各自宣告自己的监听名，事件到达任一端
+该名称的监听器，语言运行时的每次 emit 都经过宿主。
 
 ## 6. 向机制所有者提出的需求
 
@@ -380,6 +389,32 @@ Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自�
   不另加总时限。没有进展时列出未 Active 的行及缺少的依赖并失败；组合错误或必需提供者失败立即返回。
   回滚取消各行，rutis 从不中止 `apply`，而是等待它在 `ctx.cancelled()` 完成后返回。
 
+### A.4 运行时与 session
+
+App Server 的根提供 `rutis_bridge::LocalId("dim-daemon")`，它与每个 session 握手时都用这个 id。它不挂载
+`Session::service()`，因为那个服务的名字 `sessions` 是 Dim 的 `AgentDirectory`。
+
+每个本地运行时是一个进程级连接行，Node 是 `session-node`，Python 是 `py`。它的插件 `RuntimeConnection`
+（`dim-app-server/src/session_typescript.rs`）：
+
+- 注入一个携带启动命令的仅限 Rust 的进程服务（`nodeRuntime`、`pythonRuntime`），所以命令提供之后该行才启动。
+  配置了运行时路径时由 App Server 在启动时提供；否则由 RuntimeManager 在取得运行时之后提供
+  （[RuntimeManager](plugins/RuntimeManager.md)）；再次提供会重启该行；
+- 用 `rutis_bridge::runtime::Launcher`（`--id <row>`）启动进程，记在自己的 `pipe::Processes` 中，等它的问候
+  （`pipe::greeted`），再挂载 `Session::new(channel)`。卸载时杀掉尚未结束的进程并等它结束。标准错误逐行写到 `tracing`；
+- 用 Dim 自己的值 `RuntimeStatus`（`starting`、`ready`，或带原因的 `down`）在 `RuntimeStatus::key(row)` 记录运行时的
+  状态。运行时启动失败或进程结束时，该行仍是 Active，状态因此仍可读取；运行时的各行重新等待。
+
+一个 `rutis_loader::runtime::SessionResolver::npm(catalog, "session-node")` 放在解析链末尾，解析两个运行时的行：
+`py:<module>` 在 `py` 的 session 上，其他外来名字在 `session-node` 上，由 Node 运行时解析 npm 名称。它在 loader
+挂载之前接到 loader 上（`attach`），loader 运行后跟随每个运行时行（`follow_row`）。Dim 的 `SnapshotResolver`
+包住它，只做 rutis 不做的事：按 `provides` 快照检查每一行，并把各自的包交给使用 `workflowFiles` 的行。配置了运行时
+路径时，准入等待每个运行时的行（`SessionRows::key(row)`）；RuntimeManager 取得的运行时是可选的，所以启动从不等下载。
+`plugin.reload` 就是 `Loader::reload(row)`；没有解析器缓存。
+
+rutis-loader 的 `LoaderPlugin` 还提供带标记的服务 `loader`。注入它的外来行可以 `reload` 一行、读取 `status`；
+`create` 和 `remove` 会被拒绝，因为 Dim 不配置可编辑的层，所以 PluginManager 仍是行的唯一写入者。
+
 ## 附录 B. TypeScript 与 Python 绑定
 
 部件使用 `definePlugin`（Python 中为 `define_plugin`，或一个带 `inject`、`provides` 和 `apply` 的模块），
@@ -407,8 +442,8 @@ export default definePlugin({
 })
 ```
 
-Python 行的名字以运行时为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，从配置的
-项目目录导入该模块。
+Python 行的名字以运行时的行为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，从配置的
+项目目录导入该模块。Python 运行时需要 Python 3.12 或更高版本。
 
 ```json
 { "id": "python", "name": "py:python_plugin", "provides": {}, "config": {} }

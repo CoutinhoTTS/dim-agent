@@ -17,7 +17,7 @@ dimcode (one executable, two roles)
   │                                         │     │                                      │
   │  DaemonLink ─provides `Connection`─┐    │     │  LoaderPlugin                        │
   │     ▲ discover / spawn / hello     │    │ RPC │   ├─ process rows (Rust)             │
-  │     │                              │    │ v3  │   ├─ NodeRuntime, NodeRows           │
+  │     │                              │    │ v3  │   ├─ session-node, py (sessions)     │
   │  Tui ◄─────────────────────────────┤    │◄───►│   │    └─ dim-oauth (TypeScript)     │
   │   session thread + render thread   │    │sock │   └─ session / branch factories      │
   │  WebHold ◄─────────────────────────┘    │     │  WebEntry (loopback listener)        │
@@ -72,7 +72,7 @@ root.plugin(DaemonLink{options})
            (setsid; stdin/stdout null; stderr → daemon.log)
                                                     serve(): rutis root, LoaderPlugin,
                                                     reconcile assembly layer
-                                                    (process rows, NodeRuntime, NodeRows →
+                                                    (process rows, session-node and py →
                                                      dim-oauth) within startup_timeout;
                                                     listen on daemon.sock; chmod 0600
            poll every 50 ms, at most 10 s:
