@@ -155,6 +155,14 @@ from the line client's above:
   Esc closes it for that query. A directory is typed in as `@dir/` and the picker stays open; a
   file becomes an atomic `@relative/path` marker followed by a space. `~/`, absolute and `../`
   prefixes list that directory. Hidden entries are offered only when the query names one.
+  A pending clipboard read does not block accepting a file or entering a directory. Only
+  submission waits for the clipboard result:
+
+  ```text
+  @first.txt compare with @second
+                           Enter -> @first.txt compare with @second.txt
+                           Enter -> wait for clipboard insertion before sending
+  ```
 - **Submission.** A file or directory marker becomes a Markdown link to its absolute path
   (`[name](/abs/path)`, `[@src/a.rs](/abs/src/a.rs)`); its bytes are not uploaded, and the model
   reads it with its tools. An image file is read and checked (A.1) at submission and sent as an
