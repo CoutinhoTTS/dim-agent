@@ -284,6 +284,31 @@ fn decode_error(kind: ImageKind, stored: ImageSize, error: image::ImageError) ->
     invalid(kind, error)
 }
 
+/// Makes an already decoded image acceptable to a model.
+///
+/// In: the pixels a platform decoder produced — a clipboard bitmap, for
+/// example, which has no source bytes to send. Out: everything
+/// [`scale_image`] returns.
+///
+/// The same rule applies and the same re-encode step runs, so a clipboard
+/// bitmap and a file come out the same way: the pixels are re-encoded to fit
+/// [`MAX_EDGE`] and [`MAX_BASE64_BYTES`], a PNG while its scaled PNG fits and
+/// JPEG otherwise, the long edge stepping down until the encoding fits. The
+/// image always counts as re-encoded, since there are no source bytes to send
+/// as they are, and it is never animated. A pixel count above [`MAX_PIXELS`]
+/// is refused first.
+pub fn scale_pixels(image: DynamicImage) -> Result<ScaledImage, ImageRefusal> {
+    let stored = size(image.dimensions());
+    guard(stored)?;
+    reencoded(
+        ImageKind::Png,
+        stored,
+        Orientation::NoTransforms,
+        image,
+        false,
+    )
+}
+
 /// The leading bytes of the source, recognizing its format.
 fn sniffed<R: BufRead + Seek>(source: &mut R) -> Result<Option<Sniffed>, ImageRefusal> {
     let mut prefix = [0u8; SNIFF_BYTES];
