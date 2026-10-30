@@ -1799,6 +1799,14 @@ async fn read_refuses_formats_it_cannot_decode_and_other_binaries() {
     let heic = workspace.read(&reads, "photo.heic").await;
     assert_eq!(code(&heic), "binary_unsupported");
     assert!(text(&heic).contains("HEIC/HEIF"), "{}", text(&heic));
+    // The generic HEIF brand may hold HEVC or AVIF, so it is named for both.
+    workspace.put(
+        "photo.heif",
+        b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1avif",
+    );
+    let heif = workspace.read(&reads, "photo.heif").await;
+    assert_eq!(code(&heif), "binary_unsupported");
+    assert!(text(&heif).contains("HEIF/AVIF"), "{}", text(&heif));
     workspace.put("archive.zip", b"PK\x03\x04");
     assert_eq!(
         code(&workspace.read(&reads, "archive.zip").await),

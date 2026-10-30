@@ -134,11 +134,12 @@ largest format `read` decodes, 16-bit RGBA — and an allocation refused for siz
 takes the pixel-guard form; the WebP decoder takes no allocation limit of its
 own, so a metadata chunk larger than that bound, or than the file that declares
 it, is refused before it is read.
-HEIC/HEIF and AVIF are refused with the format named; every other binary file is
-refused as before. `read` never decides for the model: the same image block goes
-into the tool result whatever the model, and the stored result holds what was
-sent, the scaled image. ModelProvider turns the image into its text placeholder
-for a model without image input ([ModelProvider](ModelProvider.md#image-handling)).
+HEIC, HEIF and AVIF are refused with the format named; every other binary file
+is refused as before. `read` never decides for the model: the same image block
+goes into the tool result whatever the model, and the stored result holds what
+was sent, the scaled image. ModelProvider turns the image into its text
+placeholder for a model without image input
+([ModelProvider](ModelProvider.md#image-handling)).
 
 The model-facing texts and their classes
 ([model prompts §4](../../../design/model-prompts.md#4-protocol-and-policy)):

@@ -108,8 +108,12 @@ pub fn sniff(bytes: &[u8]) -> Option<Sniffed> {
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
         return Some(match &bytes[8..12] {
             b"avif" | b"avis" => Sniffed::Unsupported("AVIF"),
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs"
-            | b"mif1" | b"msf1" => Sniffed::Unsupported("HEIC/HEIF"),
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs" => {
+                Sniffed::Unsupported("HEIC/HEIF")
+            }
+            // The generic HEIF brands: a file carrying one may hold HEVC or
+            // AVIF, and the major brand alone does not say which.
+            b"mif1" | b"msf1" => Sniffed::Unsupported("HEIF/AVIF"),
             _ => return None,
         });
     }
