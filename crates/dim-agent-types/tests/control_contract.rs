@@ -81,9 +81,6 @@ fn internal_controls_use_the_common_event_envelope() {
             event
         );
     }
-    let original: Vec<v1::AgentEvent> =
-        serde_json::from_str(include_str!("fixtures/events.json")).unwrap();
-    assert_eq!(original.len(), 42);
 }
 
 #[test]

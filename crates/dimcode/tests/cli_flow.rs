@@ -2796,6 +2796,70 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
 }
 
 #[test]
+fn tui_escape_sends_the_reason_that_records_the_interruption() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (settle, settlement) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":true,"stopping":false}),
+            );
+            let stop = wire.read("session.stop");
+            assert_eq!(
+                stop["params"],
+                json!({
+                    "sessionId":"session", "branchId":"main", "reason":"User interrupted the run."
+                })
+            );
+            settlement.recv_timeout(PATIENCE).unwrap();
+            wire.end(
+                json!({"turn_id":"turn", "status":"cancelled", "reason":stop["params"]["reason"]}),
+            );
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":false,"stopping":false}),
+            );
+            wire.reply(&stop, json!({"sequence":25}));
+            wire.no_context();
+            let mut line = String::new();
+            assert_eq!(
+                wire.0.read_line(&mut line).unwrap(),
+                0,
+                "unexpected action: {line}"
+            );
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("esc interrupt");
+        terminal.write(b"\x1b");
+        terminal.until("Stopping");
+        assert!(!terminal.transcript.contains("User interrupted the run."));
+        settle.send(()).unwrap();
+        terminal.until("User interrupted the run.");
+        terminal.until("stopped");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
@@ -3067,6 +3131,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
             {"type":"text","text":" [Pasted text: /files/paste.txt (1 lines)]"},
         ]));
         wire.reply(&submit, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"image-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":submit["params"]["user"],"mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -3080,10 +3145,11 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.paste(&long);
     terminal.until("16385 chars");
     terminal.write(b"\r");
-    let joined = daemon.join();
+    terminal.until("[Image #1]");
+    terminal.until("[Pasted text: /files/paste.txt (1 lines)]");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    joined.unwrap();
+    daemon.join().unwrap();
 }
 
 #[test]

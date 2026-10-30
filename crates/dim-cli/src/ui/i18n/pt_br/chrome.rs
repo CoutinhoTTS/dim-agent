@@ -472,8 +472,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C limpar, duas vezes para sair · Ctrl+D sair com rascunho vazio"
         }
         "Fullscreen" => "Tela cheia",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown rolar · Home/End topo ou fim · Tab escolher mensagem, e editar, q citar"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown rolar · Home/End topo ou fim (com rascunho vazio) · Tab escolher mensagem, e editar, q citar"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "roda rolar · arrastar seleciona e copia · clique: link abre, grupo de ferramentas expande"

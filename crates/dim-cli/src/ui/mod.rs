@@ -18,6 +18,7 @@ pub struct Env {
 }
 
 pub mod approvals_panel;
+mod atomic;
 pub mod commands;
 pub mod composer;
 pub mod config;

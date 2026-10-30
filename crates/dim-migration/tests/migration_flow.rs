@@ -676,7 +676,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
     Connection::open(&native_path)
         .unwrap()
         .execute_batch(
-            "DROP TABLE agent_store_format;
+            "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE agent_store_format;
              CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
              INSERT INTO agent_store_format VALUES (23);",
         )
@@ -714,7 +714,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
             .query_row("SELECT version FROM agent_store_format", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
-        24
+        25
     );
     let retried = migration
         .run(source.clone(), true, Some(report.task.id.clone()))
