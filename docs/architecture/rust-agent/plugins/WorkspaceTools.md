@@ -118,9 +118,10 @@ source is never buffered: it reads the header, runs the guard, and only then
 decodes. An image whose longest edge exceeds 2048 px or whose base64 encoding
 exceeds 5,000,000 bytes is decoded, its EXIF orientation applied first so the
 sent pixels are upright, and re-encoded to fit: a PNG source stays PNG while
-its scaled PNG fits, everything else becomes JPEG at quality 85, and the long
-edge steps down until the encoding fits. An image within both limits with no orientation to
-apply is sent byte for byte. An animation is always re-encoded from its first
+its scaled PNG fits, everything else becomes JPEG at quality 85, transparent
+pixels flattened onto white, and the long edge steps down until the encoding
+fits. An image within both limits with no orientation to apply is sent byte
+for byte. An animation is always re-encoded from its first
 frame, its EXIF orientation applied the same way, so the frame sent is upright
 as a still's pixels are. One guard keeps memory bounded: a header claiming more
 than 100 megapixels is refused from its dimensions before the pixels are

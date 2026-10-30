@@ -1583,8 +1583,11 @@ fn vp8l(frame: &RgbaImage) -> Vec<u8> {
 /// animation and the EXIF chunk, `ANIM`, one `ANMF` per frame and `EXIF`.
 fn animated_webp(frames: [&RgbaImage; 2], orientation: u16) -> Vec<u8> {
     let (width, height) = frames[0].dimensions();
+    let alpha = frames
+        .iter()
+        .any(|frame| frame.pixels().any(|pixel| pixel[3] < 255));
     let mut body = Vec::new();
-    let mut vp8x = vec![0x0A, 0, 0, 0];
+    let mut vp8x = vec![0x0A | if alpha { 0x10 } else { 0 }, 0, 0, 0];
     vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
     vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
     body.extend_from_slice(&riff_chunk(b"VP8X", &vp8x));
@@ -1639,6 +1642,35 @@ async fn read_turns_an_animated_webp_first_frame_upright() {
     assert_eq!(structured["animated"], true);
     assert_eq!(structured["sentWidth"], 20);
     assert_eq!(structured["sentHeight"], 40);
+}
+
+#[tokio::test]
+async fn read_sends_transparent_pixels_on_white_when_it_encodes_jpeg() {
+    let workspace = Workspace::new();
+    let reads = branch();
+    let first = RgbaImage::from_fn(20, 20, |x, _| {
+        if x < 10 {
+            Rgba([255, 0, 0, 0])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    let second = RgbaImage::from_pixel(20, 20, Rgba([0, 255, 0, 255]));
+    workspace.put("clear.webp", &animated_webp([&first, &second], 1));
+    let result = workspace.read(&reads, "clear.webp").await;
+    assert_eq!(result.is_error, None);
+    let (line, source) = image_blocks(&result);
+    assert!(line.contains("as image/jpeg"), "{line}");
+    let image = decoded(source);
+    // JPEG has no alpha: a transparent pixel must not come out as its bare
+    // colour or as black.
+    let clear = image.get_pixel(0, 0);
+    assert!(
+        clear[0] > 240 && clear[1] > 240 && clear[2] > 240,
+        "transparent pixel on white {clear:?}"
+    );
+    let opaque = image.get_pixel(19, 0);
+    assert!(opaque[2] > 200 && opaque[0] < 60, "opaque pixel {opaque:?}");
 }
 
 fn crc32(bytes: &[u8]) -> u32 {

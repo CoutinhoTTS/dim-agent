@@ -2,8 +2,8 @@
 //! block. `read` is the caller here; the CLI's attachments will add the second
 //! one (#657), so both send an image the same way.
 use image::{
-    AnimationDecoder, DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader,
-    codecs::jpeg::JpegEncoder, imageops::FilterType, metadata::Orientation,
+    AnimationDecoder, DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Rgb,
+    RgbImage, codecs::jpeg::JpegEncoder, imageops::FilterType, metadata::Orientation,
 };
 use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
 
@@ -428,9 +428,23 @@ fn jpeg(image: &DynamicImage) -> Result<Vec<u8>, ImageRefusal> {
     let mut encoded = Vec::new();
     let mut encoder = JpegEncoder::new_with_quality(&mut encoded, JPEG_QUALITY);
     encoder
-        .encode_image(&image.to_rgb8())
+        .encode_image(&flattened(image))
         .map_err(|error| invalid(ImageKind::Jpeg, error))?;
     Ok(encoded)
+}
+
+/// The image with its transparency flattened onto white, for JPEG, which has
+/// no alpha channel and would otherwise show a transparent pixel's bare colour
+/// — black for a fully transparent pixel.
+fn flattened(image: &DynamicImage) -> RgbImage {
+    let rgba = image.to_rgba8();
+    let mut rgb = RgbImage::new(rgba.width(), rgba.height());
+    for (out, pixel) in rgb.pixels_mut().zip(rgba.pixels()) {
+        let alpha = u32::from(pixel[3]);
+        let mix = |channel: u8| ((u32::from(channel) * alpha + 255 * (255 - alpha)) / 255) as u8;
+        *out = Rgb([mix(pixel[0]), mix(pixel[1]), mix(pixel[2])]);
+    }
+    rgb
 }
 
 fn guard(stored: ImageSize) -> Result<(), ImageRefusal> {
