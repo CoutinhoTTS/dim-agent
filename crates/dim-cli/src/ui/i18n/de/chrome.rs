@@ -223,8 +223,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "Zwischenablage: {reason}",
         "Wait for clipboard insertion before sending" => "Vor Senden auf Zwischenablage warten",
         "A submission accepts at most 20 images" => "Pro Sendung höchstens 20 Bilder",
-        "[Image #{index}]" => "[Bild #{index}]",
-        "[Image #{index}{details}]" => "[Bild #{index}{details}]",
         "first frame" => "nur erstes Einzelbild",
         "re-encoded" => "neu kodiert",
         "The current model does not accept images; remove {label} to send" => {
