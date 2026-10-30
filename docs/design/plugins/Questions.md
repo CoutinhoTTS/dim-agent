@@ -231,7 +231,7 @@ Other key rows (full table: Appendix B):
 
 Never visible: the waiter table, `structuredContent`, client rendering. Compaction keeps the declaration and keeps answers only through the summary.
 
-Every text in the table but the declaration is protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)): the answers, `User declined to answer. Proceed without these answers.`, `No one is available to answer questions in this session. Proceed without asking.`, `The question was cancelled before the user answered.`, and the invalid-input refusals `Invalid ask_user input: <reason>`. The answered form is a handle: `User answered:`, then one numbered line per question and its `-> <label>` line, which the model matches to the questions it asked (A.1). The declaration's description is policy and is not this page's.
+Every text in the table but the declaration is protocol ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)), and two of them are mixed, marked sentence by sentence: in `User declined to answer. Proceed without these answers.` and `No one is available to answer questions in this session. Proceed without asking.`, the first sentence is protocol — it states what happened — and the `Proceed without …` sentence is policy: it is advice, and nothing parses it. The rest are protocol: the answers, `The question was cancelled before the user answered.`, and the invalid-input refusals `Invalid ask_user input: <reason>`. The answered form is a handle: `User answered:`, then one numbered line per question and its `-> <label>` line, which the model matches to the questions it asked (A.1). The declaration's description is policy and is not this page's.
 
 ## 6. Interfaces (summary)
 

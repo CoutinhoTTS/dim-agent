@@ -231,7 +231,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 
 永不可见：等待者表、`structuredContent`、客户端渲染。压缩保留声明，回答只通过摘要保留。
 
-除声明外，表中的每段文本都是 protocol（[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)）：回答本身、`User declined to answer. Proceed without these answers.`、`No one is available to answer questions in this session. Proceed without asking.`、`The question was cancelled before the user answered.`，以及非法输入拒绝 `Invalid ask_user input: <reason>`。已回答的形式是一种句柄：`User answered:`，随后每个问题一行编号加一行 `-> <label>`，模型据此对上它提的问题（A.1）。声明的 description 是 policy，不属于本页。
+除声明外，表中的文本都是 protocol（[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)），其中两段是混合的，按句标注：`User declined to answer. Proceed without these answers.` 与 `No one is available to answer questions in this session. Proceed without asking.` 的第一句是 protocol——它陈述发生了什么——而 `Proceed without …` 这句是 policy：它是建议，没有任何东西解析它。其余都是 protocol：回答本身、`The question was cancelled before the user answered.`，以及非法输入拒绝 `Invalid ask_user input: <reason>`。已回答的形式是一种句柄：`User answered:`，随后每个问题一行编号加一行 `-> <label>`，模型据此对上它提的问题（A.1）。声明的 description 是 policy，不属于本页。
 
 ## 6. 接口（摘要）
 
