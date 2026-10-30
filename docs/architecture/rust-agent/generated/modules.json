@@ -18695,6 +18695,7 @@
       "references": [
         "path BundledCatalog",
         "path BundledCatalog::load",
+        "path CatalogProvider",
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelMetadata",
@@ -18704,6 +18705,7 @@
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
         "use crate::model_catalog::BundledCatalog",
+        "use crate::model_catalog::CatalogProvider",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
         "use crate::model_catalog::ModelEntry",
@@ -19081,6 +19083,7 @@
         "path StaticProviderRecord::is_pristine_builtin",
         "path StaticRecordKind::Builtin",
         "path StaticRecordKind::Custom",
+        "path bundled_seed_for",
         "path failure",
         "path managed_authority",
         "path parse_static",

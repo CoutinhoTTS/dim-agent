@@ -1283,6 +1283,11 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
         .unwrap();
     }
     let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
     let source = directory.path().join("source");
     let db = fixture(&source);
     db.execute_batch(
@@ -1335,6 +1340,36 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
         "https://model.example/v1",
         &bearer,
         Some(&credential),
+        None,
+        &models,
+        &json!({}),
+        1,
+    );
+    insert_legacy_row(
+        &db,
+        "deepseek",
+        "builtin",
+        "DeepSeek",
+        "openai-compatible",
+        "https://api.deepseek.com",
+        &json!({"type":"api_key","headerName":"Authorization","prefix":"Bearer "}),
+        Some(&json!({"type":"apiKey","apiKey":"legacy-deepseek-key"})),
+        None,
+        &models,
+        &json!({}),
+        1,
+    );
+    insert_legacy_row(
+        &db,
+        "openrouter",
+        "builtin",
+        "OpenRouter",
+        "openai-compatible",
+        "https://openrouter.ai/api/v1",
+        &json!({"type":"custom"}),
+        Some(
+            &json!({"type":"custom","customHeaders":{"Authorization":"Bearer legacy-header-key"}}),
+        ),
         None,
         &models,
         &json!({}),
@@ -1489,9 +1524,18 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
         object("provider", "legacy-metadata").omitted,
         vec!["metadata.preferenceWindow"]
     );
+    let unknown_builtin = object("provider", "legacy-builtin");
+    assert_eq!(unknown_builtin.outcome, Outcome::Unsupported);
     assert_eq!(
-        object("provider", "legacy-builtin").outcome,
-        Outcome::Imported
+        unknown_builtin.reason.as_deref(),
+        Some("Builtin identity has no bundled definition")
+    );
+    assert_eq!(object("provider", "deepseek").outcome, Outcome::Imported);
+    let disagreeing = object("provider", "openrouter");
+    assert_eq!(disagreeing.outcome, Outcome::Unsupported);
+    assert_eq!(
+        disagreeing.reason.as_deref(),
+        Some("Legacy builtin definition differs from the current definition")
     );
     assert_eq!(object("provider", "anthropic").outcome, Outcome::Imported);
     let openai = object("provider", "openai");
@@ -1546,13 +1590,28 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
         .unwrap()
         .remove("displayName");
     assert_eq!(combined, clean_without_name);
-    assert_eq!(record("legacy-builtin")["kind"], "builtin");
-    assert_eq!(record("legacy-builtin")["version"], 1);
     let converted = record("anthropic");
     assert_eq!(converted["kind"], "builtin");
     assert_eq!(converted["version"], 2);
     assert_eq!(converted["displayName"], "Anthropic");
     assert_eq!(converted["driverKind"], "anthropic");
+    let imported_builtin = record("deepseek");
+    assert_eq!(imported_builtin["kind"], "builtin");
+    assert_eq!(imported_builtin["version"], 2);
+    assert_eq!(imported_builtin["displayName"], "DeepSeek");
+    assert_eq!(imported_builtin["enabled"], true);
+    assert_eq!(imported_builtin["credential"], "legacy-deepseek-key");
+    for id in ["legacy-builtin", "openrouter"] {
+        assert!(
+            !native
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM providers WHERE provider_id='{id}')"),
+                    [],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
     assert!(
         !native
             .query_row(
@@ -1578,6 +1637,39 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
     );
     plugin.dispose().await.unwrap();
     root.shutdown().await.unwrap();
+    drop(native);
+
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_hosts(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            startup_timeout: std::time::Duration::from_secs(60),
+            database_path: Some(native_path.clone()),
+            product_home: Some(target.clone()),
+            unix_path: Some(directory.path().join("native.sock")),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    server.shutdown();
+    server.join().await.unwrap();
+    let native = Connection::open(&native_path).unwrap();
+    let record = |id: &str| -> Value {
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(record("deepseek"), imported_builtin);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

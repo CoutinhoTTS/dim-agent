@@ -328,6 +328,15 @@ pub fn convert_legacy_provider(
     let omitted = legacy_omitted_fields(source)?;
     let _: Option<String> = field(fields, "activeModelId")?;
     let source_kind: String = field(fields, "source")?;
+    let previous = match previous {
+        Some(previous) => Some(previous),
+        None if source_kind == "builtin" => Some(
+            bundled_seed_for(bundled, &source.id)
+                .map_err(|_| "Bundled catalog is unreadable".to_owned())?
+                .ok_or_else(|| "Builtin identity has no bundled definition".to_owned())?,
+        ),
+        None => None,
+    };
     let kind = match source_kind.as_str() {
         "custom" if bundled.provider(&source.id).is_some() => {
             return Err("Builtin identity cannot be imported as custom".into());

@@ -5254,11 +5254,25 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
             "anthropic",
             "https://api.anthropic.com",
             &json!({"type":"api_key","headerName":"x-api-key","prefix":""}),
-            None,
+            Some(&json!({"type":"apiKey","apiKey":"legacy-anthropic-key"})),
             None,
             &models,
             &json!({}),
-            0,
+            1,
+        );
+        insert_legacy_provider(
+            &db,
+            "deepseek",
+            "builtin",
+            "DeepSeek",
+            "openai-compatible",
+            "https://api.deepseek.com",
+            &bearer,
+            Some(&credential),
+            None,
+            &models,
+            &json!({}),
+            1,
         );
         let unknown = json!([{
             "modelId":"legacy-model","displayName":"legacy-model","status":"active",
@@ -5344,8 +5358,17 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
         item("legacy-metadata")["omitted"],
         json!(["metadata.preferenceWindow"])
     );
-    assert_eq!(item("legacy-builtin")["status"], "imported");
+    assert_eq!(item("legacy-builtin")["status"], "rejected");
+    assert_eq!(
+        item("legacy-builtin")["reason"],
+        "Builtin identity has no bundled definition"
+    );
     assert_eq!(item("anthropic")["status"], "imported");
+    assert_eq!(item("deepseek")["status"], "rejected");
+    assert_eq!(
+        item("deepseek")["reason"],
+        "Legacy builtin definition differs from the current definition"
+    );
     assert_eq!(item("openai")["status"], "rejected");
     // The bundled identity reports before the seeded target rule, so the
     // reason is the same as Migration's fresh target (migration_flow.rs).
@@ -5394,16 +5417,28 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
         without_display_name(&record("legacy-combined")),
         without_display_name(&clean)
     );
-    assert_eq!(record("legacy-builtin")["kind"], "builtin");
-    assert_eq!(record("legacy-builtin")["version"], 1);
+    assert!(
+        !native
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM providers WHERE provider_id='legacy-builtin')",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
     let converted = record("anthropic");
     assert_eq!(converted["kind"], "builtin");
     assert_eq!(converted["version"], 2);
     assert_eq!(converted["displayName"], "Anthropic");
     assert_eq!(converted["driverKind"], "anthropic");
+    assert_eq!(converted["enabled"], true);
+    assert_eq!(converted["credential"], "legacy-anthropic-key");
     let seeded = record("openai");
     assert_eq!(seeded["displayName"], "OpenAI");
     assert_eq!(seeded["version"], 1);
+    let untouched = record("deepseek");
+    assert_eq!(untouched["version"], 1);
+    assert_eq!(untouched["displayName"], "DeepSeek");
     assert_eq!(
         native
             .query_row("SELECT count(*) FROM provider_selections", [], |row| row
@@ -5431,7 +5466,7 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
             .iter()
             .filter(|item| item["status"] == "already_imported")
             .count(),
-        7
+        6
     );
     assert!(
         repeated
@@ -5439,7 +5474,44 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
             .filter(|item| item["status"] == "already_imported")
             .all(|item| item.get("omitted").is_none())
     );
+    let imported_builtin = record("anthropic");
+    drop(native);
     root.shutdown().await.unwrap();
+
+    let restarted = Ctx::root().unwrap();
+    restarted.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        restarted.plugin(ManagedProvidersPlugin),
+        restarted
+            .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(provider_part(ProviderPlugin::new)),
+        restarted.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let record = |id: &str| -> Value {
+        serde_json::from_str(
+            &native
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(record("anthropic"), imported_builtin);
+    assert_eq!(record("deepseek")["version"], 1);
+    restarted.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
 

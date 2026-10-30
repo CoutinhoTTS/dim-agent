@@ -29,8 +29,8 @@ use crate::{
     managed_oauth,
     managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
     model_catalog::{
-        BundledCatalog, MAX_MODEL_TOKENS, ModelCapabilities, ModelEdit, ModelEntry, ModelMetadata,
-        ModelSource, NewApiEndpoint, ProviderProjection,
+        BundledCatalog, CatalogProvider, MAX_MODEL_TOKENS, ModelCapabilities, ModelEdit,
+        ModelEntry, ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection,
     },
     storage::SqliteStorage,
 };
@@ -285,7 +285,8 @@ impl StaticProviderRecord {
     pub fn is_builtin(&self) -> bool {
         self.kind == StaticRecordKind::Builtin
     }
-    /// A seeded bundled record no import has replaced yet.
+    /// A builtin at version 1, the version seeding writes: no import or
+    /// reseed has replaced it.
     pub fn is_pristine_builtin(&self) -> bool {
         self.is_builtin() && self.version == 1
     }
@@ -887,75 +888,87 @@ fn static_catalog(
     }
 }
 
+fn seeded(provider: &CatalogProvider) -> bool {
+    matches!(provider.auth.kind.as_str(), "api_key" | "aws_bedrock")
+        || managed_authority(&provider.provider_id) != CredentialAuthority::Static
+}
+
+fn bundled_seed(provider: &CatalogProvider) -> Result<StaticProviderRecord, HostError> {
+    let authority = managed_authority(&provider.provider_id);
+    let endpoint_types = provider
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.raw.as_ref())
+        .map(|raw| raw.endpoint_type_by_model.clone())
+        .unwrap_or_default();
+    let fingerprint = serde_json::to_vec(&(
+        &provider.display_name,
+        &provider.driver_kind,
+        &provider.auth,
+        &provider.default_base_url,
+        &provider.models,
+        &endpoint_types,
+    ))
+    .map_err(failure)?;
+    Ok(StaticProviderRecord {
+        kind: StaticRecordKind::Builtin,
+        display_name: provider.display_name.clone(),
+        driver_kind: provider.driver_kind.clone(),
+        auth: if authority == CredentialAuthority::Static {
+            if provider.auth.kind == "aws_bedrock" {
+                StaticAuth::AwsBedrock
+            } else {
+                StaticAuth::ApiKey {
+                    header_name: provider
+                        .auth
+                        .header_name
+                        .clone()
+                        .unwrap_or_else(|| "Authorization".into()),
+                    prefix: provider.auth.prefix.clone(),
+                }
+            }
+        } else {
+            StaticAuth::Bearer
+        },
+        credential_authority: authority,
+        base_url: provider.default_base_url.clone().unwrap_or_default(),
+        network: ModelNetwork::default(),
+        headers: HashMap::new(),
+        credential: None,
+        models: provider.models.clone(),
+        remote_models: false,
+        endpoint_types,
+        routes: HashMap::new(),
+        bedrock_region: None,
+        model_config_overrides: Vec::new(),
+        user_models: Vec::new(),
+        model_preferences: BTreeMap::new(),
+        endpoint_overrides: BTreeMap::new(),
+        disabled_model_ids: Vec::new(),
+        enabled: authority != CredentialAuthority::Static,
+        definition_fingerprint: Some(format!("{:x}", Sha256::digest(fingerprint))),
+        version: 1,
+    })
+}
+
+fn bundled_seed_for(
+    bundled: &BundledCatalog,
+    provider_id: &str,
+) -> Result<Option<StaticProviderRecord>, HostError> {
+    bundled
+        .provider(provider_id)
+        .filter(|provider| seeded(provider))
+        .map(bundled_seed)
+        .transpose()
+}
+
 fn bundled_seeds(
     bundled: &BundledCatalog,
 ) -> Result<HashMap<String, StaticProviderRecord>, HostError> {
     bundled
         .providers()
-        .filter(|provider| {
-            matches!(provider.auth.kind.as_str(), "api_key" | "aws_bedrock")
-                || managed_authority(&provider.provider_id) != CredentialAuthority::Static
-        })
-        .map(|provider| {
-            let authority = managed_authority(&provider.provider_id);
-            let endpoint_types = provider
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.raw.as_ref())
-                .map(|raw| raw.endpoint_type_by_model.clone())
-                .unwrap_or_default();
-            let fingerprint = serde_json::to_vec(&(
-                &provider.display_name,
-                &provider.driver_kind,
-                &provider.auth,
-                &provider.default_base_url,
-                &provider.models,
-                &endpoint_types,
-            ))
-            .map_err(failure)?;
-            Ok((
-                provider.provider_id.clone(),
-                StaticProviderRecord {
-                    kind: StaticRecordKind::Builtin,
-                    display_name: provider.display_name.clone(),
-                    driver_kind: provider.driver_kind.clone(),
-                    auth: if authority == CredentialAuthority::Static {
-                        if provider.auth.kind == "aws_bedrock" {
-                            StaticAuth::AwsBedrock
-                        } else {
-                            StaticAuth::ApiKey {
-                                header_name: provider
-                                    .auth
-                                    .header_name
-                                    .clone()
-                                    .unwrap_or_else(|| "Authorization".into()),
-                                prefix: provider.auth.prefix.clone(),
-                            }
-                        }
-                    } else {
-                        StaticAuth::Bearer
-                    },
-                    credential_authority: authority,
-                    base_url: provider.default_base_url.clone().unwrap_or_default(),
-                    network: ModelNetwork::default(),
-                    headers: HashMap::new(),
-                    credential: None,
-                    models: provider.models.clone(),
-                    remote_models: false,
-                    endpoint_types,
-                    routes: HashMap::new(),
-                    bedrock_region: None,
-                    model_config_overrides: Vec::new(),
-                    user_models: Vec::new(),
-                    model_preferences: BTreeMap::new(),
-                    endpoint_overrides: BTreeMap::new(),
-                    disabled_model_ids: Vec::new(),
-                    enabled: authority != CredentialAuthority::Static,
-                    definition_fingerprint: Some(format!("{:x}", Sha256::digest(fingerprint))),
-                    version: 1,
-                },
-            ))
-        })
+        .filter(|provider| seeded(provider))
+        .map(|provider| Ok((provider.provider_id.clone(), bundled_seed(provider)?)))
         .collect()
 }
 
