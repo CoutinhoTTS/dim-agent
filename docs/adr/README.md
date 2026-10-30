@@ -20,6 +20,7 @@ original text.
 | [010 — The sandbox is opt-in](010-sandbox-opt-in.md) | Proposed | Extends 009; replaces the F5 default-on policy and the policy file |
 | [011 — Execution settings](011-execution-settings.md) | Proposed | Extends 010; ExecutionSettings owns the source and provides the host port |
 | [012 — Session grants](012-session-grants.md) | Proposed | Extends 014; persisted per-session grants in `session.grants`; supersedes 009 D3's stored-grant sentence |
+| [013 — Command output ownership](013-command-output-ownership.md) | Proposed | Extends 010; output and logs join the session-owned fact |
 | [015 — Sessions, branches and their content are plugins, not loader instances](015-scopes-are-plugins.md) | Proposed | Supersedes 004's mechanism for MCP connections; follows 006 D3 and D4 |
 
 Source baseline: [initial foundation parent](https://github.com/arcships/dim/commit/aaaffa5768e031d781abb73e45b1915b05dc2aa0).
