@@ -414,8 +414,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清除，按兩次離開 · 草稿為空時 Ctrl+D 離開"
         }
         "Fullscreen" => "全螢幕",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown 捲動 · Home/End 至頂端或底端 · Tab 選擇訊息，e 編輯，q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 捲動 · Home/End 至頂端或底端 (草稿為空時) · Tab 選擇訊息，e 編輯，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滾輪捲動 · 拖曳選取並複製 · 點擊連結開啟，點擊工具群組展開"

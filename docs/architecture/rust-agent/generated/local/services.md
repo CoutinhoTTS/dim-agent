@@ -88,6 +88,7 @@ flowchart LR
   p61 -->|"dim_agent_capabilities::context_preparation::ConfigurationPublisher@main"| p67
   p40 -->|"dim_agent_capabilities::host::PromptHost@session"| p67
   p40 -->|"dim_agent_capabilities::prompt::InitialPromptConfiguration@session"| p67
+  p39 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p67
   p55 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p67
   p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p67
   p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p67
@@ -119,6 +120,7 @@ flowchart LR
   p31 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p61
   p31 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p61
   p39 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p61
+  p55 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p61
   p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p61
   p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p61
   p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p61
