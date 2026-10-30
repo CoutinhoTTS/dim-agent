@@ -720,7 +720,7 @@ struct App {
     question_stash: Option<AskUserPrompt>,
     /// Requests already answered here: the projection keeps listing them
     /// until the daemon's confirmation arrives.
-    answered: HashSet<String>,
+    answered: HashSet<(String, String)>,
     notice: Option<(String, Instant)>,
     exit_armed_until: Option<Instant>,
     run_started: Option<Instant>,
@@ -1177,10 +1177,11 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let approval = snapshot
-            .approvals
-            .iter()
-            .find(|a| !self.answered.contains(&a.request_id));
+        let approval = snapshot.approvals.iter().find(|a| {
+            !self
+                .answered
+                .contains(&(a.branch_id.clone(), a.request_id.clone()))
+        });
         let question = snapshot.questions.first();
         match &self.prompt {
             Some(Prompt::Exit(_))
@@ -1199,21 +1200,25 @@ impl App {
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
-                if approval.is_some_and(|a| a.request_id == p.request_id) => {}
+                if approval.is_some_and(|a| {
+                    a.request_id == p.request_id && a.branch_id == p.branch_id
+                }) => {}
             Some(Prompt::Ask(p)) if question.is_some_and(|q| q == &p.call) => {}
             _ => {
                 if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
                     self.upgrade = Some(dialog);
                 }
                 self.prompt = if let Some(a) = approval {
-                    Some(Prompt::Permission(PermissionPrompt::new(
+                    let mut prompt = PermissionPrompt::new(
                         a.request_id.clone(),
                         a.branch_id.clone(),
                         a.reason.clone(),
                         a.tool_name.clone(),
                         a.tool_input.clone(),
                         a.always.is_some(),
-                    )))
+                    );
+                    prompt.set_member(a.member.clone());
+                    Some(Prompt::Permission(prompt))
                 } else {
                     question.map(|q| {
                         let held = self.question_stash.take().filter(|held| held.call == *q);
@@ -1221,6 +1226,11 @@ impl App {
                     })
                 };
             }
+        }
+        if let Some(Prompt::Permission(prompt)) = &mut self.prompt
+            && let Some(approval) = approval
+        {
+            prompt.set_member(approval.member.clone());
         }
         self.reopen_upgrade();
     }
@@ -1483,6 +1493,7 @@ impl App {
                                 &[("title", title)],
                             )),
                         }
+                        self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
                     }
                     self.approvals = mode;
                 }
@@ -1610,6 +1621,13 @@ impl App {
                     }
                     _ => self.notices.push(UpgradeDialog::outcome(&version, &result)),
                 }
+            }
+            Update::ApprovalPending {
+                branch_id,
+                request_id,
+            } => {
+                self.answered
+                    .remove(&(branch_id.clone(), request_id.clone()));
             }
             Update::Failed(message) => {
                 self.failure = Some(message);
@@ -2255,13 +2273,25 @@ impl App {
                     Err(error) => self.notices.push(error.to_string()),
                 }
             }
+            Effect::RetryApproval {
+                request_id,
+                branch_id,
+            } => {
+                self.answered
+                    .remove(&(branch_id.clone(), request_id.clone()));
+                self.host.send(Command::RetryApproval {
+                    request_id,
+                    branch_id,
+                });
+            }
             Effect::Approval {
                 request_id,
                 branch_id,
                 allow,
                 remember,
             } => {
-                self.answered.insert(request_id.clone());
+                self.answered
+                    .insert((branch_id.clone(), request_id.clone()));
                 self.host.send(Command::Approval {
                     request_id,
                     branch_id,
@@ -2339,12 +2369,20 @@ impl App {
                         snapshot
                             .approvals
                             .iter()
-                            .filter(|a| !self.answered.contains(&a.request_id))
+                            .filter(|a| {
+                                a.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW
+                                    && !self
+                                        .answered
+                                        .contains(&(a.branch_id.clone(), a.request_id.clone()))
+                            })
                             .map(|a| (a.request_id.clone(), a.branch_id.clone())),
                     );
                 }
                 for (request_id, branch_id) in pending {
-                    if !self.answered.insert(request_id.clone()) {
+                    if !self
+                        .answered
+                        .insert((branch_id.clone(), request_id.clone()))
+                    {
                         continue;
                     }
                     self.host.send(Command::Approval {
@@ -2558,7 +2596,11 @@ impl App {
         let pending = snapshot
             .approvals
             .iter()
-            .find(|a| !self.answered.contains(&a.request_id))
+            .find(|a| {
+                !self
+                    .answered
+                    .contains(&(a.branch_id.clone(), a.request_id.clone()))
+            })
             .map(|a| (a.request_id.clone(), Event::Permission(a.tool_name.clone())))
             .or_else(|| {
                 snapshot.questions.first().map(|q| {
@@ -3426,7 +3468,7 @@ impl App {
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self
                 .composer

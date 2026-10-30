@@ -4579,6 +4579,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     "exec_stop",
                     "glob",
                     "grep",
+                    "member_approval_allow",
+                    "member_approval_reject",
                     "plugin",
                     "read",
                     "recall",
@@ -5704,7 +5706,7 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
         let stop=wire.read("session.stop");
         finish.recv_timeout(PATIENCE).unwrap();
-        wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
+        wire.notice("approval.cancelled",json!({"sessionId":"session","branchId":"main","requestId":"approval"}));
         wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
         let next = wire.read("session.submit");
         assert_eq!(next["params"]["text"], "after interrupts");
@@ -7038,6 +7040,8 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.reply(&respond, json!({}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-2","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm run lint"}},"reason":"shell command"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-3","source":{"kind":"model"},"call":{"name":"write","input":{"path":"notes.md"}},"reason":"file write"}));
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"member","call":{"name":"member_approval_allow","input":{"approvalId":"member-route"}},"reason":"Member requires explicit review"}));
+        let detail = wire.read("session.collaboration.approval.get");
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         let mut allowed = Vec::new();
@@ -7048,6 +7052,16 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
             wire.reply(&respond, json!({}));
         }
         assert_eq!(allowed, ["req-2", "req-3"]);
+        wire.quiet(Duration::from_millis(200));
+        let original = json!({"state":"pending","approvalId":"member-route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"explicit member action"}},"reason":"Member process request"}});
+        wire.reply(&detail, original.clone());
+        let refresh = wire.read("session.collaboration.approval.get");
+        wire.reply(&refresh, original);
+        let response = wire.read("approval.respond");
+        assert_eq!(response["params"], json!({"sessionId":"session","branchId":"review","requestId":"member","decision":"allow"}));
+        wire.reply(&response, json!({}));
+        wire.quiet(Duration::from_millis(200));
+
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-9","sequence":10,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"both allowed"}]},"mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -7072,6 +7086,8 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.until("Confirm Full Access");
     terminal.write(b"y");
     terminal.until("Tool approvals: Full access");
+    terminal.until("explicit member action");
+    terminal.write(b"y");
     terminal.until("both allowed");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
@@ -8530,6 +8546,108 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         ["blank".to_owned()],
         "only the empty catalog the daemon can list is refreshed"
     );
+}
+
+#[test]
+fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (checked, wait_checked) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers"); wire.reply(&providers, json!([]));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Leader permission"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            assert_eq!(detail["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer"}));
+            wire.send(json!({"jsonrpc":"2.0","id":detail["id"],"error":{"code":-32000,"message":"detail service reloading"}}));
+            wire.quiet(Duration::from_millis(200));
+            checked.send(()).unwrap();
+            let detail = wire.read("session.collaboration.approval.get");
+            let original = json!({"state":"pending","approvalId":"route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"cargo test trusted action"}},"reason":"Member process request"}});
+            wire.reply(&detail, original.clone());
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.reply(&detail, original);
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"allow"}));
+            wire.reply(&answer, json!({}));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer2","call":{"name":"member_approval_allow","input":{"approvalId":"route2"}},"reason":"Member cancellation"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.reply(&detail, json!({"state":"pending","approvalId":"route2","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original2","call":{"name":"exec","input":{"command":"cancel this member action"}},"reason":"Member process request"}}));
+            wire.notice("session.notice", json!({"sessionId":"session","source":"Collaboration","kind":"memberApprovalEnded","data":{"branchId":"review","approvalId":"route2"}}));
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"]["requestId"], "outer2");
+            assert_eq!(answer["params"]["decision"], "deny");
+            wire.reply(&answer, json!({}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"model","delta":"member approvals finished"}}}));
+            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Cannot review member action");
+        terminal.write(b"y");
+        wait_checked.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"r");
+        terminal.until("member-session");
+        terminal.until("cargo test trusted action");
+        assert!(terminal.transcript.contains("Leader branch: review"));
+        assert!(!terminal.transcript.contains("Full access"));
+        assert!(!terminal.transcript.contains("Allow always"));
+        terminal.write(b"y");
+        terminal.until("member approvals finished");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn member_approval_without_the_detail_method_offers_only_rejection() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (checked, wait_checked) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]); wire.created();
+            let attach = wire.read("session.attach"); wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers"); wire.reply(&providers, json!([]));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Member action"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.send(json!({"jsonrpc":"2.0","id":detail["id"],"error":{"code":-32601,"message":"Unknown method"}}));
+            wire.quiet(Duration::from_millis(250)); checked.send(()).unwrap();
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"]["decision"], "deny"); wire.reply(&answer, json!({}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"unsupported approval rejected"}}}));
+            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("combination cannot review");
+        assert!(!terminal.transcript.contains("Retry"));
+        terminal.write(b"ry");
+        wait_checked.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"n");
+        terminal.until("unsupported approval rejected");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 /// `dimcode recording on` switches the `model-log` source and names the file.

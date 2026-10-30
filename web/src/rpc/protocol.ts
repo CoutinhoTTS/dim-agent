@@ -140,10 +140,20 @@ export type ApprovalRequest = {
   reason: string
 }
 
+export type MemberApprovalDescriptor = {
+  delegationId: string
+  member: { agentId: string; sessionId: string; branchId: string }
+  requestId: string
+  call: { name: string; input: Record<string, unknown> }
+  reason: string
+}
+export type MemberApprovalDetail = { state: "pending"; approvalId: string; descriptor: MemberApprovalDescriptor } | { state: "ended" }
+
 export type Notification =
   | { method: "session.event"; sessionId: string; branchId: string; event: SessionEvent }
   | { method: "session.state"; sessionId: string; branchId: string; running: boolean; stopping: boolean }
   | { method: "session.model.progress"; progress: ModelProgress }
   | { method: "approval.request"; request: ApprovalRequest }
-  | { method: "approval.cancelled"; sessionId: string; branchId: string; requestId: string }
+  | { method: "approval.cancelled" | "approval.resolved"; sessionId: string; branchId: string; requestId: string }
+  | { method: "memberApprovalEnded"; sessionId: string; branchId: string; approvalId: string }
   | { method: "session.closed"; sessionId: string; reason?: string }

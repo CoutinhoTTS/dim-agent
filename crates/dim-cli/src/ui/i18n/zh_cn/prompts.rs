@@ -34,6 +34,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Update failed: {error}" => "升级失败：{error}",
         "←→ move · Enter confirm · Esc close" => "←→ 移动 · Enter 确认 · Esc 关闭",
         "Permission required" => "需要授权",
+        "Subagent tool approval" => "子智能体工具审批",
+        "New members from main inherit this policy; existing members retain theirs." => {
+            "之后从 main 创建的成员继承此权限；已有成员保留自身权限。"
+        }
         "Allow once" => "允许一次",
         "Allow always" => "始终允许",
         "Reject" => "拒绝",

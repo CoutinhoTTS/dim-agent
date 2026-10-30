@@ -4265,11 +4265,11 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     gate.release.notify_one();
-    let outcome = tokio::time::timeout(Duration::from_secs(8), ender).await;
-    assert!(
-        outcome.is_ok(),
-        "the ancestor's end waited for the line's own turn"
-    );
+    tokio::time::timeout(Duration::from_secs(8), ender)
+        .await
+        .expect("the ancestor's end waited for the line's own turn")
+        .unwrap()
+        .unwrap();
     assert!(
         session.ended_head(&child).is_some(),
         "the line is recorded as ended"
@@ -4277,6 +4277,32 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     let events = local_events(&session, &child).await;
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Cancelled { .. }))));
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnd(data) => Some((event.sequence, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 1, "the committed end is not replaced");
+    let results: Vec<_> = local_events(&session, &ancestor)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) if data.branch == child => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [BranchEndedData {
+            branch: child,
+            end_event: ends[0].0,
+            source: ends[0].1.source.clone(),
+            ancestor: ends[0].1.ancestor.clone(),
+        }],
+        "cancellation preserves the line's committed end and records its result once"
+    );
     soon(agent.close()).await.unwrap();
 }
 
