@@ -60,6 +60,9 @@ async fn execution_settings_decide_the_next_process_boundary() {
             "{method} is not offered"
         );
     }
+    let caps = dim_agent_types::CatalogCapabilities::with_limits(32000, 2048);
+    let entry =
+        json!({"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps});
     let provider = json!({
         "providerId": "018ec73f-0000-7000-8000-000000000002",
         "displayName": "Fixture",
@@ -69,16 +72,7 @@ async fn execution_settings_decide_the_next_process_boundary() {
             "auth": {"type": "bearer"},
             "credential": {"action": "set", "value": "fixture-access"}
         },
-        "models": [{
-            "modelId": "alpha",
-            "displayName": "alpha",
-            "status": "active",
-            "capabilities": dim_agent_types::ModelCapabilities {
-                context_window: 32000,
-                max_output_tokens: 2048,
-                ..Default::default()
-            }
-        }],
+        "models": [entry],
         "enabled": true
     });
     assert_ok(&client.rpc("provider.create", provider).await);
