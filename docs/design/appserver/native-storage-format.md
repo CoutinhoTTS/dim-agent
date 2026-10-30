@@ -17,8 +17,7 @@ another ([S5a v15 decision](#s5a-v15-格式决定),
 [#555 v24 decision](#555-v24-格式决定), [#596 v25 decision](#596-v25-格式决定)).
 Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20, v21, v22
-or v23.
+migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
 valid in v25, and v16 request rows stay readable as written.
@@ -396,7 +395,7 @@ ProjectionCheckpoint = {
 
 [工具效果](../contracts/session-boundary.md#a6-tool-effects)与[压缩清单](../plugins/ContextCompaction.md#510-class-3a-the-digest)（#527）的格式决定：升级到 **v21**，从 v20 原地升级。
 
-- **状态**：v21 的字段合同保持；当前格式由 [#580 v22 格式决定](#580-v22-格式决定)、[#556 v23 格式决定](#556-v23-格式决定) 与 [#555 v24 格式决定](#555-v24-格式决定) 升到 v24。
+- **状态**：v21 的字段合同保持；当前格式由 [#580 v22 格式决定](#580-v22-格式决定)、[#556 v23 格式决定](#556-v23-格式决定) 与 [#555 v24 格式决定](#555-v24-格式决定) 升到 v24；[#596 v25 格式决定](#596-v25-格式决定) 删除冗余索引后为 v25。
 - **只增两处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
   - `ToolResult.effects`：`step/tool-result` 的 `result` 上一个可选的效果声明数组；不声明任何效果的工具不写它，此前写下的事件也都没有它。
   - 已完成 `context/compaction` 的 `digest_entries`：清单条目（按顺序）与 `dropped`；没有清单消息的压缩不写它。
