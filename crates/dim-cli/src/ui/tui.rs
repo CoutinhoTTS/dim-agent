@@ -2280,9 +2280,10 @@ impl App {
                             .approvals
                             .iter()
                             .filter(|a| {
-                                !self
-                                    .answered
-                                    .contains(&(a.branch_id.clone(), a.request_id.clone()))
+                                a.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW
+                                    && !self
+                                        .answered
+                                        .contains(&(a.branch_id.clone(), a.request_id.clone()))
                             })
                             .map(|a| (a.request_id.clone(), a.branch_id.clone())),
                     );

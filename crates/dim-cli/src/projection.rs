@@ -735,7 +735,9 @@ impl Projection {
         &mut self,
         branch_id: &str,
         request_id: &str,
-        detail: Option<Result<dim_agent_types::MemberApprovalDescriptor, String>>,
+        detail: Option<
+            Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+        >,
     ) {
         if let Some(approval) = self
             .approvals

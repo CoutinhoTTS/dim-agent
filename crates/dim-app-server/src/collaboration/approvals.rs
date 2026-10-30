@@ -176,8 +176,17 @@ impl CollaborationSession {
             };
             let this = self.clone();
             let branch_id = branch_id.clone();
+            let member = member.clone();
             tasks.spawn(async move {
-                if !this.interactive || !this.approval_tools || abort.is_cancelled() || this.approval_route(&branch_id, &route.id).is_none() || !route.pending() {
+                let live = !abort.is_cancelled() && this.approval_route(&branch_id, &route.id).is_some() && route.pending();
+                if live && (!this.interactive || !this.approval_tools) {
+                    let reason = if !this.interactive { "the leader Session is non-interactive" } else { "the leader's approval decision tools are not mounted" };
+                    if let Ok(sender) = this.sender() {
+                        let input = this.message_input(&sender, format!("Tool approval {} is denied because {reason}.", route.descriptor.request_id), InputMode::Steer);
+                        let _ = member.input(input, &route.descriptor.member.branch_id).await;
+                    }
+                }
+                if !live || !this.interactive || !this.approval_tools {
                     route.ready.send_replace(Some(Err("Member approval is unavailable".into())));
                     this.retire_approval(&branch_id, &route.id).await;
                     return;
@@ -475,7 +484,16 @@ impl CollaborationSession {
         if p.branch_id.is_empty() || p.request_id.is_empty() {
             return Err(RpcError::invalid("Approval identity must not be empty"));
         }
-        let branch = self.tree.get(&p.branch_id)?;
+        let branch = match self.tree.get(&p.branch_id) {
+            Ok(branch) => branch,
+            Err(
+                AgentError::UnknownBranch(_) | AgentError::BranchEnded(_) | AgentError::Closed(_),
+            ) => return Ok(MemberApprovalDetail::Ended),
+            Err(error) => return Err(error.into()),
+        };
+        if branch.is_closing() {
+            return Ok(MemberApprovalDetail::Ended);
+        }
         let approval = branch.service::<Approval>()?;
         let mut id = None;
         approval.replay(|request| {

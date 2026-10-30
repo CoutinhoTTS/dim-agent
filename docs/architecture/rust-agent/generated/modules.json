@@ -2829,6 +2829,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/member_approval.rs",
       "unexpandedMacros": [
+        "matches",
         "vec"
       ]
     },
@@ -15894,6 +15895,15 @@
     },
     {
       "from": "dim_app_server::collaboration::approvals",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::BranchEnded",
+        "path AgentError::Closed",
+        "path AgentError::UnknownBranch"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::approvals",
       "to": "dim_agent_runtime::scope",
       "references": [
         "path dim_agent_runtime::PublicService"
@@ -22811,6 +22821,13 @@
       ]
     },
     {
+      "from": "dim_cli::member_approval",
+      "to": "dim_client",
+      "references": [
+        "path crate::client::RpcError"
+      ]
+    },
+    {
       "from": "dim_cli::migration_command",
       "to": "dim_cli",
       "references": [
@@ -22988,6 +23005,13 @@
       "to": "dim_agent_types::member_approval",
       "references": [
         "path dim_agent_types::MemberApprovalDescriptor"
+      ]
+    },
+    {
+      "from": "dim_cli::model::view",
+      "to": "dim_cli::member_approval",
+      "references": [
+        "path crate::member_approval::DetailError"
       ]
     },
     {
@@ -23386,6 +23410,13 @@
       "references": [
         "path ToolResult",
         "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
+      "to": "dim_cli::member_approval",
+      "references": [
+        "path crate::member_approval::DetailError"
       ]
     },
     {
@@ -23792,6 +23823,9 @@
       "from": "dim_cli::session",
       "to": "dim_cli::member_approval",
       "references": [
+        "path crate::member_approval::DetailError",
+        "path crate::member_approval::DetailError::Failed",
+        "path crate::member_approval::DetailError::from",
         "path crate::member_approval::lines"
       ]
     },
@@ -23828,6 +23862,13 @@
         "path Questions",
         "path Questions::default",
         "use crate::question::line::Questions"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -23970,6 +24011,14 @@
       "to": "dim_cli::mcp_command",
       "references": [
         "path crate::mcp_command::set_enabled"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::member_approval",
+      "references": [
+        "path crate::member_approval::DetailError::Failed",
+        "path crate::member_approval::DetailError::from"
       ]
     },
     {
@@ -27098,6 +27147,7 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::member_approval",
       "references": [
+        "path crate::member_approval::DetailError",
         "path crate::member_approval::lines"
       ]
     },
@@ -29642,6 +29692,13 @@
       "references": [
         "path Palette",
         "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::member_approval",
+      "references": [
+        "path dim_agent_types::MEMBER_APPROVAL_ALLOW"
       ]
     },
     {

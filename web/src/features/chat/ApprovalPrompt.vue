@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from
 import { useI18n } from "vue-i18n"
 import { FilePen, Globe, Search, Terminal, Wrench } from "lucide-vue-next"
 import type { ApprovalDecision, ApprovalRequest, MemberApprovalDescriptor } from "../../rpc/protocol"
+import { RpcError } from "../../rpc/client"
 import { useChatStore } from "../../stores/chat"
 import { approvalKeyDecision } from "../lines/line-state"
 import { diffLines, resolveToolDisplay, type ToolRenderer } from "./tool-display"
@@ -20,6 +21,7 @@ const error = ref("")
 const isMember = computed(() => props.request.call.name === "member_approval_allow")
 const member = ref<MemberApprovalDescriptor>()
 const loading = ref(false)
+const retryable = ref(true)
 async function loadMember(): Promise<boolean> {
   loading.value = true
   error.value = ""
@@ -30,6 +32,7 @@ async function loadMember(): Promise<boolean> {
     return true
   } catch (cause) {
     member.value = undefined
+    retryable.value = !(cause instanceof RpcError && cause.code === -32601)
     error.value = cause instanceof Error ? cause.message : "Cannot review member action"
     return false
   } finally { loading.value = false }
@@ -145,7 +148,7 @@ watch(() => props.keyboard, () => props.keyboard === false ? detach() : attach()
     <p v-if="error" class="prompt-error" role="alert">{{ error }}</p>
     <div class="prompt-buttons">
       <button type="button" class="ui-button" data-size="md" data-variant="ghost" :disabled="pending" @click="respond('deny')">{{ t("prompt.reject") }}</button>
-      <button v-if="isMember && error" type="button" class="ui-button" :disabled="loading" @click="loadMember()">Retry</button>
+      <button v-if="isMember && error && retryable" type="button" class="ui-button" :disabled="loading" @click="loadMember()">Retry</button>
       <button type="button" class="ui-button" data-size="md" data-variant="primary" :disabled="pending || (isMember && (loading || !member))" @click="respond('allow')">{{ t("prompt.allowOnce") }}</button>
     </div>
   </article>

@@ -54,7 +54,12 @@ struct Approval {
     #[serde(skip)]
     once: bool,
     #[serde(skip)]
-    member: Option<std::result::Result<dim_agent_types::MemberApprovalDescriptor, String>>,
+    member: Option<
+        std::result::Result<
+            dim_agent_types::MemberApprovalDescriptor,
+            crate::member_approval::DetailError,
+        >,
+    >,
 }
 
 /// The rule an "always" answer adds before it answers allow (F2 §5.4).
@@ -575,8 +580,12 @@ async fn wait_turn(
                 }
                 display.record(&format!(
                     "[subagent approval] Leader branch: {}",
-                    approval.branch_id
+                    crate::sanitize::safe(&approval.branch_id)
                 ))?;
+                display.record(&crate::sanitize::safe(&format!(
+                    "Leader reason: {}",
+                    approval.reason
+                )))?;
                 match approval.member.as_ref().expect("member detail queried") {
                     Ok(descriptor) => {
                         for line in crate::member_approval::lines(descriptor) {
@@ -589,8 +598,10 @@ async fn wait_turn(
                 }
                 reader.prompt(if matches!(approval.member, Some(Ok(_))) {
                     "Allow this member action once? [y/N] "
-                } else {
+                } else if matches!(&approval.member, Some(Err(error)) if error.retryable()) {
                     "Retry details or deny? [r/N] "
+                } else {
+                    "Deny this member action? [N] "
                 })?;
                 prompted = true;
                 continue;
@@ -716,7 +727,7 @@ async fn wait_turn(
                         let mut approval = approvals.pop_front().ok_or("No approval awaits this answer")?;
                         let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
                         if approval.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW {
-                            if answer.as_deref() == Some("r") {
+                            if answer.as_deref() == Some("r") && matches!(&approval.member, Some(Err(error)) if error.retryable()) {
                                 approval.member = None; approvals.push_front(approval); prompted = false; continue;
                             }
                             if allow {
@@ -944,10 +955,16 @@ async fn wait_turn(
                 }) else {
                     continue;
                 };
-                let detail = result.map_err(|error| error.to_string()).and_then(|value| {
-                    serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value)
-                        .map_err(|error| format!("Invalid member approval detail: {error}"))
-                });
+                let detail = result
+                    .map_err(crate::member_approval::DetailError::from)
+                    .and_then(|value| {
+                        serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value)
+                            .map_err(|error| {
+                                crate::member_approval::DetailError::Failed(format!(
+                                    "Invalid member approval detail: {error}"
+                                ))
+                            })
+                    });
                 let mut decision = None;
                 match detail {
                     Ok(dim_agent_types::MemberApprovalDetail::Pending { descriptor, .. }) => {

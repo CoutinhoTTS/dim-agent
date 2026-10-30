@@ -1570,7 +1570,7 @@ impl Worker {
             && projection_id == self.projection_id
     }
 
-    /// Reports a failed command as a notice; the session itself keeps going.
+    /// Reports an error as a notice and returns true only on success.
     fn report_failure<T>(&self, result: crate::Result<T>) -> bool {
         match result {
             Ok(_) => true,
@@ -1806,11 +1806,12 @@ impl Worker {
         request_id: &str,
         allow: bool,
     ) -> crate::Result<()> {
-        if self.approval_details.values().any(|read| {
+        if let Some(read) = self.approval_details.values_mut().find(|read| {
             read.projection_id == self.projection_id
                 && read.branch_id == branch_id
                 && read.request_id == request_id
         }) {
+            read.allow |= allow;
             return Ok(());
         }
         let id = self
@@ -1849,16 +1850,15 @@ impl Worker {
             return Ok(());
         }
         let detail = result
-            .map_err(|error| {
-                if error.code == -32601 {
-                    "The server cannot provide the original member action".into()
-                } else {
-                    error.to_string()
-                }
-            })
+            .map_err(crate::member_approval::DetailError::from)
             .and_then(|value| {
-                serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value)
-                    .map_err(|error| format!("Invalid member approval detail: {error}"))
+                serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value).map_err(
+                    |error| {
+                        crate::member_approval::DetailError::Failed(format!(
+                            "Invalid member approval detail: {error}"
+                        ))
+                    },
+                )
             });
         match detail {
             Ok(dim_agent_types::MemberApprovalDetail::Pending { descriptor, .. }) => {

@@ -798,6 +798,7 @@ fn member_approval_in_line_mode_allows_rejection_during_loading_and_rechecks_an_
             terminal.until("Loading member action");
             terminal.write(b"n\n");
         } else {
+            terminal.until("Leader reason: Leader permission");
             terminal.until("cargo test line action");
             terminal.until("Allow this member action once?");
             terminal.write(b"y\n");

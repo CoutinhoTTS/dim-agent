@@ -22,3 +22,36 @@ pub fn lines(descriptor: &MemberApprovalDescriptor) -> Vec<String> {
         .map(|line| crate::sanitize::safe(&line))
         .collect()
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DetailError {
+    Unsupported,
+    Failed(String),
+}
+
+impl DetailError {
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
+impl From<crate::client::RpcError> for DetailError {
+    fn from(error: crate::client::RpcError) -> Self {
+        if error.code == -32601 {
+            Self::Unsupported
+        } else {
+            Self::Failed(error.to_string())
+        }
+    }
+}
+
+impl std::fmt::Display for DetailError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported => f.write_str(
+                "This client/server combination cannot review the original member action",
+            ),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}

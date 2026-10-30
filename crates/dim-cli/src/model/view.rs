@@ -199,7 +199,9 @@ pub enum LineState {
 /// A tool call that asks the user for permission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalView {
-    pub member: Option<Result<dim_agent_types::MemberApprovalDescriptor, String>>,
+    pub member: Option<
+        Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+    >,
     pub request_id: String,
     pub branch_id: String,
     pub reason: String,

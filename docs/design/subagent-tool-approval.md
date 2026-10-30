@@ -228,7 +228,7 @@ cannot reopen it. It uses the [existing notice contract](appserver/session-notic
 | Restart/fork | Old executions and route ids confer no authority. Native Approval performs its own abandoned-request recovery; copied leader facts do not recreate a team or pending decision |
 | Leader detaches / client disconnects | Detach is not Session close. Pending requests remain answerable on another attached client; attach replays leader pending Approval requests and clients query details again |
 | Leader closes while detached member work continues | Existing detached-work contract remains. Pending asks are denied; member-side Collaboration observation denies later asks with no live assignment instead of forwarding to a dead leader |
-| Non-interactive leader (`interactive: false`) | Deny native member asks with explanatory content, without creating a driving leader approval input |
+| Non-interactive leader (`interactive: false`) | Before denying, send an ordinary leader message to the original member branch explaining that the leader is non-interactive; create no driving leader approval input |
 | Headless `dimcode exec` needs leader approval | Existing client denies it, stops/settles and exits 3; cancellation settles the member ask. No unattended allow fallback |
 
 A definitively failed input submission denies the original ask; an uncertain reply is looked up

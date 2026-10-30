@@ -317,7 +317,9 @@ impl PermissionAction {
 
 #[derive(Debug, Clone)]
 pub struct PermissionPrompt {
-    member: Option<Result<dim_agent_types::MemberApprovalDescriptor, String>>,
+    member: Option<
+        Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+    >,
     offset: Cell<usize>,
     pub request_id: String,
     pub branch_id: String,
@@ -364,7 +366,9 @@ impl PermissionPrompt {
 
     pub fn set_member(
         &mut self,
-        member: Option<Result<dim_agent_types::MemberApprovalDescriptor, String>>,
+        member: Option<
+            Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+        >,
     ) {
         if self.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW {
             return;
@@ -372,7 +376,10 @@ impl PermissionPrompt {
         self.member = member;
         self.actions = match &self.member {
             Some(Ok(_)) => vec![PermissionAction::AllowOnce, PermissionAction::Reject],
-            Some(Err(_)) => vec![PermissionAction::Retry, PermissionAction::Reject],
+            Some(Err(error)) if error.retryable() => {
+                vec![PermissionAction::Retry, PermissionAction::Reject]
+            }
+            Some(Err(_)) => vec![PermissionAction::Reject],
             None => vec![PermissionAction::Reject],
         };
         self.selected = self.selected.min(self.actions.len() - 1);
@@ -418,7 +425,13 @@ impl PermissionPrompt {
             None,
             &p.border,
             Some(t("Subagent tool approval")),
-            Some("Up/Down scroll · r retry · y allow once · n reject"),
+            Some(if matches!(&self.member, Some(Ok(_))) {
+                "Up/Down scroll · y allow once · n reject"
+            } else if self.actions.contains(&PermissionAction::Retry) {
+                "Up/Down scroll · r retry · n reject"
+            } else {
+                "Up/Down scroll · n reject"
+            }),
         )
     }
 
@@ -505,7 +518,7 @@ impl PermissionPrompt {
                     self.offset.set(self.offset.get().saturating_sub(8));
                     return Effect::None;
                 }
-                KeyCode::Char('r') => {
+                KeyCode::Char('r') if self.actions.contains(&PermissionAction::Retry) => {
                     return Effect::RetryApproval {
                         request_id: self.request_id.clone(),
                         branch_id: self.branch_id.clone(),
