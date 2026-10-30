@@ -365,12 +365,15 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
 
-旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected。明确映射连接、默认、
-用户覆盖/新增、禁用、偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。
-非空静态用量设置、未支持 retryConfig/capabilityDefaults 或其他未映射字段拒绝并保留源，
-按以下冻结映射处理。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
-草稿、模板、用量回复、已解析凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、
-释放租约并结算已接受调用后移除服务。
+旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected；冻结映射由
+Provider 以单次纯转换持有：输入旧行字段与既有目标记录，输出原生记录与省略的源字段，
+或拒绝原因。provider.import_legacy 与 Migration 的 Provider 步骤都调用它；Migration
+保留自己的快照、回执、账本与报告。明确映射连接、默认、用户覆盖/新增、禁用、偏好及
+scoped 选择。activeModelId 仅作提示，不覆盖已有选择。无原生对应物的字段丢弃并报告为
+省略，该项照常导入：非空静态用量设置、retryConfig、capabilityDefaults，以及映射之外的
+metadata 键。未知描述字段与启用/禁用列表冲突会改变模型本身，仍拒绝该项。不覆盖已有
+目标、不复制 OAuth grants、不因重复导入复活删除项。草稿、模板、用量回复、已解析凭据
+不持久化。资源取得即登记清理；关准入、取消自有 I/O、释放租约并结算已接受调用后移除服务。
 
 冻结的旧库结构通过 `modelsSource` 区分模型来源：
 
@@ -384,8 +387,17 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
 | `provider_selections` | 沿既有目标校验和导入账本导入明确的 scoped 选择 |
 
-不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值拒绝该项。
-其他 metadata 键、未知描述字段同样拒绝，源文件字节不变。
+旧行 source 为 builtin 时映射到该 ID 的内置项：没有目标时导入创建该内置项，已有目标
+必须是未改动的播种记录。custom 行的 ID 属于捆绑目录时拒绝。两个入口用同一解析器解析
+并校验既有目标记录，校验不通过则拒绝该项。
+
+provider_selections 同样共用一次转换：工作区作用域是已存在目录的规范路径，所选模型
+必须在 Provider 目录中对该记录可用。目录已不存在的选择按该原因拒绝，它本就无法匹配。
+provider.import_legacy 的回复在已导入项上增加 omitted（转换丢弃的源字段名）；该字段为
+增量，协议 v3 不变。
+
+不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置，也不报告。
+源文件字节不变。
 
 ## 7. 验收与交付
 
