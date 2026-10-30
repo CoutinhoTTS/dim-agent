@@ -529,6 +529,9 @@ pub fn is_sensitive_key(name: &str) -> bool {
         || n == "set-cookie"
         || n == "key"
         || squashed.ends_with("token")
+        || squashed.ends_with("key")
+        || squashed.ends_with("auth")
+        || squashed.contains("secret")
         || n.contains("authorization")
         || squashed.contains("apikey")
 }
@@ -927,8 +930,10 @@ fn writer_loop(
                 try_finalize(&mut w, &mut pending, &call_id, &write_error);
             }
             RecordEvent::TransportClosed { call_id } => {
-                entry_or_init(&mut pending, &call_id).transport_closed = true;
-                try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                if let Some(rec) = pending.get_mut(&call_id) {
+                    rec.transport_closed = true;
+                    try_finalize(&mut w, &mut pending, &call_id, &write_error);
+                }
             }
             RecordEvent::Outcome { call_id, outcome } => {
                 entry_or_init(&mut pending, &call_id).outcome = outcome;
