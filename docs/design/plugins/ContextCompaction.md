@@ -553,7 +553,9 @@ through a constant of its own.
    the compaction cannot shrink exceed the bound on their own), it is the latest valid boundary
    that keeps something, and under budget recovery it may also be the boundary that replaces
    everything (#169). If there is still none, or nothing lies before it: `Skipped {reason:
-   "nothing_to_compact"}`, with no model call.
+   "nothing_to_compact"}`, with no model call. The automatic threshold trigger settles the
+   same skip, with the same reason and no call, when the cut the policy selects cannot shrink
+   the request at the planned size (§5.3 step 2).
 2. **Summary.** It summarizes the previous replacement's strategy and pinned parts (from
    `input.checkpoint`, located by `replacement_parts`; §4.3) plus the entries placed by events
    before `retain_from`, and nothing earlier: the fixed context begins at the previous cut, so
@@ -677,7 +679,19 @@ How the summary is produced:
    fit, no cut exists after that event, so those entries stay and the result carries no mark:
    every part the compaction cannot shrink fits.
 2. **Start.** It appends `context/compaction-start` with the caller's ids, `command`,
-   `through`, `trigger` and `strategy.name()`.
+   `through`, `trigger` and `strategy.name()`. The automatic threshold trigger stops here,
+   before the strategy is called, when its cut cannot make the request smaller at the
+   replacement's planned size: when the entries the selected cut replaces — less the pinned
+   inputs the replacement carries instead of dropping them (§5.9), plus the previous
+   replacement's strategy part, which the next summary reads and replaces — remove no more
+   than `replacement_size`, it appends `context/compaction` with `skipped`
+   (`nothing_to_compact`) and `modelCallCount` 0, as a strategy with no cut does. Step 4's
+   acceptance can only reject such a result, so the summarizer call it would spend is not
+   made; a skip only defers, because regrowth (§5.6) gates the next attempt and budget
+   recovery still covers a request that does not fit. A manual compaction and budget
+   recovery always call the strategy: `replacement_size` is the planned upper bound, so a
+   smaller actual summary can still shrink the request a manual step was asked to compact,
+   and recovery has no alternative.
 3. **Strategy and composition.** It calls `strategy.compact` with `retain_limit`, the legal
    `cuts` and `trigger`. If it is cancelled before the strategy returns, it appends the
    `cancelled` result for the start and returns `Cancelled`; a `Failed` outcome is written as a

@@ -353,7 +353,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 
 `compact(input, cancel)`：
 
-1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。`0.5 × B` 规则落在界限里：没有尾部放得下时，界限就是替换全部的那个边界（§5.3）。没有界限时（压缩无法压缩的部分本身就超过上限），取最晚的、仍保留内容的合法边界；预算恢复时也可以取替换全部的边界（#169）。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
+1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。`0.5 × B` 规则落在界限里：没有尾部放得下时，界限就是替换全部的那个边界（§5.3）。没有界限时（压缩无法压缩的部分本身就超过上限），取最晚的、仍保留内容的合法边界；预算恢复时也可以取替换全部的边界（#169）。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。自动阈值触发时，所选切点按计划大小无法让请求变小时，ContextPolicy 以同样的跳过收尾：同样的原因，同样不调模型（§5.3 第 2 步）。
 2. **摘要。** 对上一份替换内容中属于策略的部分和钉住的部分（取自 `input.checkpoint`，按 `replacement_parts` 定位；§4.3）加上由 `retain_from` 之前的事件放置的条目做摘要，更早的不读：固定上下文从上一个切点开始，所以一次压缩的读取量和成本与会话跑了多久无关。上一份的清单消息不送给摘要器：它的条目作为数据逐次滚动（§5.10）。
 3. **结果。** 返回 `Completed {retain_from, replacement: [summary_message(summary)], strategy: "summary", diagnostics}`。现有的 `summary_message` 包装会把文本标为数据并转义；它只在这里施加一次，随记录保存。那份 `replacement` 是记录的替换内容中属于策略的部分；ContextPolicy 组合其余部分（§4.3）。
 
@@ -390,7 +390,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
    候选切点的最后一个落在上下文最后的事件上。该事件没有放置条目时，这个切点替换全部，保留的尾部为零；只要该切点上的不可压缩部分在 `0.5 × B` 以内它就放得下，所以在没有保留内容的切点放得下时，它就是界限：压缩不留任何原样尾部，请求只剩不可压缩部分，被替换的内容仍可通过 Recall 读回。这改变了 #169 只允许预算恢复替换全部的做法。
 
    连这个切点都放不下时不设界限。此时取最晚的、仍保留内容的切点（预算恢复时可以替换全部），有两种情况在上限之上完成。不可压缩部分本身就超过 `0.5 × B` 时，已完成结果带上空间不足标记（第 5 步）。上下文最后的事件放置的条目放不下时，该事件之后没有切点，那些条目只能留下，而压缩无法压缩的每个部分都放得下，所以结果不带标记。
-2. **开始。** 追加 `context/compaction-start`，带调用方的 id、`command`、`through`、`trigger` 和 `strategy.name()`。
+2. **开始。** 追加 `context/compaction-start`，带调用方的 id、`command`、`through`、`trigger` 和 `strategy.name()`。自动阈值触发时，切点按计划大小无法让请求变小的压缩就在这里收尾，不调用策略：切点替换的条目——减去替换内容改为携带、而不是丢掉的钉住输入（§5.9），加上下一份摘要读取并替换的上一次替换内容的策略部分——挤出的 token 不超过 `replacement_size` 时，追加与没有切点的策略相同的跳过：`skipped`（`nothing_to_compact`）、`modelCallCount` 为 0。第 4 步的验收只会否掉这种结果，所以它要花的那次摘要请求不再发出；跳过只是推迟，再增长规则（§5.6）把住下一次尝试，放不下的请求仍由预算恢复兜底。手动压缩和预算恢复始终调用策略：`replacement_size` 是计划上限，更小的实际摘要仍能让用户要求压缩的请求变小；恢复则别无选择。
 3. **策略与组合。** 调用 `strategy.compact`，传入 `retain_limit`、合法切点 `cuts` 和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`；`Failed` 结果写成带诊断的 `failed` 结果。随后组合记录里的替换内容——策略的消息、有条目时的清单（§5.10）、钉住的输入（§5.9），按这个顺序——并记录 `replacement_parts`（§4.3）。
 4. **验收与唯一一次重新规划。** 对任何策略都检查：
    - `retain_from` 是固定上下文中的一个事件，并通过基于事件的合法性规则（§4.3）；
