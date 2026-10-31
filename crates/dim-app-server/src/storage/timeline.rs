@@ -2099,6 +2099,27 @@ fn policy_rows(
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(error)?,
         );
+        let mut consumed = connection
+            .prepare(
+                "SELECT sequence, last_sequence FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 AND sequence<=?4 \
+                 AND kind='input/message' AND event_id IN (\
+                   SELECT json_extract(body, '$.record.event.data.input_id') \
+                   FROM timeline_events WHERE session_id=?1 AND branch_id=?2 \
+                   AND sequence>=?3 AND sequence<=?4 AND kind='input/consumed') \
+                 ORDER BY sequence",
+            )
+            .map_err(error)?;
+        rows.extend(
+            consumed
+                .query_map(
+                    params![key.session_id, key.branch_id, turn, through as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(error)?,
+        );
     }
     Ok(rows)
 }

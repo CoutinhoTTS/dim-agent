@@ -140,22 +140,34 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 不保留投影 cache，也不把整段历史装进 `ContextHistory.events`。每次 prepare 按批读取事件，
 边读边投影，投影之外的批立即释放。没有跨 prepare 的派生状态，也没有缓存失效规则。
 
-- **读取**：`TimelineStore` 增加按 ancestry/range 分页的读取，`Timeline` 暴露流式入口；
-  批大小按事件数或字节上限（例如 256 条 / 1 MiB）。读取顺序与 `context_from` 一致。
-- **投影**：`HistoryRenderer` 的续接 API 接受 `ProjectionCheckpointState` 和一批事件，
-  返回新的 entries/state；现有 `replay(events, initial)` 已接受
-  `Option<&ProjectionCheckpointState>`（[history.rs:291](../../crates/dim-agent-capabilities/src/history.rs#L291)），
-  新增 crate 内 batch 入口，不改变事件的语义。
+- **读取**：`Timeline::stored_local` 按范围直接读 store，`HistoryRenderer::rendered_stream`
+  以 256 条为默认批大小顺序读取；不经过 hot cache，不保留事件体。
+- **投影**：`project_batch` 接受上一批的 `ProjectionCheckpointState`，返回新的 entries/state；
+  `rendered_stream` 合并 entries，事件只活到当前批。
+- **压缩**：批次内遇到 completed compaction 时按 `retain_from` 裁剪已累计的 history；
+  cut 在更早批次时按 `PolicyOrder` 在累计 history 上裁剪；找不到 cut 或数据损坏时回退全量。
 - **结果**：一次 prepare 的峰值 = 一批事件 + 投影，不随历史长度增长；每次 prepare 仍读全量，
-  CPU/IO 不承诺下降。事件只活到当前批，投影保留到请求构造完成。
-- **不保留状态**：没有 cache、position、失效规则；首次、重载、压缩、快照仍走现有全量路径。
-- **业务一致**：同一前缀产生同样的 entries/config/prompt；前缀校验比较流式投影；
-  压缩、权限、事件格式不变。
-- **调用方**：Loop 构造请求、`ContextPreparation` 校验、policy/usage 消费同一个投影结果；
-  需要完整 `ContextHistory` 的 policy/compaction 路径保留全量回退。
-- **与快照的关系**：持久快照和 `context_with_checkpoint` 保持原样；流式读取不依赖快照。
+  CPU/IO 不承诺下降。
 
-这一步把每步峰值从 O(历史) 降到 O(批大小 + 投影)，是关键修复。
+#### policy 不再消费整份 ContextHistory
+
+policy 需要的事实和窗口单独查询，不经过 `ContextHistory.events`：
+
+- `PolicyFacts`：`context/configured`、`context/compaction`、`model/usage` 及其 `model/call`、
+  当前 turn 的输入、预算；SQLite 直接选行，默认 store 用同一选择。
+- `PolicyOrder`：只含 id、branch、sequence、turn start、compaction start；合并 ancestry，
+  用于合法 cut 枚举和 `regrown`。
+- `PolicyWindow`：锚点、当前 turn 输入、`input/consumed`、上一次 cut 之后的 tool-result；
+  合并 ancestry，用于 pinning 和 digest。
+- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order、
+  streamed checkpoint 和可选的 full context；`full` 只用于自定义 renderer/损坏数据回退。
+- `compact_step` 的 snapshot 优先使用 streamed checkpoint；没有 checkpoint 时按
+  `stream_checkpoint` 二次流式重放到 cut；自定义 checkpoint builder 仍走完整路径。
+
+#### 与快照的关系
+
+持久快照和 `context_with_checkpoint` 保持原样；流式读取不依赖快照。
+`stream_checkpoint` 只在需要写新 snapshot 时重放到 cut，不把完整 history 留在内存。
 
 ### P4 冷重建分段（并入 P3）
 
@@ -173,8 +185,9 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 | 单会话常驻 | 50 万 token 会话自身 ≤10MB live（消息、投影、索引；不含 provider 调用 body） |
 | 调用瞬间 | 会话自身 ≤10MB；provider body/response ≤25MB |
 | 进程 | 一个会话 ≤50MB RSS；两个会话 ≤80MB；空闲 ≤30MB |
+| 最终结果 | `context-replay` peak 8.35MB；真实会话 prepare peak 11.53MB；单会话 RSS 50.8MB，双会话 54.6MB，空 daemon 29.7MB |
+| 产品验证 | `dimcode app-server` 加载真实 SQLite session，mock model 跑一轮后测 RSS；allocator 只作为 backstop |
 | 堆高水位 | P0 验证最大会话的堆高水位是否随步数增长；不是断言，是测量 |
-| 产品验证 | 同一负载重启后观察 RSS 与 `malloc_info` 的 in-use/free 比例 |
 | 兼容 | `cargo test --workspace --locked`；`xtask check` 不需要 `graph` 变更 |
 
 不设 CI 字节阈值；数值写进 PR。
@@ -184,8 +197,9 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 - 无事件、存储、协议或配置变化；`ProjectionCheckpoint`/`ProjectionCheckpointState` 的序列化不变。
 - `ModelRequest` 序列化不变；冻结的事件 fixture 不动；压缩 `replacement` 仍是 `Message`，
   `ContextBaselineEntry.message` 改为 `Arc<Message>`，事件 JSON 不变。
-- 改动限于 capabilities 的内部类型，以及 runtime 新增的批量读取入口。
-- P3 不改变事件、快照、压缩契约；现有全量读取路径保留，供压缩/policy 回退。
+- 改动限于 capabilities 的内部类型，以及 runtime 新增的批量读取、policy facts/order/window 查询。
+- P3 不改变事件、快照、压缩契约；自定义 renderer、祖先范围和损坏数据保留全量回退。
+- `PolicyContext` 是 crate 内部输入，不新增事件、服务、配置项或持久状态。
 - `Timeline` 的快照和压缩契约不变；读取新增分页入口，现有读取语义不变。
 
 ## 8. 风险与备选
@@ -194,7 +208,10 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 | --- | --- |
 | P3 的一致性 | 流式投影必须与全量 `rendered_context` 在固定前缀上一致；读取/解码/校验失败回退全量；没有跨 prepare 的缓存状态 |
 | P3 的内存 | 峰值 = 一批事件 + 投影；不保留历史；每次 prepare 仍读全量，CPU/IO 不降 |
-| P3 的读取 | 新增分页接口，批大小按事件数/字节调优；读取顺序、ancestry、checkpoint 语义必须保持 |
+| policy facts | SQL 选择必须与默认 store 相同；按 ancestry 合并；`input/consumed` 引用的输入即使写在 turn 之前也要选中 |
+| policy 窗口 | cut 必须落在窗口内；跨 batch cut 在累计 history 上裁剪；找不到或损坏时回退全量 |
+| restore | `Dispatcher::follow` 仍为每个 consumer 读完整本地历史，restore peak 约 19.9MB；这是后续分页 replay 的工作，不影响 prepare |
+| 代码页 | 产品二进制 `.text` 约 60MB；空 daemon RSS 29.7MB，单会话 50.8MB；代码页是 RSS 下限，不是 allocator 能解决 |
 | P1 的分配 | `HistoryEntry.message` 和 `ContextBaselineEntry.message` 共享 Arc；baseline 重复从 24.09 MB 降到共享 |
 | Provider body | aimux 实测 946 条消息/1.9 MB → 10.3 MB 峰值；不是 100 MB 大头。私有 provider 只提供租约/连接，执行走 aimux |
 | 分配器兜底 | `malloc_trim` 实测 78.7 → 49.1 MB RSS；成本随 heap，需低频/阈值触发，不能每轮调 |
@@ -215,13 +232,14 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 - **rule 7**（插件只通过公开事件和服务交互）：满足。流式读取由 `HistoryRenderer`/capability 使用
   `Timeline` 的公开分页入口，不读其他能力的状态；投影不是新的 owner 状态。
 - **rule 8**（基础设施默认不变）：**不满足**。P3 需要 `TimelineStore`/`Timeline` 的分页读取，
-  属于 runtime 机制变更，按五项格式提出：
+  policy 需要 facts/order/window 查询，属于 runtime 机制变更，按五项格式提出：
   - 被挡住的规则：模型上下文必须能从已提交事件重建，同时一次 prepare 的峰值不能是整段历史。
   - 考虑过的机制：内存投影 cache（引入失效状态）、持久投影快照（跨进程但仍需整段解码）、
     一次性全量读取（峰值 45 MB）。
-  - 通用能力：`TimelineStore` 的分页/游标读取 + `HistoryRenderer` 的批量续接；不是业务能力。
-  - 对序号、批次、中断、重载的影响：只读已提交事件；不新增批次或事件；中断丢弃当前批；
-    重载仍走全量路径。
+  - 通用能力：`TimelineStore` 的分页读取、policy facts/order/window 查询，以及
+    `HistoryRenderer` 的批量续接；不是业务能力。
+  - 对序号、批次、中断、重载的影响：只读已发布事件；不新增批次或事件；中断丢弃当前批；
+    重载仍能重建同样的投影。
   - owner 与 issue：runtime owner，#710。
 - **rule 9**（只有后续决定要用的事实才进 Timeline）：不适用，流式投影是内存态，不写事件。
 - **ADR 002 D1–D5**：branch 作用域；不新增 wiring 模块、不新增配置项、不改生命周期；投影只由
@@ -235,4 +253,4 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 - P3 复用现有 `ProjectionCheckpointState`/`replay`，不新增持久状态、缓存层或失效规则；
   新增的只有 runtime 的分页读取入口。
 - 不新增通用内存统计接口；测量只存在于 opt-in example。
-- 不为了压低 RSS 而改压缩阈值或加定时清理。
+- 不为了压低 RSS 而改压缩阈值；allocator 只在 RSS 阈值/低频 idle 后 trim，作为 backstop。

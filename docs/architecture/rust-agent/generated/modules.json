@@ -13759,8 +13759,13 @@
       "references": [
         "path AgentEvent",
         "path ContextCompactionResult::Completed",
+        "path EventKind",
         "path EventKind::ContextCompaction",
         "path EventKind::ContextCompactionStart",
+        "path EventKind::InputConsumed",
+        "path EventKind::ModelCall",
+        "path EventKind::ModelUsage",
+        "path EventKind::TurnStart",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind"

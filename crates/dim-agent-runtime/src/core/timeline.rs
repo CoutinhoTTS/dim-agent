@@ -770,11 +770,30 @@ impl Timeline {
     /// The policy-relevant events at `through`, filtered by the store.
     #[service(skip)]
     pub async fn policy_facts(&self, through: u64, turn_id: &str) -> Result<PolicyFacts> {
-        let through = self.through(Some(through))?;
-        self.0
-            .store
-            .policy_facts(&self.0.key, through, turn_id)
-            .await
+        let published = self.sequence();
+        if through > published {
+            return Err(AgentError::InvalidInput(format!(
+                "future timeline sequence {through}"
+            )));
+        }
+        let mut events = Vec::new();
+        for (branch, cut) in self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
+        {
+            if cut == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch,
+            };
+            events.extend(self.0.store.policy_facts(&key, cut, turn_id).await?.events);
+        }
+        Ok(PolicyFacts { through, events })
     }
     /// The event order for legal compaction cuts.
     #[service(skip)]

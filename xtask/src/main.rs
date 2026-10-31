@@ -63,12 +63,12 @@ async fn agent() -> dim_agent_runtime::Result<MinimalHost> {
     dim_agent_capabilities::defaults::install(&mut builder);
     MinimalHost::start(&builder).await
 }
-fn agent_with_store(store: Arc<dyn TimelineStore>) -> Agent {
+async fn agent_with_store(store: Arc<dyn TimelineStore>) -> dim_agent_runtime::Result<MinimalHost> {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder.timeline_store(store);
-    builder.build()
+    MinimalHost::start(&builder).await
 }
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -461,11 +461,13 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let chunk = "x".repeat(CHARS_PER_TURN);
     let baseline = allocation::live();
     let rss_baseline = rss_kb();
-    let database =
-        std::env::temp_dir().join(format!("dim-context-replay-{}.sqlite", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("dim-context-replay-{}", std::process::id()));
+    std::fs::create_dir_all(&directory)?;
+    let database = directory.join("timeline.sqlite");
     let db = dim_app_server::storage::SqliteStorage::open(database.clone())?;
     let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
-    let agent = agent_with_store(store);
+    let store_handle = store.clone();
+    let agent = agent_with_store(store).await?;
     let live_agent = allocation::live();
     let rss_agent = rss_kb();
     let session = agent.create_session(SessionConfig::default()).await?;
@@ -512,11 +514,14 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     agent.close().await?;
     let live_after_agent = allocation::live();
     let rss_after_agent = rss_kb();
-    drop(db);
-    let _ = std::fs::remove_file(&database);
+    store_handle.close().await?;
+    db.close().await?;
+    std::fs::remove_dir_all(&directory)?;
     let report = json!({
         "modelHost": "mock",
         "store": "sqlite",
+        "platform": std::env::consts::OS,
+        "debugAssertions": cfg!(debug_assertions),
         "turns": TURNS,
         "charsPerTurn": CHARS_PER_TURN,
         "approxInputTokens": TURNS * CHARS_PER_TURN * 2 / 4,
@@ -558,7 +563,7 @@ async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Erro
     };
     let db = dim_app_server::storage::SqliteStorage::open(database)?;
     let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
-    let agent = agent_with_store(store);
+    let agent = agent_with_store(store).await?;
     let session = agent.restore_session(session_id.clone()).await?;
     let through = session.sequence("main")?;
     let mut phases = Vec::new();
@@ -664,7 +669,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let rss_baseline = rss_kb();
     let db = dim_app_server::storage::SqliteStorage::open(database)?;
     let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
-    let agent = agent_with_store(store);
+    let agent = agent_with_store(store).await?;
     let live_agent = allocation::live();
     let rss_agent = rss_kb();
     let start = Instant::now();
@@ -710,6 +715,8 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let report = json!({
         "modelHost": "mock",
         "store": "sqlite",
+        "platform": std::env::consts::OS,
+        "debugAssertions": cfg!(debug_assertions),
         "sessionId": session_id,
         "restoreMs": restore_ms,
         "trimResult": trim_result,
@@ -746,7 +753,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn rss_kb() -> u64 {
+fn rss_kb() -> Option<u64> {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|status| {
@@ -755,7 +762,6 @@ fn rss_kb() -> u64 {
                     .and_then(|value| value.trim().trim_end_matches(" kB").parse().ok())
             })
         })
-        .unwrap_or(0)
 }
 
 fn instances(

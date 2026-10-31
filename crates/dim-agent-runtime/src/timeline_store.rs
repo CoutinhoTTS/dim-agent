@@ -202,19 +202,85 @@ pub trait TimelineStore: Send + Sync + 'static {
         &'a self,
         key: &'a TimelineKey,
         through: u64,
-        _turn_id: &'a str,
+        turn_id: &'a str,
     ) -> BoxFuture<'a, Result<PolicyFacts>> {
         Box::pin(async move {
             if through == 0 {
                 return Ok(PolicyFacts::default());
             }
             let records = self.read(key, 1..=through).await?;
+            let latest = |predicate: &dyn Fn(&EventKind) -> bool| {
+                records
+                    .iter()
+                    .rev()
+                    .find(|record| predicate(&record.event.kind))
+                    .map(|record| record.event.sequence)
+            };
+            let configured = latest(&|kind| matches!(kind, EventKind::ContextConfigured(_)));
+            let compaction = latest(&|kind| matches!(kind, EventKind::ContextCompaction(_)));
+            let usage = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ModelUsage(data) => {
+                        Some((record.event.sequence, data.request_id.clone()))
+                    }
+                    _ => None,
+                });
+            let call = usage.as_ref().and_then(|(_, request_id)| {
+                records
+                    .iter()
+                    .rev()
+                    .find_map(|record| match &record.event.kind {
+                        EventKind::ModelCall(data) if data.request_id == *request_id => {
+                            Some(record.event.sequence)
+                        }
+                        _ => None,
+                    })
+            });
+            let turn = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::TurnStart(data) if data.turn_id == turn_id => {
+                        Some(record.event.sequence)
+                    }
+                    _ => None,
+                });
+            let consumed: Vec<String> = turn.map_or_else(Vec::new, |turn| {
+                records
+                    .iter()
+                    .filter(|record| record.event.sequence >= turn)
+                    .filter_map(|record| match &record.event.kind {
+                        EventKind::InputConsumed(data) => Some(data.input_id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            });
             Ok(PolicyFacts {
                 through,
                 events: records
                     .into_iter()
+                    .filter(|record| {
+                        let sequence = record.event.sequence;
+                        Some(sequence) == configured
+                            || Some(sequence) == compaction
+                            || usage.as_ref().is_some_and(|(usage, _)| *usage == sequence)
+                            || Some(sequence) == call
+                            || Some(sequence) == turn
+                            || turn.is_some_and(|turn| {
+                                sequence >= turn
+                                    && matches!(
+                                        record.event.kind,
+                                        EventKind::TurnStart(_)
+                                            | EventKind::InputMessage(_)
+                                            | EventKind::InputConsumed(_)
+                                            | EventKind::ContextBudget(_)
+                                    )
+                            })
+                            || consumed.iter().any(|id| record.event.id == *id)
+                    })
                     .map(|record| record.event)
-                    .filter(|event| policy_event(event.as_ref()))
                     .collect(),
             })
         })
