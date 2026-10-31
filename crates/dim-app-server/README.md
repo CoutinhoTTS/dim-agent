@@ -43,11 +43,14 @@ settings; model preferences requiring capability declarations are rejected rathe
 
 For protocol v3 `session.submit`, `error.data.appError` values `invalid_params`,
 `session_invalid_input`, `session_closed`, `session_build_failed`,
-`service_reloading` and `unknown_method` guarantee that this request did not
-commit an input. They identify parameter/admission, Session acquisition or
-pre-commit input rejection; the server must not return this set after accepting
-the input. This guarantee is specific to `session.submit`, not a retry policy
-for other methods or an assertion that a rejected request will succeed unchanged.
+`service_reloading`, `unknown_method` and `input_blocked` guarantee that this
+request did not commit an input. They identify parameter/admission, Session
+acquisition or pre-commit input rejection; the server must not return this set
+after accepting the input. `input_blocked` is a submit check's block (Hooks
+A.6.2): its message is the check's own, nothing was written, and a retry runs
+the checks again. This guarantee is specific to `session.submit`, not a retry
+policy for other methods or an assertion that a rejected request will succeed
+unchanged.
 
 After commit, failure to confirm publication remains uncertain even on a live
 connection: `submission_unknown`, an opaque `-32603` publication/storage error,
