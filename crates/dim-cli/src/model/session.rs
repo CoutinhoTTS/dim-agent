@@ -9,6 +9,10 @@
 
 use crate::model::shell::ShellResult;
 use crate::model::view::{MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot};
+use crate::wire::Configuration;
+
+/// The Dim account provider, signed in with `/login`.
+pub const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -541,11 +545,9 @@ pub enum CompactReply {
 
 #[allow(dead_code)]
 pub enum Update {
-    /// The session exists; `provider` / `model` label the status line.
-    Ready {
-        provider: String,
-        model: String,
-    },
+    /// The session's adopted configuration: `provider / model`, and the
+    /// reasoning effort it sends when it carries one, label the status line.
+    Ready(Configuration),
     /// What the session's model offers, once its catalog entry is known:
     /// image input, and the priority/default service tiers of `/fast`.
     ModelFeatures {
@@ -627,6 +629,8 @@ pub enum Update {
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.
     Usage(Result<Usage, String>),
+    /// The Dim account usage requested by `/usage`.
+    UsageReport(Result<Usage, String>),
     /// The main branch's context use; none while the session's usage is
     /// unknown.
     Context(Option<ContextReading>),

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::model::session::{
-    Command, CompactReply, ContextReading, DraftPart, SessionPort, SwitchKind, Update,
+    Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -24,7 +24,7 @@ use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
 use crate::ui::models_panel::ModelsPanel;
-use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
@@ -62,6 +62,7 @@ use crate::ui::transcript::tool_group::{
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
+use crate::wire::Configuration;
 
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
@@ -85,6 +86,7 @@ const REWRITE_LOG: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
+const GIT_BRANCH_POLL: Duration = Duration::from_secs(10);
 /// One blank column of margin before every document row (L's content pad).
 const MARGIN: usize = 1;
 /// Revision of the transcript the planner is tracking; a session switch bumps it.
@@ -310,8 +312,8 @@ fn run_terminal(
             app.host.shutdown();
             return code;
         }
-        if full.is_some() && terminal.mouse() != app.mouse && terminal.set_mouse(app.mouse).is_err()
-        {
+        let mouse = app.mouse && !app.native_selection();
+        if full.is_some() && terminal.mouse() != mouse && terminal.set_mouse(mouse).is_err() {
             let code = terminal.lost();
             app.host.shutdown();
             return code;
@@ -600,11 +602,7 @@ fn run_terminal(
                     } else {
                         screen = Screen::new(terminal.size(), synchronized);
                     }
-                    app.fullscreen = entering;
-                    if entering {
-                        app.redraw_window();
-                    }
-                    app.request_reflow();
+                    app.set_fullscreen(entering);
                     dirty = true;
                 }
                 Outcome::Suspend => {
@@ -682,6 +680,45 @@ enum Outcome {
     Exit(i32),
 }
 
+/// The adopted model as the label draws it: `provider / model`, and the
+/// reasoning effort the configuration sends when it carries one.
+struct ModelLabel {
+    model: String,
+    effort: Option<String>,
+}
+
+impl ModelLabel {
+    fn new(configuration: &Configuration) -> Self {
+        Self {
+            model: format!("{} / {}", configuration.provider_id, configuration.model_id),
+            effort: configuration
+                .model_preferences
+                .as_ref()
+                .and_then(|preferences| preferences.reasoning_effort.clone()),
+        }
+    }
+
+    fn full(&self) -> String {
+        match &self.effort {
+            Some(effort) => format!("{} · {effort}", self.model),
+            None => self.model.clone(),
+        }
+    }
+
+    /// The first shape of the label that `fits`, whole before whole minus the
+    /// effort; `None` when even the model alone does not fit.
+    fn fitted(&self, fits: impl Fn(&str) -> bool) -> Option<String> {
+        let full = self.full();
+        if fits(&full) {
+            return Some(full);
+        }
+        if self.effort.is_some() && fits(&self.model) {
+            return Some(self.model.clone());
+        }
+        None
+    }
+}
+
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -697,12 +734,11 @@ struct App {
     /// call's row id.
     tail_groups: Vec<(usize, String)>,
     notices: Vec<String>,
-    /// Multi-line status blocks to commit (reports), with their tone.
-    reports: Vec<(String, Tone)>,
+    reports: Vec<Block>,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
-    /// `provider / model` once the session exists.
-    label: Option<String>,
+    /// The adopted model and its reasoning effort, once the session exists.
+    label: Option<ModelLabel>,
     failure: Option<String>,
     /// The App Server asked this interface to leave: one more frame shows
     /// why, then the interface exits and the Session carries on.
@@ -749,6 +785,9 @@ struct App {
     /// Committed groups (history ids) whose delegation cards still change:
     /// fullscreen redraws them from the snapshot.
     card_blocks: Vec<usize>,
+    /// Committed user rows (history ids) the model had not consumed yet:
+    /// fullscreen redraws them once it does.
+    message_blocks: Vec<usize>,
     /// The second their running time was last drawn for.
     card_second: u64,
     session_id: String,
@@ -819,8 +858,10 @@ struct App {
     /// from the palette through the command's argument until it runs
     /// ([`Self::command_entry_open`]).
     command_entry: bool,
-    /// The workspace's git branch for the banner, read once.
+    /// The workspace's git branch for the banner and composer.
     branch: String,
+    git_head: Option<PathBuf>,
+    git_checked: Instant,
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
     /// A Ctrl+V clipboard read in progress.
@@ -926,6 +967,8 @@ impl App {
             .is_none_or(|v| v != false);
         let mut composer = Composer::new(past);
         composer.set_root(PathBuf::from(&cwd_key));
+        let git_head = git_head(&cwd_key);
+        let branch = git_head.as_deref().and_then(git_branch);
         Self {
             host,
             composer,
@@ -961,6 +1004,7 @@ impl App {
             rewrites: 0,
             rewrite_log: Default::default(),
             card_blocks: Vec::new(),
+            message_blocks: Vec::new(),
             card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
@@ -991,7 +1035,9 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch: git_branch().unwrap_or_else(|| t("Not available").into()),
+            branch: branch.unwrap_or_else(|| t("Not available").into()),
+            git_head,
+            git_checked: Instant::now(),
             shell: None,
             clipboard: None,
             image_read: None,
@@ -1056,6 +1102,14 @@ impl App {
     /// No prompt, panel or palette owns the keys.
     fn keyboard_free(&self) -> bool {
         self.prompt.is_none() && !self.composer.palette_open() && !self.composer.mention_open()
+    }
+
+    fn native_selection(&self) -> bool {
+        match &self.prompt {
+            Some(Prompt::Login(view)) => view.native_selection(),
+            Some(Prompt::Providers(panel)) => panel.native_selection(),
+            _ => false,
+        }
     }
 
     /// Command entry is open over a pending question that is not being
@@ -1252,6 +1306,15 @@ impl App {
         self.sync_task_details();
         let now = Instant::now();
         let mut changed = false;
+        if now.duration_since(self.git_checked) >= GIT_BRANCH_POLL {
+            self.git_checked = now;
+            if let Some(branch) = self.git_head.as_deref().and_then(git_branch)
+                && branch != self.branch
+            {
+                self.branch = branch;
+                changed = true;
+            }
+        }
         if let Some(Prompt::Tasks(panel)) = &mut self.prompt
             && let Some(snapshot) = &self.snapshot
             && panel.tick(snapshot)
@@ -1331,7 +1394,7 @@ impl App {
     }
 
     /// Queued inputs, oldest first: submitted while a turn was already
-    /// running, not yet consumed.
+    /// running, without their `input/applied` yet.
     fn queued(&self) -> Vec<(String, String)> {
         self.snapshot
             .as_ref()
@@ -1347,8 +1410,8 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Ready { provider, model } => {
-                self.label = Some(format!("{provider} / {model}"));
+            Update::Ready(configuration) => {
+                self.label = Some(ModelLabel::new(&configuration));
             }
             Update::ModelFeatures {
                 images,
@@ -1463,15 +1526,17 @@ impl App {
                 }
             }
             Update::Toast(text) => self.set_notice(text),
-            Update::Report { text, warning } => self
-                .reports
-                .push((text, if warning { Tone::Warning } else { Tone::Muted })),
+            Update::Report { text, warning } => self.reports.push(Block::Status {
+                text,
+                tone: if warning { Tone::Warning } else { Tone::Muted },
+            }),
             Update::Web { enabled, open, url } => {
                 if enabled && open {
                     match url {
-                        Some(url) => self
-                            .reports
-                            .push((format!("Web interface on: {url}"), Tone::Muted)),
+                        Some(url) => self.reports.push(Block::Status {
+                            text: format!("Web interface on: {url}"),
+                            tone: Tone::Muted,
+                        }),
                         None => self.notices.push("Web interface is on".to_owned()),
                     }
                 } else if open {
@@ -1493,7 +1558,9 @@ impl App {
                                 &[("title", title)],
                             )),
                         }
-                        self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        if !self.session_id.is_empty() {
+                            self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        }
                     }
                     self.approvals = mode;
                 }
@@ -1533,6 +1600,17 @@ impl App {
                     view.set_usage(usage);
                 }
             }
+            Update::UsageReport(usage) => self.reports.push(match usage {
+                Ok(usage) => Block::AccountUsage(usage),
+                Err(reason) => Block::Status {
+                    text: format!(
+                        "{} · {}",
+                        t("DimAgent OAuth"),
+                        tf("Usage: {reason}", &[("reason", &reason)])
+                    ),
+                    tone: Tone::Warning,
+                },
+            }),
             Update::Context(context) => self.context = context,
             Update::Compacted(reply) => {
                 let (text, tone) = match reply {
@@ -1554,7 +1632,7 @@ impl App {
                         Tone::Warning,
                     ),
                 };
-                self.reports.push((text, tone));
+                self.reports.push(Block::Status { text, tone });
             }
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
@@ -2482,7 +2560,6 @@ impl App {
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
             Effect::OauthBack => {}
             Effect::OauthPaste(url) => self.host.send(Command::OauthPaste(url)),
-            Effect::Print(text) => self.reports.push((text, Tone::Muted)),
             Effect::Connected(provider_id) => {
                 self.set_notice(tf("Connected {provider}", &[("provider", &provider_id)]));
                 if provider_id == DIM_OAUTH_ID {
@@ -2498,8 +2575,12 @@ impl App {
             Effect::Logout(provider_id) => self.host.send(Command::Logout(provider_id)),
             Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),
             Effect::OpenUrl(url) => {
-                crate::login::open_browser(&url);
-                self.set_notice(tf("Opened {url}", &[("url", &url)]));
+                let opened = crate::browser::open(&url);
+                self.set_notice(if opened {
+                    t("Opened link")
+                } else {
+                    t("The browser could not be opened. Open the link manually, then return here.")
+                });
             }
             Effect::ClearModelPreferences {
                 provider_id,
@@ -2681,7 +2762,7 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
-            model: self.label.clone(),
+            model: self.label.as_ref().map(ModelLabel::full),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -2955,7 +3036,10 @@ impl App {
             }
             "keys" => {
                 let rows = crate::ui::keys::report(self.fullscreen, self.mouse);
-                self.reports.push((rows.join("\n"), Tone::Muted));
+                self.reports.push(Block::Status {
+                    text: rows.join("\n"),
+                    tone: Tone::Muted,
+                });
                 Outcome::Continue
             }
             "settings" => {
@@ -3063,6 +3147,7 @@ impl App {
                 frame.commits.push(text);
             }
         }
+        self.refresh_messages();
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
             if let Block::ToolGroup(group) = &source
@@ -3070,6 +3155,11 @@ impl App {
                 && self.fullscreen
             {
                 self.card_blocks.push(self.dropped + self.history.len());
+            }
+            if let Block::User { pending: true, .. } = &source
+                && self.fullscreen
+            {
+                self.message_blocks.push(self.dropped + self.history.len());
             }
             match placement {
                 Placement::New => self.record(source),
@@ -3131,16 +3221,10 @@ impl App {
             self.record(Block::Status { text: notice, tone });
             frame.commits.push(text);
         }
-        for (text, tone) in std::mem::take(&mut self.reports) {
-            let color = match tone {
-                Tone::Muted => &self.palette.muted,
-                Tone::Warning => &self.palette.warning,
-                Tone::Danger => &self.palette.danger,
-            };
-            let rows = gutter_text(STATUS_MARK, &text, width, color);
-            let chunk_text = chunk(&rows);
-            self.record(Block::Status { text, tone });
-            frame.commits.push(chunk_text);
+        for block in std::mem::take(&mut self.reports) {
+            let text = chunk(&render_block(&block, width, &self.palette, &self.markdown));
+            self.record(block);
+            frame.commits.push(text);
         }
         for run in std::mem::take(&mut self.shell_runs) {
             let block = Block::Shell(run);
@@ -3331,7 +3415,7 @@ impl App {
             rows.resize(FULLSCREEN_COMPOSER_ROWS, String::new());
         }
         let box_top = live.len();
-        let muted = |label: &str| fg(label, &p.muted);
+        let activity = |label: &str| fg(label, &p.activity);
         let shell_title = shell.map(|shell| match shell {
             Shell::Recorded => t("! shell mode"),
             Shell::Private => t("!! shell mode · not sent to the model"),
@@ -3339,7 +3423,7 @@ impl App {
         let tinted = |label: &str| fg(label, shell_color);
         let top_status = status.as_deref().filter(|_| !self.fullscreen);
         let title = match (top_status, shell_title) {
-            (Some(text), _) => Some((text, &muted as &dyn Fn(&str) -> String)),
+            (Some(text), _) => Some((text, &activity as &dyn Fn(&str) -> String)),
             (None, Some(title)) => Some((title, &tinted as &dyn Fn(&str) -> String)),
             (None, None) => None,
         };
@@ -3353,8 +3437,14 @@ impl App {
         if self.fullscreen {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
+            let room = outer.saturating_sub(2);
+            let left = title.as_ref().map_or(0, |(text, _)| width_of(text) + 3);
+            let model = self
+                .label
+                .as_ref()
+                .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
+                .map(|label| fg(&label, &p.highlight));
             let title = title.map(|(text, label)| label(text));
-            let model = self.label.as_deref().map(|label| fg(label, &p.highlight));
             let docked = self.dock_status(status.as_deref());
             let place = fg(
                 &fit_place(self.place_label(), docked.as_deref(), outer),
@@ -3387,31 +3477,49 @@ impl App {
         if !replaced {
             live.extend(composer_box);
         }
-        let outer = cols.saturating_sub(2 + MARGIN).max(4);
-        let margin = " ".repeat(MARGIN);
+        let native_selection = self.native_selection();
+        let panel_margin = if native_selection { 0 } else { MARGIN };
+        let outer = if native_selection {
+            cols
+        } else {
+            cols.saturating_sub(2 + MARGIN).max(4)
+        };
+        let margin = " ".repeat(panel_margin);
         let composer_rows = if replaced { 0 } else { rows.len() + 2 };
-        let panel_rows = (size.1 as usize)
-            .saturating_sub(composer_rows + 1 + 4 + 1)
-            .min(18);
-        let panel_cursor = |width: usize| match &self.prompt {
+        let panel_rows = if native_selection {
+            size.1 as usize
+        } else {
+            (size.1 as usize)
+                .saturating_sub(composer_rows + 1 + 4 + 1)
+                .min(18)
+        };
+        let panel_cursor = |width: usize, height: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
+            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Ask(_)) if command_entry => None,
             Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
         };
         if self.fullscreen {
-            let budget = (size.1 as usize)
-                .saturating_sub(composer_rows + 2 + 2)
-                .min(OVERLAY_MAX_ROWS);
-            let list_width = cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH);
-            let caret = panel_cursor(list_width)
+            let budget = if native_selection {
+                size.1 as usize
+            } else {
+                (size.1 as usize)
+                    .saturating_sub(composer_rows + 2 + 2)
+                    .min(OVERLAY_MAX_ROWS)
+            };
+            let list_width = if native_selection {
+                cols
+            } else {
+                cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH)
+            };
+            let caret = panel_cursor(list_width, budget)
                 .flatten()
                 .map(|(row, column)| (row as u16, column as u16));
             let list = |rows: Vec<String>| {
@@ -3442,7 +3550,7 @@ impl App {
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, p)),
+                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -3465,7 +3573,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
-            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -3492,13 +3600,13 @@ impl App {
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
         );
-        frame.cursor = match panel_cursor(outer) {
+        frame.cursor = match panel_cursor(outer, panel_rows) {
             None => (!replaced).then_some(composer_cursor),
             Some(_) if self.fullscreen && !matches!(self.prompt, Some(Prompt::Ask(_))) => None,
             Some(caret) => caret.map(|(row, column)| {
                 (
                     (panel_top + row) as u16,
-                    (MARGIN + column).min(cols.saturating_sub(1)) as u16,
+                    (panel_margin + column).min(cols.saturating_sub(1)) as u16,
                 )
             }),
         };
@@ -3551,12 +3659,13 @@ impl App {
             Text(String),
             Thinking(String),
             Tool(usize),
-            Compaction(usize),
+            Row(usize),
         }
         let mut live_text: Vec<TextBlock> = Vec::new();
         let mut live_items: Vec<LiveItem> = Vec::new();
         let mut settled_assistant: Vec<TextBlock> = Vec::new();
-        let mut settled_ids: Vec<String> = Vec::new();
+        let mut settled: Vec<(usize, String)> = Vec::new();
+        let mut pending_messages: Vec<(usize, String)> = Vec::new();
         let mut held = false;
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < floor || held {
@@ -3590,7 +3699,11 @@ impl App {
                         .as_ref()
                         .is_some_and(|c| c.state == CompactionState::Running) =>
                 {
-                    live_items.push(LiveItem::Compaction(index));
+                    live_items.push(LiveItem::Row(index));
+                }
+                RowKind::UserMessage if row.pending && !self.fullscreen => {
+                    live_items.push(LiveItem::Row(index));
+                    pending_messages.push((index, row.row_id.clone()));
                 }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
@@ -3606,12 +3719,27 @@ impl App {
                             id: &row.row_id,
                             text,
                         });
-                        settled_ids.push(row.row_id.clone());
+                        settled.push((index, row.row_id.clone()));
                     }
                 },
-                _ => settled_ids.push(row.row_id.clone()),
+                _ => settled.push((index, row.row_id.clone())),
             }
         }
+
+        // The live tail is drawn after everything committed, so it can hold
+        // only the newest rows. A pending message with a settled row after it
+        // is committed in Timeline order instead, in its final colour: a
+        // committed row cannot take the hint back (timeline UI §4.8).
+        let mut forced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        if let Some(last) = settled.last().map(|(index, _)| *index) {
+            for (index, id) in pending_messages.iter().filter(|(index, _)| *index < last) {
+                live_items.retain(|item| !matches!(item, LiveItem::Row(at) if at == index));
+                settled.push((*index, id.clone()));
+                forced.insert(*index);
+            }
+        }
+        settled.sort_by_key(|(index, _)| *index);
+        let settled_ids: Vec<String> = settled.into_iter().map(|(_, id)| id).collect();
 
         let markdown = &self.markdown;
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
@@ -3658,7 +3786,12 @@ impl App {
                 }
                 (RowKind::AssistantMessage, Some(batch)) => streamed(batch),
                 _ => {
-                    let block = project_row(&snapshot.rows, index, detail_of(index));
+                    let mut block = project_row(&snapshot.rows, index, detail_of(index));
+                    if forced.contains(&index)
+                        && let Block::User { pending, .. } = &mut block
+                    {
+                        *pending = false;
+                    }
                     let lines = render_block(&block, width, p, markdown);
                     if lines.is_empty() {
                         return (String::new(), None);
@@ -3761,7 +3894,7 @@ impl App {
                         RUNNING_MARK,
                     )
                 }
-                LiveItem::Compaction(index) => render_block(
+                LiveItem::Row(index) => render_block(
                     &project_row(&snapshot.rows, *index, detail_of(*index)),
                     width,
                     p,
@@ -3794,6 +3927,7 @@ impl App {
         self.line_draft = None;
         self.fork_confirm = None;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3845,6 +3979,7 @@ impl App {
             self.composer.set_draft(&text);
         }
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3951,6 +4086,7 @@ impl App {
         self.history_request = None;
         self.load_more = true;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         self.dropped += self.history.len();
         self.history.clear();
         self.stream_block = None;
@@ -4015,6 +4151,89 @@ impl App {
         if self.rewrite_log.len() > REWRITE_LOG {
             self.rewrite_log.pop_front();
         }
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        if on {
+            self.redraw_window();
+        } else {
+            self.settle_committed_messages();
+        }
+        self.request_reflow();
+    }
+
+    /// Scrollback cannot recolour a row it printed, so a pending message
+    /// committed in fullscreen is settled before the history goes there
+    /// (timeline UI §4.8).
+    fn settle_committed_messages(&mut self) {
+        for index in std::mem::take(&mut self.message_blocks) {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            let Some(Block::User {
+                text, display, cut, ..
+            }) = self.history.get(at).cloned()
+            else {
+                continue;
+            };
+            self.history[at] = Block::User {
+                text,
+                display,
+                cut,
+                pending: false,
+            };
+        }
+    }
+
+    /// Fullscreen redraws a committed user row the model has consumed since;
+    /// scrollback keeps what it printed (timeline UI §4.8).
+    fn refresh_messages(&mut self) {
+        if !self.fullscreen || self.message_blocks.is_empty() {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let settled: Vec<usize> = self
+            .message_blocks
+            .iter()
+            .copied()
+            .filter(|index| {
+                let Some(Block::User {
+                    text,
+                    cut,
+                    pending: true,
+                    ..
+                }) = index
+                    .checked_sub(self.dropped)
+                    .and_then(|at| self.history.get(at))
+                else {
+                    return false;
+                };
+                snapshot.rows.iter().any(|row| {
+                    row.kind == RowKind::UserMessage
+                        && row.cut == *cut
+                        && row.text == *text
+                        && !row.pending
+                })
+            })
+            .collect();
+        for index in settled {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            if let Some(Block::User { pending, .. }) = self.history.get_mut(at) {
+                *pending = false;
+                self.mark_rewritten(index);
+            }
+        }
+        self.message_blocks.retain(|index| {
+            index
+                .checked_sub(self.dropped)
+                .and_then(|at| self.history.get(at))
+                .is_some_and(|block| matches!(block, Block::User { pending: true, .. }))
+        });
     }
 
     /// Fullscreen redraws committed delegation cards as their facts and
@@ -4208,7 +4427,7 @@ impl App {
         let p = &self.palette;
         let mut parts: Vec<String> = Vec::new();
         if let Some(run) = run {
-            parts.push(fg(run, &p.muted));
+            parts.push(fg(run, &p.activity));
         }
         if let Some(slot) = self.slot() {
             let color = if self.notice.is_some() {
@@ -4249,12 +4468,16 @@ impl App {
             left.push_str(&slot);
         }
         let total = cols.saturating_sub(2);
-        let line = match &self.label {
-            Some(label) if width_of(&left) + 2 + width_of(label) <= total => {
-                let gap = total - width_of(&left) - width_of(label);
+        let label = self
+            .label
+            .as_ref()
+            .and_then(|label| label.fitted(|text| width_of(&left) + 2 + width_of(text) <= total));
+        let line = match label {
+            Some(label) => {
+                let gap = total - width_of(&left) - width_of(&label);
                 format!("{left}{}{label}", " ".repeat(gap))
             }
-            _ => clip(&left, total).0,
+            None => clip(&left, total).0,
         };
         if let Some((text, _)) = &self.notice
             && let Some(at) = line.find(text.as_str())
@@ -4533,14 +4756,17 @@ fn pad_block(rows: &[String]) -> String {
 }
 
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::version::current();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| t("Not available").into());
     let branch = branch.to_owned();
     let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
     let greeting = [
-        tf("Welcome to DIM {version}!", &[("version", version)]),
+        tf(
+            "Welcome to DIM {version}!",
+            &[("version", version.as_str())],
+        ),
         t("Type / for commands · Ctrl+O for the palette").to_owned(),
     ];
     let header = startup_header(&greeting, body_width);
@@ -4715,17 +4941,31 @@ fn workspace_label(branch: &str) -> String {
     format!("{cwd} ({branch})")
 }
 
-fn git_branch() -> Option<String> {
+fn git_head(cwd: &str) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .args(["rev-parse", "--git-path", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!name.is_empty()).then_some(name)
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!path.is_empty()).then(|| std::path::Path::new(cwd).join(path))
+}
+
+fn git_branch(head: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(head).ok()?;
+    let head = head.trim();
+    if head.is_empty() {
+        return None;
+    }
+    Some(
+        head.strip_prefix("ref: refs/heads/")
+            .unwrap_or("HEAD")
+            .to_owned(),
+    )
 }
 
 /// The box printed under the transcript on exit, with the command that
@@ -4915,6 +5155,140 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_tracks_git_switches_in_repositories_and_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let linked = root.path().join("linked");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-q", "-b", "original"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked-original",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let nested = repo.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let theme = test_theme();
+        let mut apps = Vec::new();
+        for (cwd, expected) in [(&nested, "original"), (&linked, "linked-original")] {
+            for fullscreen in [false, true] {
+                let mut app = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette.clone(),
+                    root.path().join("home"),
+                    cwd.to_string_lossy().into_owned(),
+                );
+                app.fullscreen = fullscreen;
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})")))
+                );
+                apps.push(app);
+            }
+        }
+        git(&repo, &["switch", "-q", "-c", "feature/updated"]);
+        git(&linked, &["switch", "-q", "-c", "feature/linked-updated"]);
+        for (expected, linked_expected) in [
+            ("feature/updated", "feature/linked-updated"),
+            ("HEAD", "HEAD"),
+            ("feature/updated", "feature/linked-updated"),
+        ] {
+            if expected == "HEAD" {
+                git(&repo, &["switch", "-q", "--detach"]);
+                git(&linked, &["switch", "-q", "--detach"]);
+            } else {
+                git(&repo, &["switch", "-q", expected]);
+                git(&linked, &["switch", "-q", linked_expected]);
+            }
+            for (index, app) in apps.iter_mut().enumerate() {
+                app.git_checked = Instant::now();
+                assert!(!app.tick(), "a Git switch must wait for the next check");
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(app.tick(), "a Git switch must request a repaint");
+                let expected = if index < 2 { expected } else { linked_expected };
+                let frame = app.frame((160, 30));
+                let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
+                let bytes = if app.fullscreen {
+                    FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, app)
+                } else {
+                    Screen::new((160, 30), true).render(&frame, (160, 30))
+                };
+                emu.feed(&bytes);
+                assert!(
+                    emu.rows_text()
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "composer must show {expected}"
+                );
+            }
+        }
+        for (index, app) in apps.iter_mut().enumerate() {
+            app.git_checked -= GIT_BRANCH_POLL;
+            assert!(!app.tick(), "an unchanged HEAD must not request a repaint");
+            let expected = if index < 2 {
+                "feature/updated"
+            } else {
+                "feature/linked-updated"
+            };
+            let head = app.git_head.clone().unwrap();
+            let saved = std::fs::read(&head).unwrap();
+            std::fs::remove_file(&head).unwrap();
+            for missing in [true, false] {
+                if !missing {
+                    std::fs::write(&head, "").unwrap();
+                }
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(!app.tick(), "a failed HEAD read must not request a repaint");
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "a missing or empty HEAD must preserve the last branch label"
+                );
+            }
+            std::fs::write(&head, saved).unwrap();
+        }
+    }
+
+    #[test]
     fn pending_clipboard_allows_file_selection_but_waits_before_submission() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("first.txt"), "").unwrap();
@@ -5003,6 +5377,88 @@ mod tests {
         Theme::system(ColorMode::TrueColor, Appearance::Dark, None)
     }
 
+    #[test]
+    fn model_activity_stays_blue_across_themes_and_terminal_modes() {
+        use crate::ui::theme::{Appearance, ColorMode};
+
+        for (mode, appearance, sgr) in [
+            (
+                ColorMode::TrueColor,
+                Appearance::Dark,
+                "\x1b[38;2;56;189;248m",
+            ),
+            (ColorMode::Ansi256, Appearance::Dark, "\x1b[38;5;75m"),
+            (ColorMode::Ansi16, Appearance::Dark, "\x1b[94m"),
+            (
+                ColorMode::TrueColor,
+                Appearance::Light,
+                "\x1b[38;2;3;105;161m",
+            ),
+            (
+                ColorMode::Ansi256,
+                Appearance::Light,
+                "\x1b[38;2;3;105;161m",
+            ),
+            (ColorMode::Ansi16, Appearance::Light, "\x1b[94m"),
+        ] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.theme_context = Some(ThemeContext {
+                mode,
+                appearance,
+                background: None,
+                active: "system".into(),
+            });
+            let named = match appearance {
+                Appearance::Dark => "monokai-dark",
+                Appearance::Light => "monokai-light",
+            };
+            for id in ["system", named] {
+                drawn.app.paint_theme(id);
+                for initialized in [true, false] {
+                    let context = (!initialized).then(|| drawn.app.theme_context.take());
+                    for fullscreen in [false, true] {
+                        drawn.app.fullscreen = fullscreen;
+                        for name in ["text", "thinking"] {
+                            let mut projection = crate::projection::Projection::default();
+                            let event = serde_json::from_value(serde_json::json!({
+                                "sequence": 1, "create_at": 1, "type": "step", "name": name,
+                                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Checking the parser."}
+                            }))
+                            .unwrap();
+                            projection.apply("main", &event);
+                            projection.set_running(true);
+                            drawn
+                                .app
+                                .apply(Update::Snapshot(Box::new(projection.snapshot())));
+                            drawn.app.run_started = Some(Instant::now() - Duration::from_secs(42));
+                            let frame = drawn.app.frame((80, 24));
+                            let label = if name == "thinking" {
+                                "thinking…"
+                            } else {
+                                "working…"
+                            };
+                            let row = frame.live.iter().find(|row| row.contains(label)).unwrap();
+                            let start = row
+                                .find(sgr)
+                                .expect("the activity uses the terminal's blue");
+                            let colored = row[start + sgr.len()..].split("\x1b[0m").next().unwrap();
+                            let (pulse, status) = colored.split_once(' ').unwrap();
+                            assert!(["·", "•", "●"].contains(&pulse));
+                            assert_eq!(
+                                status,
+                                format!("{label}  42s"),
+                                "{mode:?}, {appearance:?}, {id}, fullscreen={fullscreen}, initialized={initialized}: {row:?}"
+                            );
+                        }
+                    }
+                    if let Some(context) = context {
+                        drawn.app.theme_context = context;
+                    }
+                }
+            }
+        }
+    }
+
     /// A thought only grows while it runs and never shrinks when it
     /// settles, in either detail: the rows under it would hop otherwise.
     /// A short thought takes only its own rows.
@@ -5063,6 +5519,86 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn account_usage_stays_safe_and_fits_after_reflow_and_in_login() {
+        use crate::model::session::Usage;
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+        use crate::ui::theme::{Appearance, ColorMode};
+
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "plan":{"name":"\u{1b}]2;injected-title\u{7}Pro","status":"active"},
+            "credits":{"usedUnits":25000,"totalUnits":300000},
+            "features":[{"key":"web_\u{1b}[2Jsearch","unlimited":true}]
+        }))
+        .unwrap();
+        for theme in [
+            test_theme(),
+            Theme::system(ColorMode::TrueColor, Appearance::Light, None),
+            Theme::named("monokai-dark", ColorMode::TrueColor, Appearance::Dark, None),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            app.frame((80, 32));
+            app.apply(Update::UsageReport(Ok(usage.clone())));
+            let committed = app.frame((80, 32)).commits.join("\n");
+            assert!(strip_escapes(&committed).contains("Pro · active"));
+            assert!(!committed.contains("injected-title"));
+            assert!(!committed.contains("\u{1b}[2J"));
+            let index = app.len() - 1;
+            for (cols, filled, empty) in [(80, 3, 37), (40, 3, 33), (16, 1, 11)] {
+                let rows = app.rows(index, cols);
+                let plain: Vec<_> = rows.iter().map(|row| strip_escapes(row)).collect();
+                assert!(
+                    rows.iter().all(|row| visible_width(row) <= cols),
+                    "{rows:?}"
+                );
+                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+                assert!(plain.iter().any(|row| row.trim() == bar), "{plain:?}");
+                if cols >= 40 {
+                    assert!(
+                        plain.iter().any(|row| row.contains("Web search")),
+                        "{plain:?}"
+                    );
+                }
+            }
+
+            let mut panel_usage = usage.clone();
+            let plan = panel_usage.plan.as_mut().unwrap();
+            plan.name = Some("A very long plan 名称".repeat(10));
+            plan.status = Some("\u{1b}[2Jactive\nstatus".into());
+            plan.price_amount = Some(100.0);
+            plan.price_currency = Some("\u{1b}]2;injected-title\u{7}custom".into());
+            plan.price_interval = Some("\u{1b}[2Jperiod".into());
+            let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+            view.set_account(Ok(Some(crate::model::session::Account {
+                issuer: "fixture".into(),
+                subject: "signed-in".into(),
+                name: None,
+                email: None,
+            })));
+            view.set_usage(Ok(panel_usage));
+            for width in [80, 40] {
+                let rows = view.render(width, 32, &theme.palette);
+                assert!(
+                    rows.iter().all(|row| visible_width(row) <= width),
+                    "{rows:?}"
+                );
+                assert!(rows.iter().all(|row| !row.contains(['\n', '\t'])));
+                assert!(
+                    rows.iter()
+                        .all(|row| !row.contains("injected-title") && !row.contains("\u{1b}[2J"))
+                );
+                assert!(rows.iter().any(|row| strip_escapes(row).contains("…")));
+            }
+        }
     }
 
     #[test]
@@ -5546,6 +6082,159 @@ mod tests {
     }
 
     #[test]
+    fn oauth_links_are_selectable_and_open_without_copy_buttons() {
+        use crate::model::session::OauthEvent;
+        use crate::ui::render::panel::strip_escapes;
+
+        let url = "https://dimagent.cn/oauth/authorize?state=sample&redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fauth%2Fcallback&code_challenge=abcdefghijklmnopqrstuvwxyz0123456789";
+        let typical = format!("{url}&scope={}", "a".repeat(339 - url.len() - 7));
+        let long = format!("{url}&scope={}", "a".repeat(602 - url.len() - 7));
+        for fullscreen in [true, false] {
+            for (size, url, shortened) in [
+                ((80, 24), url, false),
+                ((48, 18), url, false),
+                ((40, 12), typical.as_str(), true),
+                ((48, 18), long.as_str(), true),
+            ] {
+                for mode in ["opened", "manual", "device", "device_complete"] {
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    drawn.app.run_command("login", "");
+                    if mode.starts_with("device") {
+                        drawn.key(KeyCode::Down);
+                        drawn.key(KeyCode::Down);
+                    }
+                    drawn.key(KeyCode::Enter);
+                    let (event, expected) = if mode.starts_with("device") {
+                        let complete = (mode == "device_complete")
+                            .then(|| "https://dimagent.cn/device?code=ABCD-EFGH".to_owned());
+                        let target = complete.as_deref().unwrap_or("https://dimagent.cn/device");
+                        (
+                            OauthEvent::Device {
+                                verification_uri: "https://dimagent.cn/device".into(),
+                                verification_uri_complete: complete.clone(),
+                                user_code: "ABCD-EFGH".into(),
+                            },
+                            target.to_owned(),
+                        )
+                    } else {
+                        (
+                            OauthEvent::Url {
+                                url: url.into(),
+                                opened: mode == "opened",
+                            },
+                            url.to_owned(),
+                        )
+                    };
+                    drawn.app.apply(Update::Oauth {
+                        attempt: 1_001,
+                        event,
+                    });
+                    let frame = drawn.app.frame(size);
+                    let text = if fullscreen {
+                        let mut screen = FullScreen::new(size, true);
+                        let bytes = screen.render(&frame, size, &drawn.app.palette, &drawn.app);
+                        let mut terminal =
+                            crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                        terminal.feed(&bytes);
+                        terminal.rows_text().join("\n")
+                    } else {
+                        strip_escapes(&frame.live.join("\n"))
+                    };
+                    assert!(drawn.app.native_selection());
+                    if fullscreen {
+                        assert!(frame.overlay.as_ref().unwrap().rows.len() <= size.1 as usize);
+                    }
+                    let rows = text.lines().collect::<Vec<_>>();
+                    let start = rows
+                        .iter()
+                        .position(|row| row.contains("https://dimagent.cn/"))
+                        .unwrap();
+                    let selected = rows[start..]
+                        .iter()
+                        .take_while(|row| {
+                            !row.contains("Callback URL") && !row.contains("Restart device login")
+                        })
+                        .map(|row| {
+                            row.trim()
+                                .strip_prefix('│')
+                                .expect("the link keeps the left dialog border")
+                                .strip_suffix('│')
+                                .expect("the link keeps the right dialog border")
+                                .trim()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if shortened && !mode.starts_with("device") {
+                        let prefix = selected.replace('\n', "");
+                        assert!(prefix.ends_with('…'));
+                        assert!(expected.starts_with(prefix.trim_end_matches('…')));
+                    } else {
+                        assert_eq!(url::Url::parse(&selected).unwrap().as_str(), expected);
+                    }
+                    let rendered = if fullscreen {
+                        frame.overlay.as_ref().unwrap().rows.join("\n")
+                    } else {
+                        frame.live.join("\n")
+                    };
+                    assert!(rendered.contains(&format!("\x1b]8;;{expected}\x1b\\")));
+                    assert!(!text.contains("Copy OAuth"));
+                    assert!(!text.contains("Copy verification"));
+                    if mode.starts_with("device") {
+                        assert!(text.contains("ABCD-EFGH"));
+                    } else {
+                        assert!(text.contains("Submit callback"));
+                    }
+                    assert!(drawn.app.reports.is_empty(), "no URL in the transcript");
+                    let Some(Prompt::Login(view)) = &mut drawn.app.prompt else {
+                        panic!("the sign-in dialog stays open");
+                    };
+                    assert!(matches!(
+                        view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                        Effect::OpenUrl(url) if url == expected
+                    ));
+                    if !mode.starts_with("device") {
+                        view.handle_key(KeyEvent::new(KeyCode::Down, Modifiers::NONE));
+                        let frame = drawn.app.frame(size);
+                        let (row, _) = if fullscreen {
+                            frame.overlay.as_ref().unwrap().cursor.unwrap()
+                        } else {
+                            frame.cursor.unwrap()
+                        };
+                        let rows = if fullscreen {
+                            &frame.overlay.as_ref().unwrap().rows
+                        } else {
+                            &frame.live
+                        };
+                        assert!(rows[row as usize].contains("Callback URL"));
+                        let Some(Prompt::Login(view)) = &mut drawn.app.prompt else {
+                            panic!("the callback stays in the sign-in dialog");
+                        };
+                        let callback =
+                            "http://localhost:54321/auth/callback?code=example&state=sample";
+                        view.paste(callback);
+                        view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE));
+                        assert!(matches!(
+                            view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                            Effect::OauthPaste(url) if url == callback
+                        ));
+                    } else {
+                        drawn.app.apply(Update::Oauth {
+                            attempt: 1_001,
+                            event: OauthEvent::Done(Err(None)),
+                        });
+                        drawn.key(KeyCode::Esc);
+                        assert!(!drawn.app.native_selection());
+                    }
+                    drawn.key(KeyCode::Esc);
+                    assert!(!drawn.app.native_selection());
+                    assert!(drawn.app.terminal_requests.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn escape_commits_the_interrupt_after_the_answer_tail_and_before_stopped() {
         use crate::model::view::INTERRUPT_REASON;
         use crate::projection::Projection;
@@ -5835,6 +6524,226 @@ mod tests {
         drawn.draw();
     }
 
+    /// The user message the transcript tests draw, in the state `pending`
+    /// gives it.
+    fn message(pending: bool) -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            display: None,
+            row_id: "u1".into(),
+            kind: RowKind::UserMessage,
+            text: "find the leak".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    /// The status row a cancelled turn settles after a stop.
+    fn stopped() -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            display: None,
+            row_id: "stopped-1".into(),
+            kind: RowKind::Status,
+            text: "stopped".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending: false,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    fn show(drawn: &mut Drawn, rows: Vec<std::sync::Arc<ViewRow>>) {
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+    }
+
+    fn attached() -> Drawn {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        drawn
+    }
+
+    #[test]
+    fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.transcript().contains("find the leak"),
+            "a pending message is drawn"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { .. })),
+            "scrollback prints a message only once it has settled"
+        );
+        show(&mut drawn, vec![message(false)]);
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { text, .. } if text == "find the leak")),
+            "a consumed message settles into scrollback"
+        );
+    }
+
+    #[test]
+    fn scrollback_settles_a_pending_message_before_rows_that_came_after_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true), stopped()]);
+        let text = drawn.transcript();
+        assert!(
+            text.find("find the leak") < text.find("stopped"),
+            "the message stays where it was said, above the stop: {text}"
+        );
+        let user = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .expect("the message is committed");
+        let stop = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::Status { text, .. } if text == "stopped"))
+            .expect("the stop is committed");
+        assert!(user < stop, "the message is committed before the stop");
+        assert!(
+            matches!(drawn.app.history[user], Block::User { pending: false, .. }),
+            "a committed row cannot keep the pending hint"
+        );
+        show(&mut drawn, vec![message(false), stopped()]);
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "consuming the message does not commit a second copy"
+        );
+    }
+
+    #[test]
+    fn fullscreen_settles_a_committed_message_in_place() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        let size = (80, 40);
+        let mut full = FullScreen::new(size, false);
+        let paint = |drawn: &mut Drawn, full: &mut FullScreen| {
+            let frame = drawn.app.frame(size);
+            full.render(&frame, size, &drawn.app.palette, &drawn.app)
+        };
+        let displayed = |pending| {
+            let mut row = message(pending);
+            std::sync::Arc::make_mut(&mut row).display = Some("find the leak [Image #1]".into());
+            row
+        };
+        show(&mut drawn, vec![displayed(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, display, pending: true, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
+            )),
+            "fullscreen commits the message where it was said"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the pending row is painted"
+        );
+        show(&mut drawn, vec![displayed(false)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, display, pending: false, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
+            )),
+            "fullscreen rewrites the same row once the model reads it"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the settled row is painted again"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { pending: true, .. })),
+            "no pending copy is left behind"
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_prints_a_pending_message_settled() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: true, .. } if text == "find the leak"
+            )),
+            "fullscreen commits the pending row"
+        );
+        drawn.app.set_fullscreen(false);
+        drawn.draw();
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: false, .. } if text == "find the leak"
+            )),
+            "scrollback prints the row it cannot recolour"
+        );
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "the hint is dropped, not printed a second time"
+        );
+    }
+
     #[test]
     fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
         let mut drawn = Drawn::new((80, 40), None, true);
@@ -5936,6 +6845,14 @@ mod tests {
             ]}, "mode": "queue"},
         })).unwrap();
         projection.apply("main", &input);
+        for (sequence, name) in [(2, "applied"), (3, "consumed")] {
+            let control = serde_json::from_value(serde_json::json!({
+                "id": format!("image-{name}"), "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": name, "data": {"input_id": "image"},
+            }))
+            .unwrap();
+            projection.apply("main", &control);
+        }
         let mut snapshot = projection.snapshot();
         snapshot.session_id = "s1".into();
         snapshot.focus = "main".into();
@@ -6776,8 +7693,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(
-            app.composer.text(),
-            format!("[wide.png · {width}×2 → {MAX_EDGE}×1]")
+            app.composer.display_text(),
+            format!("[Image #1 · {width}×2 → {MAX_EDGE}×1]")
         );
         assert!(app.notice.is_none());
     }

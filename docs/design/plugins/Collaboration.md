@@ -124,7 +124,7 @@ The producer keeps these invariants:
 
 ### 6.6 What this removes
 
-- Collaboration's temporary-Agent records: the in-memory `temporary` map, `release_temporary`, the close watcher's temporary-Agent accounting, and the known race where two members end at once and leave an Agent behind ([idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)). An owned Agent with no open Session follows Agents' own load and unload rules.
+- Collaboration's temporary-Agent records: the in-memory `temporary` map, `release_temporary`, the close watcher's temporary-Agent accounting, and the known race where two members end at once and leave an Agent behind ([idle unload §7](../appserver/idle-unload.md#7-races-and-interactions)). An owned Agent with no open Session stays loaded while its member rows do; a process without a store closes it when no Session is open.
 - Loading every stored Agent at startup as a public one: owned Agents load owned, and incomplete ones are removed.
 - "Unknown id is public": an absent relation is a refusal.
 - Process memory as the authority for Team relations: they are rebuilt from the stored leader when Collaboration loads.

@@ -1263,7 +1263,7 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
         let counts = (diagnostics.plugins.len(), diagnostics.bindings.len());
         assert_eq!(*baseline.get_or_insert(counts), counts, "round {round}");
     }
-    assert_eq!(baseline, Some((19, 5)));
+    assert_eq!(baseline, Some((19, 8)));
     agent.close().await.unwrap();
 }
 
@@ -1480,10 +1480,46 @@ impl Plugin for OptionalResource {
     }
 }
 
+struct LateNestedInstances {
+    loader: Key<SessionLoader>,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl DynPlugin for LateNestedInstances {
+    fn name(&self) -> &str {
+        "LateNestedInstances"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.loader.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let loader = ctx.require_at(&self.loader)?;
+            self.entered.notify_one();
+            self.release.notified().await;
+            loader
+                .create_instance("late-nested")
+                .await
+                .map_err(|error| {
+                    rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                        error.to_string().into(),
+                    ))
+                })?;
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(rutis::host::ErrorKind::PluginFailed(
+                    "late nested initialization failure".into(),
+                )
+                .into());
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_close_with_the_scope()
- {
-    use rutis_loader::runtime::RuntimeResolver;
+async fn nested_instances_preserve_optional_rows_and_cleanup_across_create_restore_and_failure() {
+    use rutis_loader::runtime::SessionResolver;
     use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin};
     use serde_json::json;
     use std::sync::{
@@ -1497,6 +1533,23 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let mut builtins = Modules::new();
     let mut b = builder();
     b.timeline_store(store);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    b.require_feature(
+        Feature::new("test.lateNested").session("LateNestedInstances", {
+            let (entered, release) = (entered.clone(), release.clone());
+            let fail = fail.clone();
+            move |names| {
+                Ok(Box::new(LateNestedInstances {
+                    loader: names.key()?,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    fail: fail.clone(),
+                }))
+            }
+        }),
+    );
     let catalog = b.catalog();
     let pending = register_part(&mut builtins, catalog, |_| {
         Ok(Box::new(NamedCapability {
@@ -1533,17 +1586,13 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
         .join("../..")
         .canonicalize()
         .unwrap();
-    let runtime = rutis_bridge::runtime::LocalRuntime::node(
-        workspace.join("runtime/node_modules/@arcships/rutis-runtime"),
-        workspace.join("runtime/package.json"),
-    );
     let external = |prefix: &str| {
         vec![
             json!({"id":format!("{prefix}-pending"),"name":pending}),
             json!({"id":format!("{prefix}-failed"),"name":failed}),
             json!({"id":format!("{prefix}-resource"),"name":resource}),
             json!({"id":format!("{prefix}-unresolved"),"name":"missing-optional-module"}),
-            json!({"id":format!("{prefix}-runtime"),"name":workspace.join("runtime/spikes/session-part.ts")}),
+            json!({"id":format!("{prefix}-runtime"),"name":format!("session-node:{}", workspace.join("runtime/spikes/session-part.ts").display())}),
         ]
     };
     let parts = session_row["config"].as_array_mut().unwrap();
@@ -1556,15 +1605,18 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
         .unwrap()
         .extend(external("optional-branch"));
     parts.extend(external("optional-session"));
-    let resolver = RuntimeResolver::node(runtime.handle());
+    parts.push(json!({"id":"late-nested","group":true,"instanced":true,
+        "config":external("optional-late")}));
+    let resolver = SessionResolver::new(b.catalog());
     let plugin = LoaderPlugin::new(
-        Chain::new().with(builtins).with(resolver),
+        Chain::new().with(builtins).with(resolver.clone()),
         LoaderOptions {
             catalog: b.catalog().clone(),
             ..Default::default()
         },
     );
     let loader = plugin.handle();
+    resolver.attach(&loader);
     (&root.plugin(plugin)).await.unwrap();
     let mut rows = plugins;
     rows.push(b.agent_row([json!({"id":anchor,"name":anchor}), session_row]));
@@ -1581,22 +1633,72 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let instance = loader.create_instance(&root, AGENT_GROUP).await.unwrap();
     let anchor_ctx = receive.recv().await.unwrap();
     let mut saved: Option<String> = None;
-    for round in 0..2 {
+    for round in 0..3 {
+        fail.store(round == 2, Ordering::SeqCst);
         let agent = b.build(loader.clone(), &anchor_ctx);
-        let session = match &saved {
-            None => agent
-                .create_session(SessionConfig::default())
-                .await
-                .unwrap(),
-            Some(id) => agent.restore_session(id.clone()).await.unwrap(),
+        let mut creating = {
+            let (agent, saved) = (agent.clone(), saved.clone());
+            tokio::spawn(async move {
+                match saved {
+                    None => agent.create_session(SessionConfig::default()).await,
+                    Some(id) => agent.restore_session(id).await,
+                }
+            })
         };
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("required nested-instance part entered loading");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut creating)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        let created = creating.await.unwrap();
+        if round == 2 {
+            let error = created
+                .err()
+                .expect("late nested initialization fails restore");
+            let detail = error.to_string();
+            assert_eq!(
+                detail.matches("late nested initialization failure").count(),
+                1,
+                "{detail}"
+            );
+            assert!(
+                !detail.contains("cleanup-marker"),
+                "optional row failures were already settled: {detail}"
+            );
+            assert!(agent.sessions().is_empty());
+            assert_eq!(closed.load(Ordering::SeqCst), 8);
+            assert_eq!(rolled_back.load(Ordering::SeqCst), 16);
+            agent.close().await.unwrap();
+            continue;
+        }
+        let session = created.unwrap();
         saved = Some(session.id().to_owned());
         let entries: Vec<_> = loader
             .entries()
             .into_iter()
             .filter(|row| row.id.starts_with("optional-") && row.instance.is_some())
             .collect();
-        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.len(), 15);
+        let diagnostics = session.diagnostics().unwrap();
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.id.starts_with("optional-late"))
+        {
+            if let Some(view) = &entry.view {
+                assert!(
+                    diagnostics
+                        .plugins
+                        .iter()
+                        .any(|plugin| plugin.id == view.id),
+                    "late nested row {} is absent from Session diagnostics",
+                    entry.id
+                );
+            }
+        }
         for suffix in ["pending", "runtime"] {
             assert!(
                 entries
@@ -1639,8 +1741,8 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
                 .filter_map(|row| row.view.as_ref())
                 .all(|view| view.state().state == rutis::host::FiberState::Disposed)
         );
-        assert_eq!(closed.load(Ordering::SeqCst), (round + 1) * 2);
-        assert_eq!(rolled_back.load(Ordering::SeqCst), (round + 1) * 4);
+        assert_eq!(closed.load(Ordering::SeqCst), (round + 1) * 3);
+        assert_eq!(rolled_back.load(Ordering::SeqCst), (round + 1) * 6);
     }
     instance.view.shutdown().await.unwrap();
     root.shutdown().await.unwrap();

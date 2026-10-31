@@ -1928,13 +1928,31 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::catalog::PluginCatalog#rutis-bridge/catalog",
+        "provider": 2,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::runtime::definitions::PluginMounter",
         "provider": 2,
         "generation": 1,
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#loader",
+        "provider": 2,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "rutis_loader::loader::Loader",
+        "provider": 2,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "rutis_loader::loader::service::LoaderService",
         "provider": 2,
         "generation": 1,
         "removing": false

@@ -13,7 +13,7 @@ export const part = definePlugin({
   name: 'SessionTypeScriptFixture',
   inject: ['toolRegistry', 'sessionMethods'],
   provides,
-  async apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; namespace?: string }) {
+  async apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; namespace?: string; typeArray?: boolean; badTypeArray?: boolean }) {
     const generation = crypto.randomUUID()
     const owner = config.processOwner ? ctx.use<{ status(): { generation: number } }>('exampleProcess') : undefined
     let stopped = false
@@ -57,6 +57,26 @@ export const part = definePlugin({
         return { content: JSON.stringify({ ...call, generation, calls, processGeneration: owner?.status().generation }) }
       },
     ).catch((error: Error) => { refused = error.message })
+    if (config.typeArray) {
+      await ctx.use<ToolRegistry>('toolRegistry').register(
+        {
+          name: 'ts_nullable', description: 'TypeScript flow fixture',
+          inputSchema: { type: 'object', properties: { space_id: { type: ['string', 'null'] } }, required: ['space_id'] },
+          source: 'extension', risk: 'session',
+        },
+        async () => ({ content: 'fixture' }),
+      ).catch((error: Error) => { refused = error.message })
+    }
+    if (config.badTypeArray) {
+      await ctx.use<ToolRegistry>('toolRegistry').register(
+        {
+          name: 'ts_broken', description: 'TypeScript flow fixture',
+          inputSchema: { type: 'object', properties: { x: { type: ['string', 'file'] } } },
+          source: 'extension', risk: 'session',
+        },
+        async () => ({ content: 'fixture' }),
+      ).catch((error: Error) => { refused = error.message })
+    }
     const namespace = config.namespace ?? 'session.typescript'
     const declarations = config.badMethods === 'unsupported'
       ? [{ name: 'session.typescript.bad', mutating: false, interruption: 'report', progress: false, notifications: [] }]

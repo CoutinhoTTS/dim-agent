@@ -208,6 +208,14 @@ pub fn refusal(error: ImageRefusal) -> crate::Error {
     }
 }
 
+/// The marker an image shows in the draft and in the transcript: its
+/// position among the message's images, then what its sent form changed.
+/// The same fixed text in every interface language, so the two ends of one
+/// message read alike.
+pub fn marker(index: usize, details: &str) -> String {
+    format!("[Image #{index}{details}]")
+}
+
 /// Whether a local file is meant as an image: its first bytes or its
 /// extension say so. Unreadable files are not.
 pub fn is_image(path: &Path) -> bool {

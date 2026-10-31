@@ -372,10 +372,18 @@ ToolBinding reconciles the table through the existing Prompt / BranchOpening flo
 | `execute` (the registering part's function) | async | `ToolCall`, `cancelled` | `ToolResult` |
 
 An `inputSchema` node may omit `type`, for example when `oneOf` supplies its
-constraints. Preserve the supplied keywords and whether `type` is present;
-neither registration nor model preparation inserts a type for such a node.
-Persisted declarations follow the [native v22 format decision](../appserver/native-storage-format.md#580-v22-格式决定);
-v21 readers cannot decode a node whose `type` is absent.
+constraints. A node whose `type` is an array of names is stored in canonical
+form: one name becomes `"type": T`; two or more drop `type` and add
+`anyOf: [{"type": T1}, …]` in the order sent, placed under `allOf` when the
+node already has an `anyOf`. The two forms admit the same instances. Where the
+format types a subschema (a `properties` value or `items`), its boolean form
+is stored as a schema: `true` as `{}` and `false` as `{"not": {}}`. Keywords
+the format does not type, including `anyOf` branches and `$defs`, are stored
+as they arrived and never rewritten. Neither registration nor model
+preparation inserts a type for an omitted one or changes the keywords already
+present. Persisted declarations are a v22 shape under the current store
+format, which is unchanged; v21 readers cannot decode a node whose `type` is
+absent.
 
 ```text
 // ToolDeclaration

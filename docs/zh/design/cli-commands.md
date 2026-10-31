@@ -36,6 +36,33 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+## 用量报告
+
+两种 TUI 模式下，`/usage` 都输出主分支的上下文用量。当前模型使用 Dim OAuth 时，
+还通过现有[账号用量合同](../../../crates/dim-oauth/docs/runtime-contract.md)查询并输出账号的
+套餐、积分、滚动窗口和功能额度。其他模型提供方只显示上下文用量；仅登录 Dim 账号不会启用
+账号用量报告。`/login` 中的账号视图保持可用。
+
+上下文和账号查询失败时分别报告：上下文用量不可用不会隐藏账号用量，账号查询失败也不会丢弃
+上下文报告。账号未返回的可选字段不显示。下图为虚构示例，不代表账号一定具有 5h 窗口。
+
+```text
+/usage
+  Context: 1,849 / 256,000 tokens (...) ...
+
+  DimAgent OAuth
+  Pro · active · expires 2026-11-30
+
+  Credits     25,000 / 300,000  8%
+  [###-------------------------------------]
+
+  5h window   9,500 / 10,000  95%
+  [######################################--]
+
+  Web search  211 / 1,500  14%
+  [######----------------------------------]
+```
+
 ## 执行设置
 
 现有 `/settings` 面板在 `Tool approvals` 旁有一个 `Execution` 行。它是进程边界的唯一用户配置入口：
@@ -80,11 +107,19 @@ revision 冲突；保存后 `exec` 在新边界下运行——沙箱开启时工
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
+| `dimcode hooks list [--cwd DIR]` | 经 `hooks.catalog` 列出生效的 Hook 目录（[Hooks](plugins/Hooks.md#a7-管理方法)）：每个来源的路径、启用状态与状态，以及每个处理器的事件、匹配器、命令与状态。 |
+| `dimcode hooks enable\|disable [--cwd DIR]` | 经 `hooks.set_enabled` 启用或停用 `DIR`（默认当前目录）所在工作区的项目 Hook，记录在 Settings 为其授权的项目根上。 |
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
 | `/approval` | 在终端界面里为当前 Session 和之后的 Session 选择询问（`workspace-write`）或完全访问（[权限控制](#权限控制)）。 |
 | `/approvals`（别名 `/permissions`） | 交互客户端空闲时查看、切换和管理预设与命令规则。 |
+
+`dimcode hooks` 从不写 Hook 文档。用户文档是守护进程所服务 home 的 Settings 来源 `hooks`
+（原生存储中为 `user/hooks`，独立 home 中为 `hooks.json`），由 `hooks.save` 写入；
+项目文档是仓库中的 `.dimcode/hooks.json`，在仓库里编辑。`dimcode hooks enable|disable`
+把该工作区记录在用户本地的 `hooks-projects` 中，所以项目文件不能启用自己
+（[Hooks](plugins/Hooks.md#a7-管理方法)）。
 
 全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。现有的
 login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和

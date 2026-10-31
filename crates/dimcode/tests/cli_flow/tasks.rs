@@ -387,16 +387,23 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
             control.recv_timeout(Duration::from_secs(10)).unwrap();
             let mut request = first;
             for page in 0..2 {
-                let after = page * 75;
+                let start = page * 75 + 1;
+                let after = if page == 0 { 0 } else { (start - 1) * 3 + 2 };
                 assert_eq!(request["params"]["after"], after);
-                let events: Vec<_> = (after + 1..=after + 75).map(|index| {
-                    fact(&format!("message-{index}"), index, index, "input", "message",
-                        json!({"mode":"append","user":{"content":[{"type":"text","text":format!("paged-message-{index:03}")}]}}))
-                }).collect();
-                wire.reply(&request, json!({"events":events,"through":150,"nextAfter":after+75,"done":page==1}));
+                let mut events = Vec::new();
+                for index in start..start + 75 {
+                    events.push(fact(&format!("message-{index}"), index * 3, index * 3, "input", "message",
+                        json!({"mode":"append","user":{"content":[{"type":"text","text":format!("paged-message-{index:03}")}]}})));
+                    events.push(fact(&format!("applied-{index}"), index * 3 + 1, index * 3, "input", "applied",
+                        json!({"input_id": format!("message-{index}"), "mode": "append"})));
+                    events.push(fact(&format!("consumed-{index}"), index * 3 + 2, index * 3, "input", "consumed",
+                        json!({"input_id": format!("message-{index}")})));
+                }
+                let last = if page == 0 { 227 } else { 452 };
+                wire.reply(&request, json!({"events":events,"through":452,"nextAfter":last,"done":page==1}));
                 if page == 0 {
                     request = wire.read("session.history");
-                    assert_eq!(request["params"]["through"], 150);
+                    assert_eq!(request["params"]["through"], 452);
                 }
             }
             let submit = wire.read("session.submit");
@@ -709,7 +716,8 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         let first = wire.read("session.exec.stop");
         assert_eq!(first["params"], json!({"sessionId":"session","branchId":"main","taskId":"main-command"}));
         event(wire, "main", fact("leader-notice",9,9000,"input","message",json!({"mode":"append","user":{"content":[{"type":"text","text":"leader notification while stop waits"}]}})));
-        event(wire, "main", command("late-command",10,11000,"arrived after stop admission"));
+        event(wire, "main", fact("leader-notice-applied",10,9000,"input","applied",json!({"input_id":"leader-notice","mode":"append"})));
+        event(wire, "main", command("late-command",11,11000,"arrived after stop admission"));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["sessionId"], "session");
         assert_eq!(submit["params"]["text"], "leader stays usable");
@@ -734,15 +742,16 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     terminal.write(b"\x18\x18");
     terminal.until("Stop-all requests are already in progress");
     terminal.write(b"\x1b[27uleader stays usable\r");
-    if !terminal
-        .transcript
-        .contains("leader notification while stop waits")
-    {
-        terminal.until("leader notification while stop waits");
+    for expected in [
+        "leader notification while stop waits",
+        "command main/main-command:",
+        "first stop failed",
+        "attempted 3, errors 1, unavailable 1",
+    ] {
+        if !terminal.transcript.contains(expected) {
+            terminal.until(expected);
+        }
     }
-    terminal.until("command main/main-command:");
-    terminal.until("first stop failed");
-    terminal.until("attempted 3, errors 1, unavailable 1");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/tasks\r");
     terminal.until("arrived after stop admission");
@@ -1009,22 +1018,23 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         wire.reply(&attach, attach_record(&attach));
         let first = wire.read("session.history");
         assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
-        wire.reply(&first, json!({"events":[fact("member-input",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"member user\u{1b}]52;c;never-copy\u{7}"}]}}))],"through":2,"nextAfter":1,"done":false}));
+        wire.reply(&first, json!({"events":[fact("member-input",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"member user\u{1b}]52;c;never-copy\u{7}"}]}})),fact("member-applied",2,1000,"input","applied",json!({"input_id":"member-input","mode":"queue"})),fact("member-consumed",3,1000,"input","consumed",json!({"input_id":"member-input"}))],"through":4,"nextAfter":3,"done":false}));
         let second = wire.read("session.history");
-        assert_eq!(second["params"], json!({"sessionId":"member","branchId":"main","after":1,"through":2,"limit":256}));
+        assert_eq!(second["params"], json!({"sessionId":"member","branchId":"main","after":3,"through":4,"limit":256}));
         event(wire, "main", fact("leader-observation",3,3000,"input","message",json!({"mode":"append","user":{"content":[{"type":"text","text":"leader notice while reading"}]}})));
-        let text = fact("member-live",3,3000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":" + live"}));
+        event(wire, "main", fact("leader-observation-applied",4,3000,"input","applied",json!({"input_id":"leader-observation","mode":"append"})));
+        let text = fact("member-live",5,3000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":" + live"}));
         wire.notice("session.event", json!({"sessionId":"member","branchId":"main","event":text}));
         wire.notice("session.event", json!({"sessionId":"member","branchId":"main","event":text}));
         wire.notice("session.event", json!({"sessionId":"member","branchId":"other","event":fact("other-member-branch",99,3000,"step","text",json!({"turn_id":"t","request_id":"wrong","delta":"wrong member branch"}))}));
         wire.notice("session.state", json!({"sessionId":"member","branchId":"main","running":true}));
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"child","requestId":"wrong-root","text":"","textOffset":0,"thinking":"wrong leader branch thought","thinkingOffset":0}));
-        wire.reply(&second, json!({"events":[fact("member-text",2,2000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":"member original"}))],"through":2,"nextAfter":2,"done":true}));
+        wire.reply(&second, json!({"events":[fact("member-text",4,2000,"step","text",json!({"turn_id":"member-turn","request_id":"member-model","delta":"member original"}))],"through":4,"nextAfter":4,"done":true}));
         wire.notice("session.model.progress", json!({"sessionId":"member","branchId":"main","requestId":"member-model","text":"","textOffset":0,"thinking":"live member thought","thinkingOffset":0}));
         let stop = wire.read("session.stop");
         assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
-        event(wire, "main", fact("leader-result",4,4000,"collaboration","result",json!({"request_event_id":"leader-member","agent_id":"reviewer","session_id":"member","status":"cancelled","reason":"stopped by the user","text":"real cancelled delegation result"})));
+        event(wire, "main", fact("leader-result",5,4000,"collaboration","result",json!({"request_event_id":"leader-member","agent_id":"reviewer","session_id":"member","status":"cancelled","reason":"stopped by the user","text":"real cancelled delegation result"})));
         let detach = wire.read("session.detach");
         assert_eq!(detach["params"], json!({"sessionId":"member"}));
         wire.reply(&detach, json!({}));
@@ -1032,7 +1042,7 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         assert_eq!(submit["params"]["sessionId"], "session");
         assert_eq!(submit["params"]["text"], "kept leader draft and continue");
         wire.reply(&submit, json!({"event":{}}));
-        wire.event(5,"text",json!({"turn_id":"leader-turn","request_id":"leader-model","delta":"leader resumed after view"}));
+        wire.event(6,"text",json!({"turn_id":"leader-turn","request_id":"leader-model","delta":"leader resumed after view"}));
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected member input/configuration or leader cleanup: {line}");
     });
@@ -1190,12 +1200,12 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
                 control.recv_timeout(Duration::from_secs(10)).unwrap();
                 wire.notice("session.closed", json!({"sessionId":"member","reason":null}));
             } else {
-                wire.reply(&history, json!({"events":[fact("kept-prefix",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"retained member prefix"}]}}))],"through":2,"nextAfter":1,"done":false}));
+                wire.reply(&history, json!({"events":[fact("kept-prefix",1,1000,"input","message",json!({"mode":"queue","user":{"content":[{"type":"text","text":"retained member prefix"}]}})),fact("kept-prefix-applied",2,1000,"input","applied",json!({"input_id":"kept-prefix","mode":"queue"})),fact("kept-prefix-consumed",3,1000,"input","consumed",json!({"input_id":"kept-prefix"}))],"through":4,"nextAfter":3,"done":false}));
                 let page = wire.read("session.history");
                 if outcome == 1 {
                     wire.send(json!({"jsonrpc":"2.0","id":page["id"],"error":{"code":-32000,"message":"member page failed"}}));
                 } else {
-                    wire.reply(&page, json!({"events":[fact("invalid-tail",3,3000,"step","text",json!({"turn_id":"t","request_id":"r","delta":"must not adopt invalid tail"}))],"through":2,"nextAfter":2,"done":true}));
+                    wire.reply(&page, json!({"events":[fact("invalid-tail",4,3000,"step","text",json!({"turn_id":"t","request_id":"r","delta":"must not adopt invalid tail"}))],"through":4,"nextAfter":3,"done":true}));
                 }
             }
             let detach = wire.read("session.detach");

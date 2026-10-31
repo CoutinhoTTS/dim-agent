@@ -23,8 +23,10 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `hostPlatform` | process | HostPlatform | Rust-only | — |
 | `listenAddresses` | process | Transport | Rust-only | — |
 | `loader` | process | rutis-loader | Rust-only | — |
+| `loaderService` | process | rutis-loader | yes | — |
+| `localId` | process | root | yes | — |
 | `managedProviders` | process | ManagedProviders | Rust-only | — |
-| `managementMethods` | process | ManagementMethods | yes | `register` async |
+| `managementMethods` | process | ManagementMethods | Rust-only | — |
 | `mcpAuth` | process | Mcp | Rust-only | — |
 | `mcpService` | process | Mcp | Rust-only | — |
 | `modelHost` | process | Aimux | Rust-only | — |
@@ -32,6 +34,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
 | `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
+| `pluginMounter` | process | rutis-loader | yes | — |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
 | `publication` | process | McpPublication | Rust-only | — |

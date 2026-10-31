@@ -23,7 +23,7 @@ Every statement carries its kind of evidence:
 | 3 | Retention unit | Last K = 2 turns | Tokens: keep the longest tail (keyed baseline included) that fits `0.25 × B`, cut at the earliest legal cut that fits | Medium |
 | 4 | Tail larger than the budget | Only budget recovery may cut inside the last K turns | Every trigger takes the latest legal cut when no cut fits; this removes the "dead zone" of a long single turn | High (the dead zone is a code fact) |
 | 5 | Keyed baseline | Not counted by retention | Counted in the retention budget, because it is replayed after every cut | Medium |
-| 6 | Prompt caching | Not considered | Cost does not decide the trigger: an early compaction pays off only under a break-even condition this note did not measure (§5.1). Separate follow-ups: let the summarizer share the conversation prefix, and add Anthropic cache breakpoints | Medium |
+| 6 | Prompt caching | Not considered | Cost does not decide the trigger: an early compaction pays off only under a break-even condition this note did not measure (§5.1). The port marks the breakpoints (§2); the remaining follow-up is a summarizer request that shares the conversation prefix | Medium |
 | 7 | Recovery | `validate` compares a full local estimate with the whole window | With a provider baseline, use the same estimate as the trigger and compare it with `B`; without one the full estimate and its error remain (§6.4) | Medium |
 | 8 | Manual `/compact` | Same K = 2 turn limit, so it skips on short sessions | Cut at the start of the latest turn (or the token rule when that is smaller) | Low-medium |
 | 9 | Estimator | `bytes / 4`, 1,600 tokens per image | Keep both. The reserve absorbs the error of a delta over a provider baseline; it is a provisional heuristic that does not cover every no-baseline request (§6.4) | Medium-high |
@@ -58,9 +58,15 @@ Every statement carries its kind of evidence:
   (`READ_INLINE_MAX_CHARS`, `INLINE_OUTPUT_CHAR_LIMIT`).
 - The summarizer request has its own system prompt and one user message with the transcript as
   text ([summary_strategy.rs](../../../crates/dim-agent-capabilities/src/summary_strategy.rs)).
-- No production code sets `cache_control` (grep over `crates/`: only the type, the aimux
-  conversion and tests/examples mention it). Anthropic native requests are therefore not cached;
-  providers with automatic prefix caching (OpenAI and most OpenAI-compatible vendors) cache anyway.
+- The provider port marks up to two Anthropic cache breakpoints on a request
+  ([request.rs](../../../crates/dim-agent-aimux/src/request.rs),
+  [Anthropic cache breakpoints](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)): the end
+  of the System, so the tool declarations and the System are one cached prefix, and the last block of
+  the last user or tool-result message, so each turn reads the previous prefix and writes only the new
+  tail. The exact rule — an explicit System breakpoint is kept, and the message mark is added only
+  while the request stays within the API's four — is the crate README's. Both use the API's
+  five-minute lifetime; providers with automatic prefix caching (OpenAI and most OpenAI-compatible
+  vendors) take no breakpoint and are unaffected.
 
 ## 3. Trigger shape
 
@@ -187,21 +193,36 @@ threshold = B − reserve
 - [Code] Dim's projection puts the replacement first, then the baseline, then the kept tail, so a
   compaction keeps at most the system and tool prefix cached. Its summarizer request has a
   different system prompt and renders the transcript as text, so it shares no prefix with the
-  conversation and pays full input price for the whole replaced range.
-- [Judgment] Whether compacting earlier costs more depends on what follows. With a cache read at
-  `r` of the input price, a compaction pays off once
-  `compaction input + summary output + cache rebuild < r × Σ (old prompt − compacted prompt)`
-  over the later calls that would otherwise carry the old prefix. Many later small calls with a
-  warm cache can repay an early compaction. For example, with `r = 0.1`, `C = 100k` shrunk to
-  `S = 20k` saves 8k input-price units per later call, so a 150k-unit compaction is repaid within
-  about twenty calls. Few later calls, or a cache that expires between them, favour a late trigger.
-  This depends on call count, growth and cache lifetime, none of which this note measured, so cost
-  does not decide the trigger. The late trigger of §3.3 rests on overflow safety (§3) and on
-  keeping context the model may still need; it remains a heuristic. The cheaper lever
-  is the summarizer: reusing the conversation prefix (Claude Code's approach) would cut its input
-  cost by about 10× on cached providers. That changes the strategy's request shape and is a
-  separate follow-up, as is adding Anthropic cache breakpoints (without them the 0.1× case does
-  not apply on Anthropic native, and earlier compaction would look cheaper for the wrong reason).
+  conversation. Its whole input — the strategy's own System and the single user message that carries
+  the transcript — is a cache write at 1.25×, and no later request reads that transcript, because
+  the compaction replaces it. The message breakpoint on that user message is what makes the write;
+  the System breakpoint caches nothing, because the strategy's own System is shorter than the
+  model's minimum cacheable prefix
+  ([Anthropic cache breakpoints](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)). So
+  the summary call's input costs 1.25 times its input price instead of 1: the accepted cost of
+  marking every request the same way.
+- [Judgment] Whether compacting earlier costs more depends on what follows. With the breakpoints in
+  place, an ordinary call reads the prefix it shares with the previous call at the read price `r`
+  (0.1, or 0.05 on Opus 5.5 and Sonnet 5.5) and writes only its new tail at 1.25×, so an earlier
+  compaction saves `r` times the tokens it removes on each later call, not their full price. The
+  compaction pays the summarizer's whole input as a 1.25× write that is never read, the summary's
+  output, and the rebuild of the new prefix (replacement, baseline and kept tail) at 1.25×. It pays
+  off once
+  `1.25 × summary input + summary output + 1.25 × rebuilt prefix < r × Σ (old prompt − compacted prompt)`
+  over the later calls that would otherwise carry the old prefix. For example, at `r = 0.1`,
+  `C = 100k` shrunk to `S = 20k` saves 8k input-price units per later call, so a compaction whose
+  summarizer input is the replaced range and whose rebuilt prefix is `S` costs about 150k
+  input-price units before the summary's own output and is repaid within about twenty calls; at
+  `r = 0.05` the saving is 4k per call and repayment takes about twice as many calls. Many later
+  small calls with a warm cache can repay an early compaction; few later calls, or a cache that
+  expires between them, favour a late trigger. This depends on call count, growth and cache
+  lifetime, none of which this note measured, so cost does not decide the trigger. The late trigger
+  of §3.3 rests on overflow safety (§3) and on keeping context the model may still need; it remains
+  a heuristic. The cheaper lever is the summarizer: reusing the conversation prefix (Claude Code's
+  approach) would let it read that cached prefix at `r` instead of writing the whole transcript at
+  1.25×, an order-of-magnitude cut in input price on the shared part — arithmetic on the published
+  price ratios, not a measurement. That changes the strategy's request shape and is a separate
+  follow-up.
 
 ### 5.2 Budget-exhaustion recovery
 
@@ -342,7 +363,7 @@ limit updated together.
 | same, `CompactionInput::cut` in `host.rs` | The latest legal cut only under `fallback` | Unchanged in shape: with the token rule a within-limit cut exists whenever any legal cut exists, so `fallback` keeps meaning only "recovery" |
 | same, manual step | Same limit as automatic | Limit at the `turn/start` of the latest turn, or the token-rule cut if that keeps less |
 | `ContextPolicy::validate` | Full local estimate, fails at `≥ context_window` | Provider-baseline estimate from the branch's committed events, fails at `> B` |
-| Follow-up issues | — | Summarizer request reusing the conversation prefix; Anthropic `cache_control` breakpoints; provider overflow mapped to recovery (already a separate Aimux issue) |
+| Follow-up issues | — | Summarizer request reusing the conversation prefix; provider overflow mapped to recovery (already a separate Aimux issue) |
 
 Not proposed: a separate rule per window class, an absolute cap for 1M windows, a local tokenizer,
 or a different image constant.

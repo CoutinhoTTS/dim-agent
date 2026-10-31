@@ -43,6 +43,37 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+## Usage report
+
+In both TUI modes, `/usage` prints the main branch's context usage. When the
+active model uses Dim OAuth, it also queries and prints the account's plan,
+credits, rolling windows and feature meters through the existing
+[account usage contract](../../crates/dim-oauth/docs/runtime-contract.md).
+Other model providers keep context-only output; signing in alone does not
+enable the account report. The `/login` account view remains available.
+
+Context and account failures are reported independently: unavailable context
+usage does not hide account usage, and an account error does not discard the
+context report. Missing optional account fields stay absent. The illustration
+below uses synthetic data; an account need not have a 5h window.
+
+```text
+/usage
+  Context: 1,849 / 256,000 tokens (...) ...
+
+  DimAgent OAuth
+  Pro · active · expires 2026-11-30
+
+  Credits     25,000 / 300,000  8%
+  [###-------------------------------------]
+
+  5h window   9,500 / 10,000  95%
+  [######################################--]
+
+  Web search  211 / 1,500  14%
+  [######----------------------------------]
+```
+
 ## Execution settings
 
 The existing `/settings` panel has one `Execution` row, next to `Tool approvals`. It is the only
@@ -99,11 +130,19 @@ and a persistent shell started before the change have no flow coverage yet.
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
+| `dimcode hooks list [--cwd DIR]` | List the effective hook catalog over `hooks.catalog` ([Hooks](plugins/Hooks.md#a7-management-methods)): each source with its path, enablement and state, and each handler with its event, matcher, command and state. |
+| `dimcode hooks enable\|disable [--cwd DIR]` | Enable or disable the project hooks of the workspace at `DIR` (the current directory by default) over `hooks.set_enabled`, recorded against the project root Settings authorizes for it. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
 | `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
+
+`dimcode hooks` never writes a hook document. The user's document is the Settings source `hooks`
+of the home the daemon serves (`user/hooks` in native storage, `hooks.json` in a standalone home),
+written by `hooks.save`; the project document is `.dimcode/hooks.json` in the repository, edited
+there. `dimcode hooks enable|disable` records the workspace in the user-local `hooks-projects`, so a
+project file cannot enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
 
 Global home, workspace, server and model-profile options retain their current
 meanings and work before or after the command. Existing login/account/logout,
@@ -414,6 +453,16 @@ The terminal UI remembers the preset chosen in `/approval` or its `/approvals` p
 `permissionPreset` in the product home's `config.json`: without the flag, the sessions it creates
 get it in `session.create`, and a resumed one has `main` switched to it before attach. The flag
 wins for one run; choosing another preset in either menu replaces the remembered one.
+On the home screen without an active Session, either menu saves the preset without requiring
+account sign-in or creating a Session. The first message creates the Session with that selection,
+including within the same client process. With an active Session, the selection is remembered
+only after its permission update succeeds. Full access still requires confirmation in either case.
+
+```text
+Home > /approvals > select preset
+  -> confirm if full access -> remember preset (no Session or login required)
+  -> first message -> session.create {permissionPolicy: selected preset}
+```
 
 ```text
 $ dimcode exec --permission full-access -p 'Run the tests'

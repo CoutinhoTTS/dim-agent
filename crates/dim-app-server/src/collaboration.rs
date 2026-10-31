@@ -1,8 +1,8 @@
 //! Team collaboration; member admission is specified in
 //! `docs/design/subagent-tool-approval.md`.
 //!
-//! `CollaborationDirectoryPlugin` (process) owns member relations and temporary
-//! Agent records across reloads. `CollaborationSession` (Session) provides the `agent` tool and
+//! `CollaborationDirectoryPlugin` (process) owns member relations across
+//! reloads. `CollaborationSession` (Session) provides the `agent` tool and
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
@@ -117,11 +117,8 @@ struct WatchedSession {
 pub(crate) struct CollaborationDirectory {
     /// Keyed by member Session id: a member belongs to exactly one leader.
     relations: Mutex<BTreeMap<String, Relation>>,
-    /// Temporary Agent id -> the leader Session whose Team it serves; each
-    /// closes with its last Session.
-    temporary: Mutex<BTreeMap<String, String>>,
     /// Watched Session ids and their Agents: closure (treated as deletion)
-    /// removes their relations and may close a temporary Agent.
+    /// removes their relations and may release an owned Agent.
     watched: Mutex<BTreeMap<String, Arc<WatchedSession>>>,
 }
 
@@ -210,25 +207,21 @@ impl Collaboration {
             NewMember::Agent(id) if !self.visible(&id, leader_id) => {
                 return Err(Refusal::AgentNotFound.into());
             }
-            NewMember::Agent(id) => (
-                self.index.host(Some(&id)).ok_or(Refusal::AgentNotFound)?,
-                false,
-            ),
+            NewMember::Agent(id) => {
+                let host = self.index.host(Some(&id)).ok_or(Refusal::AgentNotFound)?;
+                if host.owner.is_some() && !self.index.has_members(&id).await {
+                    return Err(Refusal::AgentNotFound.into());
+                }
+                (host, false)
+            }
             NewMember::Temporary(profile) => {
-                let id = uuid::Uuid::new_v4();
-                self.directory
-                    .temporary
-                    .lock()
-                    .unwrap()
-                    .insert(id.to_string(), leader_id.to_owned());
-                let host = match self.index.create(id, Some(profile)).await {
+                let host = match self
+                    .index
+                    .create(uuid::Uuid::new_v4(), Some(profile), Some(leader_id))
+                    .await
+                {
                     Ok(host) => host,
                     Err(error) => {
-                        self.directory
-                            .temporary
-                            .lock()
-                            .unwrap()
-                            .remove(&id.to_string());
                         return Err(member_create_failed(error.to_string()));
                     }
                 };
@@ -259,12 +252,7 @@ impl Collaboration {
                 Ok(model) => model,
                 Err(error) => {
                     if owned {
-                        let _ = self.index.close(&host.agent_id).await;
-                        self.directory
-                            .temporary
-                            .lock()
-                            .unwrap()
-                            .remove(&host.agent_id);
+                        self.index.release_owned(&host.agent_id).await;
                     }
                     return Err(member_create_failed(error));
                 }
@@ -279,16 +267,15 @@ impl Collaboration {
             .index
             .version_of(leader_id)
             .ok_or_else(|| member_create_failed("leader protocol version is absent".into()))?;
-        let session = match self.index.create_session(&host, config, version).await {
+        let session = match self
+            .index
+            .create_session(&host, config, version, Some(leader_id))
+            .await
+        {
             Ok(session) => session,
             Err(error) => {
                 if owned {
-                    let _ = self.index.close(&host.agent_id).await;
-                    self.directory
-                        .temporary
-                        .lock()
-                        .unwrap()
-                        .remove(&host.agent_id);
+                    self.index.release_owned(&host.agent_id).await;
                 }
                 return Err(member_create_failed(error.to_string()));
             }
@@ -313,14 +300,13 @@ impl Collaboration {
             usage,
         })
     }
-    /// A temporary Agent is visible only within its creating leader's Team.
+    /// An owned Agent is visible only within its owner's Team, and a public
+    /// one to every Team. An unknown Agent is visible to none: absence is a
+    /// refusal, never a public record.
     fn visible(&self, agent_id: &str, leader_id: &str) -> bool {
-        self.directory
-            .temporary
-            .lock()
-            .unwrap()
-            .get(agent_id)
-            .is_none_or(|creator| creator == leader_id)
+        self.index
+            .owner(agent_id)
+            .is_some_and(|owner| owner.is_none_or(|owner| owner == leader_id))
     }
     fn watch(self: &Arc<Self>, agent_id: &str, session: Session) {
         let watched = {
@@ -373,77 +359,57 @@ impl Collaboration {
         self.session_ended(&watched.agent_id, id).await;
     }
     /// The end of Session `id` of Agent `agent_id`, by a business close or
-    /// by the delete of an unloaded Session: its relations go, and a
-    /// temporary Agent closes with its last Session.
+    /// by the delete of an unloaded Session: its relations go, and an owned
+    /// Agent is released once no member Session's rows remain.
     async fn session_ended(self: &Arc<Self>, agent_id: &str, id: &str) {
         self.directory
             .relations
             .lock()
             .unwrap()
             .retain(|member, relation| member != id && relation.leader != id);
-        self.release_temporary(agent_id, Some(id)).await;
+        self.index.release_owned(agent_id).await;
     }
-    /// Closes temporary Agent `agent_id` once it has no Session but `ended`,
-    /// loaded or unloaded, and otherwise watches its loaded ones again. An
-    /// Agent already closed is only forgotten.
-    async fn release_temporary(self: &Arc<Self>, agent_id: &str, ended: Option<&str>) {
-        if !self
-            .directory
-            .temporary
-            .lock()
-            .unwrap()
-            .contains_key(agent_id)
-        {
-            return;
-        }
-        let remaining: Vec<Session> = self
-            .index
-            .host(Some(agent_id))
-            .map(|host| host.agent.sessions())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|session| Some(session.id()) != ended && !session.is_closing())
-            .collect();
-        if remaining.is_empty()
-            && !self
-                .index
-                .unloaded_sessions(agent_id)
-                .iter()
-                .any(|session| Some(session.as_str()) != ended)
-        {
-            let _ = self.index.close(agent_id).await;
-            self.directory.temporary.lock().unwrap().remove(agent_id);
-        } else {
-            for session in remaining {
-                self.watch(agent_id, session);
-            }
-        }
-    }
-    /// Ends what this owner missed while it was not listening: a Session
-    /// deleted while unloaded during a reload of Agents and Collaboration.
-    /// Relations that name a Session the index no longer knows go, and a
-    /// temporary Agent left without a Session closes. It runs after the
-    /// subscriptions, so each such delete reaches the event, this, or both.
+    /// Rebuilds the Team relations from the stored members when this owner
+    /// loads: a restart or a reload keeps every Team, and a member whose
+    /// Session rows are gone is not one. Without a store the relations stay
+    /// as the process holds them. It runs after the subscriptions, so a delete
+    /// that ended meanwhile reaches the event, this, or both.
     async fn reconcile(self: &Arc<Self>) {
-        self.directory
-            .relations
-            .lock()
-            .unwrap()
-            .retain(|member, relation| {
-                self.index.host_by_session(member).is_some()
-                    && self.index.host_by_session(&relation.leader).is_some()
-            });
-        let temporary: Vec<String> = self
-            .directory
-            .temporary
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
-        for agent_id in temporary {
-            self.release_temporary(&agent_id, None).await;
+        let stored = match self.index.members().await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => {
+                self.directory
+                    .relations
+                    .lock()
+                    .unwrap()
+                    .retain(|member, relation| {
+                        self.index.host_by_session(member).is_some()
+                            && self.index.host_by_session(&relation.leader).is_some()
+                    });
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Stored Team members were not read");
+                return;
+            }
+        };
+        let mut relations = BTreeMap::new();
+        for (member, leader) in stored {
+            let (Some(host), Some(_)) = (
+                self.index.host_by_session(&member),
+                self.index.host_by_session(&leader),
+            ) else {
+                continue;
+            };
+            relations.insert(
+                member,
+                Relation {
+                    leader,
+                    member_agent: host.agent_id.clone(),
+                },
+            );
         }
+        *self.directory.relations.lock().unwrap() = relations;
     }
     /// Removes a relation; the member Session and its Agent stay.
     fn remove(&self, member: &str) {
@@ -519,7 +485,9 @@ impl Collaboration {
             .to_owned();
         let mut members: Vec<(CollaborationRole, String, String)> = relations
             .iter()
-            .filter(|(_, relation)| relation.leader == leader)
+            .filter(|(member, relation)| {
+                relation.leader == leader && self.index.host_by_session(member).is_some()
+            })
             .map(|(member, relation)| {
                 (
                     CollaborationRole::Member,
@@ -588,11 +556,9 @@ impl Collaboration {
         };
         if participates
             || self
-                .directory
-                .temporary
-                .lock()
-                .unwrap()
-                .contains_key(&event.agent_id)
+                .index
+                .owner(&event.agent_id)
+                .is_some_and(|owner| owner.is_some())
         {
             self.watch(&event.agent_id, session);
         }
@@ -907,8 +873,8 @@ impl CollaborationSession {
             session_id,
         };
         let (kind, action) = match input {
-            Input::List {} => return Ok(self.list()),
-            Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id)),
+            Input::List {} => return Ok(self.list().await),
+            Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id).await),
             Input::Result { result_id } => {
                 return Ok(self.result(&context.branch_id, &result_id).await);
             }
@@ -1035,19 +1001,28 @@ impl CollaborationSession {
         )
     }
 
-    /// The full profile of one Agent this leader may address.
-    fn inspect(&self, agent_id: &str) -> ToolResult {
+    /// The full profile of one Agent this leader may address. An owned Agent
+    /// with no member Session is an incomplete delegation, so it answers as
+    /// absent, as a `request` for it does.
+    async fn inspect(&self, agent_id: &str) -> ToolResult {
         let host = self
             .collaboration
             .visible(agent_id, &self.session_id)
             .then(|| self.collaboration.index.host(Some(agent_id)))
             .flatten();
-        match host {
+        let addressable = match &host {
+            Some(host) if host.owner.is_some() => {
+                self.collaboration.index.has_members(agent_id).await
+            }
+            Some(_) => true,
+            None => false,
+        };
+        match host.filter(|_| addressable) {
             Some(host) => success(json!({"agentId": agent_id, "profile": host.profile})),
             None => refusal(Refusal::AgentNotFound, "no such agent is available to you"),
         }
     }
-    fn list(&self) -> ToolResult {
+    async fn list(&self) -> ToolResult {
         let participants: Vec<Value> = self
             .collaboration
             .team(&self.session_id)
@@ -1060,22 +1035,24 @@ impl CollaborationSession {
             .collect();
         let mut result = json!({"role": self.role, "participants": participants});
         if self.role == CollaborationRole::Leader {
-            let temporary = self.collaboration.directory.temporary.lock().unwrap();
-            result["agents"] = self
-                .collaboration
-                .index
-                .list()
-                .into_iter()
-                .filter(|agent| {
-                    temporary
-                        .get(&agent.agent_id)
-                        .is_none_or(|creator| creator == &self.session_id)
-                })
-                .map(|agent| {
-                    json!({"agentId": agent.agent_id, "name": agent.name,
-                        "description": agent.description})
-                })
-                .collect();
+            let mut agents = vec![];
+            for host in self.collaboration.index.hosts() {
+                if host
+                    .owner
+                    .as_deref()
+                    .is_some_and(|owner| owner != self.session_id)
+                {
+                    continue;
+                }
+                if host.owner.is_some()
+                    && !self.collaboration.index.has_members(&host.agent_id).await
+                {
+                    continue;
+                }
+                agents.push(json!({"agentId": host.agent_id, "name": host.profile.name,
+                    "description": host.profile.description}));
+            }
+            result["agents"] = agents.into();
         }
         success(result)
     }

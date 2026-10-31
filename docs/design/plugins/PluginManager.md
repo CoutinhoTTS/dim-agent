@@ -17,7 +17,7 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | Agent tools through a Session part (§6) | yes | |
 | The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler, plugin-authoring) | yes | |
 | Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
-| Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time | hooks (Hooks is M2) |
+| Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time; hooks (Hooks is M1) | |
 
 M1's acceptance is: a user or the agent writes a TypeScript plugin, installs it from a local path, uses its tools, edits it and reloads it, and the change takes effect without a restart; the default CLI starts with the default plugins loaded. Plugin code needs its runtime, which [#476](https://github.com/arcships/dim/issues/476) supplies.
 
@@ -157,14 +157,14 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 
 | State | Owner | Read through |
 | --- | --- | --- |
-| Which rows exist and their `EntryStatus` | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waiting_for`; shown as in A.1 |
+| Which rows exist and their `EntryStatus` | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waits`; shown as in A.1 |
 | Which built-in rutis plugins exist | the App Server's assembly | rows of the `assembly` layer in `Loader::entries()`; the row id is the plugin's name |
 | Skills, MCP servers, hooks registered from a plugin | SkillsCatalog, Mcp, Hooks | the owner's own methods |
 | A plugin's business configuration | the plugin's Settings sources | Settings |
 
 ### 2.5 Runtimes
 
-Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is [RuntimeManager](RuntimeManager.md) ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there shows rutis' status and reason in `plugin.list`. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
+Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is [RuntimeManager](RuntimeManager.md) ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there is `pending` in `plugin.list`, waiting for the runtime's connection row (`session-node` or `py`). How far the runtime itself got (acquiring, failed, starting, down) is `runtime.list`'s. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
 
 A TypeScript row is named by its entry file's absolute path. A Python plugin is imported through a link PluginManager keeps: `<home>/plugins/.python/<package>` points to the plugin directory, where `<package>` is its id (a default plugin's name) with `-` as `_`; its row is named `py:<package>.<entry module>`, and the plugin uses relative imports inside its package. PluginManager creates the link when the plugin is turned on, points it at the new directory after an update, and removes it when the plugin is removed. The Python runtime imports from `<home>/plugins/.python/` (#476).
 
@@ -216,7 +216,7 @@ When a content owner itself is turned on (Hooks, for example), PluginManager reg
 `plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
 
 1. Read the manifest again. If its name changed, refuse (`name_changed`); the user installs it again under the new name.
-2. Code: `Loader::reload("plugin:<name>")`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
+2. Code: `Loader::reload("plugin:<name>")`, and nothing else: there is no resolver cache to clear, since the runtime describes the module again at every resolution. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
 3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
 4. Update `kinds` in `plugins.json` if they changed.
 
@@ -300,7 +300,7 @@ PluginManager is not a Capability: it has no Timeline state, writes no Timeline 
 
 ## 9. Requirements raised to mechanism owners
 
-None to rutis: every loader operation used exists in rutis-loader 0.17.1.
+None to rutis: every loader operation used exists in rutis-loader 0.19.2.
 
 **R1. Settings: sources registered at run time (M1).**
 
@@ -312,7 +312,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | Effect on sequence, batch, interrupt, reload | No Timeline effect. A reload registers again from the new generation. |
 | Owner and issue | Settings (App Server); to be filed with #384. |
 
-**R2. SkillsCatalog, Mcp, Hooks: register plugin content and keep it (M1 for SkillsCatalog and Mcp if they land in time; Hooks M2).**
+**R2. SkillsCatalog, Mcp, Hooks: register plugin content and keep it (M1 for all three; SkillsCatalog and Mcp if they land in time).**
 
 | Item | Content |
 | --- | --- |
@@ -356,7 +356,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
+`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor`, the services of `Loader::waits`; a row waiting for its runtime names the runtime's connection row, `session-node` or `py`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 
 The client RPC boundary omits Git source userinfo, query and fragment, preserving
 the repository path, ref and commit. The persisted source is unchanged and remains

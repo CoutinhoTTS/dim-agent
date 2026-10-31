@@ -211,6 +211,7 @@ Lines differ only in their tails:
 - The root adopts system and model. Children do not change them ([prompt](../architecture/rust-agent/prompt.md)).
 - Prompt sources load with main's scope and are inherited ([PromptSources](../architecture/rust-agent/plugins/PromptSources.md)).
 - One ToolRegistry per Session gives every line the same tool list. That is why `create` on a child is refused through the tool result instead of by removing the tool.
+- The request marks that prefix for cache where the protocol caches only what it is told to: up to two breakpoints, at the end of the System and on the last block of the last user or tool-result message, each placed only when its conditions hold ([Anthropic cache breakpoints](../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)).
 - The identity block is the child's first event of its own, directly after the inherited prefix. A child's first request therefore reuses the parent's prefix up to the cut.
 - Roster updates are Appends at the end of `main`'s history.
 
@@ -369,20 +370,24 @@ The requirements that answer these items are in [Model-facing prompts](model-pro
 
 ### 12.3 Evaluation scenarios
 
-These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
+The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: seven under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 16,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
 
-| Scenario | Watch for |
-| --- | --- |
-| A line acts as main | It opens lines, claims the roster, or coordinates other lines |
-| Redone work | `main` repeats what a line is doing, or two lines do the same thing |
-| Stale knowledge | A line acts on files or decisions that changed after its cut without re-reading them |
-| Flooding | Append or steer messages that repeat what the receiver already knows |
-| Over-splitting | Lines opened for short or sequential steps |
-| Never ending | A line that is done but does not call `end` |
-| Sibling relay | `main` is used to pass messages between lines that should have been one line |
-| Identity after compaction | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
-| Ping-pong | Steer exchanges that do not move the work forward |
-| Asking the user | A line asks the user directly when it should, and does not route through `main` |
+`identity-after-compaction` reuses `redone-work`'s message and workspace, and `flooding` and `never-ending` share one workspace: each pair stays identical, and the no-model test that reads both committed directories fails when one copy changes alone.
+
+| Scenario | Scenario directory | Watch for |
+| --- | --- | --- |
+| A line acts as main | — | It opens lines, claims the roster, or coordinates other lines |
+| Redone work | `timeline-branches/redone-work` | `main` repeats what a line is doing, or two lines do the same thing |
+| Stale knowledge | — | A line acts on files or decisions that changed after its cut without re-reading them |
+| Flooding | `timeline-branches/flooding` | Append or steer messages that repeat what the receiver already knows |
+| Over-splitting | `timeline-branches/over-splitting` | Lines opened for short or sequential steps |
+| Never ending | `timeline-branches/never-ending` | A line that is done but does not call `end` |
+| Sibling relay | `timeline-branches/sibling-relay` | `main` is used to pass messages between lines that should have been one line |
+| Identity after compaction | `timeline-branches-compact/identity-after-compaction` | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
+| Ping-pong | `timeline-branches/ping-pong` | Steer exchanges that do not move the work forward |
+| Asking the user | `timeline-branches/asking-the-user` | A line asks the user directly when it should, and does not route through `main` |
+
+A row whose scenario directory is `—` has no scenario in the set.
 
 ### 12.4 Texts and their classes
 

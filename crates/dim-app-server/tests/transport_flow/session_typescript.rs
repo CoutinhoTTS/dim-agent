@@ -1060,7 +1060,11 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
     std::fs::remove_file(audit).unwrap();
 }
 
-struct CheckedModel(tokio::sync::mpsc::UnboundedSender<Vec<String>>);
+struct CheckedModel {
+    names: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    /// The full definitions each request carries; a dropped receiver is fine.
+    tools: tokio::sync::mpsc::UnboundedSender<Vec<ToolDefinition>>,
+}
 impl ModelDriver for CheckedModel {
     fn invoke(
         &self,
@@ -1068,7 +1072,7 @@ impl ModelDriver for CheckedModel {
         connection: ModelConnection,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
-        self.0
+        self.names
             .send(
                 request
                     .tools
@@ -1079,6 +1083,14 @@ impl ModelDriver for CheckedModel {
                     .collect(),
             )
             .unwrap();
+        let tools: Vec<ToolDefinition> = request
+            .tools
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        let _ = self.tools.send(tools);
         let batch = request.messages.last().is_some_and(|message| {
             message.role == Role::User
                 && match &message.content {
@@ -1165,34 +1177,56 @@ impl ToolDriver for SlowTools {
     }
 }
 
+/// The tool names each model request offers.
+type ModelRequests = tokio::sync::mpsc::UnboundedReceiver<Vec<String>>;
+/// The full tool definitions each model request offers.
+type RecordedTools = tokio::sync::mpsc::UnboundedReceiver<Vec<ToolDefinition>>;
+
 pub(super) async fn start(
+    config: ServerConfig,
+) -> (RunningServer, ModelRequests, Arc<tokio::sync::Notify>) {
+    let (server, requests, release, _) = start_recording(config).await;
+    (server, requests, release)
+}
+
+/// `start` that also returns the full tool definitions each model request
+/// carries.
+pub(super) async fn start_recording(
     mut config: ServerConfig,
 ) -> (
     RunningServer,
-    tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
+    ModelRequests,
     Arc<tokio::sync::Notify>,
+    RecordedTools,
 ) {
     config.unix_path = Some(std::env::temp_dir().join(format!(
         "dm-ts-{}/server.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     )));
-    let (builder, recv, release) = setup();
+    let (builder, requests, release, tools) = setup_recording();
     let server = serve(builder, config).await.unwrap();
-    (server, recv, release)
+    (server, requests, release, tools)
 }
 
-pub(super) fn setup() -> (
+pub(super) fn setup() -> (AgentBuilder, ModelRequests, Arc<tokio::sync::Notify>) {
+    let (builder, requests, release, _) = setup_recording();
+    (builder, requests, release)
+}
+
+fn setup_recording() -> (
     AgentBuilder,
-    tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
+    ModelRequests,
     Arc<tokio::sync::Notify>,
+    RecordedTools,
 ) {
-    let (send, recv) = tokio::sync::mpsc::unbounded_channel();
+    let (names, requests) = tokio::sync::mpsc::unbounded_channel();
+    let (tools, recorded) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Notify::new());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(CheckedModel(send)))))
+        .process_value(Arc::new(ModelHost(Arc::new(CheckedModel { names, tools }))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
@@ -1202,7 +1236,7 @@ pub(super) fn setup() -> (
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
-    (builder, recv, release)
+    (builder, requests, release, recorded)
 }
 
 /// Waits until the configured plugin row `row` is Active, so the parts its
@@ -1250,6 +1284,19 @@ pub(super) async fn when_served(client: &mut Client, method: &str, params: Value
     })
     .await
     .unwrap_or_else(|_| panic!("{method} is served"))
+}
+
+/// Reconciles the loader's layers with a fixture layer `name` of
+/// `patches` last, or without it.
+pub(super) async fn fixture_layer(
+    loader: &rutis_loader::Loader,
+    name: &str,
+    patches: Option<Vec<rutis_loader::Patch>>,
+) -> rutis_loader::report::ReconcileReport {
+    let mut layers = loader.layers();
+    layers.retain(|layer| layer.name != name);
+    layers.extend(patches.map(|patches| rutis_loader::Layer::new(name, patches)));
+    loader.reconcile(layers, None).await.unwrap()
 }
 
 /// Whether `reply` says the row that serves its method is not serving yet.
@@ -1671,7 +1718,7 @@ pub(super) struct ControlledGate {
     instance: InstanceId,
     controls: tokio::sync::mpsc::UnboundedSender<Control>,
     loader: rutis::host::Key<rutis_loader::Loader>,
-    rows: rutis::host::Key<rutis_loader::runtime::RuntimeRows>,
+    rows: rutis::host::Key<rutis_loader::runtime::SessionRows>,
     registry: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
 }
 impl ControlledGate {
@@ -1683,7 +1730,7 @@ impl ControlledGate {
             instance: names.instance(SESSION_GROUP)?,
             controls,
             loader: names.key()?,
-            rows: rutis::host::Key::dynamic("session-node"),
+            rows: rutis_loader::runtime::SessionRows::key("session-node"),
             registry: names.key()?,
         })
     }
@@ -1974,6 +2021,64 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         error.to_string().contains("same provides snapshot"),
         "{error}"
     );
+}
+
+/// A `type` array is admitted and offered to the model in canonical form; a
+/// schema the declaration parser still refuses names the tool and the path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_accepts_type_array_schemas_and_names_a_refused_one() {
+    let mut parts = fixture();
+    parts.rows[0]["config"] = json!({"typeArray": true});
+    let (server, _requests, _, mut recorded) = start_recording(ServerConfig {
+        session_typescript: Some(parts),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["ts_echo", "ts_nullable", "echo"])).await;
+    submit(&mut client, &session, r#"tool:echo {"text":"offered"}"#).await;
+    let offered = recorded.recv().await.unwrap();
+    let nullable = offered
+        .iter()
+        .find(|tool| tool.name == "ts_nullable")
+        .unwrap_or_else(|| panic!("ts_nullable is offered: {offered:?}"));
+    assert_eq!(
+        serde_json::to_value(&nullable.input_schema).unwrap(),
+        json!({
+            "type": "object",
+            "properties": {"space_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+            "required": ["space_id"]
+        })
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let mut parts = fixture();
+    parts.rows[0]["config"] = json!({"badTypeArray": true});
+    let (server, _requests, _) = start(ServerConfig {
+        session_typescript: Some(parts),
+        ..Default::default()
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    let status = when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId":session}),
+    )
+    .await;
+    assert!(
+        status["result"]["refused"].as_str().is_some_and(|refused| {
+            refused.contains("tool ts_broken")
+                && refused.contains("inputSchema.properties.x.type[1]")
+        }),
+        "{status}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
 }
 
 /// #207: Session creation does not wait for TypeScript parts, so a published

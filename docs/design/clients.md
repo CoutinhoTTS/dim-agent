@@ -50,7 +50,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 | --- | --- |
 | Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 5); [App Server README](../../crates/dim-app-server/README.md) |
 | Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
-| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo` as `session.list` gives it, so a client that opens a known Session takes the model from it and reads no catalog; a reload leaves the title fields absent and `running` false, and the notices that follow correct them | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
+| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo` as `session.list` gives it, so a client that opens a known Session takes the model from it and reads no catalog; a reload leaves the title fields absent and `running` false, and the notices that follow correct them. The `session.create` and `session.attach` replies also carry `modelPreferences`, the preferences the Session's adopted configuration sends, derived from it and absent when it carries none; `session.list` items do not carry it | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
 | Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
 | Approvals and questions: `approval.request` / `cancelled` / `resolved`; a question is a pending `ask_user` call answered by `session.question.respond` | [ADR 003](../adr/003-approval-scope.md), [Questions](plugins/Questions.md) |
 | Interfaces viewing a Session: the UI registry, terminal UIs as UI leaves (`ui.open`, `ui.attach`, `ui.status`) | [Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves) |
@@ -149,7 +149,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | `/settings`: subagent model, auxiliary model, default multimodal model, execution shell, sandbox, prompt language | designed elsewhere, no client UI | — | overview B.1, [Modality](plugins/Modality.md) |
 | `/settings`: VS Code focus, resource monitoring, plan usage display | none | — | |
 | `/settings`: ACP Session display | unsupported: no native persisted client-origin field | — | [AcpGateway](plugins/AcpGateway.md#a5-client-labels) |
-| `/usage` | context usage: done; plan quota is shown in the account view, not in `/usage` | — | |
+| `/usage` | context usage and, for active Dim OAuth models, account usage | — | [CLI usage report](cli-commands.md#usage-report) |
 | `/stats` | out | — | [overview](overview.md) App. A |
 | `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | |
 | `/tui` mode switch | done | — | [Tui](plugins/Tui.md) |

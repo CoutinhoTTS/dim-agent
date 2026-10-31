@@ -2376,14 +2376,8 @@
         "removing": false
       },
       {
-        "service": "dyn rutis_bridge::Transport#ui-leaf",
-        "provider": 32,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dyn rutis_bridge::identity::Identity#ui-leaf",
-        "provider": 32,
+        "service": "dyn rutis_bridge::catalog::PluginCatalog#rutis-bridge/catalog",
+        "provider": 2,
         "generation": 1,
         "removing": false
       },
@@ -2396,6 +2390,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#auxiliaryModel",
         "provider": 14,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#loader",
+        "provider": 2,
         "generation": 1,
         "removing": false
       },
@@ -2448,7 +2448,19 @@
         "removing": false
       },
       {
+        "service": "rutis_bridge::session::plugin::LocalId",
+        "provider": 1,
+        "generation": 0,
+        "removing": false
+      },
+      {
         "service": "rutis_loader::loader::Loader",
+        "provider": 2,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "rutis_loader::loader::service::LoaderService",
         "provider": 2,
         "generation": 1,
         "removing": false

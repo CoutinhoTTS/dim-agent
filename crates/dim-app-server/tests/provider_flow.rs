@@ -3576,6 +3576,20 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                         ..
                     })
                 ));
+                let mut unreadable = (*request).clone();
+                unreadable.metadata = request.metadata.clone().map(|mut metadata| {
+                    metadata
+                        .extensions
+                        .insert("providerProtocol".into(), json!("no-such-protocol"));
+                    metadata
+                });
+                assert!(matches!(
+                    resolver.0.resolve(Arc::new(unreadable), cancel.clone()).await,
+                    Err(dim_agent_capabilities::host::HostError::Failed {
+                        kind: dim_agent_capabilities::host::HostErrorKind::InvalidRequest,
+                        ..
+                    })
+                ));
                 let mut current = dim_agent_types::ModelConfiguration {
                     provider_id: id.clone(),
                     model_id: model_id.into(),
@@ -6794,7 +6808,19 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
             .unwrap();
         native
             .execute_batch(
-                "DROP TABLE agent_store_format;
+                "PRAGMA foreign_keys=OFF;
+                 CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
+                 DROP TABLE agents;
+                 CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)));
+                 CREATE UNIQUE INDEX agents_default_unique ON agents(is_default) WHERE is_default = 1;
+                 INSERT INTO agents(agent_id, profile, is_default) SELECT agent_id, profile, is_default FROM agents_rows;
+                 DROP TABLE agents_rows;
+                 CREATE TEMP TABLE sessions_rows AS SELECT * FROM agent_sessions;
+                 DROP TABLE agent_sessions;
+                 CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0));
+                 INSERT INTO agent_sessions(session_id, config, created_at_ms) SELECT session_id, config, created_at_ms FROM sessions_rows;
+                 DROP TABLE sessions_rows;
+                 DROP TABLE agent_store_format;
                  CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25));
                  INSERT INTO agent_store_format VALUES (25);",
             )
@@ -6820,6 +6846,89 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
         .unwrap();
     assert_eq!(whisper["capabilities"]["contextWindow"], Value::Null);
     assert_eq!(whisper["capabilities"]["maxOutputTokens"], Value::Null);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A recorded protocol that is present but does not parse still rejects a
+/// preference update: the route guard compares the recorded value itself, not
+/// the readable readback. An absent record passes as before.
+#[tokio::test]
+async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/route-guard-flow")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&home).unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    active(&root.plugin(dim_agent_aimux::AimuxPlugin)).await;
+    active(&root.plugin(provider_part(ProviderPlugin::new))).await;
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let id = "00000000-0000-4000-9000-000000000901";
+    let mut entry = model("same", 1357);
+    entry.capabilities.reasoning = true;
+    entry.metadata = Some(
+        serde_json::from_value(json!({
+            "reasoning":{"supported":true,"effortOptions":["high","low"]}
+        }))
+        .unwrap(),
+    );
+    let mut create = input(
+        id,
+        "http://127.0.0.1:1/v1/",
+        StaticAuth::Bearer,
+        Some("fixture-secret"),
+        "kept",
+        1357,
+    );
+    create.models = vec![entry];
+    provider.create(create, &cancel).await.unwrap();
+    let selection = provider
+        .configuration(Some(target(id)), None, ModelPreferences::default(), &cancel)
+        .await
+        .unwrap();
+    let mut unreadable = selection.metadata.clone().unwrap();
+    unreadable
+        .extensions
+        .insert("providerProtocol".into(), json!("no-such-protocol"));
+    let current = dim_agent_types::ModelConfiguration {
+        provider_id: id.into(),
+        model_id: "same".into(),
+        capability_snapshot: selection.capability_snapshot.clone(),
+        config: selection.config.clone(),
+        metadata: Some(unreadable),
+        tools: None,
+        tool_sources: vec![],
+    };
+    let effort = ModelPreferences {
+        reasoning_effort: Some("high".into()),
+        ..Default::default()
+    };
+    let error = provider
+        .apply_preferences(&current, effort.clone(), &cancel)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Model route changed"), "{error}");
+    let current = dim_agent_types::ModelConfiguration {
+        metadata: selection.metadata.clone().map(|mut metadata| {
+            metadata.extensions.remove("providerProtocol");
+            metadata
+        }),
+        ..current
+    };
+    provider
+        .apply_preferences(&current, effort, &cancel)
+        .await
+        .unwrap();
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

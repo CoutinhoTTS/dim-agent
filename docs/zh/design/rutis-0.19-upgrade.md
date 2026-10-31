@@ -1,8 +1,8 @@
-# 升级到 rutis 0.19.1
+# 升级到 rutis 0.19.2
 
 [English](../../design/rutis-0.19-upgrade.md)
 
-状态：草案。
+状态：Ready。
 
 Issue：[#681](https://github.com/arcships/dim/issues/681)。
 
@@ -10,22 +10,22 @@ Issue：[#681](https://github.com/arcships/dim/issues/681)。
 [ADR 006](../adr/006-plugin-contract.md)、[Dim 如何使用 rutis](rutis-usage.md)。
 
 本次升级把 `rutis`、`rutis-loader`、`rutis-bridge`、随附的 Node 运行时、仓库内的 TypeScript 插件以及
-Python SDK 从 0.17.1 升到 0.19.1。rutis 0.18 和 0.19 都有不兼容变更（[0.18 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.18.md)、
-[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.md)）。本次升级不保留兼容路径。
+Python SDK 从 0.17.1 升到 0.19.2。rutis 0.18 和 0.19 都有不兼容变更（[0.18 迁移指南](https://github.com/arcships/rutis/blob/v0.19.2/docs/migration-0.18.md)、
+[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.2/docs/migration-0.19.md)）。本次升级不保留兼容路径。
 rutis 删掉的 API，Dim 一律改用 rutis 规定的新写法，不加重建旧 API 的包装层。
 
 ## 1. 范围，以及为什么一步做完
 
 | 项 | 现状 | 目标 |
 | --- | --- | --- |
-| `Cargo.toml` 工作区依赖 | `rutis`、`rutis-bridge` 0.17.1；`rutis-loader` 0.17.1，带 `node`、`python` | 0.19.1；`rutis-loader` 只带 `node`（0.19 没有 `python` feature，`node` 会启用 `runtimes`） |
+| `Cargo.toml` 工作区依赖 | `rutis`、`rutis-bridge` 0.17.1；`rutis-loader` 0.17.1，带 `node`、`python` | 0.19.2；`rutis-loader` 只带 `node`（0.19 没有 `python` feature，`node` 会启用 `runtimes`） |
 | 新增依赖 | — | 无。Dim 自己拉起运行时（M4）；npm 上的 `@arcships/rutis-host` 只是测试用的开发依赖（M10） |
-| `xtask` | `rutis-bridge`，带 `exports` | `rutis-types` 0.19.1 |
-| `runtime/package.json` 及锁文件 | `@arcships/rutis-runtime`、`@arcships/rutis` 0.17.1 | 0.19.1；另加开发依赖 `@arcships/rutis-host` 0.19.1（M10） |
-| `runtime/plugins/{goal,scheduler,session-title,workflow}/package.json` 及锁文件 | `@arcships/rutis` 0.17.1 | 0.19.1 |
+| `xtask` | `rutis-bridge`，带 `exports` | `rutis-types` 0.19.2 |
+| `runtime/package.json` 及锁文件 | `@arcships/rutis-runtime`、`@arcships/rutis` 0.17.1 | 0.19.2；另加开发依赖 `@arcships/rutis-host` 0.19.2（M10） |
+| `runtime/plugins/{goal,scheduler,session-title,workflow}/package.json` 及锁文件 | `@arcships/rutis` 0.17.1 | 0.19.2 |
 | `npm/package.json` 的 peer 依赖 | `@arcships/rutis` `~0.17.0` | `~0.19.0` |
-| `runtime/python-requirements.txt` | `rutis==0.17.1` 及其哈希 | `rutis==0.19.1` 及其哈希 |
-| 作者指南的固定版本 | [作者指南](../../typescript-plugin-authoring.md) | 0.19.1 |
+| `runtime/python-requirements.txt` | `rutis==0.17.1` 及其哈希 | `rutis==0.19.2` 及其哈希 |
+| 作者指南的固定版本 | [作者指南](../../typescript-plugin-authoring.md) | 0.19.2 |
 | `.github/workflows/ci.yml` | Node 绑定一步用 0.17.1 的测试工具跑插件测试 | 为 0.19 的测试工具导出 `RUTIS_HOST`（M10） |
 
 0.19 使用会话协议 4，握手时会拒绝 0.18 及更早的对端，两个方向都是如此。因此 App Server、Node 运行时、
@@ -33,15 +33,16 @@ Python 运行时和交互式 `dimcode` 进程（UI leaf，M8）必须一起升�
 Python 行都无法连接。
 
 目标是 0.19，而不是 0.18。0.18 的大部分不兼容变化（诊断、配置校验）原样延续到 0.19；而如果先升到 0.18，
-要适配的那些 API（链接、`LocalRuntime`、`RuntimeResolver`）在 0.19 里又都被删掉了。固定版本是 0.19.1，
-已于 2026-10-30 发布到 crates.io、npm 和 PyPI。它补回了 M2 需要的同步 waterfall（[rutis#947](https://github.com/arcships/rutis/pull/947)），并公开了
+要适配的那些 API（链接、`LocalRuntime`、`RuntimeResolver`）在 0.19 里又都被删掉了。固定版本是 0.19.2。0.19.1
+已于 2026-10-30 发布到 crates.io、npm 和 PyPI，它补回了 M2 需要的同步 waterfall（[rutis#947](https://github.com/arcships/rutis/pull/947)），并公开了
 [#684](https://github.com/arcships/dim/pull/684) 依赖的 `mark_scope`（[rutis#948](https://github.com/arcships/rutis/issues/948)）。
-它和 0.19.0 使用同一个协议，所以 `npm` 的 peer 范围仍是 `~0.19.0`。
+它和 0.19.0 使用同一个协议，所以 `npm` 的 peer 范围仍是 `~0.19.0`。0.19.2 只修 bug、不增减 API；本次升级用它是为了
+[rutis#978](https://github.com/arcships/rutis/pull/978) 让大量实例一起关闭时的峰值变成线性（#714）。
 
 不在范围内：Go、Swift、Kotlin 运行时，dylib 插件，远程运行时与节点连接行（`rutis-host/dial`、
 `rutis-host/listen`），`rutis-host` 命令，以及 Cordis 宿主。Dim 都不使用。`rutis-migrate` 停在 0.18，不使用它。
 
-## 2. 0.17.1 到 0.19.1 之间的变化
+## 2. 0.17.1 到 0.19.2 之间的变化
 
 | 版本 | 与 Dim 相关的内容 |
 | --- | --- |
@@ -49,10 +50,11 @@ Python 行都无法连接。
 | 0.18 | 错误文案带错误码（`session::Error::Binding`）；默认错误 sink 写标准错误；配置按 schema 校验并填入默认值；`reconcile` 不再等待仍在启动的运行时；带方法的对象可以传给每种语言 |
 | 0.19 | 本地运行时是一个会话的对端；链接、peer、传输和身份这一层整个删除；服务目录共享所有未登记的名字；运行时的行遵守 `isolate`；运行时的每次 emit 都经过宿主；`LoaderPlugin` 提供服务 `loader`；每个 loader 只用一个 `rutis/row` 监听器，而不是每行一个（[rutis#808](https://github.com/arcships/rutis/pull/808)，即 [#518](https://github.com/arcships/dim/issues/518) 在等的修复）；SDK 测试工具运行在真实的 `rutis-host` 上；要求 Python 3.12 及以上；线上错误名 `CordisError` 改为 `Error` |
 | 0.19.1 | 同步 waterfall 以 `waterfall(event).sync(terminal)` 的形式补回（M2）；外语插件定义的副本可以挂在宿主自己的实例里，`mark_scope` 公开（rutis#948，#684 使用）；`Loader::instance_rows`；运行时 `ready()` 之后的 `reconcile` 一定装载它的行；rutis-host 的运行时插件从创建起就是 Starting（rutis#964；Dim 不用它，M4） |
+| 0.19.2 | 只修 bug、不增减 API：大量实例一起关闭时的峰值变成线性（rutis#978）；被驱动取消的加载中插件回到 Pending，它的清理错误只进 error sink（rutis#969，见 §8）；放弃的 `reconcile` 不再卡住后续操作；TypeScript 测试工具在每个测试结束时卸载插件 |
 
 ### 2.1 Dim 调用的内核 API
 
-| 0.17.1 | 0.19.1 |
+| 0.17.1 | 0.19.2 |
 | --- | --- |
 | `Ctx::waterfall_sync(event, terminal)` | 在 0.19.0 中删除，迁移指南给的替代是 `waterfall`（异步）或同步的 `bail`，两者都不适用于 `before` 链。0.19.1 补回了 `ctx.waterfall(event).sync(terminal)`（rutis#946），M2 用它 |
 | 同步监听器里的 `SyncCall::next()` | 总是返回 `Err(WaterfallNext)`：同步监听器后面没有链可以继续执行 |
@@ -64,7 +66,7 @@ Python 行都无法连接。
 
 ### 2.2 Dim 调用的 bridge 与 loader API
 
-| 0.17.1 | 0.19.1 |
+| 0.17.1 | 0.19.2 |
 | --- | --- |
 | `rutis_bridge::runtime::LocalRuntime`（`node`、`python`、`named`、`interpreter`、`python_path`、stdio、`handle`） | 宿主自己的连接行：`rutis_bridge::runtime::Launcher`、`pipe::greeted`、`Session::new`、`pipe::Processes`。不使用迁移指南给的 `rutis_host::connect::SpawnPlugin`（M4） |
 | `RuntimePlugin`、服务 `runtime::Runtime` | 删除；由连接插件记录自己运行时的 `RuntimeStatus`（M4） |
@@ -128,10 +130,11 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 **与本次升级相关的未完成工作。**
 
 - [#518](https://github.com/arcships/dim/issues/518) 在等 rutis#808，0.19 带上了它。本次升级凭 §6 的测量结果关闭它。
-- [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
-  引入 rutis#920。rutis#920 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
-  [#684](https://github.com/arcships/dim/pull/684)：Session 和分支变成用 0.19.1 公开的 `mark_scope` 标记自己的插件，
-  不再有实例行可查。#684 的设计已经合入（79fbb1b3），它的实现在本次升级之后进行。#645 不合入：#684 取代了它。
+- [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，0.19.1 发布了它（rutis#941），
+  rutis#920 则已关闭、没有合并。#645 随后以 0.19.2 上的后续改动合入：装配通过这个 API 读取当前的
+  行句柄，行为不变。但 #594 不是这样解决的：Session 和分支变成用公开的 `mark_scope` 标记自己的插件，
+  不再有实例行可查。[#684](https://github.com/arcships/dim/pull/684) 承载这个设计（已合入，79fbb1b3），
+  它的实现在本次升级之后进行。
 
 ## 4. 决策
 
@@ -179,7 +182,7 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 `SessionHandle::process()` 读取运行时的进程，而这个方法在 rutis-bridge 里是隐藏的（`#[doc(hidden)]`，给
 rutis-loader 用）。Dim 本身就是宿主，这两样都不需要。0.19 里，一个运行时，无论本地还是远端，都是一个连接行：
 自己的连接，就是一个把 `Channel` 交给 `Session::new` 的插件；由宿主启动的运行时，命令行是
-`<channel> --id <name> <project>`（[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.1/docs/migration-0.19.md)
+`<channel> --id <name> <project>`（[0.19 迁移指南](https://github.com/arcships/rutis/blob/v0.19.2/docs/migration-0.19.md)
 "一起升级"一节）。拉起进程的插件最清楚进程还在不在，所以由它自己记录这个状态。Dim 不链接 `rutis-host`，
 也不照抄 `SpawnPlugin`。
 
@@ -418,6 +421,13 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
   其他插件的测试本来就加载默认导出。
 - `load(plugin, { config, services })` 的形状不变。现在测试和插件之间传值遵循进程之间的规则，测试观察到的
   事件会在发出方返回之后才到达。在 `emit` 之后立刻读取结果的测试要改为等待。
+- goal、session-title、scheduler、workflow 四个插件的测试暂时不在 CI 里运行。在 0.19.2 上，测试调用的回调与插件调用的
+  假服务交错时测试工具会死锁（[rutis#987](https://github.com/arcships/rutis/issues/987)），一次 provide 失败就让测试宿主
+  断开（[rutis#988](https://github.com/arcships/rutis/issues/988)），而 rutis-host 自己的 `sessions` 占用了 Dim 插件注入的
+  名字（[rutis#986](https://github.com/arcships/rutis/issues/986)）。`tsc` 仍检查这些插件，§6 的 Node 流程测试仍实际加载
+  它们。rutis 修复后测试恢复。
+- zod 的 `z.toJSONSchema` 结果还带着 `~standard`，0.19 的 `definePlugin` 会把它当成 Standard Schema 拒绝，所以 goal、
+  scheduler、workflow 插件把它转成纯 JSON 再传。
 
 ## 5. 实施计划
 
@@ -427,7 +437,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 步骤 | 工作 | 门槛 |
 | --- | --- | --- |
 | 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供最小宿主，并把 41 个文件迁到它上面 | `cargo test --workspace --locked`；`xtask check` 和 `graph`，并对照 §6 中步骤 0 的图 diff；§6 中放置的检查 |
-| 1 | 固定版本和锁文件（M1），升到 0.19.1；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.1 |
+| 1 | 固定版本和锁文件（M1），升到 0.19.2；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.2 |
 | 2 | 内核与服务目录：M2、M3 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 的检查 |
 | 3 | 运行时：M4、M5、M9 | App Server 和 `tests/integration` 中由 Node、Python 驱动的流程测试 |
 | 4 | leaf：M7、M8 | `cargo test -p dimcode --test ui_leaf`；`transport_flow ui_host::` |
@@ -537,11 +547,13 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | leaf 建立了会话，但它的 `Tui` 一直不 attach | 在 `START` 之后关闭；替换时在新界面 attach 之前保留旧界面（M8） |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
-| #645 先合入 | 它对 rutis#920 的 Git 固定版本与 0.19.1 的固定版本（M1）冲突，它查询的实例行也会随 #684 去掉。它不合入；§3 让 #594 改走 #684 |
+| #645 合入 | 它在本次升级之后合入，用的是 0.19.2 公开的 `Loader::instance_rows`，行为不变，因此与固定版本和本次升级都不冲突；它读取的实例行会随 #684 去掉（§3） |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |
 | Dim 保留的启动命令和运行时包脱节 | 它们和这些包一起固定版本（`runtime/package.json`、`runtime/python-requirements.txt`），由 Node 和 Python 驱动的流程测试实际启动两个运行时 |
+| Agent 关闭打断 Session 构造时，某个插件的清理失败 | 在 0.19.2 上，这个失败只进 error sink，不出现在 `Agent::close` 的结果里（rutis#969）。为了关闭峰值的修复先接受；已报为 [rutis#983](https://github.com/arcships/rutis/issues/983)，`lifecycle_review` 的两个测试在修复前忽略 |
+| TypeScript 插件测试暂时不在 CI 里运行 | `tsc` 和 Node 流程测试仍覆盖这些插件；rutis#986–#988 修复后恢复（M10） |
 
 回滚：撤销这次升级改动和固定版本即可。没有任何持久化格式变化；Timeline、存储和线上格式的夹具都不动。
 
@@ -549,7 +561,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 一项，已有答复：为 Timeline 的 `before` 链提供同步 waterfall（M2），即
 [rutis#946](https://github.com/arcships/rutis/issues/946)，已由 [rutis#947](https://github.com/arcships/rutis/pull/947)
-合入，在 0.19.1 发布，本次升级以 0.19.1 为目标。其余决策都按 rutis 的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
+合入，在 0.19.1 发布；本次升级以 0.19.2 为目标。其余决策都按 rutis 的现状使用它。接受一条限制而不提需求（M8）。`LoaderService` 的键无法隔离，
 这正好符合 loader 按宿主划分（M6）。
 
 ## 10. 规则检查

@@ -26,6 +26,8 @@ pub struct Palette {
     pub user: String,
     /// Keys named in menus and hints.
     pub keybind: String,
+    /// Model activity, blue in every theme.
+    pub activity: String,
     pub text: String,
     pub text_soft: String,
     pub muted: String,
@@ -108,6 +110,12 @@ pub fn terminal_palette(mode: ColorMode, appearance: Appearance) -> Palette {
         on_accent: own(if light { "#ffffff" } else { "ansi:0" }),
         user: slot("ansi:2", LIGHT_RAMP.green),
         keybind: slot("ansi:4", LIGHT_RAMP.blue),
+        activity: own(match (mode, appearance) {
+            (ColorMode::Ansi16, _) => "ansi:12",
+            (_, Appearance::Light) => "#0369a1",
+            (ColorMode::TrueColor, Appearance::Dark) => "#38bdf8",
+            (ColorMode::Ansi256, Appearance::Dark) => "ansi:75",
+        }),
         text: own("default"),
         text_soft: own("default"),
         muted: slot("dim", LIGHT_RAMP.muted),

@@ -139,8 +139,6 @@ pub enum Effect {
     LoginUsage(String),
     /// Open this page in the browser.
     OpenUrl(String),
-    /// Commit this text to the transcript as a status block.
-    Print(String),
     /// Make this model the default and the session's model.
     ClearModelPreferences {
         provider_id: String,

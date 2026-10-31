@@ -506,12 +506,17 @@ pub(crate) fn render_block(
 ) -> Vec<String> {
     match block {
         Block::Banner => Vec::new(),
-        Block::User { text, display, .. } => render_user(
+        Block::User {
+            text,
+            display,
+            pending,
+            ..
+        } => render_user(
             &crate::sanitize::safe(display.as_deref().unwrap_or(text)),
             width,
             &UserStyle {
-                color: &p.user,
-                surface: p.surface.as_deref(),
+                color: if *pending { &p.muted } else { &p.user },
+                surface: if *pending { None } else { p.surface.as_deref() },
             },
         ),
         Block::Assistant(text) => markdown.render(&crate::sanitize::safe(text), width, 0),
@@ -594,6 +599,25 @@ pub(crate) fn render_block(
                 Tone::Danger => &p.danger,
             };
             gutter_text(STATUS_MARK, &crate::sanitize::safe(text), width, color)
+        }
+        Block::AccountUsage(usage) => {
+            let gutter = gutter_width(width);
+            let content = width.saturating_sub(gutter).max(1);
+            let mut rows = vec![fg(&truncate_cells(t("DimAgent OAuth"), content), &p.muted)];
+            rows.extend(crate::ui::oauth_view::OauthView::render_usage(
+                usage, content, p,
+            ));
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let lead = if i == 0 {
+                        fg(&gutter_mark(STATUS_MARK, gutter), &p.muted)
+                    } else {
+                        " ".repeat(gutter)
+                    };
+                    format!("{lead}{row}")
+                })
+                .collect()
         }
         Block::Failure(message) => vec![tf("Error: {message}", &[("message", message)])],
         Block::Boundary(label) => vec![fg(&boundary_line(label, width), &p.muted)],

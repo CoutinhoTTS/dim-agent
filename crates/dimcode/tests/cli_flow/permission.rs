@@ -28,6 +28,120 @@ fn quiet_turn(wire: &mut Wire) {
 }
 
 #[test]
+fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_message() {
+    for initial_setup in [false, true] {
+        for fullscreen in [false, true] {
+            let home = Home::new();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(if initial_setup { &[] } else { &PRESET_METHODS });
+                if initial_setup {
+                    let create = wire.read("session.create");
+                    fail(wire, &create, "provider_failed");
+                } else {
+                    wire.created();
+                    let attach = wire.read("session.attach");
+                    wire.reply(&attach, attach_record(&attach));
+                    let history = wire.read("session.history");
+                    wire.reply(
+                        &history,
+                        json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                    );
+                    let read = wire.read("session.permission.get");
+                    wire.reply(
+                        &read,
+                        json!({"version":1,"policy":policy("workspace-write", &[], &[])}),
+                    );
+                    wire.no_context();
+                }
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                let create = wire.read("session.create");
+                assert_eq!(
+                    create["params"]["permissionPolicy"],
+                    json!({"preset":"read-only"})
+                );
+                wire.reply(
+                    &create,
+                    json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                );
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                );
+                if !initial_setup {
+                    let read = wire.read("session.permission.get");
+                    wire.reply(
+                        &read,
+                        json!({"version":1,"policy":policy("read-only", &[], &[])}),
+                    );
+                }
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["text"], "first message");
+                wire.reply(&submit, json!({}));
+                wire.notice(
+                    "session.event",
+                    json!({"sessionId":"session","branchId":"main","event":{"id":"input-9","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"accepted first message"}]},"mode":"queue"}}}),
+                );
+                for (sequence, name) in [(10, "applied"), (11, "consumed")] {
+                    wire.notice(
+                        "session.event",
+                        json!({"sessionId":"session","branchId":"main","event":{"id":format!("input-{sequence}"),"sequence":sequence,"create_at":1,"type":"input","name":name,"data":{"input_id":"input-9"}}}),
+                    );
+                }
+                wire.no_context();
+                let mut line = String::new();
+                while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                    line.clear();
+                }
+            });
+            let mut command = home.command();
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            if initial_setup {
+                terminal.until("Sign in with /login");
+            } else {
+                terminal.until("test / model");
+                terminal.write(b"/new\r");
+                terminal.until("new session");
+            }
+            let mark = terminal.transcript.len();
+            terminal.write(b"/approvals\r");
+            terminal.until("Workspace write");
+            terminal.write(b"\x1b[A\r");
+            terminal.until("Confirm Full Access");
+            terminal.write(b"y");
+            terminal.until("Tool approvals: Full access");
+            terminal.write(b"/approvals\r");
+            terminal.until("Workspace write");
+            terminal.write(b"\x1b[B\r");
+            terminal.until("Tool approvals: Ask");
+            terminal.write(b"/approvals\r");
+            terminal.until("Read only");
+            terminal.write(b"\x1b[B\r");
+            terminal.until("Tool approvals: Read only");
+            let config: Value =
+                serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap())
+                    .unwrap();
+            assert_eq!(config["permissionPreset"], "read-only");
+            if !initial_setup {
+                assert!(!terminal.transcript[mark..].contains("Sign in with /login"));
+            }
+            assert!(!terminal.transcript[mark..].contains("New members from main"));
+            terminal.write(b"first message\r");
+            terminal.until("accepted first message");
+            terminal.signal(libc::SIGKILL);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
