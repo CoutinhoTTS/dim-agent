@@ -193,6 +193,7 @@ impl HistoryRenderer {
         }
         let mut state = None;
         let mut history = Vec::new();
+        let mut compaction = None;
         let mut start = 1;
         while start <= through {
             let end = (start + batch - 1).min(through);
@@ -202,10 +203,8 @@ impl HistoryRenderer {
             }
             let projected = project_batch(&events, state.as_ref())
                 .map_err(|error| AgentError::fault("History", error))?;
-            if projected.compacted {
-                return Ok(StreamedContext::fallback());
-            }
             history.extend(projected.history);
+            compaction = projected.compaction.or(compaction);
             state = Some(projected.state);
             start = end + 1;
         }
@@ -215,6 +214,7 @@ impl HistoryRenderer {
             configuration: state.configuration,
             prompt: PromptSnapshot::from_checkpoint(&state.prompts).revision,
             ancestry: ancestors.into_iter().map(|(branch, _)| branch).collect(),
+            compaction,
             fallback: false,
         })
     }
@@ -227,6 +227,7 @@ pub struct StreamedContext {
     pub configuration: Option<ContextConfiguredData>,
     pub prompt: Option<PromptReference>,
     pub ancestry: Vec<String>,
+    pub compaction: Option<Arc<AgentEvent>>,
     /// The caller must use the full `rendered_context` path.
     pub fallback: bool,
 }
@@ -238,6 +239,7 @@ impl StreamedContext {
             configuration: None,
             prompt: None,
             ancestry: Vec::new(),
+            compaction: None,
             fallback: true,
         }
     }
@@ -367,6 +369,7 @@ pub struct ProjectedBatch {
     pub history: Vec<HistoryEntry>,
     pub state: ProjectionCheckpointState,
     pub compacted: bool,
+    pub compaction: Option<Arc<AgentEvent>>,
 }
 
 /// Projects one contiguous event batch from `initial` without retaining the
@@ -376,13 +379,48 @@ pub fn project_batch(
     events: &[Arc<AgentEvent>],
     initial: Option<&ProjectionCheckpointState>,
 ) -> Result<ProjectedBatch, String> {
-    let projection = replay(events, initial)?;
+    let mut projection = replay(events, initial)?;
+    let compaction = events.iter().rev().find(|event| {
+        matches!(
+            &event.kind,
+            EventKind::ContextCompaction(data)
+                if matches!(data.outcome, ContextCompactionResult::Completed { .. })
+        )
+    });
+    if let Some(event) = compaction
+        && let EventKind::ContextCompaction(data) = &event.kind
+        && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
+    {
+        let order: HashMap<&str, usize> = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| (event.id.as_str(), index))
+            .collect();
+        let Some(cut) = order.get(retain_from.as_str()).copied() else {
+            return Ok(ProjectedBatch {
+                history: projection.history,
+                state: projection.state,
+                compacted: true,
+                compaction: None,
+            });
+        };
+        let kept = projection
+            .history
+            .iter()
+            .position(|entry| {
+                order
+                    .get(entry.source.as_str())
+                    .is_some_and(|index| *index >= cut)
+            })
+            .unwrap_or(projection.history.len());
+        projection.history.drain(..kept);
+        projection.state.retain_from = retain_from.clone();
+    }
     Ok(ProjectedBatch {
         history: projection.history,
         state: projection.state,
-        compacted: events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::ContextCompaction(_))),
+        compacted: compaction.is_some(),
+        compaction: compaction.cloned(),
     })
 }
 
