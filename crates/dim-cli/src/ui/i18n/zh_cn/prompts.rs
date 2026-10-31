@@ -125,6 +125,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Changing" => "正在修改",
         "1 file" => "1 个文件",
         "{count} files" => "{count} 个文件",
+        "… {count} more" => "…另 {count} 个",
         "1 web page" => "1 个网页",
         "{count} web pages" => "{count} 个网页",
         "1 skill" => "1 个技能",

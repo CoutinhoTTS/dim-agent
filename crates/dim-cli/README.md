@@ -722,6 +722,23 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
 
+Edit group headers name the edited paths even while collapsed. A single file replaces the
+file count; multiple files keep the unique-file count and total added/removed lines before
+the path list, in first-call order. Repeated edits of one path count as one file, while all
+successful edits contribute to the line totals. Mixed tool groups carry the same edit summary.
+Paths retain the tool input's spelling, including directory components to distinguish namesakes.
+On narrow terminals, the path list gives way to a localized remaining-file count; an individual
+path may shorten on grapheme boundaries to keep the totals and disclosure visible. If even
+those fixed fields exceed the width, the header uses the ordinary one-row truncation.
+Opening the group still shows each tool's full path and diff.
+
+```text
+✓ Edited src/main.rs (+12 -3) ▸
+✓ Edited 2 files (+18 -5) · src/main.rs, src/config.rs ▸
+✓ Edited 5 files (+42 -16) · src/main.rs, … 4 more ▸
+✓ Ran 1 command, edited src/main.rs (+12 -3) ▸
+```
+
 Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening preserves this order for turns interrupted by this version of the TUI. Older cancellations and cancellations from the line client retain their existing `stopped` display.
 
 ```text
