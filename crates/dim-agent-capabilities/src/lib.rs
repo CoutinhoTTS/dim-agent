@@ -78,6 +78,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::ToolHost>(catalog, session);
     register::<permission::CommandRulesHost>(catalog, session);
     register::<hooks::HookSourcesHost>(catalog, session);
+    register::<hooks::HooksRuntime>(catalog, session);
     register::<methods::SessionMethods>(catalog, session);
     let branch = Some(BRANCH_GROUP);
     register::<input_queue::InputQueue>(catalog, branch);

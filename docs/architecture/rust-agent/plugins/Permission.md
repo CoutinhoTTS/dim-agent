@@ -193,5 +193,5 @@ fails with `invalid_params`, which ends the prompt.
 | 作用域 | 分支 |
 | 注入 | `B:Dispatcher`、`B:Permission`、`B:Timeline` |
 | 提供 | `B:Approval` |
-| 被注入于 | `ToolExecutor` |
+| 被注入于 | `HooksBranch`、`ToolExecutor` |
 <!-- /generated -->

@@ -231,5 +231,5 @@ isolation line.
 | 作用域 | 进程 |
 | 注入 | `P:FileStorage` |
 | 提供 | `P:HostPlatform` |
-| 被注入于 | `PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
+| 被注入于 | `HooksSession`、`PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
 <!-- /generated -->

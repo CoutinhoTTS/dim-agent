@@ -499,6 +499,32 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::hooks::runner",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::hooks",
+      "file": "crates/dim-agent-capabilities/src/hooks/runner.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::hooks::runner::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::hooks::runner",
+      "file": "crates/dim-agent-capabilities/src/hooks/runner.rs",
+      "unexpandedMacros": [
+        "assert",
+        "format",
+        "serde_json::json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::hooks::sources",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::hooks",
@@ -6291,6 +6317,13 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::hooks::runner",
+      "references": [
+        "path hooks::HooksRuntime"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
         "path hooks::HookSourcesHost"
@@ -8069,6 +8102,13 @@
     },
     {
       "from": "dim_agent_capabilities::hooks",
+      "to": "dim_agent_capabilities",
+      "references": [
+        "path crate::register_names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks",
       "to": "dim_agent_capabilities::hooks::document",
       "references": [
         "mod document",
@@ -8080,6 +8120,16 @@
         "use document::OnFailure",
         "use document::entries",
         "use document::handlers"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks",
+      "to": "dim_agent_capabilities::hooks::runner",
+      "references": [
+        "mod runner",
+        "path runner::HooksBranchPlugin::new",
+        "path runner::HooksSessionPlugin::new",
+        "use runner::HooksRuntime"
       ]
     },
     {
@@ -8097,6 +8147,20 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::hooks",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::Feature::new"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::hooks::document",
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
@@ -8107,6 +8171,284 @@
         "use super::sources::HookSourceId",
         "use super::sources::HookSourceState",
         "use super::sources::HookSourcesSnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::approval",
+      "references": [
+        "path Approval",
+        "use crate::approval::Approval"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path append_own",
+        "use crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path element",
+        "path raw",
+        "use crate::context_block::element",
+        "use crate::context_block::raw"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::hooks::document",
+      "references": [
+        "path HookEvent",
+        "path HookEvent::Notification",
+        "path HookEvent::PermissionRequest",
+        "path HookEvent::PostToolUse",
+        "path HookEvent::PostToolUseFailure",
+        "path HookEvent::SessionStart",
+        "path HookEvent::Stop",
+        "path HookHandler",
+        "path handlers",
+        "use crate::hooks::HookEvent",
+        "use crate::hooks::HookHandler",
+        "use crate::hooks::handlers"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::hooks::runner::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::hooks::sources",
+      "references": [
+        "path HookSourcesHost",
+        "path HookSourcesSnapshot",
+        "use crate::hooks::HookSourcesHost",
+        "use crate::hooks::HookSourcesSnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path Os::Windows",
+        "use crate::host_platform::HostPlatform",
+        "use crate::host_platform::Os"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "path SessionConfig",
+        "path SessionIdentity",
+        "path TimelineIdentity",
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::TimelineIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_runtime::core::dispatcher",
+      "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
+        "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
+        "use dim_agent_runtime::Dispatcher"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject",
+        "use dim_agent_types::JsonObject"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ToolContent",
+        "use dim_agent_types::ToolContent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path ApprovalCancelledData",
+        "path ApprovalDecision",
+        "path ApprovalDecision::Allow",
+        "path ApprovalDecision::Deny",
+        "path ApprovalRequestData",
+        "path ApprovalRespondData",
+        "path BranchSource::Tool",
+        "path EventKind::ApprovalCancelled",
+        "path EventKind::ApprovalRequest",
+        "path EventKind::ApprovalRespond",
+        "path EventKind::ContextConfigured",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputMessage",
+        "path EventKind::StopInterrupt",
+        "path EventKind::ToolCall",
+        "path EventKind::ToolResult",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
+        "path InputBlock",
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMode",
+        "path InputMode::Append",
+        "path InputMode::Queue",
+        "path ToolCallResult",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::ApprovalCancelledData",
+        "use dim_agent_types::ApprovalDecision",
+        "use dim_agent_types::ApprovalRequestData",
+        "use dim_agent_types::ApprovalRespondData",
+        "use dim_agent_types::BranchSource",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputMode",
+        "use dim_agent_types::ToolCallResult",
+        "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolDefinition",
+        "use dim_agent_types::ToolDefinition"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::hooks::document",
+      "references": [
+        "path HooksDocument",
+        "use crate::hooks::HooksDocument"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::hooks::runner",
+      "references": [
+        "path HooksRuntime",
+        "path Pending::default",
+        "path View::default",
+        "path approval_point"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::hooks::sources",
+      "references": [
+        "path HookSourcesHost",
+        "path HookSourcesSnapshot",
+        "path ReadHookSources",
+        "use crate::hooks::HookSourceId",
+        "use crate::hooks::HookSourceSnapshot",
+        "use crate::hooks::HookSourceState",
+        "use crate::hooks::ReadHookSources"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform::current"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "path SessionConfig::default",
+        "path SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path ApprovalCallData",
+        "path ApprovalRequestData",
+        "path BranchSource::Host",
+        "path EventKind",
+        "path EventKind::ToolCall",
+        "path EventKind::ToolResult",
+        "path ToolCallData",
+        "path ToolResultData",
+        "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::ToolCallData",
+        "use dim_agent_types::ToolResultData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolResult"
       ]
     },
     {
@@ -15542,6 +15884,13 @@
       "references": [
         "path HistoryRenderer::default",
         "use dim_agent_capabilities::history::HistoryRenderer"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_agent_capabilities::hooks",
+      "references": [
+        "path dim_agent_capabilities::hooks::install"
       ]
     },
     {
@@ -33160,6 +33509,34 @@
     {
       "module": "dim_agent_capabilities::file_storage::windows",
       "path": "FILE_STANDARD_INFO::default"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner",
+      "path": "End::Cancelled"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner",
+      "path": "End::Done"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner",
+      "path": "End::TimedOut"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner::tests",
+      "path": "OutputEncoding::Utf8"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner::tests",
+      "path": "ShellEdition::Sh"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner::tests",
+      "path": "ShellSource::Fallback"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::runner::tests",
+      "path": "ShellStatus::Available"
     },
     {
       "module": "dim_agent_capabilities::host",

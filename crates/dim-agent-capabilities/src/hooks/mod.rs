@@ -6,7 +6,10 @@
 //! that reads the sources. The configuration owner is HooksSettings in App
 //! Server; it registers the documents and binds [`HookSourcesHost`].
 pub mod document;
+mod runner;
 mod sources;
+
+pub(crate) use runner::HooksRuntime;
 
 pub use document::{
     HookEntry, HookEvent, HookHandler, HookState, HooksDocument, OnFailure, entries, handlers,
@@ -15,3 +18,17 @@ pub use sources::{
     HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost, HookSourcesSnapshot,
     NoHookSources, ReadHookSources,
 };
+
+/// Registers the Hooks parts in every Session and branch.
+pub fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
+    crate::register_names(builder);
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("Hooks")
+            .session("HooksSession", |names| {
+                Ok(Box::new(runner::HooksSessionPlugin::new(names)?))
+            })
+            .branch("HooksBranch", |names| {
+                Ok(Box::new(runner::HooksBranchPlugin::new(names)?))
+            }),
+    );
+}

@@ -1,0 +1,157 @@
+# Hooks
+
+The Hooks plugin runs user commands at Session and turn lifecycle points. The
+document format, the per-event protocol and the acceptance criteria live in the
+[Hooks design](../../../design/plugins/Hooks.md); this page records how the
+local-execution parts are assembled and what each one owns.
+
+Two Session/branch parts are in scope here: HooksSession, which binds the
+runtime and decides `SessionStart`, and HooksBranch, which observes one branch
+and runs the handlers of its hook points. The configuration owner,
+HooksSettings, is an App Server plugin: it registers the `hooks` and
+`hooks-projects` Settings sources, the `hooks.*` management methods and the
+`HookSources` Session part that binds `S:HookSourcesHost`. Their assembly is in
+the generated App Server services page.
+
+## HooksSession
+
+Owner: [hooks/runner.rs](../../../../crates/dim-agent-capabilities/src/hooks/runner.rs).
+Provides the Session's single `S:HooksRuntime`, which reads the effective hook
+sources for the Session's working directory, builds the payload of one hook
+point, and runs its commands.
+
+The runtime reads sources when a hook point is evaluated, never at Session
+start: a change to the user's `hooks.json` or to a project document applies to
+the next hook point, and the catalog is recomputed rather than cached. Reading
+is a `S:HookSourcesHost` call, which the App Server binds to Settings and
+FileStorage; a Session whose host binds no sources (the scripted model
+assembly) sees an empty catalog. `DIMCODE_HOME` comes from the same port, so a
+Session started by a product daemon passes the daemon's product home into every
+hook command and a Session without one sets nothing.
+
+Every process the runtime starts is owned by `ctx.effect` through its
+`TaskTracker`: a synchronous handler is awaited by the evaluating part, an
+`async` one is spawned and settled before the part unloads, and the branch's
+cancellation token terminates its process tree on close.
+
+### Dependencies
+
+| Service | Purpose |
+| --- | --- |
+| `S:HookSourcesHost` | Read the effective documents of the user and the workspace. |
+| `P:HostPlatform` | Build each command's process spec, environment and process tree. |
+| `S:SessionConfig` | Pass the working directory and permission facts to the payload. |
+| `S:SessionIdentity` | Name the Session in the payload and `DIM_SESSION_ID`. |
+
+<!-- generated:plugin HooksSession — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | Session |
+| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity` |
+| 提供 | `S:HooksRuntime` |
+| 被注入于 | `HooksBranch` |
+<!-- /generated -->
+
+## HooksBranch
+
+Owner: [hooks/runner.rs](../../../../crates/dim-agent-capabilities/src/hooks/runner.rs).
+Folds the branch's committed events into a consumed view and evaluates the hook
+points that follow from them: `PostToolUse` and `PostToolUseFailure` after a
+settled tool result, `PermissionRequest` and `Notification` at an approval
+request, and `Stop` at a completed turn.
+
+The dispatcher handler only folds the event and starts the work; it never
+runs a command and never waits. A branch task drains the queued points in
+order, so handlers of one point start together, the point's combined output is
+written once, and a later point waits for the earlier one. The exception is
+`PermissionRequest`: its run is a task of its own, spawned when the live
+request is folded, so it waits for no earlier point and delays no later one.
+Its token is registered before the task starts, and the live
+`approval/respond` or `approval/cancelled` cancels it. A run that finds its
+token cancelled, before it starts or after the source read, starts no command.
+Before writing, the branch rechecks the consumed view: output whose triggering
+fact an interrupt or a newer operator input has overtaken is dropped.
+
+Commands run outside the branch's commit path and never take the commit lock.
+Each handler gets a timeout; the process tree is terminated when it expires,
+which is reported as a failure of that handler and honored by `onFailure`.
+Standard output is capped at 64 KiB for the context contribution, standard
+error at 2 KiB for a failure or blocking reason, and a context block at 16 KiB.
+The README of the local profile carries the process facts; the timeout,
+`onFailure`, `async` and de-duplication rules are the design's.
+
+`Stop` writes a `<dim-hooks kind="follow-up">` input that queues a new turn,
+bounded at three consecutive follow-ups; a turn driven by an operator input
+resets the count. The follow-up is recognized by the id of the input Hooks
+wrote, recorded under the view lock when it was appended, so another source's
+queued input is never counted as one.
+
+`SessionStart` is derived on `main` from the folded view: it runs only when no
+`turn/start` and no Session-start block was seen; it runs at most once per
+`main` because the block it writes is what the derivation checks for. The
+block is keyed `hooks:session-start/<n>`, which is what keeps it in the
+compacted context baseline.
+
+### Dependencies
+
+| Service | Purpose |
+| --- | --- |
+| `B:Approval` | Answer a `PermissionRequest` decision for the pending admission. |
+| `S:HooksRuntime` | Read sources, build payloads and run the point's handlers. |
+| `B:BranchLifecycle` | Close the branch's jobs and settle its processes. |
+| `B:TimelineIdentity` | Name the branch in the payload and in the main-branch rule. |
+| `B:Dispatcher` | Follow the events that open each hook point. |
+| `B:Timeline` | Read the history for `SessionStart` and append output. |
+
+<!-- generated:plugin HooksBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | 分支 |
+| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime` |
+| 提供 | — |
+| 被注入于 | — |
+<!-- /generated -->
+
+## Diagnostics
+
+A handler that fails, times out or is cancelled is reported with its source
+(`user`, `project`), its event, its exit status and duration, and the bounded
+standard-error excerpt. A hook's own output never appears in diagnostics beyond
+that excerpt, and a handler whose document does not parse is reported by
+`hooks.catalog` rather than at the hook point.
+
+## Tests
+
+[hooks_flow.rs](../../../../crates/dim-agent-capabilities/tests/hooks_flow.rs):
+`session_start_writes_one_keyed_block_per_hook_and_the_model_sees_it`,
+`a_second_session_start_does_not_run_the_hooks_again`,
+`the_session_start_block_is_still_in_context_after_compaction`,
+`post_tool_use_follows_the_protocol_for_success_block_and_failure`,
+`post_tool_use_failure_runs_only_for_error_results`,
+`a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
+`identical_commands_at_one_point_run_once`,
+`stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns`,
+`only_the_follow_ups_turn_reports_stop_hook_active`,
+`permission_request_answers_through_approval`,
+`a_user_answer_cancels_the_hook_and_does_not_delay_the_next_point`,
+`a_permission_request_does_not_wait_for_a_running_post_tool_hook`,
+`notification_runs_on_an_approval_and_writes_nothing`,
+`hook_output_is_dropped_after_an_interrupt`,
+`an_async_handler_does_not_delay_the_turn_or_the_next_point`,
+`a_hook_sees_its_environment_and_no_plugin_root`,
+`a_project_source_runs_nothing_until_the_user_enables_it`,
+`disable_all_hooks_turns_every_source_off`;
+`runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
+that a settled call's input does not stay in the folded view;
+`a_live_request_registers_its_token_before_its_task_starts`,
+`an_answer_folded_before_the_task_starts_runs_no_permission_command` and
+`an_answer_folded_during_the_read_runs_no_permission_command` pin that an
+answered request starts no command; and
+`hooks_settings.rs`'s `a_hook_point_reads_sources_without_authorizing_a_project`
+pins that reading a Session's sources never authorizes a workspace.
+[hooks_settings_flow.rs](../../../../crates/dim-app-server/tests/hooks_settings_flow.rs):
+`catalog_reports_sources_states_and_never_reads_foreign_hook_files`,
+`project_hooks_stay_disabled_until_the_user_enables_them_and_edits_apply`,
+`a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks`;
+[host_platform_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_flow.rs):
+`spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe`.
