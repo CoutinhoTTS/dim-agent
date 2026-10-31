@@ -4630,7 +4630,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "println"
+        "writeln"
       ]
     },
     {
@@ -22168,7 +22168,8 @@
         "path client",
         "path client::connect_inner",
         "path client::shutdown",
-        "path client::stop"
+        "path client::stop",
+        "path client::web_assets"
       ]
     },
     {
@@ -31438,13 +31439,6 @@
       "to": "dim_cli",
       "references": [
         "path crate::Result"
-      ]
-    },
-    {
-      "from": "dim_cli::web_install",
-      "to": "dim_cli::client",
-      "references": [
-        "path crate::client::web_assets"
       ]
     },
     {

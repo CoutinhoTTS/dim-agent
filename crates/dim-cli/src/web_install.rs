@@ -2,6 +2,7 @@
 //! npm registry into `<home>/web`, verified against the registry's integrity
 //! (web-workspace.md §2.4).
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -12,8 +13,16 @@ const PACKAGE: &str = "dimcode-web";
 const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Installs `dimcode-web@version` from `registry` into `<home>/web`, replacing
-/// what was there only once the new tree is complete.
-pub async fn install(home: &Path, version: &str, registry: &str) -> crate::Result<i32> {
+/// what was there only once the new tree is complete, and reports to `out`.
+/// `assets` is the frontend the caller found before installing: one in an
+/// earlier source still comes first, and the report names it.
+pub async fn install(
+    home: &Path,
+    version: &str,
+    registry: &str,
+    assets: Option<PathBuf>,
+    out: &mut impl Write,
+) -> crate::Result<i32> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         dist: Dist,
@@ -43,7 +52,7 @@ pub async fn install(home: &Path, version: &str, registry: &str) -> crate::Resul
                 .ok()
         })
         .ok_or_else(|| format!("{PACKAGE}@{version} has no sha512 integrity"))?;
-    println!("Downloading {PACKAGE}@{version}…");
+    writeln!(out, "Downloading {PACKAGE}@{version}…")?;
     let tarball = client
         .get(&manifest.dist.tarball)
         .send()
@@ -74,15 +83,19 @@ pub async fn install(home: &Path, version: &str, registry: &str) -> crate::Resul
     }
     std::fs::rename(&partial, &target)?;
     let _ = std::fs::remove_dir_all(&previous);
-    println!("Web workspace {version} installed in {}.", target.display());
-    let executable = std::env::current_exe().unwrap_or_default();
-    if let Some(other) = crate::client::web_assets(&executable, home)
-        .filter(|found| found.canonicalize().ok() != target.canonicalize().ok())
+    writeln!(
+        out,
+        "Web workspace {version} installed in {}.",
+        target.display()
+    )?;
+    if let Some(other) =
+        assets.filter(|found| found.canonicalize().ok() != target.canonicalize().ok())
     {
-        println!(
+        writeln!(
+            out,
             "The Web workspace in {} is used instead; remove it to use this one.",
             other.display()
-        );
+        )?;
     }
     Ok(0)
 }
@@ -202,9 +215,19 @@ mod tests {
         std::fs::create_dir_all(home.path().join("web")).unwrap();
         std::fs::write(home.path().join("web/stale.js"), "").unwrap();
 
+        let mut out = Vec::new();
         assert_eq!(
-            install(home.path(), "0.1.0-alpha.8", &base).await.unwrap(),
+            install(home.path(), "0.1.0-alpha.8", &base, None, &mut out)
+                .await
+                .unwrap(),
             0
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "Downloading dimcode-web@0.1.0-alpha.8…\nWeb workspace 0.1.0-alpha.8 installed in {}.\n",
+                home.path().join("web").display()
+            )
         );
         assert_eq!(
             std::fs::read_to_string(home.path().join("web/assets/app-1.js")).unwrap(),
@@ -217,6 +240,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn install_names_a_frontend_in_an_earlier_source() {
+        let tarball = tarball();
+        let base = registry("0.1.0-alpha.8", tarball.clone(), integrity(&tarball));
+        let home = tempfile::tempdir().unwrap();
+        let first = home.path().join("npm-web");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::write(first.join("index.html"), "<!doctype html>").unwrap();
+
+        let mut out = Vec::new();
+        assert_eq!(
+            install(
+                home.path(),
+                "0.1.0-alpha.8",
+                &base,
+                Some(first.clone()),
+                &mut out
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(String::from_utf8(out).unwrap().ends_with(&format!(
+            "The Web workspace in {} is used instead; remove it to use this one.\n",
+            first.display()
+        )));
+    }
+
+    #[tokio::test]
     async fn install_rejects_a_tarball_that_does_not_match_its_integrity() {
         let tarball = tarball();
         let base = registry(
@@ -225,7 +276,7 @@ mod tests {
             format!("sha512-{}", "A".repeat(88)),
         );
         let home = tempfile::tempdir().unwrap();
-        let error = install(home.path(), "0.1.0-alpha.8", &base)
+        let error = install(home.path(), "0.1.0-alpha.8", &base, None, &mut Vec::new())
             .await
             .unwrap_err();
         assert!(

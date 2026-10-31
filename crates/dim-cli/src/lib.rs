@@ -596,7 +596,16 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         if !version::RELEASE {
             return Err("A build from source has no published Web workspace; set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature".into());
         }
-        return web_install::install(&options.home, version::VERSION, &update::registry()).await;
+        let executable = std::env::current_exe().unwrap_or_default();
+        let assets = client::web_assets(&executable, &options.home);
+        return web_install::install(
+            &options.home,
+            version::VERSION,
+            &update::registry(),
+            assets,
+            &mut std::io::stdout(),
+        )
+        .await;
     }
     if let Action::Web {
         port,
