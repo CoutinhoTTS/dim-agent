@@ -16,9 +16,9 @@
 //! without a verdict, enters none of them either, and the unjudged-run rate
 //! counts it once however many of its probes the judge left unanswered,
 //! because the judge answers all of them in one call. The verdict is `fail`
-//! when any comparison is a regression, `pass` when none is and every case
-//! ran 20 times in each arm, and `inconclusive` otherwise. The multi-arm runs
-//! read their decisions from the same test: each arm's loss and p-value
+//! when any comparison is a regression, `pass` when none is and every arm has
+//! 20 judged runs of every case, and `inconclusive` otherwise. The multi-arm
+//! runs read their decisions from the same test: each arm's loss and p-value
 //! against the decision's baseline stand beside the table.
 use crate::app_server;
 use crate::rule::{self, Comparison, Counts, Worse};
@@ -170,7 +170,8 @@ pub async fn run() -> Result<()> {
         .iter()
         .map(|(arm, metrics)| metrics.row(arm))
         .collect();
-    let min_runs = options.runs as u64;
+    let min_judged = min_judged_runs(&results, &prepared);
+    let kinds = case_kinds(&prepared);
     let mut report = table(&rows);
     report.push_str(&candidate_cost_line(
         &options.model,
@@ -187,14 +188,14 @@ pub async fn run() -> Result<()> {
     if let [(_, current), (_, candidate)] = results.as_slice()
         && options.candidate.is_some()
     {
-        let judged = rule::judge(&comparisons(current, candidate), min_runs);
+        let judged = rule::judge(&comparisons(current, candidate, &kinds), min_judged);
         report.push('\n');
         report.push_str(rule::COMPARISON_HEADER);
         for row in &judged.rows {
             report += &row.line();
             report.push('\n');
         }
-        let line = rule::verdict_line(&judged, min_runs, "case", "candidate");
+        let line = rule::verdict_line(&judged, min_judged, "case", "candidate");
         report.push_str(&format!(
             "\n{line}; median T: current {}, candidate {}\n",
             median_tokens(current),
@@ -203,7 +204,7 @@ pub async fn run() -> Result<()> {
         verdict = Some(line);
     }
     if results.len() > 2 {
-        report.push_str(&against_baseline(&results, min_runs));
+        report.push_str(&against_baseline(&results, min_judged, &kinds));
     }
     std::fs::write(options.out.join("summary.md"), report)?;
     server.shutdown();
@@ -552,7 +553,7 @@ struct Probe {
     item: Option<ItemClass>,
 }
 
-#[derive(Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 enum ProbeKind {
     Exact,
@@ -618,6 +619,9 @@ fn read_cases(directory: &Path) -> Result<Vec<Case>> {
             .map_err(|error| format!("{}: {error}", file.display()))?;
         validate_probes(&case.probes).map_err(|error| format!("{}: {error}", file.display()))?;
         cases.push(case);
+    }
+    if cases.is_empty() {
+        return Err(format!("{}: no case files", directory.display()).into());
     }
     Ok(cases)
 }
@@ -1418,6 +1422,9 @@ struct Metrics {
     /// verdict: the judge answers all of a run's such probes in one call, so
     /// an unusable answer counts the run once (ContextCompaction §13.4).
     unjudged_runs: usize,
+    /// The case's runs that entered the probe rates: the floor counts these
+    /// and no others (model-prompts §8.1).
+    judged: BTreeMap<String, u64>,
     cut_offs: u64,
     /// Every run of the arm, failed and skipped included.
     runs: usize,
@@ -1472,6 +1479,8 @@ impl Metrics {
         }
         if self.add_probes(&case.probes, probes) {
             self.unjudged_runs += 1;
+        } else {
+            *self.judged.entry(case.id.clone()).or_default() += 1;
         }
     }
     /// Counts one run's probes and says whether the judge left any of them
@@ -1610,7 +1619,11 @@ fn recall(counts: Counts) -> Option<f64> {
 /// (ContextCompaction §13.4), so both multi-arm decisions are read off the
 /// same test as the candidate rule: `inherit` for the reasoning phase, and the
 /// best arm for the target phase.
-fn against_baseline(results: &[(Arm, Metrics)], min_runs: u64) -> String {
+fn against_baseline(
+    results: &[(Arm, Metrics)],
+    min_judged: u64,
+    kinds: &BTreeSet<ProbeKind>,
+) -> String {
     let reasoning = results.iter().all(|(arm, _)| arm.target.is_none());
     let baseline = if reasoning {
         results
@@ -1624,7 +1637,7 @@ fn against_baseline(results: &[(Arm, Metrics)], min_runs: u64) -> String {
     };
     let (baseline_arm, baseline_metrics) = &results[baseline];
     let mut text = format!(
-        "\nagainst `{}`: every other arm's loss and p-value, Holm-adjusted over its five comparisons (model-prompts §8.1, floor of {} runs)\n\n",
+        "\nagainst `{}`: every other arm's loss and p-value, Holm-adjusted over its five comparisons (model-prompts §8.1, floor of {} judged runs)\n\n",
         baseline_arm.id,
         rule::FLOOR,
     );
@@ -1633,7 +1646,7 @@ fn against_baseline(results: &[(Arm, Metrics)], min_runs: u64) -> String {
         if index == baseline {
             continue;
         }
-        let judged = rule::judge(&comparisons(baseline_metrics, metrics), min_runs);
+        let judged = rule::judge(&comparisons(baseline_metrics, metrics, kinds), min_judged);
         for row in &judged.rows {
             text += &row.line();
             text.push('\n');
@@ -1641,7 +1654,7 @@ fn against_baseline(results: &[(Arm, Metrics)], min_runs: u64) -> String {
         let subject = format!("`{}` against `{}`", arm.id, baseline_arm.id);
         text += &format!(
             "{}\n",
-            rule::verdict_line(&judged, min_runs, "case", &subject)
+            rule::verdict_line(&judged, min_judged, "case", &subject)
         );
     }
     text
@@ -1695,47 +1708,84 @@ fn lower(left: Counts, right: Counts) -> Ordering {
     }
 }
 
+/// The probe kinds the case set carries, fixed before any data: a kind no
+/// case carries stays out of the family (model-prompts §8.1).
+fn case_kinds(cases: &[Prepared]) -> BTreeSet<ProbeKind> {
+    cases
+        .iter()
+        .flat_map(|case| case.probes.iter())
+        .map(|probe| probe.kind)
+        .collect()
+}
+
+/// The fewest judged runs any arm ran any case (model-prompts §8.1): the
+/// floor the verdict needs, and only a run that entered the probe rates
+/// counts.
+fn min_judged_runs(results: &[(Arm, Metrics)], cases: &[Prepared]) -> u64 {
+    let mut fewest = u64::MAX;
+    for (_, metrics) in results {
+        for case in cases {
+            fewest = fewest.min(metrics.judged.get(&case.id).copied().unwrap_or(0));
+        }
+    }
+    if results.is_empty() || cases.is_empty() {
+        return 0;
+    }
+    fewest
+}
+
 /// The candidate rule's family, fixed before any data (ContextCompaction
 /// §13.4): fact recall, exact recall, the violation rate over the probes that
 /// can be violated, the failed-run rate and the unjudged-run rate — a run
 /// whose judge left any of its `fact` or `absent` probes without a verdict,
-/// counted once.
-fn comparisons(current: &Metrics, candidate: &Metrics) -> Vec<Comparison> {
+/// counted once. A probe kind no case carries stays out of the family: its
+/// rate would have no data to compare (model-prompts §8.1).
+fn comparisons(
+    current: &Metrics,
+    candidate: &Metrics,
+    kinds: &BTreeSet<ProbeKind>,
+) -> Vec<Comparison> {
     let rate = |metrics: &Metrics| Counts::new(metrics.failed as u64, metrics.runs as u64);
     let unjudged =
         |metrics: &Metrics| Counts::new(metrics.unjudged_runs as u64, metrics.runs as u64);
-    vec![
-        Comparison {
+    let mut family = Vec::new();
+    if kinds.contains(&ProbeKind::Fact) {
+        family.push(Comparison {
             name: "fact recall".into(),
             worse: Worse::Lower,
             current: current.facts,
             candidate: candidate.facts,
-        },
-        Comparison {
+        });
+    }
+    if kinds.contains(&ProbeKind::Exact) {
+        family.push(Comparison {
             name: "exact recall".into(),
             worse: Worse::Lower,
             current: current.exact,
             candidate: candidate.exact,
-        },
-        Comparison {
+        });
+    }
+    if kinds.contains(&ProbeKind::Absent) {
+        family.push(Comparison {
             name: "violations".into(),
             worse: Worse::Higher,
             current: current.violations,
             candidate: candidate.violations,
-        },
-        Comparison {
-            name: "failed runs".into(),
-            worse: Worse::Higher,
-            current: rate(current),
-            candidate: rate(candidate),
-        },
-        Comparison {
-            name: "unjudged runs".into(),
-            worse: Worse::Higher,
-            current: unjudged(current),
-            candidate: unjudged(candidate),
-        },
-    ]
+        });
+    }
+    family.push(Comparison {
+        name: "failed runs".into(),
+        worse: Worse::Higher,
+        current: rate(current),
+        candidate: rate(candidate),
+    });
+    family.push(Comparison {
+        name: "unjudged runs".into(),
+        worse: Worse::Higher,
+        current: unjudged(current),
+        candidate: unjudged(candidate),
+    });
+    family
 }
 fn median_tokens(metrics: &Metrics) -> String {
     percentile(&metrics.tokens, 0.5).map_or_else(|| "–".to_owned(), |tokens| format!("{tokens:.0}"))
@@ -1950,6 +2000,13 @@ mod tests {
         }
     }
 
+    /// Every probe kind: the case set these tests judge carries all three.
+    fn kinds() -> BTreeSet<ProbeKind> {
+        [ProbeKind::Exact, ProbeKind::Fact, ProbeKind::Absent]
+            .into_iter()
+            .collect()
+    }
+
     /// The candidate rule is five comparisons through the module: identical
     /// counts pass at the floor and fall to inconclusive below it, and a
     /// planted loss in any of the five fails and names it (model-prompts
@@ -1958,11 +2015,11 @@ mod tests {
     fn the_candidate_rule_judges_five_comparisons_through_the_module() {
         let current = level(20);
         assert_eq!(
-            rule::judge(&comparisons(&current, &current), 20).verdict,
+            rule::judge(&comparisons(&current, &current, &kinds()), 20).verdict,
             rule::Verdict::Pass
         );
         assert_eq!(
-            rule::judge(&comparisons(&current, &level(19)), 19).verdict,
+            rule::judge(&comparisons(&current, &level(19), &kinds()), 19).verdict,
             rule::Verdict::Inconclusive
         );
         for (name, candidate) in [
@@ -2002,7 +2059,7 @@ mod tests {
                 },
             ),
         ] {
-            let judged = rule::judge(&comparisons(&current, &candidate), 20);
+            let judged = rule::judge(&comparisons(&current, &candidate, &kinds()), 20);
             assert_eq!(judged.verdict, rule::Verdict::Fail, "{name}");
             assert!(
                 judged
@@ -2027,7 +2084,7 @@ mod tests {
             runs: 21,
             ..level(20)
         };
-        let family = comparisons(&current, &with_failure);
+        let family = comparisons(&current, &with_failure, &kinds());
         let fact = family
             .iter()
             .find(|comparison| comparison.name == "fact recall")
@@ -2093,6 +2150,25 @@ mod tests {
             duration: Duration::ZERO,
         }
     }
+    /// One run of `case` the judge answered in full: every probe present.
+    fn judged_run(metrics: &mut Metrics, arm: &Arm, case: &Prepared) {
+        let verdicts: BTreeMap<String, (Verdict, Option<String>)> = case
+            .probes
+            .iter()
+            .map(|probe| (probe.id.clone(), (Verdict::Present, None)))
+            .collect();
+        let judged = Judged::Verdicts(verdicts);
+        let probes = probe_records(&case.probes, "the summary", &judged);
+        metrics.add(
+            arm,
+            case,
+            &completed(),
+            &judged,
+            &probes,
+            &Configuration::default(),
+        );
+    }
+
     /// A judge call that fails makes a failed run — the same event as the
     /// scenario runner's `call_failed` — so the run is compared once, as the
     /// failed-run rate, and none of its probes counts (model-prompts §8.1).
@@ -2124,6 +2200,11 @@ mod tests {
             "a failed run enters no probe rate"
         );
         assert_eq!(metrics.exact, Counts::default());
+        assert_eq!(
+            metrics.judged.get("case").copied().unwrap_or(0),
+            0,
+            "and counts toward no floor"
+        );
     }
 
     /// A reply with no verdict list leaves the run unjudged: none of its
@@ -2168,6 +2249,7 @@ mod tests {
             Counts::new(2, 2),
             "the column lists both judged probes"
         );
+        assert_eq!(metrics.judged.get("case").copied().unwrap_or(0), 0);
     }
 
     /// A reply that answers some probes only leaves the run unjudged too: the
@@ -2201,6 +2283,97 @@ mod tests {
             "even the probe the reply answered stays out"
         );
         assert_eq!(metrics.unjudged, Counts::new(1, 2));
+    }
+
+    /// The floor is the fewest judged runs an arm ran a case: a failed run
+    /// and an unjudged run are compared in their own rows and do not count
+    /// (model-prompts §8.1).
+    #[test]
+    fn the_floor_counts_judged_runs_per_case() {
+        let cases = [
+            prepared("a", vec![probe("p", ProbeKind::Fact)]),
+            prepared("b", vec![probe("q", ProbeKind::Fact)]),
+        ];
+        let mut current = Metrics::default();
+        let mut candidate = Metrics::default();
+        for case in &cases {
+            for _ in 0..20 {
+                judged_run(&mut current, &arm("current"), case);
+            }
+            let runs = if case.id == "b" { 19 } else { 20 };
+            for _ in 0..runs {
+                judged_run(&mut candidate, &arm("candidate"), case);
+            }
+        }
+        for judged in [
+            Judged::Failed("the judge failed".into()),
+            Judged::Unreadable("the judge answered with no verdict list".into()),
+        ] {
+            let probes = probe_records(&cases[1].probes, "the summary", &judged);
+            candidate.add(
+                &arm("candidate"),
+                &cases[1],
+                &completed(),
+                &judged,
+                &probes,
+                &Configuration::default(),
+            );
+        }
+        assert_eq!(
+            (candidate.runs, candidate.failed, candidate.unjudged_runs),
+            (41, 1, 1),
+            "both runs are counted apart"
+        );
+        let results = vec![(arm("current"), current), (arm("candidate"), candidate)];
+        assert_eq!(min_judged_runs(&results, &cases), 19);
+    }
+
+    /// A case directory with no case file is refused before any run: an
+    /// evaluation with no cases would compare nothing, and the floor would
+    /// claim runs that never happened (model-prompts §8.1).
+    #[test]
+    fn an_empty_case_directory_is_refused() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-summary-eval-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let error = match read_cases(&directory) {
+            Err(error) => error.to_string(),
+            Ok(cases) => panic!("{} case files were read", cases.len()),
+        };
+        assert!(error.contains("no case files"), "{error}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A probe kind no case carries stays out of the family. A kind the case
+    /// set does carry, with no counted run in an arm, cannot be compared and
+    /// makes the verdict inconclusive (model-prompts §8.1).
+    #[test]
+    fn a_kind_absent_from_every_case_stays_out_of_the_family() {
+        let case = prepared("case", vec![probe("a", ProbeKind::Fact)]);
+        let family = comparisons(
+            &level(20),
+            &level(20),
+            &case_kinds(std::slice::from_ref(&case)),
+        );
+        let names: Vec<&str> = family
+            .iter()
+            .map(|comparison| comparison.name.as_str())
+            .collect();
+        assert_eq!(names, ["fact recall", "failed runs", "unjudged runs"]);
+        let empty = Metrics {
+            runs: 20,
+            ..Metrics::default()
+        };
+        let rule = rule::judge(
+            &comparisons(&empty, &empty, &case_kinds(std::slice::from_ref(&case))),
+            20,
+        );
+        assert_eq!(rule.verdict, rule::Verdict::Inconclusive);
+        let line = rule::verdict_line(&rule, 20, "case", "candidate");
+        assert!(
+            line.contains("fact recall has no counted run in an arm"),
+            "{line}"
+        );
     }
 
     /// The target phase's baseline is the arm that keeps the most facts,
@@ -2280,7 +2453,7 @@ mod tests {
             reasoning("reasoning-off", SummaryReasoning::Off),
             reasoning("reasoning-low", SummaryReasoning::Low),
         ];
-        let text = against_baseline(&results, 20);
+        let text = against_baseline(&results, 20, &kinds());
         assert!(text.contains("against `reasoning-inherit`"), "{text}");
         assert!(
             text.contains("| fact recall | 20/20 (1.000) | 20/20 (1.000) |"),

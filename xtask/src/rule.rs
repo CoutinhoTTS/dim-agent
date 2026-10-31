@@ -6,17 +6,19 @@
 //! exact test on the two arms' counts rejects "no loss". Each evaluation has
 //! one family of comparisons, fixed before any data and adjusted with Holm at
 //! a family-wise α. The verdict is `fail` when any comparison is a regression,
-//! `pass` when none is and every arm ran every case at least [`FLOOR`] times,
-//! and `inconclusive` otherwise. There is no absolute pass line.
+//! `inconclusive` when none is but the floor is unmet or a comparison has no
+//! counted run to compare, and `pass` otherwise. There is no absolute pass
+//! line.
 
 /// The smallest loss that is tested: a comparison whose loss is at most δ
 /// enters the family with p = 1 and never rejects.
 pub(crate) const DELTA: f64 = 0.05;
 /// The family-wise significance level the Holm adjustment holds.
 pub(crate) const ALPHA: f64 = 0.10;
-/// The fewest runs every arm needs on every case before the verdict can be
-/// `pass`; failed and unjudged runs count, and the family compares them on
-/// their own.
+/// The fewest judged runs every arm needs on every case before the verdict
+/// can be `pass`. Failed and unjudged runs are compared, in their own rows,
+/// but they are not judged runs, so they do not count here: only judged runs
+/// enter the probe rates this floor is for.
 pub(crate) const FLOOR: u64 = 20;
 
 /// One arm's counts on one rate: how many of `total` counted runs showed the
@@ -138,14 +140,17 @@ pub(crate) struct Rule {
     pub verdict: Verdict,
 }
 
-/// Judges a family of comparisons fixed before any data. `min_runs` is the
-/// fewest times any arm ran any case, failed and unjudged runs included.
-pub(crate) fn judge(comparisons: &[Comparison], min_runs: u64) -> Rule {
+/// Judges a family of comparisons fixed before any data. `min_judged` is the
+/// fewest judged runs any arm ran any case. A comparison an arm counted no run
+/// for cannot be made, and a family with one cannot pass. `fail` comes first,
+/// then `inconclusive`, then `pass` (model-prompts §8.1).
+pub(crate) fn judge(comparisons: &[Comparison], min_judged: u64) -> Rule {
     let mut rows: Vec<Row> = comparisons.iter().map(Row::of).collect();
     holm(&mut rows);
+    let incomplete = rows.iter().any(|row| row.loss.is_none());
     let verdict = if rows.iter().any(|row| row.rejected) {
         Verdict::Fail
-    } else if min_runs >= FLOOR {
+    } else if min_judged >= FLOOR && !incomplete {
         Verdict::Pass
     } else {
         Verdict::Inconclusive
@@ -156,7 +161,7 @@ pub(crate) fn judge(comparisons: &[Comparison], min_runs: u64) -> Rule {
 /// The verdict as a report line: the comparisons that rejected, or why the
 /// evaluation cannot pass. `case` names what the floor counts, and `subject`
 /// whose verdict it is, such as `candidate`.
-pub(crate) fn verdict_line(rule: &Rule, min_runs: u64, case: &str, subject: &str) -> String {
+pub(crate) fn verdict_line(rule: &Rule, min_judged: u64, case: &str, subject: &str) -> String {
     match rule.verdict {
         Verdict::Fail => {
             let rejected: Vec<String> = rule
@@ -183,11 +188,25 @@ pub(crate) fn verdict_line(rule: &Rule, min_runs: u64, case: &str, subject: &str
             format!("{subject} fails: {}.", rejected.join("; "))
         }
         Verdict::Pass => format!(
-            "{subject} passes: no comparison is a regression, and every arm ran every {case} at least {FLOOR} times."
+            "{subject} passes: no comparison is a regression, and every arm has at least {FLOOR} judged runs of every {case}."
         ),
-        Verdict::Inconclusive => format!(
-            "{subject} is inconclusive: no comparison is a regression, but the fewest runs on a {case} are {min_runs}, under the floor of {FLOOR}."
-        ),
+        Verdict::Inconclusive => {
+            let mut reasons: Vec<String> = rule
+                .rows
+                .iter()
+                .filter(|row| row.loss.is_none())
+                .map(|row| format!("{} has no counted run in an arm", row.name))
+                .collect();
+            if min_judged < FLOOR {
+                reasons.push(format!(
+                    "the fewest judged runs on a {case} are {min_judged}, under the floor of {FLOOR}"
+                ));
+            }
+            format!(
+                "{subject} is inconclusive: no comparison is a regression, but {}.",
+                reasons.join(", and ")
+            )
+        }
     }
 }
 
@@ -431,7 +450,7 @@ mod tests {
         );
         let line = verdict_line(&judge(&identical, 19), 19, "scenario", "candidate");
         assert!(
-            line.contains("the fewest runs on a scenario are 19"),
+            line.contains("the fewest judged runs on a scenario are 19"),
             "{line}"
         );
     }
@@ -462,19 +481,31 @@ mod tests {
         assert_eq!(rule.verdict, Verdict::Pass);
     }
 
-    /// A comparison with no counted run in an arm cannot be tested: it enters
-    /// with p = 1 and its rates read as none.
+    /// A comparison with no counted run in an arm cannot be made: it enters
+    /// with p = 1, and the verdict is `inconclusive` even at the floor, so no
+    /// `pass` can rest on data that was never judged (model-prompts §8.1).
     #[test]
-    fn a_comparison_without_counts_never_rejects() {
+    fn a_comparison_without_counts_makes_the_verdict_inconclusive() {
         let rule = judge(&[comparison("empty", Worse::Lower, (0, 0), (0, 0))], 20);
         assert_eq!(rule.rows[0].loss, None);
         assert_eq!(rule.rows[0].p, 1.);
-        assert_eq!(rule.verdict, Verdict::Pass);
+        assert_eq!(rule.verdict, Verdict::Inconclusive);
+        let line = verdict_line(&rule, 20, "scenario", "candidate");
+        assert!(
+            line.contains("empty has no counted run in an arm"),
+            "{line}"
+        );
+        let rule = judge(&[comparison("empty", Worse::Lower, (0, 0), (0, 0))], 0);
+        assert!(
+            verdict_line(&rule, 0, "scenario", "candidate")
+                .contains("empty has no counted run in an arm, and the fewest judged runs"),
+            "both reasons are named"
+        );
         let rule = judge(
-            &[comparison("one-sided", Worse::Lower, (5, 10), (0, 0))],
+            &[comparison("one-sided", Worse::Lower, (20, 20), (0, 0))],
             20,
         );
         assert_eq!(rule.rows[0].loss, None);
-        assert_eq!(rule.verdict, Verdict::Pass);
+        assert_eq!(rule.verdict, Verdict::Inconclusive);
     }
 }

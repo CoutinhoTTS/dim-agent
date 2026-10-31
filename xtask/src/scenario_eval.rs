@@ -19,7 +19,9 @@
 //! the endpoint lands on both arms alike, and the records come out in that
 //! order whatever order the runs complete in. `--jobs N` (default 1) runs N
 //! runs at once; each run keeps its own workspace copy, product home, local
-//! endpoint and Session, and the counts do not depend on N.
+//! endpoint and Session, and the schedule and record order are fixed
+//! whatever N is. The outcomes can still vary: wall-clock budgets, timed
+//! steers and provider contention do not read the job count.
 //!
 //! The report applies the rule of model-prompts §8.1. One comparison is the
 //! candidate arm's loss against the current arm on one rate: a regression
@@ -31,9 +33,9 @@
 //! the unjudged-run rate, adjusted with Holm at a family-wise `α = 0.10`. A
 //! probe's rate counts judged, non-failed runs only, and a failed run is
 //! compared once, as the failed-run rate. The verdict is `fail` when any
-//! comparison is a regression, `pass` when none is and every arm ran every
-//! scenario at least 20 times, and `inconclusive` otherwise. There is no
-//! absolute pass line.
+//! comparison is a regression, `pass` when none is and every arm has at least
+//! 20 judged runs of every scenario, and `inconclusive` otherwise — also when
+//! a comparison has no counted run in an arm. There is no absolute pass line.
 //!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
@@ -800,6 +802,12 @@ impl RunRecord {
                 self.judge_outcome,
                 JudgeOutcome::Unreadable | JudgeOutcome::Unfit
             )
+    }
+    /// Whether the run is judged (model-prompts §8.1): it failed neither on
+    /// its own nor on its judging, and the judge answered every call with
+    /// usable verdicts. Only such a run counts toward the floor.
+    fn judged(&self) -> bool {
+        !self.failed && self.judge_outcome == JudgeOutcome::Judged
     }
 }
 #[derive(Clone, serde::Serialize)]
@@ -1917,7 +1925,9 @@ impl Metrics {
 /// any run (model-prompts §8.1): every (scenario, probe) — a pass rate for a
 /// `must_show` probe, a violation rate for a `must_not_show` one —, the
 /// pooled `must_show` pass rate, the pooled `must_not_show` violation rate,
-/// the failed-run rate and the unjudged-run rate.
+/// the failed-run rate and the unjudged-run rate. A probe kind no scenario
+/// carries stays out of the family: its pooled row would have no data to
+/// compare.
 fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -> Vec<Comparison> {
     let mut comparisons = Vec::new();
     for scenario in scenarios {
@@ -1942,18 +1952,27 @@ fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -
         }
     }
     let rate = |counts: u32, runs: u32| Counts::new(counts.into(), runs.into());
-    comparisons.push(Comparison {
-        name: "pooled must_show".into(),
-        worse: Worse::Lower,
-        current: current.must_show,
-        candidate: candidate.must_show,
-    });
-    comparisons.push(Comparison {
-        name: "pooled must_not_show (violations)".into(),
-        worse: Worse::Higher,
-        current: current.must_not_show,
-        candidate: candidate.must_not_show,
-    });
+    let carries = |kind: ProbeKind| {
+        scenarios
+            .iter()
+            .any(|scenario| scenario.probes.iter().any(|probe| probe.kind == kind))
+    };
+    if carries(ProbeKind::MustShow) {
+        comparisons.push(Comparison {
+            name: "pooled must_show".into(),
+            worse: Worse::Lower,
+            current: current.must_show,
+            candidate: candidate.must_show,
+        });
+    }
+    if carries(ProbeKind::MustNotShow) {
+        comparisons.push(Comparison {
+            name: "pooled must_not_show (violations)".into(),
+            worse: Worse::Higher,
+            current: current.must_not_show,
+            candidate: candidate.must_not_show,
+        });
+    }
     comparisons.push(Comparison {
         name: "failed runs".into(),
         worse: Worse::Higher,
@@ -2094,7 +2113,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         .map(|(text, tokens)| format!("`{text}`: {tokens:.0}"))
         .collect();
     let mut text = format!(
-        "| | |\n| --- | --- |\n| text | {} |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-p Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} runs per arm and scenario |\n",
+        "| | |\n| --- | --- |\n| text | {} |\n| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n| candidate tokens | {} |\n| rule | a comparison is a regression when the candidate's loss exceeds {delta:.2} and a one-sided mid-p Fisher exact test on both arms' counts rejects it, Holm-adjusted at a family-wise α = {alpha:.2}; the verdict needs {floor} judged runs per arm and scenario |\n",
         texts.join(", "),
         instrument.model.provider_id,
         instrument.model.model_id,
@@ -2142,10 +2161,11 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
     let empty = Metrics::default();
     let current = metrics.get("current").unwrap_or(&empty);
     let candidate = metrics.get("candidate").unwrap_or(&empty);
-    // The fewest times an arm ran a scenario, failed and unjudged runs
-    // included: the floor the verdict needs.
+    // The fewest judged runs an arm ran a scenario: the floor the verdict
+    // needs. Failed and unjudged runs are compared in their own rows and do
+    // not count here, because they enter no probe rate (model-prompts §8.1).
     let mut per_arm: BTreeMap<(&str, &str), u64> = BTreeMap::new();
-    for record in records {
+    for record in records.iter().filter(|record| record.judged()) {
         *per_arm
             .entry((record.arm, record.scenario.as_str()))
             .or_default() += 1;
@@ -2584,14 +2604,14 @@ mod tests {
         );
         assert!(
             text.contains(
-                "candidate passes: no comparison is a regression, and every arm ran every scenario at least 20 times"
+                "candidate passes: no comparison is a regression, and every arm has at least 20 judged runs of every scenario"
             ),
             "{text}"
         );
         let text = judged(19, 19, 19);
         assert!(
             text.contains(
-                "candidate is inconclusive: no comparison is a regression, but the fewest runs on a scenario are 19"
+                "candidate is inconclusive: no comparison is a regression, but the fewest judged runs on a scenario are 19"
             ),
             "{text}"
         );
@@ -2605,6 +2625,147 @@ mod tests {
             text.contains("candidate fails: case/reports (must_show) falls from 1.000 to 0.400"),
             "a regression fails below the floor: {text}"
         );
+    }
+
+    /// Twenty runs an arm whose every judge call failed are not twenty judged
+    /// runs: the probe rows have nothing to compare, so the verdict is
+    /// inconclusive and never `pass` (model-prompts §8.1).
+    #[test]
+    fn runs_whose_judge_calls_all_failed_are_inconclusive() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = Vec::new();
+        for arm in ["current", "candidate"] {
+            for _ in 0..20 {
+                records.push(record(
+                    arm,
+                    &scenario,
+                    &[("reports", ProbeVerdict::Unparsed)],
+                    JudgeOutcome::CallFailed,
+                ));
+            }
+        }
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| failed runs | 20/20 (1.000) | 20/20 (1.000) |"),
+            "the runs are compared, once, as failed runs: {text}"
+        );
+        assert!(
+            text.contains("| case/reports (must_show) | – | – |"),
+            "the probe row has no counted run: {text}"
+        );
+        assert!(
+            text.contains("candidate is inconclusive: no comparison is a regression"),
+            "{text}"
+        );
+        assert!(
+            text.contains("case/reports (must_show) has no counted run in an arm"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the fewest judged runs on a scenario are 0, under the floor of 20"),
+            "{text}"
+        );
+    }
+
+    /// The same holds when the judge answered unreadably: twenty unjudged
+    /// runs compare zero probes with zero probes, and the verdict is
+    /// inconclusive (model-prompts §8.1).
+    #[test]
+    fn runs_the_judge_could_not_read_are_inconclusive() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = Vec::new();
+        for arm in ["current", "candidate"] {
+            for _ in 0..20 {
+                records.push(record(
+                    arm,
+                    &scenario,
+                    &[("reports", ProbeVerdict::Unparsed)],
+                    JudgeOutcome::Unreadable,
+                ));
+            }
+        }
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| failed runs | 0/20 (0.000) | 0/20 (0.000) |"),
+            "an unjudged run is not a failed run: {text}"
+        );
+        assert!(
+            text.contains("| unjudged runs | 20/20 (1.000) | 20/20 (1.000) |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("candidate is inconclusive: no comparison is a regression"),
+            "{text}"
+        );
+        assert!(
+            text.contains("case/reports (must_show) has no counted run in an arm"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the fewest judged runs on a scenario are 0, under the floor of 20"),
+            "{text}"
+        );
+    }
+
+    /// The floor counts judged runs: nineteen judged runs and one failed run
+    /// per arm are nineteen, not twenty, and the verdict is inconclusive
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_failed_run_does_not_count_toward_the_floor() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = Vec::new();
+        for name in ["current", "candidate"] {
+            records.extend(arm(&scenario, name, 19, 19));
+            records.push(record(
+                name,
+                &scenario,
+                &[("reports", ProbeVerdict::Unparsed)],
+                JudgeOutcome::CallFailed,
+            ));
+        }
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| case/reports (must_show) | 19/19 (1.000) | 19/19 (1.000) |"),
+            "the failed run leaves the probe rates: {text}"
+        );
+        assert!(
+            text.contains(
+                "candidate is inconclusive: no comparison is a regression, but the fewest judged runs on a scenario are 19, under the floor of 20."
+            ),
+            "{text}"
+        );
+    }
+
+    /// A probe kind no case carries stays out of the family; only a kind the
+    /// case set has, with no counted run in an arm, makes the verdict
+    /// inconclusive (model-prompts §8.1).
+    #[test]
+    fn a_kind_absent_from_every_case_stays_out_of_the_family() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = arm(&scenario, "current", 20, 20);
+        records.extend(arm(&scenario, "candidate", 20, 20));
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            !text.contains("pooled must_not_show"),
+            "no case carries a must_not_show probe: {text}"
+        );
+        assert!(text.contains("candidate passes:"), "{text}");
     }
 
     /// A failed run changes no probe's rate: it leaves the counted runs and is
