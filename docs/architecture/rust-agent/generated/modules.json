@@ -432,6 +432,16 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::file_access",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/file_access.rs",
+      "unexpandedMacros": [
+        "format",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::file_storage",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -639,6 +649,7 @@
         "format",
         "matches",
         "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -6268,6 +6279,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "mod file_access",
+        "path file_access::FileAccessFacts"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "mod file_storage",
@@ -7829,6 +7848,93 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError::failed",
+        "path HostFuture",
+        "path SessionFilesHost",
+        "use crate::host::HostError",
+        "use crate::host::HostFuture",
+        "use crate::host::SessionFilesHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use crate::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::session_grants",
+      "references": [
+        "path SessionGrantsHost",
+        "use crate::session_grants::SessionGrantsHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path canonical_prefix",
+        "use crate::workspace_tools::files::canonical_prefix"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path Feature::new",
+        "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path GrantMode",
+        "path GrantMode::Read",
+        "path GrantMode::Write",
+        "use dim_agent_types::grant::GrantMode"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_access",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::file_storage",
       "to": "dim_agent_capabilities::file_storage::native",
       "references": [
@@ -8859,6 +8965,14 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path FileAccessFacts",
+        "use crate::file_access::FileAccessFacts"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -8870,12 +8984,10 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
-      "to": "dim_agent_capabilities::session_grants",
+      "to": "dim_agent_capabilities::host_platform",
       "references": [
-        "path SessionGrantsHost",
-        "path resolve_grant_path",
-        "use crate::session_grants::SessionGrantsHost",
-        "use crate::session_grants::resolve_grant_path"
+        "path HostPlatform",
+        "use crate::host_platform::HostPlatform"
       ]
     },
     {
@@ -8883,7 +8995,9 @@
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
         "path canonical_prefix",
-        "use crate::workspace_tools::files::canonical_prefix"
+        "path resolve_path",
+        "use crate::workspace_tools::files::canonical_prefix",
+        "use crate::workspace_tools::files::resolve_path"
       ]
     },
     {
@@ -8891,7 +9005,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
-        "use dim_agent_runtime::SessionConfig"
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity"
       ]
     },
     {
@@ -8957,8 +9073,6 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_types::grant",
       "references": [
-        "path GrantMode::Read",
-        "path GrantMode::Write",
         "use dim_agent_types::grant::GrantMode"
       ]
     },
@@ -15504,6 +15618,13 @@
     },
     {
       "from": "dim_app_server::cli",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path dim_agent_capabilities::file_access::install"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryRenderer::default",
@@ -21503,7 +21624,6 @@
       "from": "dim_app_server::storage::files",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path PutSessionFile",
         "path SessionFileError",
         "path SessionFileErrorCode",
         "path SessionFileErrorCode::Cancelled",
@@ -21512,10 +21632,11 @@
         "path SessionFileErrorCode::NotFound",
         "path SessionFileErrorCode::Storage",
         "path SessionFileErrorCode::TooLarge",
+        "path SessionFilesService",
         "path StoredSessionFile",
-        "use dim_agent_capabilities::host::PutSessionFile",
         "use dim_agent_capabilities::host::SessionFileError",
         "use dim_agent_capabilities::host::SessionFileErrorCode",
+        "use dim_agent_capabilities::host::SessionFilesService",
         "use dim_agent_capabilities::host::StoredSessionFile"
       ]
     },

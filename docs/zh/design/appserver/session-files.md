@@ -357,7 +357,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 今天的实际行为，依据 [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs) 的 `decide` 和 [approval.rs](../../../../crates/dim-agent-capabilities/src/approval.rs) 的 `admit`：
 
-- **不询问。** 读取准入按工具名和风险类别决定，工作目录以外的读取与目录内的读取决定方式相同。`workspace-write` 的写入准入另行检查[工作区目标](../../../architecture/rust-agent/plugins/Permission.md#workspace-write-targets)。`read` 声明的风险是 `read_filesystem`，所有预设都允许；产品配置的默认预设是 `workspace-write`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。因此模型读取粘贴文件时不会弹出审批，符合 Attachments 的需要。把 `read` 列入 `disallowedTools` 的策略会拒绝它，与拒绝其他任何 `read` 一样。
+- **不询问。** 读取准入按工具名和风险类别决定，工作目录以外的读取与目录内的读取决定方式相同。`workspace-write` 的写入准入另行检查[文件访问事实](../../../architecture/rust-agent/plugins/Permission.md#file-access-facts)。`read` 声明的风险是 `read_filesystem`，所有预设都允许；产品配置的默认预设是 `workspace-write`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。因此模型读取粘贴文件时不会弹出审批，符合 Attachments 的需要。把 `read` 列入 `disallowedTools` 的策略会拒绝它，与拒绝其他任何 `read` 一样。
 - **没有可以扩大的授权。** 审批的回答是对单次调用的 `allow` 或 `deny`，Dim 不记录"以后都允许"（[AcpGateway](../plugins/AcpGateway.md) 从不提供 `allow_always`）。策略变更（`session.permission.update`，写成 `permission/changed`）只包含预设和工具名，从不包含路径。记住的决定（`/approvals`）在计划中，尚未设计；从不询问的 `read` 不会产生它们，§11.2 保证这一点不变。读取 Session 文件不经审批请求就被允许，所以不会留下任何可能覆盖 `dimcode.sqlite`、数据库目录或 `~/.dimcode` 的东西。
 - **FileStorage 根不授予任何东西。** 把数据库目录登记为 FileStorage 根（§3.1），只是让 SessionStore 能通过 FileStorage 在那里写入。`read` 从不查询 FileStorage 根，文件根授权也不授予除此之外的任何东西（[ADR 003](../../adr/003-approval-scope.md) D5）。
 - **不是新情况。** WorkspaceTools 已经把超长的 `read` 结果和 `exec` 输出写到 `<数据库目录>/command-output/<sessionId>/`，并把路径交给模型（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。在产品配置下，这两个目录都紧挨着 `dimcode.sqlite`。
@@ -386,7 +386,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 1. **拥有的文件读取时不询问。** Session 读取它拥有的 Session 文件时不审批、不记录决定，所以 Attachments 从不弹出审批。这样的读取不派生任何授权。
 2. **由所有权而不是位置决定。** 在决定访问时，或在隔离进程启动时，Session S 可以读取 SessionStore 的行中 S 拥有的每个文件的 `<db>.session-files/<fileId>/`。这个集合从不覆盖整个 `<db>.session-files/`、数据库目录或产品目录；只有 S 拥有另一个 Session 的文件时才包含它（分叉拥有源的文件）。
 
-SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 `(session_id, file_id)` 服务这个查询，所以 v15 不需要为此修改。这个查询随该项的设计加入；在那之前没有调用方。
+SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 `(session_id, file_id)` 服务这个查询，所以 v15 不需要为此修改。`sessionFiles.owns` 就是这个查询；[ADR 014](../../../adr/014-file-access-facts.md) 把它读作写入的 Session 自有事实，[ADR 013](../../../adr/013-command-output-ownership.md) 的输出表会扩展它。
 
 被否决的方案：
 
@@ -454,7 +454,7 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 | App Server 装配（lib.rs 中的 `serve`） | 数据库目录还不是 FileStorage 根时注册它，并把索引交给 `SessionStorePlugin`（§3.1） | S5a 实现中的几行改动，像其他登记一样在装配线的工作之后追加 |
 | Attachments（P2 设计细化） | 把 `sessionFiles` 的 `storage` 映射为 `attachment.put` 的某个码。Attachments 目前没有；SessionTitle 把 SessionStore 的 `storage` 映射为 `storage_failed` | 已决定：`storage_failed`，记录在 [#66](https://github.com/arcships/dim/issues/66)；在 P2 的设计复核中落实 |
 | S5c | 在删除事务内、关闭 Session 之后、删除 `agent_sessions` 之前删除所有者行；在分叉事务内复制所有者行；删除后安排清扫 | S5c 的合同（§5.2、§5.3） |
-| 首先按路径限定文件访问的那一项（进程方面为 F5 [#76](https://github.com/arcships/dim/issues/76)；进程内工具方面尚无条目） | §11.2：Session 读取它拥有的文件时不询问；由所有权决定，从不是整个 Session 文件目录、数据库目录或产品目录 | S5a 不需要，因为 Permission 没有路径输入。在该项设计时适用；届时 SessionStore 加入所有权查询 |
+| 首先按路径限定文件访问的那一项（进程方面为 F5 [#76](https://github.com/arcships/dim/issues/76)；进程内文件工具为 [ADR 014](../../../adr/014-file-access-facts.md)） | §11.2：Session 读取它拥有的文件时不询问；由所有权决定，从不是整个 Session 文件目录、数据库目录或产品目录 | S5a 不需要。ADR 014 为写入读取 `sessionFiles.owns`；按路径限定的读取询问仍未完成 |
 
 ## 16. 验收（流程测试）
 
@@ -490,11 +490,13 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 pub struct StoredSessionFile { pub file_id: String, pub path: PathBuf, pub bytes: u64 }
 pub enum SessionFileErrorCode { NotFound, Invalid, TooLarge, NodeUnavailable, Cancelled, Storage }
 pub struct SessionFileError { pub code: SessionFileErrorCode, pub message: String }
-pub trait PutSessionFile: Send + Sync + 'static {
+pub trait SessionFilesService: Send + Sync + 'static {
     fn put(&self, session_id: String, name: String, content: Vec<u8>, cancel: CancellationToken)
         -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+    fn owns(&self, session_id: String, path: PathBuf)
+        -> Pin<Box<dyn Future<Output = Result<bool, SessionFileError>> + Send + '_>>;
 }
-pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
+pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
 ```
 
 `SessionStorePlugin` 接收数据库目录的根索引，提供 `SessionFilesHost`，并在每次调用时用 `ctx.get_as` 读取 `FileStorage`。分叉、释放和清扫步骤是 SessionStore 基于原生存储连接的方法，供 S5c 使用。

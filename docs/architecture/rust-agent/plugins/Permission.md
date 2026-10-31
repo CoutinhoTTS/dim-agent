@@ -5,9 +5,11 @@ The Permission plugin registers two branch parts: Permission, which decides each
 ## Permission
 
 Owner: [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs).
-Evaluates tool risk, workspace write targets, explicit allow/deny policy, the
-user's command rules and the Session's file grants, and exposes versioned
-branch-local permission state.
+Evaluates tool risk, the fixed file-access facts, explicit allow/deny policy and
+the user's command rules, and exposes versioned branch-local permission state.
+The facts service is owned by the Session part in
+[file_access.rs](../../../../crates/dim-agent-capabilities/src/file_access.rs)
+([ADR 014 D1](../../../adr/014-file-access-facts.md#d1-fixed-facts)).
 
 `PermissionState` is serializable for read-only generated host exports. Agents'
 `sessionPermissions.permission` reads this same dispatched state through the
@@ -20,12 +22,16 @@ cache or event.
 | --- | --- |
 | `S:SessionConfig` | Seed the initial permission policy. |
 | `S:CommandRulesHost` | Read the user's command rules when deciding a command call. |
+| `S:SessionIdentity` | Name the Session in the facts query. |
 | `B:Dispatcher` | Replay local policies, apply committed policy changes and settle update waiters. |
 | `B:Timeline` | Write changes and read ancestor policies. |
 
-`S:SessionGrantsHost` is read optionally at each `Ask`; a composition without
-the App Server `SessionGrants` part reads no grants. It is not an injected
-dependency, so its absence does not gate the part.
+`S:FileAccessFacts` and `P:HostPlatform` are looked up when a write is decided,
+after the part is active, not while it loads; a composition without the App
+Server facts part decides a write by the workspace alone, and one without
+HostPlatform keeps the fallback for relative targets. Neither is an injected
+dependency, so their absence does not gate the part.
+
 
 ### Events and lifetime
 
@@ -46,15 +52,41 @@ command rather than retry it; `Command rules could not be read: <error>` is
 protocol too, because it says the rules were not applied and a retry may be
 decided differently.
 
+### File-access facts
+
+[ADR 014](../../../adr/014-file-access-facts.md) fixes what a file operation is
+decided from. The `FileAccessFacts` Session part registers `fileAccessFacts`
+with `facts(session_id, preset, path, mode) -> FileFacts`: `workspace` from
+`SessionConfig`, `system` from HostPlatform's platform roots, `owned` from
+`SessionFiles.owns`, and `grant` from the Session's grants. The part holds no
+state; it reads at use time and imports no SessionStore. A query failure denies.
+
+For a write, Permission resolves the call's path to the same canonical target
+the tool owner admitted and calls the service with the branch preset and
+`write`. It uses WorkspaceTools' `resolve_path` for both absolute and relative
+targets, so cwd, `~`, `..` and symlinks are settled before the query; a
+composition without HostPlatform cannot expand `~` or join a relative target
+and keeps the fallback rule below. A system root or Session-owned artifact is
+denied, not asked, under `read-only` and `workspace-write`, including when
+`allowedTools` names the tool. A `read-only` write is otherwise denied by its
+preset; `full-access` admits file-tool writes everywhere without a query.
+`workspace-write` allows a workspace target, allows a target covered by a write
+grant, and asks otherwise. A write grant is inert under `read-only`; a read
+grant never permits a write. A composition without the facts service keeps the
+workspace-only rule below. Reads are unchanged until
+[ADR 014 D2/D4](../../../adr/014-file-access-facts.md#d2-read-and-write) lands
+for them.
+
 ### Workspace write targets
 
 Decision for [#294](https://github.com/arcships/dim/issues/294): under
-`workspace-write`, a `write_filesystem` call runs automatically only when its
-resolved `path` is inside the Session workspace. Every outside write asks for
-approval for that call, including a model write to a host-owned output directory.
-`allowedTools` does not bypass this question; `disallowedTools` still denies.
-A write tool without an absolute target also asks because its workspace scope
-cannot be established. `read-only` and `full-access` retain their existing rules.
+`workspace-write`, a `write_filesystem` call runs automatically only when the
+facts say its resolved `path` is inside the Session workspace. Every outside
+write asks for approval for that call, including a model write to a host-owned
+output directory. `allowedTools` does not bypass this question;
+`disallowedTools` still denies. A write tool without a path, or with a relative
+target in a composition without HostPlatform, asks because its workspace scope
+cannot be established. This is the fallback rule when the facts part is absent.
 
 The tool's owner resolves its target before admission. WorkspaceTools expands
 home-relative paths using its own HostPlatform facts and applies its shared
@@ -62,30 +94,30 @@ path boundary: platform path handling, lexical components and canonicalization
 of the longest existing prefix, including a new file's parent. ToolExecutor
 passes that resolved call to both Approval and execution, so retargeting an
 original symlink while approval is pending does not redirect the approved write.
-The model's original tool-call fact stays unchanged. Permission canonicalizes
-the workspace and target for its current boundary check. Compare path
-components, not string prefixes. Resolution failures refuse the call; an unreadable prefix,
-symlink loop or dangling symlink is not a missing directory to skip. I/O runs
-outside the async executor. Read the dispatched policy after this I/O so a policy
-change while it waits takes effect. Approval rechecks the path and policy before
-an approved call starts, using its existing call-specific request and response.
+The model's original tool-call fact stays unchanged. Permission applies the same
+resolver to a call it receives unresolved, and the facts compare the workspace,
+system roots, owned artifacts and grants against that canonical target. Compare
+path components, not string prefixes. Resolution failures refuse the call; an
+unreadable prefix, symlink loop or dangling symlink is not a missing directory
+to skip. I/O runs outside the async executor. Read the dispatched policy after
+this I/O so a policy change while it waits takes effect. Approval rechecks the
+path and policy before an approved call starts, using its existing
+call-specific request and response.
 
 ### Session grants
 
 [ADR 012](../../../adr/012-session-grants.md) stores the user's
 "Allow for this session" answers in `session_grants`, owned by the App Server
-`SessionGrants` part. Permission applies them only after its own decision is
-`Ask`: `Deny`, `read-only` writes and `disallowedTools` stay as decided. It
-resolves the call's target with the same canonical boundary as WorkspaceTools
-and matches the stored canonical path: a file grant matches the exact path, a
-directory grant matches by component, and a write requires a write grant. A
-read grant never authorizes a write. A grant read failure denies; a cancelled
+`SessionGrants` part. The facts service reads them and matches the resolved
+target: a file grant matches the exact path, a directory grant matches by
+component, and a write requires a write grant. Permission applies no grant by
+itself, so there is one path resolver. A grant read failure denies; a cancelled
 read propagates. No grant becomes a Timeline fact, preset or
 output-directory exemption. Reads stay path-independent under the current
 presets, including Session attachments and command output; ADR 014's outside
-read ask will use the same match. Host-generated output and configured commands
-retain their own execution contracts under ADR 003. This is tool admission, not
-an OS filesystem sandbox against concurrent filesystem mutation.
+read ask will use the same `grant` fact. Host-generated output and configured
+commands retain their own execution contracts under ADR 003. This is tool
+admission, not an OS filesystem sandbox against concurrent filesystem mutation.
 
 The CLI uses its existing approval prompt, with the resolved outside target in
 the reason and a Session-scoped grant action for file tools:
@@ -101,13 +133,14 @@ the reason and a Session-scoped grant action for file tools:
 - §1 and ADR 002 D1–D3: the existing branch Permission and Approval Capabilities
   own admission and approval facts. WorkspaceTools owns file execution; no
   plugin, wiring part, lifecycle or isolation dependency is added. The grant
-  store and `session.grants.add/remove` belong to the App Server `SessionGrants` Session
-  part (ADR 012); Permission only reads them at an Ask.
+  store and `session.grants.add/remove` belong to the App Server
+  `SessionGrants` Session part (ADR 012), and the fixed facts belong to the
+  `FileAccessFacts` Session part (ADR 014 D1); Permission only reads them.
 - §4 rules 1–6 and 9: existing approval requests/responses and tool results
   carry the decision and outcome; handlers retain their existing tasks,
   cancellation and cleanup. No new event or context input path is introduced.
-- §4 rule 7: Permission reads its declared Session configuration and command
-  rules, plus the optional grant service at an Ask; WorkspaceTools uses its
+- §4 rule 7: Permission reads its declared Session configuration, command rules,
+  Session identity and the optional facts service; WorkspaceTools uses its
   existing HostPlatform dependency. The bound handler's `resolve_write`
   prepares the actual call at its external path boundary before admission; it
   reads metadata and performs no file mutation or process execution.
@@ -136,8 +169,12 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_time`,
 `unreadable_rules_deny_command_calls_only`,
 `a_policy_tightened_during_the_rules_read_decides_the_call`,
-`a_composition_without_grants_builds_and_asks`,
+`a_composition_without_facts_builds_and_asks`,
+`file_write_facts_decide_each_path_by_preset`,
 `a_session_grant_matches_only_the_canonical_target_and_mode`.
+
+[session_files_flow.rs](../../../../crates/dim-app-server/tests/session_files_flow.rs)
+checks `sessionFiles.owns` against the attachment owner rows.
 
 [session_grants.rs](../../../../crates/dim-app-server/tests/transport_flow/session_grants.rs)
 covers the `session.grants.add/remove` methods, a write grant admitting the
@@ -153,7 +190,7 @@ unresolvable targets and the unchanged read-only/full-access presets.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`S:CommandRulesHost`、`S:SessionConfig` |
+| 注入 | `B:Dispatcher`、`B:Timeline`、`S:CommandRulesHost`、`S:SessionConfig`、`S:SessionIdentity` |
 | 提供 | `B:Permission`、`B:StateCell<PermissionState>` |
 | 被注入于 | `Approval` |
 <!-- /generated -->

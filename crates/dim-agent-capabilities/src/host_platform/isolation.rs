@@ -101,26 +101,16 @@ impl HostPlatform {
         .map(str::to_owned)
         .collect();
         let (read_only_paths, default_files) = {
-            #[cfg(target_os = "macos")]
-            let paths = [
-                "/System",
-                "/usr",
-                "/bin",
-                "/sbin",
-                "/Library/Apple",
-                "/private/etc",
-                "/etc",
-                "/var/select",
-            ];
-            #[cfg(not(target_os = "macos"))]
-            let paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
             let mut installed = Vec::new();
-            for path in paths {
+            for path in &self.platform_roots {
                 match tokio::fs::metadata(path).await {
-                    Ok(_) => installed.push(path.into()),
+                    Ok(_) => installed.push(path.clone()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => {
-                        return Err(invalid(format!("System isolation root {path}: {error}")));
+                        return Err(invalid(format!(
+                            "System isolation root {}: {error}",
+                            path.display()
+                        )));
                     }
                 }
             }

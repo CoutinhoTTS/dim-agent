@@ -37,6 +37,7 @@ async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
     );
     dim_app_server::permission_rules::install(&mut builder);
     dim_app_server::session_grants::install(&mut builder);
+    dim_agent_capabilities::file_access::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     let server = serve(
         builder,

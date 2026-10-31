@@ -15,7 +15,7 @@
 use super::{SqliteStorage, sqlite::error};
 use dim_agent_capabilities::{
     file_storage::{FileStorage, FileStorageError},
-    host::{PutSessionFile, SessionFileError, SessionFileErrorCode, StoredSessionFile},
+    host::{SessionFileError, SessionFileErrorCode, SessionFilesService, StoredSessionFile},
 };
 use rusqlite::{Connection, TransactionBehavior, params};
 use rutis::Ctx;
@@ -24,7 +24,7 @@ use std::{
     fs::Permissions,
     future::Future,
     ops::ControlFlow,
-    path::Path,
+    path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -239,7 +239,7 @@ impl SessionFiles {
     }
 }
 
-impl PutSessionFile for SessionFiles {
+impl SessionFilesService for SessionFiles {
     fn put(
         &self,
         session_id: String,
@@ -276,6 +276,62 @@ impl PutSessionFile for SessionFiles {
             let _dropped = call.drop_guard();
             task.await
                 .unwrap_or_else(|join| Err(file_error(SessionFileErrorCode::Storage, join)))
+        })
+    }
+
+    fn owns(
+        &self,
+        session_id: String,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionFileError>> + Send + '_>> {
+        Box::pin(async move {
+            if path.components().any(|component| {
+                !matches!(
+                    component,
+                    Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+                )
+            }) {
+                return Ok(false);
+            }
+            let storage = self
+                .0
+                .ctx
+                .get::<FileStorage>()
+                .ok_or_else(node_unavailable)?;
+            let directory = storage
+                .root_path(self.0.root)
+                .map_err(storage_failure)?
+                .join(&self.0.directory);
+            let directory = match tokio::fs::canonicalize(&directory).await {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(file_error(SessionFileErrorCode::Storage, error)),
+            };
+            let Some(rest) = path.strip_prefix(&directory).ok() else {
+                return Ok(false);
+            };
+            let Some(Component::Normal(name)) = rest.components().next() else {
+                return Ok(false);
+            };
+            let Some(file_id) = name.to_str() else {
+                return Ok(false);
+            };
+            let file_id = file_id.to_owned();
+            let owned = self
+                .0
+                .db
+                .run(move |connection| {
+                    connection
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM session_file_owners WHERE session_id = ?1 AND file_id = ?2)",
+                            params![session_id, file_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(error)
+                })
+                .await
+                .map_err(|failure| file_error(SessionFileErrorCode::Storage, failure))?;
+            Ok(owned)
         })
     }
 }

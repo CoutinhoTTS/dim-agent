@@ -1,8 +1,9 @@
 //! Branch permission through the public Session interfaces.
 use dim_agent_capabilities::{
     approval::Approval,
-    defaults,
+    defaults, file_access,
     host::*,
+    host_platform::{HostPlatform, ShellStatus},
     model_provider::ModelProviderPlugin,
     permission::{
         CommandRulesHost, Decision, NoCommandRules, Permission, PermissionState,
@@ -19,10 +20,12 @@ use dim_agent_types::{
     *,
 };
 use std::{
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -107,6 +110,65 @@ impl ReadSessionGrants for TestGrants {
         Box::pin(async move { grants.ok_or_else(|| HostError::failed("invalid grants store")) })
     }
 }
+
+/// The Session's owned artifact directories as the test sets them; `fails`
+/// is an unreadable ownership query.
+#[derive(Default)]
+struct TestFiles {
+    owned: Mutex<Vec<PathBuf>>,
+    fails: AtomicBool,
+}
+impl TestFiles {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    fn own(&self, path: impl Into<PathBuf>) {
+        self.owned.lock().unwrap().push(path.into());
+    }
+    fn fail(&self, fails: bool) {
+        self.fails.store(fails, Ordering::SeqCst);
+    }
+}
+impl SessionFilesService for TestFiles {
+    fn put(
+        &self,
+        _: String,
+        _: String,
+        _: Vec<u8>,
+        _: CancellationToken,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<StoredSessionFile, SessionFileError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Err(SessionFileError {
+                code: SessionFileErrorCode::NodeUnavailable,
+                message: "the test stores no files".into(),
+            })
+        })
+    }
+    fn owns(
+        &self,
+        _: String,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<bool, SessionFileError>> + Send + '_>>
+    {
+        let owned = self.owned.lock().unwrap().clone();
+        let fails = self.fails.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if fails {
+                return Err(SessionFileError {
+                    code: SessionFileErrorCode::Storage,
+                    message: "invalid ownership store".into(),
+                });
+            }
+            Ok(owned.iter().any(|root| path.starts_with(root)))
+        })
+    }
+}
 fn grant(path: impl Into<PathBuf>, kind: GrantKind, mode: GrantMode) -> SessionGrant {
     SessionGrant {
         path: path.into(),
@@ -143,16 +205,30 @@ async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) ->
     defaults::tool_host(&mut builder, tools);
     MinimalHost::start(&builder).await.unwrap()
 }
-/// The same profile with `grants` bound in place of the empty host.
-async fn granted_agent(tools: Arc<RiskTools>, grants: Arc<dyn ReadSessionGrants>) -> MinimalHost {
+/// The same profile with grants, the fixed facts and their `sessionFiles`
+/// source bound.
+async fn granted_agent(
+    tools: Arc<RiskTools>,
+    grants: Arc<dyn ReadSessionGrants>,
+    files: Arc<TestFiles>,
+) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
         .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
-        .session_value(Arc::new(SessionGrantsHost(grants)));
+        .session_value(Arc::new(SessionGrantsHost(grants)))
+        .process_value(Arc::new(SessionFilesHost(files)))
+        .process_value(Arc::new(
+            HostPlatform::current(ShellStatus::Unavailable {
+                code: "PERMISSION_TEST",
+                reason: "The permission flow starts no process".into(),
+            })
+            .unwrap(),
+        ));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
+    file_access::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
     MinimalHost::start(&builder).await.unwrap()
@@ -286,6 +362,14 @@ async fn decide_write(permission: &Permission, path: &Path) -> Decision {
         .await
         .unwrap()
 }
+/// Decides a `write` call for `path`; returns its verdict.
+async fn write_verdict(permission: &Permission, path: &Path) -> &'static str {
+    match decide_write(permission, path).await {
+        Decision::Allow => "allow",
+        Decision::Ask { .. } => "ask",
+        Decision::Deny { .. } => "deny",
+    }
+}
 fn temporary_directory(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("dim-permission-{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
@@ -293,7 +377,7 @@ fn temporary_directory(name: &str) -> PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_composition_without_grants_builds_and_asks() {
+async fn a_composition_without_facts_builds_and_asks() {
     let work = temporary_directory("no-grants");
     let agent = agent(Arc::new(RiskTools::default())).await;
     let session = agent
@@ -301,6 +385,10 @@ async fn a_composition_without_grants_builds_and_asks() {
         .await
         .unwrap();
     let permission = session.service::<Permission>("main").unwrap();
+    assert_eq!(
+        write_verdict(&permission, &work.join("inside.txt")).await,
+        "allow"
+    );
     let target = work.parent().unwrap().join("outside.txt");
     assert!(matches!(
         decide_write(&permission, &target).await,
@@ -309,6 +397,111 @@ async fn a_composition_without_grants_builds_and_asks() {
     session.close().await.unwrap();
     agent.close().await.unwrap();
     let _ = std::fs::remove_dir_all(work);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_write_facts_decide_each_path_by_preset() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let root = temporary_directory("facts");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let outside = root.join("outside.txt");
+        let owned = root.join("owned").join("artifact.txt");
+        std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
+        std::fs::write(&owned, b"owned").unwrap();
+        let system =
+            PathBuf::from("/usr/bin").join(format!("dim-permission-{}", uuid::Uuid::new_v4()));
+        let grants = TestGrants::new(Vec::new());
+        let files = TestFiles::new();
+        files.own(owned.clone());
+        let agent = granted_agent(Arc::new(RiskTools::default()), grants, files.clone()).await;
+
+        let inside = work.join("file.txt");
+        for (policy, expected) in [
+            (PermissionPreset::ReadOnly, ["deny", "deny", "deny", "deny"]),
+            (
+                PermissionPreset::WorkspaceWrite,
+                ["allow", "ask", "deny", "deny"],
+            ),
+            (
+                PermissionPreset::FullAccess,
+                ["allow", "allow", "allow", "allow"],
+            ),
+        ] {
+            let session = agent
+                .create_session(config_in(&work, preset(policy)))
+                .await
+                .unwrap();
+            let permission = session.service::<Permission>("main").unwrap();
+            for (path, expected) in [&inside, &outside, &owned, &system]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    write_verdict(&permission, path).await,
+                    expected,
+                    "{policy:?} {}",
+                    path.display()
+                );
+            }
+            session.close().await.unwrap();
+        }
+
+        // A relative target is resolved against the Session cwd with the
+        // tools' resolver before the facts.
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(
+            write_verdict(&permission, Path::new("inside.txt")).await,
+            "allow"
+        );
+        assert_eq!(
+            write_verdict(&permission, Path::new("../outside.txt")).await,
+            "ask"
+        );
+        let escape = PathBuf::from("../".repeat(work.components().count() - 1)).join("etc/hosts");
+        assert_eq!(write_verdict(&permission, &escape).await, "deny");
+        assert_eq!(write_verdict(&permission, Path::new("")).await, "ask");
+        session.close().await.unwrap();
+
+        // An explicit tool allow does not bypass a path fact.
+        let session = agent
+            .create_session(config_in(
+                &work,
+                PermissionPolicy {
+                    preset: PermissionPreset::ReadOnly,
+                    allowed_tools: vec!["write".into()],
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(write_verdict(&permission, &inside).await, "allow");
+        assert_eq!(write_verdict(&permission, &owned).await, "deny");
+        assert_eq!(write_verdict(&permission, &system).await, "deny");
+        session.close().await.unwrap();
+
+        // An unreadable ownership or grants source denies instead of asking.
+        files.fail(true);
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        for path in [&inside, &outside] {
+            assert_eq!(write_verdict(&permission, path).await, "deny");
+        }
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    })
+    .await
+    .expect("file facts flow completed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -320,8 +513,9 @@ async fn a_session_grant_matches_only_the_canonical_target_and_mode() {
         std::fs::create_dir_all(&work).unwrap();
         std::fs::create_dir_all(&granted).unwrap();
         let grants = TestGrants::new(Vec::new());
+        let files = TestFiles::new();
         let tools = Arc::new(RiskTools::default());
-        let agent = granted_agent(tools.clone(), grants.clone()).await;
+        let agent = granted_agent(tools.clone(), grants.clone(), files).await;
         let session = agent
             .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
             .await

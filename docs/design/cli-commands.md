@@ -437,7 +437,7 @@ This section adds CLI entry points over those contracts and the
 | Preset | What runs (Permission's existing decision, after `disallowedTools` and deny rules) |
 | --- | --- |
 | `read-only` | Reads and Session tools run; file writes, commands, network and unclassified tools are denied |
-| `workspace-write` | Reads, workspace file writes and Session tools run; outside writes without a matching write grant, commands, network and unclassified tools ask |
+| `workspace-write` | Reads, workspace file writes and Session tools run; writes to system roots or Session-owned files are denied; other outside writes without a matching write grant, commands, network and unclassified tools ask |
 | `full-access` | Every tool call runs without asking |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
@@ -641,7 +641,7 @@ Approval
 
 | Choice | Preset | What runs |
 | --- | --- | --- |
-| Ask | `workspace-write` | Reads and workspace writes run; commands, network, outside writes and unclassified tools ask |
+| Ask | `workspace-write` | Reads and workspace writes run; writes to system roots or Session-owned files are denied; commands, network, other outside writes and unclassified tools ask |
 | Full access | `full-access` | Every tool call runs without asking |
 
 Ask is the product default. Enter on the choice already in force closes the menu. Full access

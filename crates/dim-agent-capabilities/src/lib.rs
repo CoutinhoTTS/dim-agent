@@ -10,6 +10,7 @@ pub mod context_preparation;
 pub mod defaults;
 pub mod exec_stop;
 pub mod execution_settings;
+pub mod file_access;
 pub mod file_storage;
 pub mod history;
 pub mod host;
@@ -79,6 +80,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::ToolHost>(catalog, session);
     register::<permission::CommandRulesHost>(catalog, session);
     register::<session_grants::SessionGrantsHost>(catalog, session);
+    register::<file_access::FileAccessFacts>(catalog, session);
     register::<methods::SessionMethods>(catalog, session);
     let branch = Some(BRANCH_GROUP);
     register::<input_queue::InputQueue>(catalog, branch);
