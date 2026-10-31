@@ -438,7 +438,7 @@ ProjectionCheckpoint = {
 
 [Session grants](../../adr/012-session-grants.md) 的原生存储格式为 **v28**，从 #593 的 v27 原地升级。v27 保留委派归属的两列和两个索引。
 
-- **新增结构**：`session_grants(session_id, path, kind, mode)`，列、主键、外键与约束见当前表定义；其他 SQL 结构和持久化 JSON 不变。主键服务 Session 内的读取、upsert 和删除；`session.grants.lookup` 按 Session 读取后匹配，没有按路径的单列查询，因此不另建索引。
+- **新增结构**：`session_grants(session_id, path, kind, mode)`，列、主键、外键与约束见当前表定义；其他 SQL 结构和持久化 JSON 不变。主键服务 Session 内的读取、upsert 和删除；Permission 通过 `SessionGrants` 读取该 Session 的全部 grants 后匹配，没有按路径的单列查询，因此不另建索引。
 - **升级**：空库创建 v28；精确匹配且标记相符的 v27 库在现有启动准入事务内创建空的 grants 表，重建标记表并写入 28。更早的受支持格式先执行已有步骤，再执行本步。失败回滚；旧业务行及委派归属列原值不变，不从历史审批生成 grants。
 - **单向**：v27 守护进程拒绝 v28 库；不降级。准入仍要求精确 SQL 结构及对应标记，不能将不同结构共用同一编号。
 - **验证**：`storage_flow.rs` 的 `a_v27_store_upgrades_in_place_once` 核对 v27 原地升级、业务行保持、grants 初始为空和再次打开不再升级；`documented_native_records_restore_with_legacy_snapshot_bypassed` 经完整记录示例的 grants 行核对重启后原样恢复；`a_delete_removes_the_sessions_grants` 核对删除事务同时清掉 grants；既有各格式升级测试核对完整升级链。

@@ -1,10 +1,10 @@
 use super::*;
 
-/// The four `session.grants.*` methods resolve paths against the Session
-/// workspace, and a stored write grant lets the next write run without an
-/// approval prompt.
+/// A stored write grant lets the next write run without an approval prompt;
+/// removing it makes the next write ask again. Grant matching is covered by
+/// `permission_flow`, and the stored rows by `storage_flow`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grants_are_managed_through_session_methods_and_allow_the_next_write() {
+async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
     use dim_agent_capabilities::{
         model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
     };
@@ -75,128 +75,14 @@ async fn grants_are_managed_through_session_methods_and_allow_the_next_write() {
     let branch = json!({"sessionId":sid,"branchId":"main"});
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
 
-    let list = client
-        .rpc("session.grants.list", json!({"sessionId":sid}))
-        .await;
-    assert_ok(&list);
-    assert_eq!(list["result"]["grants"], json!([]));
+    for method in ["session.grants.list", "session.grants.lookup"] {
+        let reply = client.rpc(method, json!({"sessionId":sid})).await;
+        assert_eq!(
+            reply["error"]["data"]["appError"], "unknown_method",
+            "{reply}"
+        );
+    }
 
-    // `notes.md` is relative to the Session workspace, which the daemon
-    // resolves; `sub/../notes.md` is the same canonical path.
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.add",
-                json!({"sessionId":sid,"path":"notes.md","kind":"file","mode":"write"}),
-            )
-            .await,
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.add",
-                json!({"sessionId":sid,"path":"sub/../notes.md","kind":"file","mode":"read"}),
-            )
-            .await,
-    );
-    let list = client
-        .rpc("session.grants.list", json!({"sessionId":sid}))
-        .await;
-    assert_ok(&list);
-    assert_eq!(
-        list["result"]["grants"],
-        json!([{"path":work.join("notes.md"),"kind":"file","mode":"write"}])
-    );
-    let lookup = client
-        .rpc(
-            "session.grants.lookup",
-            json!({"sessionId":sid,"path":"notes.md","mode":"read"}),
-        )
-        .await;
-    assert_ok(&lookup);
-    assert_eq!(
-        lookup["result"]["grant"],
-        json!({"path":work.join("notes.md"),"kind":"file","mode":"write"})
-    );
-    let lookup = client
-        .rpc(
-            "session.grants.lookup",
-            json!({"sessionId":sid,"path":"notes.md","mode":"write"}),
-        )
-        .await;
-    assert_ok(&lookup);
-    assert_eq!(
-        lookup["result"]["grant"],
-        json!({"path":work.join("notes.md"),"kind":"file","mode":"write"})
-    );
-
-    // A read grant answers a read lookup, not a write lookup.
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.add",
-                json!({"sessionId":sid,"path":"only-read.txt","kind":"file","mode":"read"}),
-            )
-            .await,
-    );
-    let lookup = client
-        .rpc(
-            "session.grants.lookup",
-            json!({"sessionId":sid,"path":"only-read.txt","mode":"write"}),
-        )
-        .await;
-    assert_ok(&lookup);
-    assert_eq!(lookup["result"]["grant"], json!(null));
-    let lookup = client
-        .rpc(
-            "session.grants.lookup",
-            json!({"sessionId":sid,"path":"only-read.txt","mode":"read"}),
-        )
-        .await;
-    assert_ok(&lookup);
-    assert_eq!(
-        lookup["result"]["grant"],
-        json!({"path":work.join("only-read.txt"),"kind":"file","mode":"read"})
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.remove",
-                json!({"sessionId":sid,"path":"only-read.txt"}),
-            )
-            .await,
-    );
-
-    // A directory grant matches a child by component.
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.add",
-                json!({"sessionId":sid,"path":"notes","kind":"dir","mode":"write"}),
-            )
-            .await,
-    );
-    let lookup = client
-        .rpc(
-            "session.grants.lookup",
-            json!({"sessionId":sid,"path":"notes/child.txt","mode":"write"}),
-        )
-        .await;
-    assert_ok(&lookup);
-    assert_eq!(
-        lookup["result"]["grant"],
-        json!({"path":work.join("notes"),"kind":"dir","mode":"write"})
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.remove",
-                json!({"sessionId":sid,"path":"notes"}),
-            )
-            .await,
-    );
-
-    // A new file outside the workspace is stored by its parent and name.
     assert_ok(
         &client
             .rpc(
@@ -205,30 +91,12 @@ async fn grants_are_managed_through_session_methods_and_allow_the_next_write() {
             )
             .await,
     );
-    // Remove takes the same path the client typed.
-    assert_ok(
-        &client
-            .rpc(
-                "session.grants.remove",
-                json!({"sessionId":sid,"path":"notes.md"}),
-            )
-            .await,
-    );
-    let list = client
-        .rpc("session.grants.list", json!({"sessionId":sid}))
-        .await;
-    assert_ok(&list);
-    assert_eq!(
-        list["result"]["grants"],
-        json!([{"path":outside,"kind":"file","mode":"write"}])
-    );
-
     let write = json!({
         "sessionId":sid,"branchId":"main",
         "text":format!("tool:write {}", json!({"path":outside,"content":"granted"}))
     });
     assert_ok(&client.rpc("session.submit", write).await);
-    assert_ok(&client.rpc("session.idle", branch).await);
+    assert_ok(&client.rpc("session.idle", branch.clone()).await);
     let result = session
         .history("main", None)
         .await
@@ -242,16 +110,45 @@ async fn grants_are_managed_through_session_methods_and_allow_the_next_write() {
         .unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "granted");
-    let approvals = session
+    assert_eq!(approval_requests(&session).await, 0);
+
+    assert_ok(
+        &client
+            .rpc(
+                "session.grants.remove",
+                json!({"sessionId":sid,"path":outside}),
+            )
+            .await,
+    );
+    let write = json!({
+        "sessionId":sid,"branchId":"main",
+        "text":format!("tool:write {}", json!({"path":outside,"content":"again"}))
+    });
+    assert_ok(&client.rpc("session.submit", write).await);
+    let approval = client.notice("approval.request").await;
+    assert_ok(
+        &client
+            .rpc(
+                "approval.respond",
+                json!({"sessionId":sid,"branchId":"main","requestId":approval["params"]["requestId"],"decision":"deny"}),
+            )
+            .await,
+    );
+    assert_ok(&client.rpc("session.idle", branch).await);
+    assert_eq!(approval_requests(&session).await, 1);
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "granted");
+
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+async fn approval_requests(session: &dim_agent_runtime::Session) -> usize {
+    session
         .local("main", ..)
         .await
         .unwrap()
         .iter()
         .filter(|event| matches!(event.kind, EventKind::ApprovalRequest(_)))
-        .count();
-    assert_eq!(approvals, 0);
-
-    server.shutdown();
-    server.join().await.unwrap();
-    let _ = std::fs::remove_dir_all(&home);
+        .count()
 }
