@@ -884,6 +884,11 @@ pub struct PingResult {
 pub struct CreateResult {
     pub session_id: String,
     pub model: ModelId,
+    /// The preferences the Session's adopted configuration sends, derived from
+    /// it; only on this reply, not on `session.list` items, and absent when it
+    /// carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
     pub sequence: u64,
 }
 /// The fork's id and its `main` head once it is published.
@@ -909,6 +914,16 @@ pub struct SessionInfo {
     /// protocol v3 only.
     #[serde(flatten)]
     pub title: Option<crate::storage::TitleFields>,
+}
+/// The `session.attach` reply: the attached Session's directory record, as
+/// `session.list` gives it, plus the preferences its adopted configuration
+/// sends. Only this reply and `session.create` name them; list items do not.
+#[derive(Debug, Serialize)]
+pub struct AttachResult {
+    #[serde(flatten)]
+    pub session: SessionInfo,
+    #[serde(rename = "modelPreferences", skip_serializing_if = "Option::is_none")]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -952,8 +967,9 @@ pub enum Reply {
     Create(CreateResult),
     Fork(ForkResult),
     List(Vec<SessionInfo>),
-    /// The attached Session's directory record, as `session.list` gives it.
-    Attach(SessionInfo),
+    /// The attached Session's directory record, as `session.list` gives it,
+    /// plus the preferences its adopted configuration sends.
+    Attach(AttachResult),
     Summaries(Vec<SessionSummary>),
     Catalog(CatalogResult),
     Submit(SubmitResult),

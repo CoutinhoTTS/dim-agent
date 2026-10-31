@@ -129,7 +129,7 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 | `session/set_mode` | 条件可接 | 仅提供 `read-only`、`workspace-write`、`full-access`。先 get policy/version，再 update `{sessionId,branchId:"main",expectedVersion,policy:<保留工具列表，仅替换 preset>}`。冲突返回错误并刷新；不盲重试旧 policy，不映射 plan mode |
 | `session/set_config_option` | 条件可接 | `mode` 复用上一行。`model` 仅在安全 provider catalog 和 `session.model.update` 可用时提供：保留 catalog 中 native model id，使用生成该选项的 providerId 调用 `{sessionId,branchId:"main",providerId,modelId}`。等待原生 `{model,outcome:"adopted"|"unchanged"}` 并接收 `context/configured`，再返回完整 configOptions；`configuration_superseded` 时刷新并报错，不把请求值直接当 currentValue |
 
-mode 和 model 的选项来自当前 Session 的公开状态，不能用用户偏好默认值冒充已采用值。模型切换影响可用选项时重读 catalog；超时或连接丢失后的写入不能报告为未应用。effort、fast/service tier 的写入口虽然存在，但 RPC 未提供完整的 Session 当前值读取；首版不发布这些 config options。不同 Session 的可选方法逐个检查，不能因另一个 Session 安装了插件就假定可用。
+mode 和 model 的选项来自当前 Session 的公开状态，不能用用户偏好默认值冒充已采用值。模型切换影响可用选项时重读 catalog；超时或连接丢失后的写入不能报告为未应用。effort、fast/service tier 的写入口虽然存在，公开 `context/configured` 视图现在也读回已采用的 `model_preferences`，但首版不发布这些 config options。不同 Session 的可选方法逐个检查，不能因另一个 Session 安装了插件就假定可用。
 
 new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Session 插件接入 `mcpServers`，与原生工具并存，不写共享配置。只有旧 daemon 缺少 `mcp.temporary.capabilities` 时保留接受并忽略行为，且不声明 HTTP/SSE MCP 能力。非空 `additionalDirectories` 仍在创建或 attach 前拒绝。
 

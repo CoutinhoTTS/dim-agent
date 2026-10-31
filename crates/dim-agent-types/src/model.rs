@@ -589,6 +589,27 @@ pub struct ProviderOptions {
     pub aihubmix: Option<EffortProviderOptions>,
 }
 
+/// The preferences an adoption applies on top of a model's base configuration,
+/// in the spelling a client requests them. Derived from an adopted
+/// configuration and its protocol when a client reads them back; absent when
+/// there are none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelPreferences {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub reasoning_effort: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub service_tier: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderReasoningConfig {
