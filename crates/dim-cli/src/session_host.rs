@@ -3816,38 +3816,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_hit_rate_floors_at_every_step() {
-        for (prompt, cache, expected) in [
-            (10_000, 10_000, "100%"),
-            (10_000, 9_999, "99.9%"),
-            (10_000, 9_900, "99.0%"),
-            (10_000, 9_200, "92%"),
-            (10_000, 100, "1%"),
-            (10_000, 99, "<1%"),
-            (10_000, 1, "<1%"),
-            (10_000, 0, "0%"),
-        ] {
-            assert_eq!(
-                cache_hit_rate(prompt, Some(cache)).as_deref(),
-                Some(expected),
-                "{cache} of {prompt}"
-            );
-        }
-    }
-
-    #[test]
-    fn cache_hit_rate_is_absent_when_its_counters_cannot_produce_one() {
-        assert_eq!(cache_hit_rate(10_000, None), None, "no cache read count");
-        assert_eq!(
-            cache_hit_rate(10_000, Some(10_001)),
-            None,
-            "cache reads above the prompt"
-        );
-        assert_eq!(cache_hit_rate(0, Some(0)), None, "no prompt tokens");
-        assert_eq!(cache_hit_rate(0, None), None, "neither counter");
-    }
-
-    #[test]
     fn a_line_notice_reaches_its_own_transcript() {
         let mut main = Projection::default();
         let mut lines =

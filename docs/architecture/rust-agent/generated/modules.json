@@ -3121,8 +3121,7 @@
       "parent": "dim_cli::session_host",
       "file": "crates/dim-cli/src/session_host.rs",
       "unexpandedMacros": [
-        "assert",
-        "assert_eq"
+        "assert"
       ]
     },
     {

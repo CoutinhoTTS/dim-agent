@@ -286,8 +286,8 @@ fn tui_usage_shows_the_last_requests_cache_hit_rate() {
 }
 
 /// Every rounding row reaches the report: `100%` for a full hit, one decimal
-/// below it, `<1%` for a positive share under one percent, and no segment
-/// when the counters cannot produce one.
+/// below it, an integer down to `1%`, `<1%` for a positive share under one
+/// percent, and no segment when the counters cannot produce one.
 #[test]
 fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
     let home = Home::new();
@@ -314,8 +314,10 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
         for (sequence, cache_read, delta, input) in [
             (9, Some(10000.0), "full hit", 64000.0),
             (11, Some(9999.0), "almost full", 32000.0),
-            (13, Some(1.0), "sliver", 16000.0),
-            (15, Some(10001.0), "impossible", 8000.0),
+            (13, Some(9900.0), "ninety-nine", 40000.0),
+            (15, Some(100.0), "one percent", 20000.0),
+            (17, Some(1.0), "sliver", 16000.0),
+            (19, Some(10001.0), "impossible", 8000.0),
         ] {
             model_usage(wire, "main", sequence, 10000.0, cache_read);
             wire.event(
@@ -340,6 +342,12 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
     terminal.until("almost full");
     terminal.write(b"/usage\r");
     terminal.until("last request cached 99.9%");
+    terminal.until("ninety-nine");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 99.0%");
+    terminal.until("one percent");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 1%");
     terminal.until("sliver");
     terminal.write(b"/usage\r");
     terminal.until("last request cached <1%");
