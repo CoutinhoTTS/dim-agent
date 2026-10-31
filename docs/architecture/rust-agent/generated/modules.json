@@ -4608,6 +4608,7 @@
       "unexpandedMacros": [
         "env",
         "format",
+        "matches",
         "option_env"
       ]
     },
@@ -4617,6 +4618,7 @@
       "parent": "dim_cli::version",
       "file": "crates/dim-cli/src/version.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
