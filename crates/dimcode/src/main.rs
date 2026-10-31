@@ -25,6 +25,14 @@ const fn present(value: Option<&'static str>) -> Option<&'static str> {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        mallopt(-3, 64 * 1024);
+        mallopt(-8, 1);
+    }
     if std::env::args().nth(1).as_deref() == Some("app-server") {
         let provider = CLIENT_IDS.map(|(cn, global)| {
             dim_oauth::row(dim_oauth::ClientIds {

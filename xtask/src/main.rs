@@ -22,8 +22,8 @@ unsafe extern "C" {
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     unsafe {
-        mallopt(-3, 128 * 1024);
-        mallopt(-8, 2);
+        mallopt(-3, 64 * 1024);
+        mallopt(-8, 1);
     }
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
