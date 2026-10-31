@@ -74,6 +74,7 @@ End     scroll to the bottom (fullscreen, empty draft)
 ```text
 Settings > Execution
   Applies to new processes and persistent shells.
+  Sandbox is unavailable on this host: <reason>   仅当主机没有后端时显示
   Sandbox             off  >                    切换 off | on
   Network             off  >                    Sandbox 关闭时被忽略，显示为
                                                 "off (ignored while Sandbox is off)"
@@ -83,6 +84,9 @@ Settings > Execution
 ```
 
 打开面板时读取 `{source: "execution", scope: "user"}`，返回的 revision 随草稿保留，不作为用户输入字段。
+守护进程声明 `host.execution.backend` 时，面板还会读取 `{}`：返回 `{available: true}` 或
+`{available: false, reason}`。reason 就是下次启动进程会使用的原因文本；面板显示它，两个开关仍可编辑。
+Web 的 Permissions 页读取同一方法并显示同一原因。两个客户端都不根据自身环境推断平台或后端。
 方向键选择，Enter 或 Space 切换选中行，Esc 关闭面板，有未保存修改时先询问是否丢弃。
 Save 携带读取时的 revision 提交两个开关；Reset to defaults 先要求确认，再携带该 revision 把两个开关写为关闭。
 两种操作都不会自动重试过期 revision：冲突时保留草稿并显示错误，Reload 明确丢弃草稿后重新读取。
@@ -90,12 +94,17 @@ Sandbox 关闭时面板仍显示已保存的 Network 值并标注其被忽略，
 加载时禁用修改；守护进程没有这些设置方法时显示不支持的错误，不回退到宿主执行。
 
 该行报告的是已保存的开关，不是正在运行的命令的边界：运行中的进程（包括常驻 shell）保持启动时的边界。
-没有沙箱后端的平台在下次启动进程时以 `isolation_unavailable` 报错；把该状态显示在行上属于
-[#691](https://github.com/arcships/dim/issues/691)。
+在没有沙箱后端的平台上（Windows，或没有 `bwrap` 的 Linux），该行给出原因，下次启动进程仍以
+`isolation_unavailable` 失败；显示状态不会削弱这一拒绝。
+
+两个开关是已存储的配置。能写该来源的模型——在 `full-access` 下，或在 `workspace-write` 下经批准的外部写入——
+会改变下次进程使用的值。该写入与改动此行的权限相同，不创建授权，也不改变运行中的进程；想要边界的用户不会
+批准这样的写入（[ADR 011 D2](../../adr/011-execution-settings.md)）。
 
 验证覆盖这一行显示什么、守护进程据此做什么：读取；Sandbox 关闭时切换仍显示已存储的 Network 值；
-revision 冲突；保存后 `exec` 在新边界下运行——沙箱开启时工作区外的写入失败，关闭后同一写入成功。
-重置、外部修改后重载、不支持的守护进程分支，以及切换前已启动的常驻 shell，目前还没有流程测试。
+revision 冲突；后端原因；保存后 `exec` 在新边界下运行——Network 关闭和开启两种情况下，沙箱开启时
+工作区外的写入失败，关闭后同一写入成功。重置、外部修改后重载、不支持的守护进程分支，以及切换前
+已启动的常驻 shell，目前还没有流程测试。
 
 ## 命令
 

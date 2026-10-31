@@ -31,6 +31,10 @@ pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellCh
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
+#[cfg(windows)]
+const WINDOWS_SANDBOX_UNAVAILABLE: &str =
+    "The sandbox has no backend on Windows; turn Sandbox off in /settings > Execution";
+
 /// The declaration line for the tools that start processes; `None` where the
 /// platform has no sandbox backend. It is static because declarations are read
 /// once, while each process start reads the current switches. Only the macOS
@@ -239,6 +243,14 @@ pub struct ProcessSpecError {
     pub reason: String,
 }
 
+/// Whether a new process can be sandboxed on this host, or why it cannot. The
+/// Execution row shows this; preparation reads the same backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxBackend {
+    Available,
+    Unavailable { reason: &'static str },
+}
+
 /// What a consumer keeps for a process that
 /// [`HostPlatform::prepare_isolated_process`] sandboxed.
 #[cfg_attr(windows, allow(dead_code))]
@@ -382,6 +394,34 @@ impl HostPlatform {
             })
     }
 
+    /// The sandbox backend a new process would use. Preparation reads the same
+    /// backend, so this report and the next process start cannot disagree.
+    #[cfg(windows)]
+    pub fn sandbox_backend(&self) -> SandboxBackend {
+        SandboxBackend::Unavailable {
+            reason: WINDOWS_SANDBOX_UNAVAILABLE,
+        }
+    }
+
+    /// The sandbox backend a new process would use. macOS always has
+    /// `sandbox-exec`.
+    #[cfg(target_os = "macos")]
+    pub fn sandbox_backend(&self) -> SandboxBackend {
+        SandboxBackend::Available
+    }
+
+    /// The sandbox backend a new process would use: the same bubblewrap
+    /// preparation resolves from the captured `PATH`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn sandbox_backend(&self) -> SandboxBackend {
+        match isolation::bubblewrap(&self.env) {
+            Some(_) => SandboxBackend::Available,
+            None => SandboxBackend::Unavailable {
+                reason: isolation::BWRAP_UNAVAILABLE,
+            },
+        }
+    }
+
     #[cfg(windows)]
     pub(crate) async fn prepare_isolated_process(
         &self,
@@ -395,9 +435,7 @@ impl HostPlatform {
         }
         Err(ProcessSpecError {
             code: "isolation_unavailable",
-            reason:
-                "The sandbox has no backend on Windows; turn Sandbox off in /settings > Execution"
-                    .into(),
+            reason: WINDOWS_SANDBOX_UNAVAILABLE.into(),
         })
     }
 }

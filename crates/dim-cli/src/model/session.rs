@@ -40,6 +40,35 @@ pub struct ExecutionSnapshot {
     pub network: bool,
 }
 
+/// The host's answer to `host.execution.backend`; the Execution panel shows
+/// the reason when the platform has no sandbox backend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SandboxBackend {
+    Available,
+    Unavailable { reason: String },
+}
+
+impl<'de> serde::Deserialize<'de> for SandboxBackend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            available: bool,
+            #[serde(default)]
+            reason: Option<String>,
+        }
+        let reply = Reply::deserialize(deserializer)?;
+        if reply.available {
+            Ok(Self::Available)
+        } else {
+            Ok(Self::Unavailable {
+                reason: reply
+                    .reason
+                    .ok_or_else(|| serde::de::Error::missing_field("reason"))?,
+            })
+        }
+    }
+}
+
 pub enum Command {
     Submit(String),
     /// A draft with pastes to store or content blocks to send.
@@ -608,6 +637,9 @@ pub enum Update {
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
     Isolation(Result<ExecutionSnapshot, String>),
+    /// Read once with the switches; `Err` is shown only when the daemon
+    /// advertises the method and the call fails.
+    IsolationBackend(Result<SandboxBackend, String>),
     /// A transient status-line message.
     Toast(String),
     /// The default tool-approval mode (wire name).
