@@ -637,8 +637,8 @@ pub enum Update {
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
     Isolation(Result<ExecutionSnapshot, String>),
-    /// Read once with the switches; `Err` is shown only when the daemon
-    /// advertises the method and the call fails.
+    /// Read once with the switches; a failed read adds no line and leaves the
+    /// switches usable.
     IsolationBackend(Result<SandboxBackend, String>),
     /// A transient status-line message.
     Toast(String),

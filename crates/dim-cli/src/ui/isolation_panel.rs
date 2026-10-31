@@ -59,7 +59,7 @@ impl IsolationPanel {
     }
 
     /// The host's sandbox-backend answer; the read happens with the switches.
-    /// A failed read leaves the switches usable and adds no line.
+    /// A failed read adds no line and leaves the switches usable.
     pub fn set_backend(&mut self, result: Result<SandboxBackend, String>) {
         if let Ok(backend) = result {
             self.backend = Some(backend);
