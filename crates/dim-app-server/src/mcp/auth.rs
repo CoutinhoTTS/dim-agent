@@ -388,6 +388,20 @@ impl McpAuth {
         result
     }
 
+    pub(crate) async fn cancel_attempt(
+        &self,
+        attempt_id: Uuid,
+        cancel: &CancellationToken,
+    ) -> Result<(), McpAuthError> {
+        let mut attempts = self.lock_attempts(cancel).await?;
+        let slot = attempts
+            .values_mut()
+            .find(|slot| slot.is(attempt_id))
+            .ok_or(McpAuthError::AttemptClosed)?;
+        slot.current = None;
+        Ok(())
+    }
+
     pub(crate) async fn complete(
         self: &Arc<Self>,
         attempt_id: Uuid,

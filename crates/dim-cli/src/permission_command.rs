@@ -184,7 +184,9 @@ async fn show(
     } else {
         display.record("Command rules: this daemon does not provide them")?;
     }
-    display.record("Permission controls admission, not process isolation. Configure isolation in /settings > Command isolation.")?;
+    display.record(
+        "Permission controls admission; the user turns the sandbox on in /settings > Execution.",
+    )?;
     display.record(USAGE)
 }
 
@@ -231,7 +233,7 @@ async fn switch(
         Switch::Switched(version) => {
             display.permission_seen = display.permission_seen.max(version);
             display.record(&format!(
-                "Preset (main branch): {name}. Child branches created later inherit it; agent members keep the Session's starting preset."
+                "Preset (main branch): {name}. Child branches and members created later from main inherit it; existing branches and members keep their policies."
             ))
         }
         Switch::Conflict(current) => display.record(&format!(

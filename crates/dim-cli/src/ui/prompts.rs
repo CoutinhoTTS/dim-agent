@@ -5,7 +5,7 @@
 //! Each prompt is a small state value with a key handler returning an
 //! [`Effect`]; the app owns the side effects (RPCs, notices, exit).
 
-use std::collections::BTreeMap;
+use std::{cell::Cell, collections::BTreeMap};
 
 use crate::question::{Answer, Call, Question};
 use serde_json::Value;
@@ -58,6 +58,10 @@ pub enum Effect {
     /// Reload the session list.
     Refresh,
     /// Switch the session to full access and allow this call.
+    RetryApproval {
+        request_id: String,
+        branch_id: String,
+    },
     FullAccess {
         request_id: String,
         branch_id: String,
@@ -292,6 +296,7 @@ pub const CONFIRM_BODY: &str = "Full access reduces confirmation prompts and can
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
     AllowOnce,
+    Retry,
     /// Allow and save an allow rule for the command, so it never asks again.
     AllowAlways,
     /// Allow this exact path for the rest of this Session.
@@ -306,6 +311,7 @@ impl PermissionAction {
     fn label(self) -> &'static str {
         match self {
             Self::AllowOnce => t("Allow once"),
+            Self::Retry => t("Retry"),
             Self::AllowAlways => t("Allow always"),
             Self::AllowSession => t("Allow for this session"),
             Self::Reject => t("Reject"),
@@ -316,6 +322,10 @@ impl PermissionAction {
 
 #[derive(Debug, Clone)]
 pub struct PermissionPrompt {
+    member: Option<
+        Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+    >,
+    offset: Cell<usize>,
     pub request_id: String,
     pub branch_id: String,
     pub reason: String,
@@ -349,6 +359,8 @@ impl PermissionPrompt {
         actions.push(PermissionAction::Reject);
         actions.push(PermissionAction::FullAccess);
         Self {
+            member: None,
+            offset: Cell::new(0),
             request_id,
             branch_id,
             reason,
@@ -358,6 +370,77 @@ impl PermissionPrompt {
             actions,
             confirming: None,
         }
+    }
+
+    pub fn set_member(
+        &mut self,
+        member: Option<
+            Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+        >,
+    ) {
+        if self.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW {
+            return;
+        }
+        self.member = member;
+        self.actions = match &self.member {
+            Some(Ok(_)) => vec![PermissionAction::AllowOnce, PermissionAction::Reject],
+            Some(Err(error)) if error.retryable() => {
+                vec![PermissionAction::Retry, PermissionAction::Reject]
+            }
+            Some(Err(_)) => vec![PermissionAction::Reject],
+            None => vec![PermissionAction::Reject],
+        };
+        self.selected = self.selected.min(self.actions.len() - 1);
+    }
+
+    pub fn render_sized(&self, width: usize, height: usize, p: &Palette) -> Vec<String> {
+        if self.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW {
+            return self.render(width, p);
+        }
+        let inner = width.saturating_sub(4).max(1);
+        let mut lines = vec![
+            format!("Leader branch: {}", self.branch_id),
+            format!("Leader reason: {}", self.reason),
+        ];
+        match &self.member {
+            Some(Ok(detail)) => lines.extend(crate::member_approval::lines(detail)),
+            Some(Err(error)) => lines.push(format!("Cannot review member action: {error}")),
+            None => lines.push("Loading member action...".into()),
+        }
+        let wrapped: Vec<_> = lines
+            .iter()
+            .flat_map(|line| wrap_cells(&crate::sanitize::safe(line), inner))
+            .collect();
+        let budget = height.saturating_sub(5).max(1);
+        let offset = self.offset.get().min(wrapped.len().saturating_sub(budget));
+        self.offset.set(offset);
+        let mut content: Vec<_> = wrapped
+            .iter()
+            .skip(offset)
+            .take(budget)
+            .map(|line| fg(line, &p.text))
+            .collect();
+        content.push(String::new());
+        let labels: Vec<_> = self
+            .actions
+            .iter()
+            .map(|action| action.label().to_owned())
+            .collect();
+        content.push(choices(&labels, self.selected, p));
+        bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(t("Subagent tool approval")),
+            Some(if matches!(&self.member, Some(Ok(_))) {
+                "Up/Down scroll · y allow once · n reject"
+            } else if self.actions.contains(&PermissionAction::Retry) {
+                "Up/Down scroll · r retry · n reject"
+            } else {
+                "Up/Down scroll · n reject"
+            }),
+        )
     }
 
     fn grant_for(tool: &str, input: &Value) -> Option<crate::model::session::GrantRequest> {
@@ -413,14 +496,10 @@ impl PermissionPrompt {
         } else {
             collapse(&self.reason)
         };
-        let mut lines = vec![
+        vec![
             format!("# {description}"),
             format!("$ {}", self.command_preview()),
-        ];
-        if let Some(Value::String(sandbox)) = self.input.get("sandbox") {
-            lines.push(tf("boundary: {sandbox}", &[("sandbox", sandbox)]));
-        }
-        lines
+        ]
     }
 
     fn full_access(&self) -> Effect {
@@ -436,6 +515,12 @@ impl PermissionPrompt {
         remember: bool,
         grant: Option<crate::model::session::GrantRequest>,
     ) -> Effect {
+        if allow
+            && self.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+            && !matches!(self.member, Some(Ok(_)))
+        {
+            return Effect::None;
+        }
         Effect::Approval {
             request_id: self.request_id.clone(),
             branch_id: self.branch_id.clone(),
@@ -446,6 +531,33 @@ impl PermissionPrompt {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if self.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW {
+            match key.code {
+                KeyCode::Down => {
+                    self.offset.set(self.offset.get().saturating_add(1));
+                    return Effect::None;
+                }
+                KeyCode::Up => {
+                    self.offset.set(self.offset.get().saturating_sub(1));
+                    return Effect::None;
+                }
+                KeyCode::PageDown => {
+                    self.offset.set(self.offset.get().saturating_add(8));
+                    return Effect::None;
+                }
+                KeyCode::PageUp => {
+                    self.offset.set(self.offset.get().saturating_sub(8));
+                    return Effect::None;
+                }
+                KeyCode::Char('r') if self.actions.contains(&PermissionAction::Retry) => {
+                    return Effect::RetryApproval {
+                        request_id: self.request_id.clone(),
+                        branch_id: self.branch_id.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
         if let Some(focus) = &mut self.confirming {
             return match key.code {
                 KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
@@ -479,6 +591,10 @@ impl PermissionPrompt {
             }
             KeyCode::Enter => match self.actions[self.selected] {
                 PermissionAction::AllowOnce => self.decide(true, false, None),
+                PermissionAction::Retry => Effect::RetryApproval {
+                    request_id: self.request_id.clone(),
+                    branch_id: self.branch_id.clone(),
+                },
                 PermissionAction::AllowAlways => self.decide(true, true, None),
                 PermissionAction::AllowSession => self.decide(true, false, self.grant()),
                 PermissionAction::Reject => self.decide(false, false, None),
@@ -1491,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn escalated_exec_prompt_shows_the_requested_boundary() {
+    fn exec_prompt_shows_the_command_without_a_boundary() {
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let p = PermissionPrompt::new(
             "r1".into(),
@@ -1508,7 +1624,10 @@ mod tests {
             .map(|r| strip(r))
             .collect();
         assert!(rows[3].contains("$ curl https://example.com"));
-        assert!(rows[4].contains("boundary: host"), "{rows:#?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("boundary")),
+            "{rows:#?}"
+        );
     }
 
     #[test]

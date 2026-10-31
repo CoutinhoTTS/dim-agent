@@ -163,6 +163,19 @@ Full table in Appendix B.
 - Never visible: `structuredContent`, the service name, configuration, the API key, private-host exceptions, diagnostics.
 - Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 
+### 5.1 Model-facing texts
+
+The two declarations are built-in and protocol throughout ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)): both schemas, and both descriptions, which state what each call does and returns — "Search the web. Returns numbered titles, URLs and snippets." and "Read a public web page as text. Use start_char to continue at the returned final URL.", the second naming the continuation argument and the final URL the result carries. Both result texts are protocol:
+
+| Text | Class |
+| --- | --- |
+| `web_fetch failed: <code>: <message>` and `web_search failed: <code>: <message>` | Protocol: the result format and its codes (Appendix C); the model reads the code and acts on it |
+| The `web_fetch` header's `URL:`, `Title:`, `Content-Type:` and `Characters: <start>-<end> of <total>` lines | Protocol: the result format |
+| `[Truncated: call web_fetch again with start_char=<end> to continue.]` and `Redirected to <url>; call web_fetch with that URL to follow it.` | Protocol: the handles that continue a read; the model passes them back |
+| The search result list, the fetched text slice and the redirect notice's URL | The service's and the page's own content, carried as material |
+
+Web writes no marker and contributes no guide entry; its declarations have no policy text.
+
 ## 6. Interfaces (summary)
 
 | Interface | Kind | Purpose |

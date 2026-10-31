@@ -65,7 +65,7 @@ On main at 08d78bca (rutis 0.17.1, with #666):
 
 ```text
 agent group (instanced)
-  AgentScope (AgentAnchor when an Agent places itself)
+  AgentScope (AgentAnchor in the minimal host)
   session group (instanced)                    branch group (instanced, nested)
     SessionScope                                 BranchScope
     SessionExtension (when extensions exist)     required mounter
@@ -181,11 +181,10 @@ tree shows where their content sits.
 
 ### 2.3 Observable changes
 
-- **Fiber tree:** a Session is a child of its Agent's anchor row (`AgentScope`, or `AgentAnchor` when
-  an Agent places itself), a branch of its Session scope, and
-  the mounters of their scope. Skills contents and MCP connections sit under their parts. The
-  `session` and `main` subgraphs of the generated graphs regenerate. The `SessionLoader` service and
-  its edges go; no other service or edge changes.
+- **Fiber tree:** a Session is a child of its Agent's anchor row (`AgentScope`, or `AgentAnchor` in
+  the minimal host), a branch of its Session scope, and the mounters of their scope. Skills contents
+  and MCP connections sit under their parts. The `session` and `main` subgraphs of the generated
+  graphs regenerate. The `SessionLoader` service and its edges go; no other service or edge changes.
 - **The anchor must not reload.** Today a Session is a sibling of the anchor in the Agent group;
   now it is the anchor's child. A reload of the anchor would dispose every Session of that Agent
   without `Agent::close`'s settlement. It does not reload today: `AgentScope` depends only on the

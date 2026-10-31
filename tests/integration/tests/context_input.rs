@@ -1,4 +1,4 @@
-use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig, testing::MinimalHost};
 use dim_agent_types::{EventKind, InputMessageData, InputMode};
 
 fn builder() -> AgentBuilder {
@@ -20,7 +20,7 @@ fn context_input(content: &str) -> InputMessageData {
 
 #[tokio::test]
 async fn context_only_input_waits_for_the_next_user_turn() {
-    let agent = builder().build();
+    let agent = MinimalHost::start(&builder()).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -69,7 +69,7 @@ async fn context_only_input_waits_for_the_next_user_turn() {
 
 #[tokio::test]
 async fn context_only_input_after_a_stop_starts_no_turn() {
-    let agent = builder().build();
+    let agent = MinimalHost::start(&builder()).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

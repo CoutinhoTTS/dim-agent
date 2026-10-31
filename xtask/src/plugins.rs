@@ -9,6 +9,7 @@
 //! block and table against the diagnostics.
 use dim_agent_capabilities::{
     defaults,
+    execution_settings::ExecutionSettingsHost,
     file_storage::FileStorage,
     file_storage::FileStoragePlugin,
     host::{
@@ -21,7 +22,7 @@ use dim_agent_capabilities::{
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use serde_json::Value;
@@ -60,21 +61,24 @@ const INFRASTRUCTURE: [&str; 13] = [
 struct GraphPlatform {
     home: PathBuf,
     storage: Key<FileStorage>,
+    execution: Key<ExecutionSettingsHost>,
 }
 impl DynPlugin for GraphPlatform {
     fn name(&self) -> &str {
         "HostPlatform"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.storage.erase()]
+        vec![self.storage.erase(), self.execution.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let execution = ctx.require_at(&self.execution)?;
             let mut platform = HostPlatform::current(ShellStatus::Unavailable {
                 code: "GRAPH_ONLY",
                 reason: "Graph generation does not execute commands".into(),
             })
-            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?
+            .with_execution_settings(ExecutionSettingsHost(execution.0.clone()));
             platform.home = self.home.clone();
             ctx.provide_as::<HostPlatform>(Arc::new(platform))?;
             Ok(Effect::Done)
@@ -129,19 +133,19 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         skill.join("SKILL.md"),
         "---\nname: graph\ndescription: Architecture fixture\n---\nGraph fixture instructions.\n",
     )?;
-    let process = rutis::Ctx::root()?;
-    (&process.plugin(FileStoragePlugin::new(vec![storage.canonicalize()?]))).await?;
-    (&process.plugin(GraphPlatform {
-        home: storage.canonicalize()?,
-        storage: Key::of(),
-    }))
-        .await?;
-    process.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
-        MemorySkillSettings::default(),
-    ))))?;
-    process.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(GraphFiles))))?;
-
+    let home = storage.canonicalize()?;
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    // The host's own plugins are rows of its loader, as the App Server places
+    // them.
+    let files = FileStoragePlugin::new(vec![home.clone()]);
+    builder.plugin(move |_| Ok(Box::new(files.clone())));
+    builder.plugin(move |_| {
+        Ok(Box::new(GraphPlatform {
+            home: home.clone(),
+            storage: Key::of(),
+            execution: Key::of(),
+        }))
+    });
     defaults::mock_model_hosts(&mut builder);
     builder.session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
     defaults::install_local_execution(
@@ -155,7 +159,18 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     dim_agent_attachments::install(&mut builder);
     dim_agent_questions::install(&mut builder);
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-    let agent = builder.build_in(&process);
+    let agent = MinimalHost::start_with(&builder, |root, _| {
+        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+            MemorySkillSettings::default(),
+        ))))?;
+        root.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(GraphFiles))))?;
+        root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+            Default::default(),
+        )))?;
+        Ok(())
+    })
+    .await?;
+    let process = agent.root().clone();
     let session = agent
         .create_session(SessionConfig {
             cwd: work.canonicalize()?.to_string_lossy().into_owned(),
@@ -210,7 +225,6 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         ("main", crate::diagnostics(main_diagnostics, &scopes)),
     ]);
     agent.close().await?;
-    process.shutdown().await?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(graphs)
 }

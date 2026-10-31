@@ -4,6 +4,7 @@
 
 use dim_agent_capabilities::{
     defaults,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     history::HistoryRenderer,
     host::*,
     host_platform::{
@@ -16,6 +17,7 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
     timeline_tree::TreeCommands,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -95,7 +97,8 @@ pub fn platform(home: &Path) -> HostPlatform {
         source: ShellSource::Login,
         output_encoding: OutputEncoding::Utf8,
     }))
-    .unwrap();
+    .unwrap()
+    .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.home = home.to_owned();
     platform.os = Os::Linux;
     platform.arch = "x64".into();
@@ -345,7 +348,7 @@ impl DynPlugin for LifecycleProbePlugin {
 
 pub struct Env {
     pub root: rutis::Ctx,
-    pub agent: Agent,
+    pub agent: MinimalHost,
     pub model: Arc<ScriptedModel>,
     pub gate: Arc<Gate>,
     pub today: Arc<Mutex<String>>,
@@ -374,6 +377,13 @@ pub struct Options {
     pub timezone: &'static str,
     pub hold: Option<Arc<AssemblyHold>>,
     pub probe: Option<Arc<LifecycleProbe>>,
+    /// Skills' factory configuration: the text replacing the built-in
+    /// instructions.
+    pub instructions: Option<Arc<str>>,
+    /// Register the Skills parts in the profile without installing the
+    /// capability, as a host whose profile takes them by name does: the
+    /// catalog plugin registers them either way.
+    pub require_without_install: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -384,18 +394,17 @@ impl Default for Options {
             timezone: "Asia/Shanghai",
             hold: None,
             probe: None,
+            instructions: None,
+            require_without_install: false,
         }
     }
 }
 
 /// The product profile: PromptSources and Skills with scripted hosts.
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
-    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
     let mut host = platform(&dirs.home);
     host.timezone = Some(options.timezone.into());
-    root.provide_as::<HostPlatform>(Arc::new(host)).unwrap();
-    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(options.settings.clone())))
-        .unwrap();
+    let settings = options.settings.clone();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -424,7 +433,20 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(move || today.lock().unwrap().clone()),
         std::time::Duration::from_millis(10),
     );
-    skills::install(&mut builder);
+    if options.require_without_install {
+        for part in ["Skills", "SkillsBranch"] {
+            builder.require_part(part);
+        }
+    } else if let Some(instructions) = options.instructions {
+        skills::install_with_config(
+            &mut builder,
+            skills::SkillsConfig {
+                instructions: Some(instructions),
+            },
+        );
+    } else {
+        skills::install(&mut builder);
+    }
     if let Some(hold) = options.hold {
         builder.require_feature(
             Feature::new("AssemblyHold").session("AssemblyHold", move |_| {
@@ -440,11 +462,16 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         );
     }
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-    let agent = builder.build_in(&root);
-    agent.start().await.unwrap();
+    let agent = MinimalHost::start_with(&builder, move |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(host))?;
+        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings)))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     Env {
+        root: agent.root().clone(),
         agent,
-        root,
         model,
         gate,
         today: options.today,

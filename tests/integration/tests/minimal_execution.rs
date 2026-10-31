@@ -9,6 +9,7 @@ mod compaction_support;
 mod process_support;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
@@ -18,10 +19,10 @@ use dim_agent_capabilities::{
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use process_support::{alive, gone, pid_in};
-use rutis::host::CtxHost;
+use process_support::{gone, pid_in};
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
 use std::{
@@ -109,6 +110,30 @@ impl Plugin for PlatformPlugin {
         Ok(())
     }
 }
+/// `platform` provided by [`PlatformPlugin`], a row of the harness's host.
+fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
+    let platform = Arc::new(platform);
+    move |builder| {
+        builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
+    }
+}
+/// FileStorage over `home` and the HostPlatform plugin reading
+/// `exec-shell.json` there, rows of the harness's host.
+fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
+    move |builder| {
+        let files = FileStoragePlugin::new(vec![home]);
+        builder.plugin(move |_| Ok(Box::new(files.clone())));
+        builder.plugin(|names| {
+            Ok(Box::new(HostPlatformPlugin::new(
+                names,
+                HostPlatformConfig {
+                    execution: names.key()?,
+                    exec_shell_file: Some((0, "exec-shell.json".into())),
+                },
+            )?))
+        });
+    }
+}
 
 fn scratch(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -125,7 +150,9 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
     let mut env: Vec<_> = std::env::vars_os().collect();
     env.retain(|(key, _)| key != "SHELL");
     env.push(("SHELL".into(), "/bin/bash".into()));
-    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await)
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.env.extend(
         extra
             .iter()
@@ -135,8 +162,7 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
 }
 
 struct Harness {
-    root: Ctx,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Script>,
     cwd: PathBuf,
     compacting: bool,
@@ -156,33 +182,21 @@ impl Harness {
         let cwd = scratch("cwd");
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        Self::with_platform_context(root, view, cwd, compacting).await
+        Self::with_platform_context(test_platform(platform), cwd, compacting).await
     }
-    async fn with_platform(root: Ctx, view: rutis::host::FiberView, cwd: PathBuf) -> Self {
-        Self::with_platform_context(root, view, cwd, false).await
+    async fn with_platform(platform: impl FnOnce(&mut AgentBuilder), cwd: PathBuf) -> Self {
+        Self::with_platform_context(platform, cwd, false).await
     }
+    /// A host whose `platform` rows provide HostPlatform, Active before the
+    /// harness runs.
     async fn with_platform_context(
-        root: Ctx,
-        view: rutis::host::FiberView,
+        platform: impl FnOnce(&mut AgentBuilder),
         cwd: PathBuf,
         compacting: bool,
     ) -> Self {
-        wait_active(
-            &root,
-            &[view],
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
-            MemorySkillSettings::default(),
-        ))))
-        .unwrap();
         let model = Arc::new(Script::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
+        platform(&mut builder);
         builder
             .timeline_store(Arc::new(MemoryTimelineStore::default()))
             .session_value(Arc::new(HistoryRenderer::default()))
@@ -205,9 +219,33 @@ impl Harness {
             ModelProviderPlugin::new,
         );
         builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+                MemorySkillSettings::default(),
+            ))))?;
+            root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+                ExecutionSettings::default(),
+            )))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let process: Vec<_> = agent
+            .loader()
+            .entries()
+            .into_iter()
+            .filter(|row| row.instance.is_none())
+            .filter_map(|row| row.view)
+            .collect();
+        wait_active(
+            agent.root(),
+            &process,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         Self {
-            root,
             agent,
             model,
             cwd,
@@ -247,7 +285,6 @@ impl Harness {
     }
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
-        self.root.shutdown().await.unwrap();
     }
 }
 
@@ -514,23 +551,7 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
         .unwrap()
     };
     set_shell("/bin/bash");
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
-            HostPlatformConfig {
-                exec_shell_file: Some((0, "exec-shell.json".into())),
-                ..HostPlatformConfig::default()
-            },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, scratch("cwd")).await;
+    let harness = Harness::with_platform(configured_platform(home.clone()), scratch("cwd")).await;
     let session = harness.session().await;
     let alternate = if Path::new("/bin/zsh").is_file() {
         "/bin/zsh"
@@ -626,7 +647,7 @@ async fn foreground_echo_returns_output() {
         })
         .unwrap();
     assert!(
-        declared.contains("Isolation: when the user enables it")
+        declared.contains("Isolation: the user decides")
             && !declared.contains("host-isolation.json"),
         "{declared}"
     );

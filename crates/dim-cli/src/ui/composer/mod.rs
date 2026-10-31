@@ -581,21 +581,31 @@ impl Composer {
             match self.tokens.iter().find(|t| t.id == element.id) {
                 Some(token) => {
                     let part = match (&token.block, &token.file) {
-                        (Some(_), _) if !self.accepts_images => {
+                        (Some(_), None) if !self.accepts_images => {
                             return Err(tf(
                                 "The current model does not accept images; remove {label} to send",
                                 &[("label", &token.label)],
                             ));
                         }
-                        (Some(block), _) => DraftPart::Block(block.clone()),
+                        (Some(block), None) => DraftPart::Block(block.clone()),
+                        (Some(block), Some(_)) if self.accepts_images => {
+                            DraftPart::Block(block.clone())
+                        }
+                        (Some(_), Some(_)) => {
+                            typed.push_str(&token.content);
+                            at = element.range.end;
+                            continue;
+                        }
                         (None, Some(path))
                             if self.accepts_images && crate::images::is_image(path) =>
                         {
                             match crate::images::file(path) {
-                                Ok(block @ dim_agent_types::ContentBlock::Image { .. }) => {
-                                    DraftPart::Block(block)
+                                Ok(crate::images::Item::Image(image)) => {
+                                    DraftPart::Block(image.block())
                                 }
-                                Ok(_) => DraftPart::Text(token.content.clone()),
+                                Ok(crate::images::Item::Text(_)) => {
+                                    DraftPart::Text(token.content.clone())
+                                }
                                 Err(error) => return Err(format!("{}: {error}", token.label)),
                             }
                         }
@@ -622,46 +632,64 @@ impl Composer {
         Ok(parts)
     }
 
-    /// Inserts local files and directories as `[name]` tokens; how each
-    /// is sent is decided on submit. The group is taken whole or not at
-    /// all.
-    pub fn attach_files(&mut self, paths: &[std::path::PathBuf]) -> Result<(), String> {
+    /// Decides what a group of pasted paths becomes without reading image
+    /// bytes: absolute paths, token names, and the 20-image count.
+    pub fn plan_files(&self, paths: &[std::path::PathBuf]) -> Result<Vec<PlannedFile>, String> {
         let mut images = self.image_count();
-        let mut inserts = Vec::new();
+        let mut plan = Vec::new();
         for path in paths {
             let path = std::path::absolute(path).map_err(|error| error.to_string())?;
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            if crate::images::is_image(&path) {
+            let is_image = crate::images::is_image(&path);
+            if is_image {
                 images += 1;
                 if images > MAX_IMAGES {
                     return Err(t("A submission accepts at most 20 images").to_owned());
                 }
             }
-            inserts.push((name, path));
+            plan.push(PlannedFile {
+                name,
+                path,
+                read: is_image && self.accepts_images,
+            });
         }
-        for (name, path) in inserts {
-            let label = self.unique_label(format!("[{name}]"));
-            let content = file_link(&name, &path);
-            self.insert_token(label, content, None, Some(path));
+        Ok(plan)
+    }
+
+    /// Inserts a planned group with the image blocks read for it. The group
+    /// is taken whole or not at all.
+    pub fn insert_files(
+        &mut self,
+        plan: Vec<PlannedFile>,
+        images: Vec<Option<crate::images::Attached>>,
+    ) {
+        for (planned, image) in plan.into_iter().zip(images) {
+            let label = match &image {
+                Some(image) => self.unique_label(path_marker(&planned.name, image)),
+                None => self.unique_label(format!("[{}]", planned.name)),
+            };
+            let content = file_link(&planned.name, &planned.path);
+            self.insert_token(
+                label,
+                content,
+                image.map(|image| image.block()),
+                Some(planned.path),
+            );
         }
-        Ok(())
     }
 
     /// Inserts an image the clipboard held.
-    pub fn attach_image(&mut self, source: dim_agent_types::ImageSource) -> Result<(), String> {
+    pub fn attach_image(&mut self, image: crate::images::Attached) -> Result<(), String> {
         let count = self.image_count();
         if count >= MAX_IMAGES {
             return Err(t("A submission accepts at most 20 images").to_owned());
         }
-        let label = self.unique_label(tf(
-            "[Image #{index}]",
-            &[("index", &(count + 1).to_string())],
-        ));
-        let block = dim_agent_types::ContentBlock::Image { source };
-        self.insert_token(label.clone(), label, Some(block), None);
+        let index = count + 1;
+        let label = self.unique_label(image_marker(index, &image));
+        self.insert_token(label.clone(), label, Some(image.block()), None);
         Ok(())
     }
 
@@ -967,6 +995,80 @@ fn preview(text: &str) -> String {
     }
 }
 
+/// One path a paste will attach, decided without reading image bytes.
+#[derive(Clone)]
+pub struct PlannedFile {
+    /// The token's name: the file name, or the whole path when it has none.
+    pub name: String,
+    /// The absolute path the token submits.
+    pub path: std::path::PathBuf,
+    /// Whether the model takes images, so the file's bytes must be read.
+    pub read: bool,
+}
+
+/// Reads the planned image entries. A path that turned out not to be an
+/// image comes back as `None`; the first refusal names its file. This is the
+/// blocking part of an attach, so a caller with a thread of its own runs it
+/// there.
+pub fn read_planned(plan: &[PlannedFile]) -> Result<Vec<Option<crate::images::Attached>>, String> {
+    let mut images = Vec::with_capacity(plan.len());
+    for planned in plan {
+        if !planned.read {
+            images.push(None);
+            continue;
+        }
+        let image = match crate::images::file(&planned.path)
+            .map_err(|error| format!("{}: {error}", planned.name))?
+        {
+            crate::images::Item::Image(image) => Some(image),
+            crate::images::Item::Text(_) => None,
+        };
+        images.push(image);
+    }
+    Ok(images)
+}
+
+/// What a marker adds to its plain form: both sizes when the sent size
+/// differs from the original, both media types when the encoding changed the
+/// type, the first-frame note of an animation, and a re-encode that kept both
+/// the size and the type.
+fn image_details(image: &crate::images::Attached) -> String {
+    let mut details = String::new();
+    if image.resized() {
+        details.push_str(" · ");
+        details.push_str(&image.sizes());
+    }
+    if let Some(types) = image.media_types() {
+        details.push_str(" · ");
+        details.push_str(&types);
+    }
+    if image.animated {
+        details.push_str(" · ");
+        details.push_str(t("first frame"));
+    }
+    if image.reencoded() {
+        details.push_str(" · ");
+        details.push_str(t("re-encoded"));
+    }
+    details
+}
+
+/// The marker of a clipboard image: the index, and what the image adds.
+fn image_marker(index: usize, image: &crate::images::Attached) -> String {
+    tf(
+        "[Image #{index}{details}]",
+        &[
+            ("index", &index.to_string()),
+            ("details", &image_details(image)),
+        ],
+    )
+}
+
+/// The marker of a path token: the file's name in place of the index.
+fn path_marker(name: &str, image: &crate::images::Attached) -> String {
+    format!("[{name}{}]", image_details(image))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1076,14 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, Modifiers::NONE)
+    }
+
+    /// Attaches a group the way an interface does, reading on this thread.
+    fn attach(c: &mut Composer, paths: &[std::path::PathBuf]) -> Result<(), String> {
+        let plan = c.plan_files(paths)?;
+        let images = read_planned(&plan)?;
+        c.insert_files(plan, images);
+        Ok(())
     }
 
     fn typed(c: &mut Composer, text: &str) {
@@ -1101,7 +1211,7 @@ mod tests {
         std::fs::write(&notes, "plain").unwrap();
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "see");
-        c.attach_files(&[image.clone(), notes.clone()]).unwrap();
+        attach(&mut c, &[image.clone(), notes.clone()]).unwrap();
         let long = "one\ntwo\nthree\nfour".to_owned();
         c.paste(&long);
         assert!(
@@ -1126,7 +1236,7 @@ mod tests {
         assert_eq!(parts[3], DraftPart::Paste(long));
         let mut c = Composer::new(Vec::new());
         let many = vec![image; 21];
-        assert!(c.attach_files(&many).is_err());
+        assert!(attach(&mut c, &many).is_err());
         assert_eq!(c.text(), "");
     }
 
@@ -1138,6 +1248,79 @@ mod tests {
         std::fs::write(path, png.into_inner()).unwrap();
     }
 
+    fn wide_png(path: &std::path::Path, width: u32) {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(width, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(path, png.into_inner()).unwrap();
+    }
+
+    /// Deterministic RGB noise of `width`×`height` pixels.
+    fn noise_rgb(width: u32, height: u32) -> Vec<u8> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut step = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+        for _ in 0..width as usize * height as usize {
+            let (red, green, blue) = (step(), step(), step());
+            pixels.extend([(red >> 24) as u8, (green >> 24) as u8, (blue >> 24) as u8]);
+        }
+        pixels
+    }
+
+    /// Deterministic noise: a PNG within the edge limit whose base64 is over
+    /// the byte limit, so it is sent as a JPEG at the same size.
+    fn noise_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut bytes),
+            &noise_rgb(width, height),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+        bytes
+    }
+
+    fn noise_jpeg(width: u32, height: u32, quality: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality);
+        encoder
+            .encode(
+                &noise_rgb(width, height),
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// `noise_jpeg`, with a minimal EXIF APP1 segment whose one IFD0 entry is
+    /// the orientation: `3` turns the image 180° and `6` 90° clockwise.
+    fn oriented_jpeg(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+        let mut bytes = noise_jpeg(width, height, 90);
+        let mut exif = vec![0xFF, 0xE1, 0x00, 0x22];
+        exif.extend(b"Exif\0\0");
+        exif.extend(b"II\x2A\x00");
+        exif.extend(8u32.to_le_bytes());
+        exif.extend(1u16.to_le_bytes());
+        exif.extend(0x0112u16.to_le_bytes());
+        exif.extend(3u16.to_le_bytes());
+        exif.extend(1u32.to_le_bytes());
+        exif.extend(orientation.to_le_bytes());
+        exif.extend([0, 0]);
+        exif.extend(0u32.to_le_bytes());
+        bytes.splice(2..2, exif);
+        bytes
+    }
+
     #[test]
     fn images_follow_what_the_model_accepts() {
         let dir = tempfile::tempdir().unwrap();
@@ -1145,16 +1328,16 @@ mod tests {
         png(&image);
         let mut c = Composer::new(Vec::new());
         c.set_accepts_images(false);
-        c.attach_files(std::slice::from_ref(&image)).unwrap();
-        c.attach_files(std::slice::from_ref(&image)).unwrap();
+        attach(&mut c, std::slice::from_ref(&image)).unwrap();
+        attach(&mut c, std::slice::from_ref(&image)).unwrap();
         assert_eq!(c.text(), "[shot.png] [shot.png #2]");
         let link = format!("[shot.png]({})", image.display());
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Submit(format!("{link} {link}"))
         );
-        let source = crate::images::encoded(std::fs::read(&image).unwrap()).unwrap();
-        c.attach_image(source).unwrap();
+        let image = crate::images::from_bytes(std::fs::read(&image).unwrap()).unwrap();
+        c.attach_image(image).unwrap();
         assert_eq!(c.text(), "[Image #1]");
         assert!(matches!(
             c.handle_key(key(KeyCode::Enter)),
@@ -1168,6 +1351,153 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_path_attached_to_an_image_model_keeps_its_scaled_block_and_sizes() {
+        use dim_agent_capabilities::images::MAX_EDGE;
+        let width = MAX_EDGE * 2;
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("wide.png");
+        wide_png(&image, width);
+        let mut c = Composer::new(Vec::new());
+        attach(&mut c, std::slice::from_ref(&image)).unwrap();
+        assert_eq!(c.text(), format!("[wide.png · {width}×2 → {MAX_EDGE}×1]"));
+        c.set_accepts_images(false);
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Submit(format!("[wide.png]({})", image.display()))
+        );
+        let mut c = Composer::new(Vec::new());
+        attach(&mut c, std::slice::from_ref(&image)).unwrap();
+        let Outcome::SubmitDraft { parts, .. } = c.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a draft")
+        };
+        assert!(matches!(
+            &parts[..],
+            [DraftPart::Block(dim_agent_types::ContentBlock::Image { source })]
+                if source.media_type == "image/png"
+        ));
+    }
+
+    #[test]
+    fn an_animated_image_says_its_first_frame_is_sent() {
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            encoder
+                .encode_frames([
+                    image::Frame::new(image::RgbaImage::from_pixel(
+                        2,
+                        2,
+                        image::Rgba([255, 0, 0, 255]),
+                    )),
+                    image::Frame::new(image::RgbaImage::from_pixel(
+                        2,
+                        2,
+                        image::Rgba([0, 0, 255, 255]),
+                    )),
+                ])
+                .unwrap();
+        }
+        let image = crate::images::from_bytes(gif).unwrap();
+        assert!(image.animated && image.scaled && !image.resized());
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(
+            c.text(),
+            "[Image #1 · image/gif → image/jpeg · first frame]"
+        );
+    }
+
+    /// A PNG within the edge limit whose base64 is over the byte limit is
+    /// re-encoded as JPEG at the same size: the marker names both types.
+    #[test]
+    fn a_reencoded_image_shows_both_media_types_in_its_marker() {
+        let image = crate::images::from_bytes(noise_png(1500, 1500)).unwrap();
+        assert!(image.scaled && !image.resized());
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(c.text(), "[Image #1 · image/png → image/jpeg]");
+    }
+
+    /// A JPEG within both limits whose EXIF orientation turns it upright is
+    /// sent re-encoded at the same size and media type: the marker says so.
+    #[test]
+    fn an_exif_rotation_reencoded_at_the_same_size_says_reencoded() {
+        for orientation in [3, 6] {
+            let image = crate::images::from_bytes(oriented_jpeg(40, 20, orientation)).unwrap();
+            assert!(
+                image.scaled && !image.resized() && image.media_types().is_none(),
+                "orientation {orientation}"
+            );
+            let mut c = Composer::new(Vec::new());
+            c.attach_image(image).unwrap();
+            assert_eq!(c.text(), "[Image #1 · re-encoded]");
+        }
+    }
+
+    /// A JPEG within the edge limit whose base64 is over the byte limit fits
+    /// once it is re-encoded at quality 85, again at the same size and type.
+    #[test]
+    fn a_jpeg_that_fits_only_after_the_reencode_says_reencoded() {
+        use dim_agent_capabilities::images::{MAX_BASE64_BYTES, base64_len};
+        let bytes = noise_jpeg(1500, 1500, 100);
+        assert!(
+            base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+            "{}",
+            bytes.len()
+        );
+        let image = crate::images::from_bytes(bytes).unwrap();
+        assert!(image.scaled && !image.resized() && image.media_types().is_none());
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(c.text(), "[Image #1 · re-encoded]");
+    }
+
+    #[test]
+    fn a_clipboard_image_shows_both_sizes_in_its_marker() {
+        use dim_agent_capabilities::images::MAX_EDGE;
+        let width = MAX_EDGE * 2;
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("wide.png");
+        wide_png(&image, width);
+        let image = crate::images::from_bytes(std::fs::read(&image).unwrap()).unwrap();
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(c.text(), format!("[Image #1 · {width}×2 → {MAX_EDGE}×1]"));
+        assert!(matches!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::SubmitDraft { parts, .. } if matches!(parts[..], [DraftPart::Block(_)])
+        ));
+    }
+
+    /// A bitmap that fits is re-encoded but not resized: its marker stays the
+    /// plain form rather than naming one size twice.
+    #[test]
+    fn a_small_clipboard_bitmap_keeps_its_plain_marker() {
+        let image = crate::images::from_pixels(image::DynamicImage::new_rgb8(12, 8)).unwrap();
+        assert!(image.scaled && !image.resized());
+        let mut c = Composer::new(Vec::new());
+        c.attach_image(image).unwrap();
+        assert_eq!(c.text(), "[Image #1]");
+    }
+
+    #[test]
+    fn an_image_above_the_pixel_guard_is_refused_and_leaves_the_draft_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("huge.gif");
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend(12000u16.to_le_bytes());
+        gif.extend(9000u16.to_le_bytes());
+        gif.extend([0, 0, 0, 0]);
+        gif.push(b';');
+        std::fs::write(&image, gif).unwrap();
+        let mut c = Composer::new(Vec::new());
+        typed(&mut c, "look");
+        let error = attach(&mut c, std::slice::from_ref(&image)).unwrap_err();
+        assert!(error.contains("12000×9000"), "{error}");
+        assert_eq!(c.text(), "look");
+    }
+
     /// `/branch` opens a line from text: a clipboard image keeps the draft
     /// and is named, rather than dropped on the way.
     #[test]
@@ -1177,8 +1507,8 @@ mod tests {
         png(&image);
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "/branch look at ");
-        let source = crate::images::encoded(std::fs::read(&image).unwrap()).unwrap();
-        c.attach_image(source).unwrap();
+        let image = crate::images::from_bytes(std::fs::read(&image).unwrap()).unwrap();
+        c.attach_image(image).unwrap();
         assert!(matches!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Rejected(reason) if reason.contains("[Image #1]")
@@ -1193,11 +1523,11 @@ mod tests {
         std::fs::create_dir(&docs).unwrap();
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "look at");
-        c.attach_files(std::slice::from_ref(&docs)).unwrap();
+        attach(&mut c, std::slice::from_ref(&docs)).unwrap();
         assert_eq!(c.text(), "look at [my docs]");
         c.handle_key(key(KeyCode::Backspace));
         assert_eq!(c.text(), "look at ");
-        c.attach_files(std::slice::from_ref(&docs)).unwrap();
+        attach(&mut c, std::slice::from_ref(&docs)).unwrap();
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Submit(format!("look at [my docs](<{}>)", docs.display()))

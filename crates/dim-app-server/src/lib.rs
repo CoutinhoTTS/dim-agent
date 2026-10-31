@@ -7,6 +7,7 @@ pub mod collaboration;
 mod collaboration_model_policy;
 mod connection;
 mod control;
+mod exec_shell_settings;
 mod execution_settings;
 pub mod grok_oauth;
 mod managed_oauth;
@@ -14,6 +15,7 @@ pub mod managed_provider;
 pub mod mcp;
 pub mod methods;
 pub mod model_catalog;
+pub mod model_log;
 mod outbound;
 pub mod permission_rules;
 #[cfg(windows)]
@@ -678,6 +680,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(web::WebPlugin::new(names)?))
         })?);
+        if config.model_catalog.is_some() || product_root.is_some() {
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| Ok(Box::new(model_log::ModelLogPlugin::new(names, home_root)?)),
+            )?);
+        }
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
@@ -706,16 +715,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
-                            execution: names
-                                .registered::<dim_agent_capabilities::execution_settings::ExecutionSettingsHost>()
-                                .then(|| names.key())
-                                .transpose()?,
+                            execution: names.key()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
                         },
                     )?,
                 ))
             },
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(exec_shell_settings::ExecShellSettingsPlugin::new(
+                names,
+            )?))
+        })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(skills_management::SkillsCatalogPlugin::new(
                 names,

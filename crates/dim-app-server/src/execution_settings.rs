@@ -30,18 +30,8 @@ impl ExecutionSettingsSource for Storage {
                 .read_declared(SOURCE, SettingsScope::User, &cancel)
                 .await
                 .map_err(|error| ExecutionSettingsError::Failed(error.to_string()))?;
-            Ok(ExecutionSettings {
-                sandbox: snapshot
-                    .document
-                    .get("sandbox")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-                network: snapshot
-                    .document
-                    .get("network")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            })
+            serde_json::from_value(snapshot.document)
+                .map_err(|error| ExecutionSettingsError::Failed(error.to_string()))
         })
     }
 }

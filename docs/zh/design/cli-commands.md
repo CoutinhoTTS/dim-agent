@@ -36,59 +36,39 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
-## 命令隔离设置
+## 执行设置
 
-现有 `/settings` 面板在 Permissions 下、`Tool approvals` 旁增加独立的 `Command isolation` 行。
-这是唯一的用户配置入口，不新增原生 `dimcode isolation` 命令或 `/isolation` 斜杠命令。
-即使模型命令无法运行，该入口仍通过本地守护进程连接使用 HostPlatform 的
-[可信本地策略管理](../../design/host-platform-isolation.md#trusted-local-policy-management)。
-`/approvals` 输出指向 `/settings > Command isolation`；隔离不是另一种 Permission 预设。
+现有 `/settings` 面板在 `Tool approvals` 旁有一个 `Execution` 行。它是进程边界的唯一用户配置入口：
+没有原生 `dimcode isolation` 命令、没有 `/isolation` 斜杠命令，也没有策略文件。两个开关就是用户作用域的
+`execution` 设置源，通过 [`settings.read`/`settings.update`](appserver/settings-service.md) 读写；
+每个开关授予什么由[进程隔离设计](../../design/host-platform-isolation.md)规定。`/approvals` 输出说明沙箱在
+`/settings > Execution`；沙箱不是另一种 Permission 预设。
 
 ```text
-Settings > Command isolation
-  Permission preset   full-access (admission only)
-  Execution node      local
-  Isolation tier      workspace >  [workspace | network | host]
-  Wider requests      ask       >  [ask | deny]
-  Advanced                     >  Read paths / Write paths / Environment names
-  Policy source       defaults
-  Policy path         <execution-home>/host-isolation.json
-
-  Save
-  Reset to defaults
-  Applies to new commands and new persistent shells.
+Settings > Execution
+  Applies to new processes and persistent shells.
+  Sandbox             off  >                    切换 off | on
+  Network             off  >                    Sandbox 关闭时被忽略，显示为
+                                                "off (ignored while Sandbox is off)"
+  Save                                          携带读取时的 revision 写入两个开关
+  Reset to defaults                             确认后把两个开关写为关闭
+  Reload              Discard edits and read the current settings
 ```
 
-打开面板时分别读取策略快照和当前 `main` 分支的 Permission 预设。快照的 revision 随草稿保留，
-不作为用户输入字段。隔离层级和扩大范围请求的选择器打开时预选草稿值，字段省略时预选其有效值，
-并且只修改草稿。编辑版本 1 策略的
-tier/escalation 时，显式将其有效设置转换为版本 2，并保留可选列表。Save 提交完整草稿和
-读取时的 revision；Reset to defaults 先要求确认，再携带该 revision 由所有者重置。
-两种操作都不会自动重试过期 revision。发生冲突时保留草稿，显示错误并提供 Reload；
-Reload 明确丢弃草稿。保存或重置成功后，以返回的快照替换草稿，并提示设置从下一个进程起生效。
-Esc/Back 返回 Settings；有未保存修改时先询问是否丢弃。
+打开面板时读取 `{source: "execution", scope: "user"}`，返回的 revision 随草稿保留，不作为用户输入字段。
+方向键选择，Enter 或 Space 切换选中行，Esc 关闭面板，有未保存修改时先询问是否丢弃。
+Save 携带读取时的 revision 提交两个开关；Reset to defaults 先要求确认，再携带该 revision 把两个开关写为关闭。
+两种操作都不会自动重试过期 revision：冲突时保留草稿并显示错误，Reload 明确丢弃草稿后重新读取。
+Sandbox 关闭时面板仍显示已保存的 Network 值并标注其被忽略，因此打开 Sandbox 后会生效的值可见。
+加载时禁用修改；守护进程没有这些设置方法时显示不支持的错误，不回退到宿主执行。
 
-Advanced 为 `readOnlyPaths`、`writablePaths` 和环境变量**名称**提供三个列表编辑器。
-每个编辑器都有与显式列表不同的 `Use defaults` 选项、Add 输入、条目编辑/删除和清空列表操作；
-显式空列表不授予任何访问。面板说明显式列表会替换默认值。绝不读取或显示环境变量值。
-保存一个字段时保留无关的显式设置和省略的列表。校验失败时保留草稿并指出错误字段，
-不改变已保存策略；不需要直接编辑生效策略 JSON、外部临时文件、导出入口或强制覆盖选项。
+该行报告的是已保存的开关，不是正在运行的命令的边界：运行中的进程（包括常驻 shell）保持启动时的边界。
+没有沙箱后端的平台在下次启动进程时以 `isolation_unavailable` 报错；把该状态显示在行上属于
+[#691](https://github.com/arcships/dim/issues/691)。
 
-复用现有设置和列表面板的导航：方向键选择，Enter 打开选择器/编辑器或执行操作，Esc 返回上一级。
-只有活动面板接收输入；确认或输入浮层结束后返回所属面板。长路径换行或滚动，不遮住操作控件。
-小终端复用现有面板的视口和滚动行为，不另设全屏布局。加载时禁用修改；读取失败提供 Retry/Back，
-不伪造默认快照；写入失败保留编辑。管理方法不可用时显示守护进程不支持的错误，
-不回退到模型执行命令。
-
-修改策略是本地用户的显式配置操作，不是模型命令审批。`ask` 委托 Permission/Approval 决定，
-并不总是弹出询问。`host` 表示普通守护进程用户的访问权限；`network` 只改变网络访问，
-不改变文件系统授权或认证。
-
-验证独立于 `./dev` 覆盖全新原生启动：默认交互审批显示 `network`/`host`，允许后执行载荷，
-拒绝则阻止载荷；版本 2 省略 escalation 时使用 `ask`，显式 deny 和版本 1 仍保持限制。
-流程覆盖还包括 `full-access`、允许的工具和命令规则、本地专用管理、策略文件缺失、保存时保留列表、
-重置、非法字段/根路径及 revision 冲突。Homebrew 可执行文件的对照用例区分网络访问和可执行文件访问，
-不使用真实凭据。
+验证覆盖这一行显示什么、守护进程据此做什么：读取；Sandbox 关闭时切换仍显示已存储的 Network 值；
+revision 冲突；保存后 `exec` 在新边界下运行——沙箱开启时工作区外的写入失败，关闭后同一写入成功。
+重置、外部修改后重载、不支持的守护进程分支，以及切换前已启动的常驻 shell，目前还没有流程测试。
 
 ## 命令
 
@@ -285,7 +265,7 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
 ```
 
 新 Session 在 `session.create` 中收到完整策略 `{preset}`：不带工具列表，这是产品配置的形式。Agent
-成员复制这份创建时策略（见分支语义）。恢复时该参数只替换预设，保留已存储的
+新成员按[权限继承设计](../../design/subagent-tool-approval.md#2-permission-inheritance)采样发起分支的当前策略（见分支语义）。恢复时该参数只替换预设，保留已存储的
 `allowedTools`/`disallowedTools`。更新发生在 attach 之前，所以本次调用提交的回合不会在旧预设下运行。
 不给参数时，`session.create` 不带策略，恢复的 Session 保持自己的策略。守护进程没有声明
 `session.permission.update` 时，恢复时的参数在 attach 之前失败。这里重试冲突是正确的：要设置的预设
@@ -320,25 +300,32 @@ Assistant: ...
 ### 分支语义
 
 一个分支的 Permission 状态是 `SessionConfig.permissionPolicy` 依次叠加祖先前缀和自身的
-`permission/changed` 事件。CLI 只写 `main`，也就是它提交输入、等待空闲和导出的分支。
+`permission/changed` 事件。CLI 的权限入口只写 `main`；分支交互见 [Timeline branches](../../design/timeline-branches.md)。
 
 ```text
-session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
-        |                                         |
-        v                                         v  创建成员时复制
- main: permission/changed（按版本 CAS）     agent 成员 Session（Collaboration）
-   ^  由恢复时的 --permission
-   |  和 /approval 或 /approvals 写入
-   +-- 分支点 --> 子分支（branch 工具）：分支点处 main 的策略，
-                   之后是它自己的修改
+Session 创建配置 --> main 当前策略 --分支点--> 子分支策略
+                         |                       |
+                         +--新成员请求采样        +--新成员请求采样
+                         v                       v
+                    新成员权限               新成员权限
+
+后续修改不更新已有子分支或成员。
 ```
 
 - branch 工具在修改之后创建的子分支继承该修改。已有子分支保持自己的策略；CLI 不枚举也不更新它们。
   它们的审批请求仍像现在一样按各自的分支 id 回答。
-- Agent 成员复制领导者 Session 的创建时策略。新 Session 上的 `--permission` 会传到成员；之后对
-  `main` 的修改不会。切换的确认信息会说明这一点，下文的需求 R2 请 Collaboration 改为复制领导者分支的
-  当前策略。
+- 新成员复制发起分支在采样点已派发的完整权限；已有成员保留自身权限，复用时也不刷新。
+  采样顺序、失败和复用行为由[权限继承设计](../../design/subagent-tool-approval.md#2-permission-inheritance)定义。
+  权限切换确认须说明其影响后续从该分支创建的成员，不更新已有成员；交付跟踪在 #257。
 - 分叉复制源 Session 的事实，所以分叉从源 Session 当前的 `main` 策略开始（#26）。
+
+### 子 agent 工具审批
+
+审批转交、权限继承和取消恢复见 [Collaboration 设计](../../design/subagent-tool-approval.md)。
+`ask` 的完整终端交互以 [CLI 审批设计](../../design/cli-commands.md#subagent-tool-approval)为准：
+成员请求交给发起委派的 leader 分支；leader 的允许工具需要审批时，展示成员身份、双方分支、
+原始工具和完整参数、原因，只提供允许一次或拒绝。详情从服务端读取，加载失败不能允许；
+成员详情面板仍然只读，不直接回答成员请求。这是设计要求，不代表当前二进制已实现。
 
 ### `/approval`
 
@@ -387,7 +374,7 @@ Switch the main branch to full-access? [y/N]
 Preset unchanged: workspace-write
 
 > /approvals read-only
-Preset (main branch): read-only. Child branches created later inherit it; agent members keep the Session's starting preset.
+Preset (main branch): read-only. Child branches and members created later from main inherit it; existing branches and members keep their policies.
 
 > /approvals deny prefix git push
 Rule already present: deny prefix `git push`
@@ -515,14 +502,9 @@ CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写
   [#257](https://github.com/arcships/dim/issues/257)。
 
 **R2. Agent 成员跟随领导者分支的当前策略。**
-- 受阻："成员在领导者的策略下工作"只在领导者修改预设之前成立。Collaboration 复制领导者 Session 的
-  `SessionConfig.permissionPolicy`，所以执行 `/approvals read-only` 之后，新成员仍以创建时的预设启动。
-- 考虑过：由 CLI 更新每个成员（它看不到成员的创建，并会与之竞争）；只通过参数创建 Session（覆盖不了
-  之后的修改）。
-- 需要：Collaboration 创建成员时，复制领导者分支已派发的 `PermissionState.policy`（Permission 的公开
-  状态），而不是创建时的配置。
-- 顺序：成员采用其创建时已派发的策略；领导者之后的修改不影响已有成员，与子分支相同。
-- 所有者：Collaboration（App Server）；跟踪于 [#257](https://github.com/arcships/dim/issues/257)。
+- 所有者：Collaboration；跟踪于 [#257](https://github.com/arcships/dim/issues/257)。
+- 合同、采样顺序、失败和复用行为由[权限继承设计](../../design/subagent-tool-approval.md#2-permission-inheritance)拥有。
+- CLI 只更新目标分支，不枚举成员或传播策略；确认文案须说明对新成员和已有成员的不同影响。
 
 ## 问题
 

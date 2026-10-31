@@ -77,6 +77,31 @@ Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/
 Selects content from the catalog, owns Session loader content instances and
 aggregates their contributions into the skill tool and instructions/list prompt sources.
 
+### Model-facing texts
+
+Skills writes two texts for the model. Each is protocol or policy as
+[model-facing prompts §4](../../../design/model-prompts.md#4-protocol-and-policy) decides;
+the instructions are mixed.
+
+| Text | Class and sentences |
+| --- | --- |
+| `dim/skills/instructions`, in the system prefix | Protocol: "A skill is a local instruction bundle stored in a SKILL.md file." states what a skill is, "Discovery: The latest `<dim-state source="dim/skills/list">` lists the skills available in this session, each with a name and, when space allows, a description." names the state source the list arrives in, "A `$skill: name` marker names the exact skill to load." names a marker, and "Use `skill({ "skill_name": "<name>" })` to load the full SKILL.md instructions." states the call shape. Policy: the trigger rules, loading, multiple-match, missing-or-blocked, context-hygiene and safety guidance, and "Use the `skill` tool to load the full instructions before applying a skill." |
+| `dim/skills/list`, as a `<dim-state>` block | Protocol: the format — one `- <name>: <description>` or `- <name>` line per enabled skill, names listed always and descriptions added cheapest first within the character budget, escaped — and the source name the block carries. The names and descriptions are the skills' own data |
+
+The list arrives in a `<dim-state>` block, so its guide entry is Prompt's
+([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)):
+Skills writes no marker of its own and contributes no entry. The `skill` tool's
+declaration is built-in and mixed: its schema is protocol, and so is "Load and
+apply a named skill's full SKILL.md instructions." because it states what the
+tool loads; the rest is policy — the `BLOCKING REQUIREMENT` rule, what makes a
+request match a skill, and invoking the tool before answering. Those policy
+sentences have no factory member yet, and get one in the change that first
+evaluates a candidate for them. Its result is
+Skills' own: the `Skill:`, `Description:`, `File:`, `Allowed tools:`
+and `Instructions:` layout and the refusals "Invalid input: skill_name must be a
+string", "Skills unavailable: …", "Skill is disabled: …" and "Unknown skill: …" are
+protocol, and the loaded body is the skill author's own text.
+
 ### Dependencies
 
 | Service | Purpose |
@@ -85,6 +110,7 @@ aggregates their contributions into the skill tool and instructions/list prompt 
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
 | `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
+| `S:SkillsConfig` | The factory configuration of this plugin, registered and provided by `skills::install_with_config`; its `instructions` text replaces the built-in skill instructions when set, and a profile that registers the parts without the install declares and reads none. |
 | `S:PromptRegistry` | Register the list and instructions sources, until this part unloads. |
 | `S:ToolRegistry` | Register the `skill` tool, until this part unloads. |
 
@@ -156,7 +182,7 @@ loading uses the current view rather than an old model-visible list.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:ToolRegistry` |
+| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillsConfig`、`S:ToolRegistry` |
 | 提供 | `S:SessionSkills` |
 | 被注入于 | `SkillsBranch` |
 <!-- /generated -->

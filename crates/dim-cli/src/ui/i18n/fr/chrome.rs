@@ -205,10 +205,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Sortie shell non enregistrée: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Lecture du presse-papiers…",
+        "Reading image…" => "Lecture de l'image…",
+        "Wait for the image insertion before sending" => {
+            "Attendez l'insertion de l'image avant d'envoyer"
+        }
+        "The image could not be read" => "L'image n'a pas pu être lue",
+        "An image is still being inserted; paste again when it is in" => {
+            "Une image est en cours d'insertion ; collez à nouveau une fois terminée"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Le presse-papiers est en cours d'insertion ; collez à nouveau une fois terminé"
+        }
         "Clipboard: {reason}" => "Presse-papiers: {reason}",
         "Wait for clipboard insertion before sending" => "Attendre le collage avant d'envoyer",
         "A submission accepts at most 20 images" => "20 images max par envoi",
         "[Image #{index}]" => "[Image #{index}]",
+        "[Image #{index}{details}]" => "[Image #{index}{details}]",
+        "first frame" => "première image seulement",
+        "re-encoded" => "réencodée",
         "The current model does not accept images; remove {label} to send" => {
             "Le modèle n'accepte pas les images; retirer {label} pour envoyer"
         }
@@ -352,7 +366,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Souris (plein écran)",
         "Permissions" => "Autorisations",
         "Tool approvals" => "Approbations d'outils",
-        "Command isolation" => "Isolation des commandes",
+        "Execution" => "Exécution",
         "Models" => "Modèles",
         "Model" => "Modèle",
         "not set" => "non défini",
@@ -403,6 +417,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} modèles indisponibles · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider} : 1 modèle a besoin d’une fenêtre · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider} : {count} modèles ont besoin d’une fenêtre · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: aucun modèle · dimcode models {id} --refresh"
         }
@@ -414,6 +434,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: catalogue illisible · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Un modèle dont les limites ne sont pas déclarées ne peut pas être sélectionné ; déclarez-les avec dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Déclarez-les avec dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "Aucun catalogue en cache. Connectez-vous et exécutez models PROVIDER --refresh."

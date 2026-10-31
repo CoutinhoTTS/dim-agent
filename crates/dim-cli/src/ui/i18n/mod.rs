@@ -190,29 +190,45 @@ mod tests {
         }
     }
 
-    /// `/settings` names command isolation.
+    /// `/settings` names the execution row.
     #[test]
-    fn every_locale_translates_command_isolation() {
+    fn every_locale_translates_execution_settings() {
         for (code, lookup) in tables() {
-            assert!(
-                lookup("Command isolation").is_some(),
-                "{code} lacks Command isolation"
-            );
+            assert!(lookup("Execution").is_some(), "{code} lacks Execution");
         }
     }
 
-    /// The approval prompt and the transcript command row name the requested
-    /// boundary; a table that drops the placeholder would print the tier name
-    /// nowhere.
+    /// The image marker exists in every locale, with the placeholders its
+    /// index and details go through.
     #[test]
-    fn every_locale_translates_the_sandbox_boundary_and_keeps_its_placeholder() {
+    fn every_locale_translates_the_scaled_image_marker() {
         for (code, lookup) in tables() {
-            for key in ["boundary: {sandbox}", " (boundary: {sandbox})"] {
-                let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            for key in ["[Image #{index}{details}]", "first frame", "re-encoded"] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+            let marker = lookup("[Image #{index}{details}]").expect("marker");
+            for placeholder in ["{index}", "{details}"] {
                 assert!(
-                    text.contains("{sandbox}"),
-                    "{code} drops the placeholder in {key:?}: {text:?}"
+                    marker.contains(placeholder),
+                    "{code} drops {placeholder} in {marker:?}"
                 );
+            }
+        }
+    }
+
+    /// The notices an image read shows — the wait, the second-paste refusal,
+    /// the clipboard refusal and the failed read — exist in every locale.
+    #[test]
+    fn every_locale_translates_the_image_read_notices() {
+        for (code, lookup) in tables() {
+            for key in [
+                "Reading image…",
+                "Wait for the image insertion before sending",
+                "An image is still being inserted; paste again when it is in",
+                "The clipboard is still being inserted; paste again when it is in",
+                "The image could not be read",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }
         }
     }
@@ -315,6 +331,14 @@ mod tests {
                     "{provider}: {count} models disabled · dimcode models {id}",
                     &["{provider}", "{count}", "{id}"][..],
                 ),
+                (
+                    "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{id}"][..],
+                ),
+                (
+                    "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{count}", "{id}"][..],
+                ),
             ] {
                 let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
                 for placeholder in placeholders {
@@ -352,6 +376,20 @@ mod tests {
                 !text.contains('{'),
                 "{code} keeps a placeholder in {key:?}: {text:?}"
             );
+            let key = "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            assert!(
+                text.contains("{id}"),
+                "{code} drops {{id}} in {key:?}: {text:?}"
+            );
+            let key = "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            for placeholder in ["{provider}", "{model}"] {
+                assert!(
+                    text.contains(placeholder),
+                    "{code} drops {placeholder} in {key:?}: {text:?}"
+                );
+            }
             let key = "Saved model preferences cleared";
             let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
             assert!(

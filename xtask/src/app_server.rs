@@ -40,6 +40,9 @@ pub struct Overrides {
     /// The `branch` tool's description in place of its built-in text
     /// (timeline branches §12.4).
     pub branch_description: Option<Arc<str>>,
+    /// The roster's closing sentence in place of its built-in text
+    /// (timeline branches §12.4).
+    pub roster_closing: Option<Arc<str>>,
 }
 
 /// What one run adds to the product assembly: the overrides above, the model
@@ -159,6 +162,7 @@ pub async fn serve_home(
         WorkspaceToolsConfig { output_root },
         dim_agent_capabilities::timeline_tree::BranchToolConfig {
             description: run.overrides.branch_description.clone(),
+            roster_closing: run.overrides.roster_closing.clone(),
         },
     );
     dim_app_server::permission_rules::install(&mut builder);

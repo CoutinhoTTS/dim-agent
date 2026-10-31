@@ -11,7 +11,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 27;
+pub const FORMAT: u32 = 27;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -121,7 +121,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 12] = [
+const UPGRADES: [(u32, &[&str]); 13] = [
     (
         13,
         &[
@@ -158,6 +158,10 @@ const UPGRADES: [(u32, &[&str]); 12] = [
     // decode; the marker only.
     (23, &[]),
     (24, &[]),
+    // #522: model limits that only a declaration writes, which a v25
+    // daemon cannot decode; the marker only, and the Provider-owned
+    // rewriter runs at this step.
+    (25, &[]),
     (26, &["session_grants", "session_grants_by_path"]),
 ];
 
@@ -342,6 +346,9 @@ impl SqliteStorage {
                     if *from == 24 {
                         tx.execute_batch("DROP INDEX timeline_events_by_end")
                             .map_err(storage)?;
+                    }
+                    if *from == 25 {
+                        crate::provider::rewrite_stored_limits(&tx)?;
                     }
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])

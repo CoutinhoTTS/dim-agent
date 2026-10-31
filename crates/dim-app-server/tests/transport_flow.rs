@@ -77,6 +77,12 @@ mod management;
 #[path = "transport_flow/permission_rules.rs"]
 mod permission_rules;
 
+#[path = "transport_flow/exec_shell_settings.rs"]
+mod exec_shell_settings;
+
+#[path = "transport_flow/execution_settings.rs"]
+mod execution_settings;
+
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
 
@@ -295,7 +301,34 @@ async fn launch_with(
 /// `launch_with`, returning the assembly error instead of panicking.
 async fn try_launch_with(
     tools: Arc<dyn ToolDriver>,
+    config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> dim_app_server::Result<RunningServer> {
+    launch_inner(tools, config, dim_app_server::collaboration::install, extra).await
+}
+
+/// `launch_with_agent` with Collaboration's factory configuration set.
+async fn launch_with_collaboration(
+    tools: Arc<dyn ToolDriver>,
+    config: ServerConfig,
+    collaboration: dim_app_server::collaboration::CollaborationConfig,
+) -> (RunningServer, dim_agent_runtime::Agent) {
+    let server = launch_inner(
+        tools,
+        config,
+        move |builder| dim_app_server::collaboration::install_with_config(builder, collaboration),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+
+async fn launch_inner(
+    tools: Arc<dyn ToolDriver>,
     mut config: ServerConfig,
+    install_collaboration: impl FnOnce(&mut AgentBuilder),
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> dim_app_server::Result<RunningServer> {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -307,7 +340,7 @@ async fn try_launch_with(
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
-    dim_app_server::collaboration::install(&mut builder);
+    install_collaboration(&mut builder);
     extra(&mut builder);
     serve(builder, config).await
 }

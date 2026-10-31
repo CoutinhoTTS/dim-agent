@@ -7,12 +7,14 @@ mod compaction_support;
 mod process_support;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
     host_platform::{
-        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, HostPlatformConfig,
-        HostPlatformPlugin, ShellStatus, resolve_shell,
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, ExecShellRuntime, HostPlatform,
+        HostPlatformConfig, HostPlatformPlugin, OutputEncoding, ShellEdition, ShellSource,
+        ShellStatus, resolve_shell,
     },
     timeline_tree::TreeCommands,
     wait,
@@ -22,6 +24,7 @@ use dim_agent_capabilities::{
         exec::{Decoder, truncate_preview},
     },
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{alive, gone, pid_in};
@@ -136,6 +139,30 @@ impl Plugin for PlatformPlugin {
         Ok(())
     }
 }
+/// `platform` provided by [`PlatformPlugin`], a row of the harness's host.
+fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
+    let platform = Arc::new(platform);
+    move |builder| {
+        builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
+    }
+}
+/// FileStorage over `home` and the HostPlatform plugin reading
+/// `exec-shell.json` there, rows of the harness's host.
+fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
+    move |builder| {
+        let files = FileStoragePlugin::new(vec![home]);
+        builder.plugin(move |_| Ok(Box::new(files.clone())));
+        builder.plugin(|names| {
+            Ok(Box::new(HostPlatformPlugin::new(
+                names,
+                HostPlatformConfig {
+                    execution: names.key()?,
+                    exec_shell_file: Some((0, "exec-shell.json".into())),
+                },
+            )?))
+        });
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hook {
@@ -243,7 +270,7 @@ impl DynPlugin for Probe {
 struct Harness {
     root: Ctx,
     store: Arc<MemoryTimelineStore>,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Script>,
     cwd: PathBuf,
     output_root: PathBuf,
@@ -260,7 +287,9 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
     let mut env: Vec<_> = std::env::vars_os().collect();
     env.retain(|(key, _)| key != "SHELL");
     env.push(("SHELL".into(), "/bin/bash".into()));
-    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await)
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.env.extend(
         extra
             .iter()
@@ -283,38 +312,29 @@ impl Harness {
         platform.home = cwd.clone();
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        Self::with_platform_context(root, view, hook, cwd, compacting).await
+        Self::with_platform_context(test_platform(platform), hook, cwd, compacting).await
     }
     async fn with_platform(
-        root: Ctx,
-        view: rutis::host::FiberView,
+        platform: impl FnOnce(&mut AgentBuilder),
         hook: Hook,
         cwd: PathBuf,
     ) -> Self {
-        Self::with_platform_context(root, view, hook, cwd, false).await
+        Self::with_platform_context(platform, hook, cwd, false).await
     }
+    /// A host whose `platform` rows provide HostPlatform, Active before the
+    /// harness runs.
     async fn with_platform_context(
-        root: Ctx,
-        view: rutis::host::FiberView,
+        platform: impl FnOnce(&mut AgentBuilder),
         hook: Hook,
         cwd: PathBuf,
         compacting: bool,
     ) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
         let output_root = scratch("output");
-        wait_active(
-            &root,
-            &[view],
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
         let model = Arc::new(Script::default());
         let seen = Seen::default();
         let mut builder = AgentBuilder::new(AgentConfig::default());
+        platform(&mut builder);
         builder
             .timeline_store(store.clone())
             .session_value(Arc::new(HistoryRenderer::default()))
@@ -360,9 +380,31 @@ impl Harness {
         builder.require_feature(Feature::new("Probe").branch("Probe", move |names| {
             Ok(Box::new(Probe::new(names, hook, probes.clone())?))
         }));
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+                ExecutionSettings::default(),
+            )))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let process: Vec<_> = agent
+            .loader()
+            .entries()
+            .into_iter()
+            .filter(|row| row.instance.is_none())
+            .filter_map(|row| row.view)
+            .collect();
+        wait_active(
+            agent.root(),
+            &process,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         Self {
-            root,
+            root: agent.root().clone(),
             store,
             agent,
             model,
@@ -395,7 +437,6 @@ impl Harness {
     }
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
-        self.root.shutdown().await.unwrap();
     }
 }
 
@@ -523,22 +564,12 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let home = scratch("shell-config");
     let config = home.join("exec-shell.json");
     std::fs::write(&config, "invalid json").unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
-            HostPlatformConfig {
-                exec_shell_file: Some((0, "exec-shell.json".into())),
-                ..HostPlatformConfig::default()
-            },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let harness = Harness::with_platform(
+        configured_platform(home.clone()),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let platform = harness.root.get::<HostPlatform>().unwrap();
     let session = harness.session().await;
 
@@ -745,7 +776,7 @@ fn exit_drains_output_even_when_offload_is_slow() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unavailable_shell_or_backend_refuses_the_payload() {
+async fn an_unavailable_shell_or_a_missing_execution_port_refuses_the_payload() {
     let unavailable = HostPlatform::current(ShellStatus::Unavailable {
         code: EXEC_SHELL_UNAVAILABLE,
         reason: "Selected command shell is unavailable: /opt/zsh".into(),
@@ -768,6 +799,37 @@ async fn an_unavailable_shell_or_backend_refuses_the_payload() {
     assert_eq!(code(result), Some("exec_shell_unavailable"));
     assert!(text(result).contains(EXEC_SHELL_UNAVAILABLE));
     assert!(text(result).contains("/opt/zsh"));
+    assert!(!marker.exists());
+    session.close().await.unwrap();
+    harness.shutdown().await;
+
+    let without_port = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+        executable_path: "/bin/sh".into(),
+        edition: ShellEdition::Sh,
+        source: ShellSource::Fallback,
+        output_encoding: OutputEncoding::Utf8,
+    }))
+    .unwrap();
+    let harness = Harness::new(without_port, Hook::None).await;
+    let session = harness.session().await;
+    let marker = harness.cwd.join("b");
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": format!("touch {}", marker.display())}),
+            )],
+        )
+        .await;
+    let events = until(&session, "result", |events| tool_results(events) == 1).await;
+    let result = &results(&events)[0];
+    assert_eq!(code(result), Some("isolation_config_invalid"));
+    assert!(
+        text(result).contains("no execution settings port"),
+        "{}",
+        text(result)
+    );
     assert!(!marker.exists());
     session.close().await.unwrap();
     harness.shutdown().await;

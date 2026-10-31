@@ -163,6 +163,19 @@ sequenceDiagram
 - 从不可见：`structuredContent`、服务名、配置、API 密钥、私有主机例外、诊断。
 - 抓取的页面文本是不可信的第三方内容，放入工具结果时不加指令框定（A14）。
 
+### 5.1 面向模型的文本
+
+两个声明是内置的，整体是 protocol（[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)）：两个 schema，以及两个描述——它们陈述各调用做什么、返回什么：“Search the web. Returns numbered titles, URLs and snippets.” 与 “Read a public web page as text. Use start_char to continue at the returned final URL.”，后者点明续读参数与结果携带的最终 URL。两类结果文本都是 protocol：
+
+| 文本 | 类别 |
+| --- | --- |
+| `web_fetch failed: <code>: <message>` 与 `web_search failed: <code>: <message>` | Protocol：结果格式与其代码（附录 C）；模型读取代码并据此行动 |
+| `web_fetch` 头部中的 `URL:`、`Title:`、`Content-Type:` 与 `Characters: <start>-<end> of <total>` 各行 | Protocol：结果格式 |
+| `[Truncated: call web_fetch again with start_char=<end> to continue.]` 与 `Redirected to <url>; call web_fetch with that URL to follow it.` | Protocol：继续读取的句柄；模型把它们回传 |
+| 搜索结果列表、抓取的文本片段与重定向提示中的 URL | 服务与页面自己的内容，作为 material 承载 |
+
+Web 不写标记、不贡献 guide 条目；它的声明没有 policy 文本。
+
 ## 6. 接口（摘要）
 
 | 接口 | 类型 | 用途 |

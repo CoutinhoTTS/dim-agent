@@ -1,4 +1,5 @@
 use dim_agent_capabilities::defaults;
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -88,7 +89,7 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
             )?))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -168,7 +169,7 @@ async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
             Ok(Box::new(DomainProbe::new(names, recorded.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -229,7 +230,7 @@ async fn loop_publishes_running_only_once_turn_start_is_dispatched() {
             }))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();

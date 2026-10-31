@@ -15,7 +15,7 @@ use dim_agent_types::{ApprovalCallData, ContentBlock, ModelId, UserInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::pending,
     io::Write,
 };
@@ -53,6 +53,13 @@ struct Approval {
     /// Set after a failed rule write: the user can still answer once.
     #[serde(skip)]
     once: bool,
+    #[serde(skip)]
+    member: Option<
+        std::result::Result<
+            dim_agent_types::MemberApprovalDescriptor,
+            crate::member_approval::DetailError,
+        >,
+    >,
 }
 
 /// The rule an "always" answer adds before it answers allow (F2 §5.4).
@@ -67,6 +74,7 @@ struct RuleWrite {
 #[serde(rename_all = "camelCase")]
 struct ApprovalCancelled {
     session_id: String,
+    branch_id: String,
     request_id: String,
 }
 
@@ -179,6 +187,7 @@ pub async fn chat(
     client: &mut Client,
     options: &Options,
     images: Vec<ContentBlock>,
+    notes: Vec<String>,
 ) -> Result<i32> {
     #[cfg(unix)]
     let mut interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -191,11 +200,15 @@ pub async fn chat(
         None
     };
     let mut display = Display::new(interactive, options.json);
+    for note in &notes {
+        display.record(note)?;
+    }
     let session_id = if let Some(id) = &options.resume {
         id.clone()
     } else {
         let mut params = json!({"cwd":options.cwd});
         let mut preferences = None;
+        let mut target = None;
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
             params["model"] = json!({"provider":provider,"modelId":model});
             preferences =
@@ -203,14 +216,24 @@ pub async fn chat(
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
+            target = Some((provider.clone(), model.clone()));
         }
         if let Some(preset) = options.permission {
             params["permissionPolicy"] = json!({"preset":preset});
         }
-        let created: Created = client.typed("session.create", params).await.map_err(|error| {
-            let error = crate::session_host::model_adoption_error(error, preferences.as_ref());
-            format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference")
-        })?;
+        let created: Created = match client.typed("session.create", params).await {
+            Ok(created) => created,
+            Err(error) => {
+                let error = crate::model_adoption_error(
+                    client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await;
+                return Err(format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference").into());
+            }
+        };
         if interactive {
             println!(
                 "dimcode · model: {}/{}",
@@ -514,6 +537,7 @@ async fn wait_turn(
     };
     let mut stop = None;
     let mut approval_replies = HashSet::new();
+    let mut member_reads: HashMap<u64, (String, String, bool)> = HashMap::new();
     let mut approvals: VecDeque<Approval> = VecDeque::new();
     let mut deferred = VecDeque::new();
     let mut prompted = false;
@@ -528,6 +552,7 @@ async fn wait_turn(
             && idle.is_none()
             && stop.is_none()
             && approval_replies.is_empty()
+            && member_reads.is_empty()
             && shell.is_none()
             && deferred.is_empty()
             && rule_write.is_none()
@@ -543,12 +568,59 @@ async fn wait_turn(
                 0
             });
         }
-        if let Some(approval) = approvals.front()
+        if let Some(approval) = approvals.front_mut()
             && let Some(reader) = input.as_mut()
             && !prompted
             && rule_write.is_none()
             && !questions.asking()
         {
+            if approval.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW {
+                if approval.member.is_none() {
+                    if !member_reads.values().any(|(branch, request, _)| {
+                        branch == &approval.branch_id && request == &approval.request_id
+                    }) {
+                        let id = client.send(dim_agent_types::MEMBER_APPROVAL_GET, json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id})).await?;
+                        member_reads.insert(
+                            id,
+                            (
+                                approval.branch_id.clone(),
+                                approval.request_id.clone(),
+                                false,
+                            ),
+                        );
+                    }
+                    reader.prompt("Loading member action... [n deny] ")?;
+                    prompted = true;
+                    continue;
+                }
+                display.record(&format!(
+                    "[subagent approval] Leader branch: {}",
+                    crate::sanitize::safe(&approval.branch_id)
+                ))?;
+                display.record(&crate::sanitize::safe(&format!(
+                    "Leader reason: {}",
+                    approval.reason
+                )))?;
+                match approval.member.as_ref().expect("member detail queried") {
+                    Ok(descriptor) => {
+                        for line in crate::member_approval::lines(descriptor) {
+                            display.record(&line)?;
+                        }
+                    }
+                    Err(error) => {
+                        display.record(&format!("Cannot review member action: {error}"))?
+                    }
+                }
+                reader.prompt(if matches!(approval.member, Some(Ok(_))) {
+                    "Allow this member action once? [y/N] "
+                } else if matches!(&approval.member, Some(Err(error)) if error.retryable()) {
+                    "Retry details or deny? [r/N] "
+                } else {
+                    "Deny this member action? [N] "
+                })?;
+                prompted = true;
+                continue;
+            }
             display.record(&format!(
                 "[approval] {}: {}",
                 approval.call.name, approval.reason
@@ -667,8 +739,24 @@ async fn wait_turn(
                         input.as_mut().expect("approval input").prompt(&format!("Always allow `{}` (exact). Press Enter, or type its leading words for a prefix rule: ", crate::sanitize::safe(command)))?;
                         rule_stage = true;
                     } else if prompted {
-                        let approval = approvals.pop_front().ok_or("No approval awaits this answer")?;
+                        let mut approval = approvals.pop_front().ok_or("No approval awaits this answer")?;
                         let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
+                        if approval.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW {
+                            if answer.as_deref() == Some("r") && matches!(&approval.member, Some(Err(error)) if error.retryable()) {
+                                approval.member = None; approvals.push_front(approval); prompted = false; continue;
+                            }
+                            if allow {
+                                if !matches!(approval.member, Some(Ok(_))) {
+                                    approvals.push_front(approval); prompted = false; continue;
+                                }
+                                let id = client.send(dim_agent_types::MEMBER_APPROVAL_GET, json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id})).await?;
+                                member_reads.insert(id, (approval.branch_id.clone(), approval.request_id.clone(), true));
+                                approval.member = None;
+                                approvals.push_front(approval);
+                                input.as_mut().expect("approval input").prompt("Checking member action... [n deny] ")?;
+                                continue;
+                            }
+                        }
                         approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
                         prompted = false;
                     } else if let Some(text) = &line {
@@ -874,6 +962,47 @@ async fn wait_turn(
                     }
                 }
             }
+            Message::Response { id, result } if member_reads.contains_key(&id) => {
+                let (branch, request, allow) =
+                    member_reads.remove(&id).expect("matched member detail");
+                let Some(index) = approvals.iter().position(|approval| {
+                    approval.branch_id == branch && approval.request_id == request
+                }) else {
+                    continue;
+                };
+                let detail = result
+                    .map_err(crate::member_approval::DetailError::from)
+                    .and_then(|value| {
+                        serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value)
+                            .map_err(|error| {
+                                crate::member_approval::DetailError::Failed(format!(
+                                    "Invalid member approval detail: {error}"
+                                ))
+                            })
+                    });
+                let mut decision = None;
+                match detail {
+                    Ok(dim_agent_types::MemberApprovalDetail::Pending { descriptor, .. }) => {
+                        approvals[index].member = Some(Ok(*descriptor));
+                        if allow {
+                            decision = Some("allow");
+                        }
+                    }
+                    Ok(dim_agent_types::MemberApprovalDetail::Ended) => {
+                        decision = Some("deny");
+                        display.record("Member request ended")?;
+                    }
+                    Err(error) => approvals[index].member = Some(Err(error)),
+                }
+                if let Some(decision) = decision {
+                    approvals.remove(index);
+                    approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":branch,"requestId":request,"decision":decision})).await?);
+                }
+                if index == 0 {
+                    prompted = false;
+                    println!();
+                }
+            }
             Message::Response { id, result } if approval_replies.remove(&id) => {
                 if code == 0 {
                     result?;
@@ -902,19 +1031,52 @@ async fn wait_turn(
                     approvals.push_back(approval);
                 }
             }
-            Message::Notice { method, params } if method == "approval.cancelled" => {
+            Message::Notice { method, params }
+                if matches!(method.as_str(), "approval.cancelled" | "approval.resolved") =>
+            {
                 let cancelled: ApprovalCancelled = decode(params, &method)?;
                 if cancelled.session_id == session_id {
-                    let current = approvals
-                        .front()
-                        .is_some_and(|approval| approval.request_id == cancelled.request_id);
-                    approvals.retain(|approval| approval.request_id != cancelled.request_id);
+                    let current = approvals.front().is_some_and(|approval| {
+                        approval.request_id == cancelled.request_id
+                            && approval.branch_id == cancelled.branch_id
+                    });
+                    approvals.retain(|approval| {
+                        approval.request_id != cancelled.request_id
+                            || approval.branch_id != cancelled.branch_id
+                    });
                     if current {
                         prompted = false;
                         println!();
                         display.record("[approval cancelled]")?;
                     }
                 }
+            }
+            Message::Notice { method, params }
+                if method == "session.notice"
+                    && params["sessionId"] == session_id
+                    && params["source"] == "Collaboration"
+                    && params["kind"] == "memberApprovalEnded" =>
+            {
+                let ended: dim_agent_types::MemberApprovalEnded =
+                    decode(params["data"].clone(), "memberApprovalEnded")?;
+                let mut retained = VecDeque::new();
+                while let Some(approval) = approvals.pop_front() {
+                    if approval.branch_id == ended.branch_id
+                        && approval.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+                        && approval
+                            .call
+                            .input
+                            .get("approvalId")
+                            .is_some_and(|id| id == &ended.approval_id)
+                    {
+                        prompted = false;
+                        approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":"deny"})).await?);
+                        display.record("Member request ended")?;
+                    } else {
+                        retained.push_back(approval);
+                    }
+                }
+                approvals = retained;
             }
             notice @ Message::Notice { .. } if prompted || questions.asking() => {
                 deferred.push_back(notice)

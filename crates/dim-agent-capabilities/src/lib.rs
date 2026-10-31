@@ -105,6 +105,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::ModelSelectionHost>(catalog, None);
     register::<host::SessionFilesHost>(catalog, None);
     register::<skill_settings::SkillSettingsHost>(catalog, None);
+    register::<execution_settings::ExecutionSettingsHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
 }
 impl PublicService for approval::Approval {}

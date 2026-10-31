@@ -187,10 +187,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell 출력 기록 안 됨: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "클립보드 읽는 중…",
+        "Reading image…" => "이미지 읽는 중…",
+        "Wait for the image insertion before sending" => "이미지 삽입 후 전송하세요",
+        "The image could not be read" => "이미지를 읽을 수 없습니다",
+        "An image is still being inserted; paste again when it is in" => {
+            "이미지 삽입 중입니다. 완료 후 다시 붙여넣으세요"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "클립보드 삽입 중입니다. 완료 후 다시 붙여넣으세요"
+        }
         "Clipboard: {reason}" => "클립보드: {reason}",
         "Wait for clipboard insertion before sending" => "클립보드 삽입 완료 후 전송",
         "A submission accepts at most 20 images" => "한 번에 이미지 최대 20개",
         "[Image #{index}]" => "[이미지 #{index}]",
+        "[Image #{index}{details}]" => "[이미지 #{index}{details}]",
+        "first frame" => "첫 프레임만",
+        "re-encoded" => "재인코딩됨",
         "The current model does not accept images; remove {label} to send" => {
             "현재 모델은 이미지 미지원, {label} 삭제 후 전송"
         }
@@ -324,7 +336,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "마우스 (전체 화면)",
         "Permissions" => "권한",
         "Tool approvals" => "도구 승인",
-        "Command isolation" => "명령 격리",
+        "Execution" => "실행",
         "Models" => "모델",
         "Model" => "모델",
         "not set" => "미설정",
@@ -369,6 +381,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: 모델 {count}개 사용 불가 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 모델 1개에 윈도가 필요합니다 · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 모델 {count}개에 윈도가 필요합니다 · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: 모델 없음 · dimcode models {id} --refresh"
         }
@@ -380,6 +398,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: 카탈로그를 읽을 수 없음 · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "한도가 선언되지 않은 모델은 선택할 수 없습니다. dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N로 선언하세요."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N로 선언하세요."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "캐시된 카탈로그가 없습니다. 로그인한 뒤 models PROVIDER --refresh를 실행하세요."

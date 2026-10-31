@@ -60,12 +60,6 @@ TIMELINE_FILENAME = "dim-timeline.jsonl"
 DIMCODE_HOME = "/tmp/dimcode-home"
 MODEL_CONFIG = "/tmp/dimcode-model.json"
 
-#: The task container is the isolation boundary. dimcode's command sandbox needs
-#: bubblewrap, which task images lack, so every first command failed with
-#: `isolation_unavailable` and agents spent turns rewriting this file themselves.
-#: Host mode (docs/design/host-platform-isolation.md) runs commands directly.
-HOST_ISOLATION = '{"version": 2, "sandbox": "host"}'
-
 #: Seconds added to Harbor's own agent deadline before the in-container guard
 #: fires. Harbor must still be the one that declares the timeout — its
 #: ``AgentTimeoutError`` is what the gate counts — so the guard is strictly the
@@ -157,8 +151,7 @@ class DimAgent(BaseInstalledAgent):
                 f'|| {{ echo "{key_var} is empty in the task environment" >&2; exit 1; }}; '
                 # dimcode refuses a home that is not private (0700).
                 f"mkdir -p /logs/agent; (umask 077; mkdir -p {DIMCODE_HOME}/rust); "
-                f'printf %s "$DIM_EVAL_MODEL_CONFIG_JSON" > {MODEL_CONFIG}; '
-                f"printf %s {shlex.quote(HOST_ISOLATION)} > {DIMCODE_HOME}/rust/host-isolation.json"
+                f'printf %s "$DIM_EVAL_MODEL_CONFIG_JSON" > {MODEL_CONFIG}'
             ),
             env=env,
         )

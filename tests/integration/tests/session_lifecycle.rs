@@ -35,7 +35,8 @@ async fn agent_close_during_assembly_never_activates_the_session() {
         .await
         .expect("assembly reached the hold");
     probe.wait_for("applied", 1).await;
-    let closing = env.agent.close();
+    // The Agent's close starts at the call; the host's close is a future.
+    let closing = env.agent.agent().close();
     hold.release.notify_one();
     assert!(matches!(
         creating.await.unwrap(),
@@ -44,6 +45,7 @@ async fn agent_close_during_assembly_never_activates_the_session() {
     closing.await.unwrap();
     probe.wait_for("inactive", 1).await;
     assert_eq!(probe.count("active"), 0);
+    env.agent.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -63,7 +65,7 @@ async fn agent_close_reports_closing_to_every_session_at_once() {
     let _second = env.session(&cwd, "").await.unwrap();
     probe.wait_for("active", 2).await;
     probe.hold_next_close();
-    let closing = env.agent.close();
+    let closing = env.agent.agent().close();
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         probe.close_held.notified(),
@@ -73,6 +75,7 @@ async fn agent_close_reports_closing_to_every_session_at_once() {
     probe.wait_for("closing", 2).await;
     probe.release_close.notify_one();
     closing.await.unwrap();
+    env.agent.close().await.unwrap();
 }
 
 /// An Agent whose Sessions an idle release can unload: an explicit store.

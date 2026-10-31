@@ -1,6 +1,6 @@
 //! One scaling step for every place that turns a local image into an image
-//! block. `read` is the caller here; the CLI's attachments will add the second
-//! one (#657), so both send an image the same way.
+//! block: `read` and the CLI's attachments both call it, so both send an image
+//! the same way.
 use image::{
     AnimationDecoder, DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Rgb,
     RgbImage, codecs::jpeg::JpegEncoder, imageops::FilterType, metadata::Orientation,
@@ -26,13 +26,17 @@ const JPEG_QUALITY: u8 = 85;
 /// The leading bytes read to recognize the format.
 const SNIFF_BYTES: usize = 16;
 
-/// The image formats this module decodes and sends.
+/// The image formats this module decodes and sends, plus the TIFF a platform
+/// decoder produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
     Png,
     Jpeg,
     WebP,
     Gif,
+    /// A clipboard bitmap's source format: decoded by a platform decoder, never
+    /// sniffed or sent as it is, so it only names a refusal.
+    Tiff,
 }
 
 impl ImageKind {
@@ -43,6 +47,7 @@ impl ImageKind {
             Self::Jpeg => "JPEG",
             Self::WebP => "WebP",
             Self::Gif => "GIF",
+            Self::Tiff => "TIFF",
         }
     }
 
@@ -53,6 +58,7 @@ impl ImageKind {
             Self::Jpeg => "image/jpeg",
             Self::WebP => "image/webp",
             Self::Gif => "image/gif",
+            Self::Tiff => "image/tiff",
         }
     }
 
@@ -62,6 +68,7 @@ impl ImageKind {
             Self::Jpeg => ImageFormat::Jpeg,
             Self::WebP => ImageFormat::WebP,
             Self::Gif => ImageFormat::Gif,
+            Self::Tiff => ImageFormat::Tiff,
         }
     }
 }
@@ -200,7 +207,7 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
                     .map_err(|error| invalid(kind, error))?;
                 decoder
                     .set_limits(decode_limits())
-                    .map_err(|error| decode_error(kind, stored, error))?;
+                    .map_err(|error| decode_refusal(kind, stored, error))?;
                 first_frame(kind, stored, decoder.into_frames())?
             };
             if let Some(image) = unchanged(
@@ -228,7 +235,7 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             // decoder.
             let orientation = decoder
                 .orientation()
-                .map_err(|error| decode_error(kind, stored, error))?;
+                .map_err(|error| decode_refusal(kind, stored, error))?;
             if decoder.has_animation() {
                 let (image, animated) = first_frame(kind, stored, decoder.into_frames())?;
                 return reencoded(kind, stored, orientation, image, animated);
@@ -241,7 +248,7 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             let decoder = image::codecs::webp::WebPDecoder::new(&mut source)
                 .map_err(|error| invalid(kind, error))?;
             let image = DynamicImage::from_decoder(decoder)
-                .map_err(|error| decode_error(kind, stored, error))?;
+                .map_err(|error| decode_refusal(kind, stored, error))?;
             reencoded(kind, stored, orientation, image, false)
         }
         _ => {
@@ -255,25 +262,32 @@ pub fn scale_image<R: BufRead + Seek>(mut source: R) -> Result<ScaledImage, Imag
             reader.limits(decode_limits());
             let decoder = reader
                 .into_decoder()
-                .map_err(|error| decode_error(kind, stored, error))?;
+                .map_err(|error| decode_refusal(kind, stored, error))?;
             let image = DynamicImage::from_decoder(decoder)
-                .map_err(|error| decode_error(kind, stored, error))?;
+                .map_err(|error| decode_refusal(kind, stored, error))?;
             reencoded(kind, stored, orientation, image, false)
         }
     }
 }
 
-/// The allocation limit every decoder that takes one is given.
-fn decode_limits() -> image::Limits {
+/// The allocation limit every decoder that takes one is given, this module's
+/// and a platform decoder's alike: [`MAX_DECODE_BYTES`], the largest form the
+/// pixel guard allows.
+pub fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     limits
 }
 
-/// A decoder error, with an allocation refused for size reported as the
-/// pixel-guard refusal: at [`MAX_PIXELS`] in the largest decoded format the
-/// image is exactly what the guard is for, not a broken file.
-fn decode_error(kind: ImageKind, stored: ImageSize, error: image::ImageError) -> ImageRefusal {
+/// A decoder error as a refusal, with an allocation refused for size reported
+/// as the pixel-guard refusal: at [`MAX_PIXELS`] in the largest decoded format
+/// the image is exactly what the guard is for, not a broken file. Every other
+/// error is [`ImageRefusal::Invalid`] for `kind`.
+pub fn decode_refusal(
+    kind: ImageKind,
+    stored: ImageSize,
+    error: image::ImageError,
+) -> ImageRefusal {
     if matches!(
         &error,
         image::ImageError::Limits(limit)
@@ -282,6 +296,31 @@ fn decode_error(kind: ImageKind, stored: ImageSize, error: image::ImageError) ->
         return ImageRefusal::TooManyPixels(stored);
     }
     invalid(kind, error)
+}
+
+/// Makes an already decoded image acceptable to a model.
+///
+/// In: the pixels a platform decoder produced — a clipboard bitmap, for
+/// example, which has no source bytes to send. Out: everything
+/// [`scale_image`] returns.
+///
+/// The same rule applies and the same re-encode step runs, so a clipboard
+/// bitmap and a file come out the same way: the pixels are re-encoded to fit
+/// [`MAX_EDGE`] and [`MAX_BASE64_BYTES`], a PNG while its scaled PNG fits and
+/// JPEG otherwise, the long edge stepping down until the encoding fits. The
+/// image always counts as re-encoded, since there are no source bytes to send
+/// as they are, and it is never animated. A pixel count above [`MAX_PIXELS`]
+/// is refused first.
+pub fn scale_pixels(image: DynamicImage) -> Result<ScaledImage, ImageRefusal> {
+    let stored = size(image.dimensions());
+    guard(stored)?;
+    reencoded(
+        ImageKind::Png,
+        stored,
+        Orientation::NoTransforms,
+        image,
+        false,
+    )
 }
 
 /// The leading bytes of the source, recognizing its format.
@@ -314,7 +353,7 @@ fn read_header<R: BufRead + Seek>(
         let stored = size(decoder.dimensions());
         let orientation = decoder
             .orientation()
-            .map_err(|error| decode_error(kind, stored, error))?;
+            .map_err(|error| decode_refusal(kind, stored, error))?;
         (stored, orientation)
     };
     guard(stored)?;
@@ -371,7 +410,7 @@ fn first_frame(
             kind,
             reason: "the animation has no frames".into(),
         })?
-        .map_err(|error| decode_error(kind, stored, error))?;
+        .map_err(|error| decode_refusal(kind, stored, error))?;
     let animated = frames.next().is_some();
     Ok((DynamicImage::ImageRgba8(first.into_buffer()), animated))
 }

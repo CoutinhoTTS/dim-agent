@@ -43,67 +43,47 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
-## Command isolation settings
+## Execution settings
 
-The existing `/settings` panel adds a separate `Command isolation` row under Permissions,
-next to `Tool approvals`. This is the only user configuration entry: no native `dimcode isolation`
-command or `/isolation` slash command is added. It uses HostPlatform's
-[trusted local policy management](host-platform-isolation.md#trusted-local-policy-management)
-over the local daemon connection even when model commands cannot run. `/approvals` output
-points to `/settings > Command isolation`; isolation is not another Permission preset.
+The existing `/settings` panel has one `Execution` row, next to `Tool approvals`. It is the only
+user configuration entry for the process boundary: there is no native `dimcode isolation` command,
+no `/isolation` slash command and no policy file. The switches are the user-scope `execution`
+settings source, read through
+[`settings.read`/`settings.update`](appserver/settings-service.md); what each switch grants is the
+[process isolation design](host-platform-isolation.md)'s contract. `/approvals` output says the
+sandbox is in `/settings > Execution`; the sandbox is not another Permission preset.
 
 ```text
-Settings > Command isolation
-  Permission preset   full-access (admission only)
-  Execution node      local
-  Isolation tier      workspace >  [workspace | network | host]
-  Wider requests      ask       >  [ask | deny]
-  Advanced                     >  Read paths / Write paths / Environment names
-  Policy source       defaults
-  Policy path         <execution-home>/host-isolation.json
-
-  Save
-  Reset to defaults
-  Applies to new commands and new persistent shells.
+Settings > Execution
+  Applies to new processes and persistent shells.
+  Sandbox             off  >                    toggle off | on
+  Network             off  >                    ignored while Sandbox is off, and shown as
+                                                "off (ignored while Sandbox is off)"
+  Save                                          write both switches with the read revision
+  Reset to defaults                             confirm, then write both off
+  Reload              Discard edits and read the current settings
 ```
 
-Opening the panel reads the policy snapshot and the current `main` Permission preset separately.
-The snapshot revision stays with the draft, not as a user-entered field. Tier and wider-request
-pickers initially select the draft value, or its effective value when omitted, and change the
-draft only. Editing a version 1 policy's tier/escalation explicitly converts
-its effective settings to version 2, preserving optional lists. Save submits the complete draft
-with the inspected revision; Reset to defaults asks for confirmation, then resets through the
-owner with that revision. Neither action retries a stale revision automatically. A conflict
-keeps the draft, displays the error and offers Reload; reload explicitly discards the draft.
-Successful save/reset replaces the draft with the returned snapshot and displays the
-next-process activation notice. Esc/Back returns to Settings, asking before discarding edits.
+Opening the panel reads `{source: "execution", scope: "user"}` and keeps the returned revision with
+the draft, not as a user-entered field. ↑↓ move, Enter or Space toggles the selected row, Esc
+closes the panel and asks before discarding edits. Save submits both switches with the inspected
+revision; Reset to defaults asks for confirmation, then writes both switches off with that
+revision. Neither action retries a stale revision automatically: a conflict keeps the draft and
+shows the error, and Reload explicitly discards the draft and reads again. The panel keeps the
+stored Network value visible while Sandbox is off, marked as ignored, so what will apply when
+Sandbox is turned on can be read. Loading disables mutation, and a daemon without the settings
+methods displays an unsupported-daemon error instead of falling back to the host.
 
-Advanced opens three list editors for `readOnlyPaths`, `writablePaths` and environment **names**.
-Each has a `Use defaults` choice distinct from an explicit list, an Add input, editable/removable
-entries and a clear-list action; an explicit empty list grants none. The panel explains that
-explicit lists replace defaults. Environment values are never read or displayed. Saving one
-field preserves unrelated explicit settings and omitted lists. Validation errors keep the draft
-and show the offending field without changing persisted policy; no live-policy JSON editing,
-external scratch file, export route or force-write option is needed.
+The row reports the stored switches, not the boundary of a running command: a running process,
+including a persistent shell, keeps the boundary it started with. A platform without a sandbox
+backend is reported by the next process start as `isolation_unavailable`; showing that state on
+the row is [#691](https://github.com/arcships/dim/issues/691)'s item.
 
-Reuse the existing settings/list-panel navigation: arrows select, Enter opens a picker/editor
-or activates an action, Esc returns one level. Only the active panel receives input; a
-confirmation/input overlay returns to its owning panel. Long paths wrap or scroll without
-hiding the controls. At small terminal sizes use the existing panel viewport/scroll behavior,
-not a separate full-screen layout. Loading disables mutation; read failure offers Retry/Back
-without inventing a default snapshot; write failure retains edits. An unavailable management
-method displays an unsupported-daemon error, not a model-exec fallback.
-
-Changing policy is an explicit local-user configuration action, not a model command approval.
-`ask` delegates to Permission/Approval and is not always a prompt. `host` means ordinary
-daemon-user access; `network` changes networking only, not filesystem grants or authentication.
-
-Verification exercises fresh native startup independently of `./dev`: default interactive
-approval displays `network`/`host`, allow runs and deny prevents the payload; version 2 omission
-uses `ask`, explicit deny and version 1 remain restrictive. Flow coverage also exercises `full-access`, allowed tools
-and command rules; local-only management, absence, saves preserving lists, reset, invalid
-fields/roots and revision conflicts. A Homebrew executable
-control distinguishes network from executable access without using real credentials.
+Verification covers what the row shows and what the daemon does with it: the read, the toggle that
+keeps the stored Network value visible while Sandbox is off, the CAS conflict, and a save followed
+by `exec` under the new boundary, where a write outside the workspace fails while the sandbox is on
+and succeeds once it is off. Reset, reload after an external edit, the unsupported-daemon branch
+and a persistent shell started before the change have no flow coverage yet.
 
 ## Commands
 
@@ -451,8 +431,9 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
 ```
 
 A new Session receives the whole policy `{preset}` in `session.create`: no tool lists, which is
-the product profile's form. Agent members copy this creation policy (see branch semantics). On
-resume the flag replaces only the preset; the stored `allowedTools`/`disallowedTools` are kept.
+the product profile's form. New members inherit the requesting branch's current policy
+(see branch semantics). On resume the flag replaces only the preset; the stored
+`allowedTools`/`disallowedTools` are kept.
 The update happens before attach, so no turn submitted by this invocation runs under the old
 preset. Without the flag, `session.create` omits the policy and a resumed Session keeps its own.
 A resume flag against a daemon that does not advertise `session.permission.update` fails before
@@ -492,26 +473,107 @@ no automatic approval. The flag is the explicit choice, so `exec` asks for no co
 
 Permission's state for a branch is `SessionConfig.permissionPolicy` folded with the
 `permission/changed` events of its ancestor prefix and then its own. The CLI writes only `main`,
-the branch it submits to, idles on and exports.
+the branch its permission controls target. Branch-scoped interaction follows
+[Timeline branches](timeline-branches.md).
 
 ```text
-session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
-        |                                         |
-        v                                         v  copied when a member is created
- main: permission/changed (CAS on version)    agent member Sessions (Collaboration)
-   ^  written by --permission on resume
-   |  and /approval or /approvals
-   +-- branch point --> child branch (branch tool): main's policy at the branch point,
-                         then its own changes
+session.create {permissionPolicy} --> SessionConfig.permissionPolicy
+                                       |
+                                       v
+ main: permission/changed --> current branch policy
+        |                      |
+        | branch point         | sample when consuming a new member request
+        v                      v
+ child branch policy      new member Session policy
+        |
+        +-- its own member request --> sample child policy, not main's
+
+Later updates do not reconfigure existing child branches or members.
 ```
 
 - Child branches that the branch tool creates after a change inherit it. Existing child branches
   keep their policy; the CLI does not enumerate or update them. Their approval requests are
   still answered on their own branch id, as today.
-- Agent members copy the leader Session's creation policy. `--permission` on a new Session
-  reaches them; a later change on `main` does not. The confirmation of a switch says so, and
-  requirement R2 below asks Collaboration to copy the leader branch's current policy.
+- New Agent members copy the requesting branch's dispatched policy at the sampling point defined
+  by [member permission inheritance](subagent-tool-approval.md#2-permission-inheritance). Existing
+  members retain their policy, including on reuse. Permission-switch confirmation says that it
+  affects future members created from this branch, not existing members. This is the target
+  contract; delivery is tracked in #257.
 - A fork copies the source's facts, so it starts with the source's current `main` policy (#26).
+
+### Subagent tool approval
+
+This section specifies the client interaction for [Collaboration's member-approval
+route](subagent-tool-approval.md). It is a design requirement, not a claim that the route is
+implemented. Member observation remains read-only ([member conversation](member-conversation.md));
+answering uses the leader's approval surface and never submits directly to a member Session.
+
+When the leader receives `approval.request` for `member_approval_allow`, the CLI queues it like
+any other leader-Session approval, keyed by `(sessionId, branchId, requestId)`. Before enabling
+Allow, call `session.collaboration.approval.get` with that leader request identity. Display the
+returned server-owned member descriptor, not a command or explanation supplied by the leader
+model. A non-main requesting branch is shown even if the user is currently viewing another line.
+
+Scrollback and fullscreen use the same modal prompt and keyboard behavior:
+
+```text
++-- Subagent tool approval ----------------------------------------+
+| Requested by leader branch: research                             |
+| Member: reviewer  Session: <member-session-id>                    |
+| Member branch: main                                             |
+| Tool: exec                                                      |
+| Command: cargo test --workspace                                  |
+| Member reason: Starting processes requires approval              |
+| Leader reason: Allowing a member action requires approval        |
+|                                                                |
+| [Allow once]  [Reject]                                           |
+| y allow once / n reject / Tab move / Enter confirm               |
++-----------------------------------------------------------------+
+```
+
+The line client presents the same fields followed by `Allow this member action once? [y/N]`.
+Enter, another answer or EOF rejects under its normal approval rules. It does not offer `a`.
+`Allow once` answers the **leader** request with `approval.respond allow`; Reject answers that
+request with deny. Collaboration settles the original member request. Do not use the member id
+from the displayed descriptor as the RPC answer target.
+
+For original calls other than `exec`, show the original tool and its full input, prominently the
+resolved `path`, URL or boundary (`sandbox`) where present. Commands, paths and ids remain verbatim;
+localize labels only and sanitize terminal control characters. Wrap/scroll long detail and expose
+all arguments before confirmation; do not silently truncate the action to a title or summary.
+If the original command is simple, this wrapper still has no Always action: it is not that command
+and must not create a command rule. No Full Access button or implicit policy update is offered in
+this prompt; permission settings remain a separate user action.
+
+| Client state | Display and action |
+| --- | --- |
+| Detail loading | Show `Loading member action...`; disable Allow; Reject remains available |
+| Query failure/reloading | Show the error with Retry and Reject; keep Allow disabled and preserve the prompt |
+| Method absent | Explain that this client/server combination cannot review the member action; offer Reject, never fall back to approving an opaque route id |
+| Query returns `ended` | Close as `Member request ended`; deny the still-pending leader wrapper if necessary; no success message |
+| Another leader request arrives | Queue it; do not replace the focused approval or reuse its loaded descriptor |
+| `approval.resolved` / `approval.cancelled` from another client | Retire only the matching full request identity; a resolved answer is not evidence the member tool ran |
+| Member cancellation while open | `session.notice` from Collaboration with kind `memberApprovalEnded` retires the matching branch/route prompt and denies the still-pending wrapper. Recheck detail on focus/accept as well |
+| Leader stop / closing | Use normal stop/settlement; discard local detail state after its request ends |
+
+Accepting Allow performs a fresh detail check before sending the answer. A request ending after
+that check remains safe through server admission and route checks. The prompt's descriptor is
+immutable; focus changes never change its target. A pending member request that ends between
+checks is removed by the terminal notice, and cannot be approved onto another call. A terminal
+notice racing a detail reply wins; an old pending reply never reopens that prompt. Reattachment rebuilds
+from replayed leader approval requests and queries details again; cached pre-disconnect snapshots
+are not grants.
+
+An approval takes existing modal priority over member detail and task panels in both TUI modes;
+closing the panel preserves the leader draft, selected model, selected line and transcript position.
+Incoming requests do not move the user into the member Session. An adopted member ask awaiting the
+leader model may be represented by its normal input/tool activity; it is not yet a user permission
+prompt. Do not label the tool as approved merely because the user allowed the wrapper.
+
+Headless `exec` keeps its existing deny/stop/exit-3 contract for a leader approval. `exec --json`
+may emit the raw notifications, but adds no stdin approval protocol. Non-interactive leader Sessions
+are settled by Collaboration without prompting. A terminal that loses its connection neither
+approves nor cancels work by that fact alone.
 
 ### `/approval`
 
@@ -561,7 +623,7 @@ Switch the main branch to full-access? [y/N]
 Preset unchanged: workspace-write
 
 > /approvals read-only
-Preset (main branch): read-only. Child branches created later inherit it; agent members keep the Session's starting preset.
+Preset (main branch): read-only. Child branches and members created later from main inherit it; existing branches and members keep their policies.
 
 > /approvals deny prefix git push
 Rule already present: deny prefix `git push`
@@ -707,16 +769,11 @@ filter.
   [#257](https://github.com/arcships/dim/issues/257).
 
 **R2. Agent members follow the leader branch's current policy.**
-- Blocked: "a member works under the leader's policy" holds only until the leader changes its
-  preset. Collaboration copies the leader Session's `SessionConfig.permissionPolicy`, so after
-  `/approvals read-only` new members still start with the creation preset.
-- Considered: the CLI updating each member (it cannot see members' creation and would race it);
-  creating Sessions only through the flag (does not cover later changes).
-- Needed: when Collaboration creates a member, it copies the leader branch's dispatched
-  `PermissionState.policy` (Permission's public state) instead of the creation configuration.
-- Ordering: the member takes the policy dispatched when it is created; later leader changes do
-  not reach existing members, as for child branches.
-- Owner: Collaboration (App Server); tracked in [#257](https://github.com/arcships/dim/issues/257).
+- Owner: Collaboration; tracked in [#257](https://github.com/arcships/dim/issues/257).
+- Contract, sampling order, failure and reuse behavior are owned by
+  [member permission inheritance](subagent-tool-approval.md#2-permission-inheritance).
+- CLI permission controls update their target branch only. They do not enumerate members or
+  propagate policy. Their confirmation explains the consequence stated under Branch semantics.
 
 ## Questions
 

@@ -1,6 +1,6 @@
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, Feature, Names, SessionConfig, Timeline,
-    names,
+    names, testing::MinimalHost,
 };
 use dim_agent_types::{ContentBlock, EventKind, InputMode};
 use rutis::Ctx;
@@ -18,7 +18,7 @@ async fn interrupt_commits_before_later_input_without_waiting_for_dispatch() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -173,7 +173,7 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
                 Ok(Box::new(LaterSubscriber::new(names, send.clone())?))
             }),
         );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -281,7 +281,7 @@ async fn a_large_interrupt_and_later_input_need_no_byte_budget() {
             Ok(Box::new(OversizedInterrupt::new(names, disposed.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

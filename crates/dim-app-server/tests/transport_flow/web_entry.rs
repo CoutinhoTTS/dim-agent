@@ -3,7 +3,7 @@ use tokio::io::AsyncReadExt;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 
 /// One HTTP/1.1 exchange on a fresh connection: status, head, body.
-async fn http(address: &str, request: String) -> (u16, String, String) {
+pub(super) async fn http(address: &str, request: String) -> (u16, String, String) {
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut bytes = Vec::new();
@@ -16,7 +16,7 @@ async fn http(address: &str, request: String) -> (u16, String, String) {
 fn get(address: &str, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
 }
-fn post(address: &str, path: &str, origin: &str, body: &str) -> String {
+pub(super) fn post(address: &str, path: &str, origin: &str, body: &str) -> String {
     format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -44,7 +44,7 @@ async fn web_socket(
         Err(error) => panic!("{error}"),
     }
 }
-async fn web_client(address: &str, cookie: &str) -> Client {
+pub(super) async fn web_client(address: &str, cookie: &str) -> Client {
     let mut client = Client {
         transport: Transport::Ws(Box::new(web_socket(address, Some(cookie)).await.unwrap())),
         id: 0,
@@ -60,7 +60,7 @@ async fn web_client(address: &str, cookie: &str) -> Client {
 }
 
 /// A frontend directory as `scripts/stage-web.mjs` lays it out.
-fn frontend_fixture() -> std::path::PathBuf {
+pub(super) fn frontend_fixture() -> std::path::PathBuf {
     let assets = std::env::temp_dir().join(format!("dim-web-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(assets.join("assets")).unwrap();
     std::fs::write(
@@ -254,7 +254,7 @@ async fn a_web_assets_directory_built_for_another_protocol_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn web_entry_admits_token_holders_to_session_methods_only() {
+async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     use dim_agent_capabilities::{
         model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
     };
@@ -305,11 +305,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     .await
     .unwrap();
     let mut local = Client::new_version(&server, false, 3).await;
-    let caps = dim_agent_types::ModelCapabilities {
-        context_window: 32000,
-        max_output_tokens: 2048,
-        ..Default::default()
-    };
+    let caps = dim_agent_types::CatalogCapabilities::with_limits(32000, 2048);
     assert_ok(&local.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-secret"}},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true})).await);
     let opened = local.rpc("web.open", json!({"port":0})).await["result"].clone();
     let address = opened["address"].as_str().unwrap().to_owned();
@@ -402,14 +398,34 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         "session.create",
         "session.permission.update",
         "provider.catalog",
+        "account.providers",
+        "provider.create",
+        "account.status",
+        "account.login.begin",
+        "account.referral",
+        "account.reset_batches",
+        "account.apply_reset",
+        "account.codex.status",
+        "account.grok.status",
+        "settings.read",
+        "mcp.catalog",
+        "mcp.configuration",
+        "mcp.inspect",
+        "mcp.test",
+        "mcp.auth.cancel",
+        "plugin.list",
+        "plugin.install",
+        "skills.catalog",
     ] {
         assert!(features.contains(&json!(method)), "{method}");
     }
     for method in [
         "web.open",
-        "provider.create",
-        "mcp.catalog",
-        "skills.catalog",
+        "web.status",
+        "daemon.shutdown",
+        "ui.open",
+        "ui.shutdown",
+        "provider.import_legacy",
     ] {
         assert!(!features.contains(&json!(method)), "{method}");
     }
@@ -425,6 +441,13 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     );
     for (method, params) in [
         ("provider.list", json!({})),
+        ("provider.management", json!({})),
+        ("account.providers", json!({})),
+        ("account.codex.status", json!({})),
+        ("account.grok.status", json!({})),
+        ("permission.rules", json!({})),
+        ("mcp.catalog", json!({})),
+        ("plugin.list", json!({})),
         (
             "provider.catalog",
             json!({"providerId":"018ec73f-0000-7000-8000-000000000011"}),
@@ -435,14 +458,83 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         assert_ok(&reply);
         assert!(!reply.to_string().contains("fixture-secret"), "{method}");
     }
+    let created = web.rpc("provider.create", json!({
+        "providerId":"018ec73f-0000-7000-8000-000000000012", "displayName":"Web fixture",
+        "connection":{"driverKind":"openai-compatible", "baseUrl":"http://127.0.0.1:1/v1",
+            "auth":{"type":"bearer"}, "credential":{"action":"set","value":"web-fixture-secret"},
+            "headers":{"X-Private":"header-fixture-secret"},
+            "network":{"proxy":"http://proxy-user:proxy-fixture-secret@127.0.0.1:1234"}},
+        "models":[], "enabled":false
+    })).await;
+    assert_ok(&created);
+    let view = web
+        .rpc(
+            "provider.management",
+            json!({"providerId":"018ec73f-0000-7000-8000-000000000012"}),
+        )
+        .await;
+    assert_ok(&view);
+    for secret in [
+        "web-fixture-secret",
+        "header-fixture-secret",
+        "proxy-fixture-secret",
+        "proxy-user",
+    ] {
+        assert!(!created.to_string().contains(secret));
+        assert!(!view.to_string().contains(secret));
+    }
+    assert_eq!(
+        view["result"]["providers"][0]["connection"]["credentialConfigured"],
+        true
+    );
+    assert_eq!(
+        view["result"]["providers"][0]["connection"]["headerNames"],
+        json!(["X-Private"])
+    );
+    let settings = web
+        .rpc(
+            "settings.read",
+            json!({"source":"model-log","scope":"user"}),
+        )
+        .await;
+    assert_ok(&settings);
+    assert_ok(
+        &web.rpc(
+            "settings.update",
+            json!({"source":"model-log","scope":"user",
+        "expectedRevision":settings["result"]["revision"],"document":{"enabled":false}}),
+        )
+        .await,
+    );
+    let mut bare = Client::new_version(&server, true, 3).await;
+    for method in [
+        "provider.management",
+        "account.status",
+        "settings.read",
+        "mcp.test",
+        "mcp.inspect",
+        "plugin.install",
+    ] {
+        assert!(!bare.features.as_array().unwrap().contains(&json!(method)));
+        assert_eq!(
+            bare.rpc(method, json!({})).await["error"]["data"]["appError"],
+            "local_transport_required"
+        );
+    }
     for (method, params) in [
         ("daemon.shutdown", json!({})),
+        ("web.open", json!({})),
+        ("web.status", json!({})),
+        ("ui.status", json!({})),
+        ("ui.shutdown", json!({"uiId":"other-ui"})),
+        ("account.credential", json!({"providerId":"x"})),
+        ("provider.import_legacy", json!({"path":"/private/config"})),
+        ("settings.read", json!({"source":"web","scope":"user"})),
+        ("settings.read", json!({"source":"mcp","scope":"user"})),
         (
-            "provider.delete",
-            json!({"providerId":"x","expectedVersion":1}),
+            "settings.update",
+            json!({"source":"web","scope":"user","document":{}}),
         ),
-        ("account.logout", json!({"providerId":"x"})),
-        ("skills.catalog", json!({})),
     ] {
         assert_eq!(
             web.rpc(method, params).await["error"]["data"]["appError"],

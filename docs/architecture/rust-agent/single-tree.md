@@ -92,9 +92,9 @@ uses `Loader::restart(row_id)`.
 Session extension templates and returns the `session` row, nested under `agent` by App Server.
 `AgentBuilder::plugin_rows` registers the builder's plugins and the row providing
 `partRegistry` as process rows.
-Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
-isolated loader key under the host; both create an `AgentAnchor` instance.
-`build_at(loader, ctx)` uses the host's existing loader.
+一个宿主只有一个 loader，Agent 建在其中：`AgentBuilder::build(loader, anchor)` 使用宿主已有的 loader，Agent
+既不创建根也不创建 loader，关闭 Agent 只关闭它的 Session。测试、示例和 `xtask` 用 `testing` feature 下的最小宿主
+（`testing::MinimalHost`），它像 App Server 一样装配一个根和它的 loader、创建 `AgentAnchor` 实例，并拥有根的生命周期。
 
 登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待必需行：作用域根、必需挂载器和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。必需挂载器把 profile 要求的部件（`require_feature`、`require_part`）交给实例创建，创建等它们 Active；尚无插件登记的必需部件同样让创建等待。失败则回滚整个候选实例。
 
@@ -201,6 +201,12 @@ Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchSc
 `SessionConfig.collaboration_role: Leader | Member` 是 Session 创建时确定的协作角色，缺省 `Leader`，创建后不变。只有 `CollaborationPlugin` 创建成员 Session 时写入 `Member`；`session.create` 不接受该字段。
 
 `agent` 工具按动作公布必填参数：`request` 需要 `prompt` 和 Agent/profile 目标，`cancel`、`close`、`read` 需要 `agentId + sessionId`，`message` 还需要 `content`，`inspect` 需要 `agentId`，`result` 需要 `resultId`；`list` 不需要目标。成员角色只公布 message/read/list。后台命令的 Task ID 由 `exec_stop` 处理，不是成员身份；无效参数不产生协作操作。
+
+Collaboration 的成员工具审批在 `collaboration/approvals.rs` 内实现，沿用既有 Session 和分支部件。
+Session 部件注册决策工具与详情查询；成员分支按自己的 Dispatcher 进度观察 Approval，
+持有原始代次的提交资源并向 leader 分支提交请求与结束输入。leader 分支只在消费已提交输入时
+建立和结束路由，不由成员任务修改其状态。每个分支记录持有自己的资源与任务。成员创建的权限采样发生在 `collaboration/request`
+的消费点，异步创建只传递已采样策略。公开行为与错误由[成员审批及权限继承设计](../../design/subagent-tool-approval.md)拥有。
 
 `SessionConfig.interactive: bool` 表示 Session 有可交互的对象，能回答它的提问和审批，在创建时由 `session.create` 的 `interactive` 参数确定（缺省 `true`），创建后不变。装配从不读取它；关心它的 Session 部件经 `Keyed<SessionConfig>` 或 `Session::config()` 读取（[Session 访问 A.3](../../design/contracts/session-access.md#a3-sessionconfig-fields)）。
 
@@ -392,7 +398,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 | 步骤 | 状态 |
 | --- | --- |
-| runtime：作用域 Plugin 与实例键、实例事件派发、`build_in` | 完成 |
+| runtime：作用域 Plugin 与实例键、实例事件派发、唯一的放置 API `build(loader, anchor)` | 完成 |
 | App Server：进程层 Plugin、`serve`/`RunningServer`、显式 restart（限定集合）与 `service_reloading` | 完成 |
 | 能力重载协议与门面按调用查找 | 完成 |
 | FileStorage、SQLite 资源边界、Aimux 请求对象及开发 resolver 调用方接线 | 完成 |

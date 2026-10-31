@@ -48,6 +48,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Read-only member conversations in the CLI](design/member-conversation.md) (#300, #333, #324, #263)
 - [Subagent model policy](design/subagent-model-policy.md) (#263)
+- [Subagent tool approval and permission inheritance](design/subagent-tool-approval.md): requesting-branch policy, leader decision tools, user review, cancellation and recovery (#19, #29, #257)
 - [CLI background command output](design/background-task-output.md) (#324)
 - [Commands and members in the background-task list](design/background-task-list.md) (#324)
 - [Workflows in the CLI task view](design/workflow-task-view.md) (#264)
@@ -63,7 +64,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
 - [Summary evaluation: reasoning and target length (research, #170)](design/research/summary-eval.md)（[中文](zh/design/research/summary-eval.md)）
-- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md)
+- [F5 HostPlatform process isolation boundary](design/host-platform-isolation.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)

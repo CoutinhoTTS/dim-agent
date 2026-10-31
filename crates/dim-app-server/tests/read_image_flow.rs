@@ -11,9 +11,8 @@ use dim_agent_capabilities::{
     host_platform::{HostPlatform, ShellStatus},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
-use rutis::host::CtxHost;
 use serde_json::json;
 use std::{
     path::PathBuf,
@@ -57,7 +56,7 @@ fn snapshot(vision: bool) -> ModelCapabilitySnapshot {
         },
         capabilities: ModelCapabilities {
             vision,
-            ..Default::default()
+            ..ModelCapabilities::with_limits(128_000, 16_384)
         },
         reasoning: None,
         service_tier: None,
@@ -99,14 +98,12 @@ async fn read_image_reaches_a_vision_model_and_becomes_text_for_others() {
     })
     .unwrap();
 
-    let root = rutis::Ctx::root().unwrap();
     let mut platform = HostPlatform::current(ShellStatus::Unavailable {
         code: "READ_IMAGE_FLOW",
         reason: "Reading the fixture runs no command".into(),
     })
     .unwrap();
     platform.home = home.clone();
-    root.provide_as::<HostPlatform>(Arc::new(platform)).unwrap();
     let requests: Arc<Mutex<Vec<Arc<ModelRequest>>>> = Default::default();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
@@ -123,8 +120,12 @@ async fn read_image_reaches_a_vision_model_and_becomes_text_for_others() {
             output_root: home.join("command-output"),
         },
     );
-    let agent = builder.build_in(&root);
-    agent.start().await.unwrap();
+    let agent = MinimalHost::start_with(&builder, |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(platform))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
 
     for vision in [true, false] {
         let before = requests.lock().unwrap().len();
@@ -194,6 +195,5 @@ async fn read_image_reaches_a_vision_model_and_becomes_text_for_others() {
         session.close().await.unwrap();
     }
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
     std::fs::remove_dir_all(&home).unwrap();
 }

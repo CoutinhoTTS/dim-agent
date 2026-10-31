@@ -15,7 +15,7 @@
 | 连接配置 | UUID 新建与局部更新，保留客户端不能回读的秘密 |
 | 断开与删除 | 断开时原子清除凭据并禁用；删除自定义项时清理自有选择 |
 | 获取模型 | 探测未保存连接，不写入 Provider、目录、凭据或选择 |
-| 模型管理 | 区分默认与用户模型，分别处理描述覆盖和显式 New API 路由 |
+| 模型管理 | 区分默认与用户模型，分别处理描述覆盖和显式 New API 路由；两项上限各自记录声明来源，没有任何来源的模型列出原因且不可选（§3.5） |
 | 模型偏好 | 客户端读取持久偏好，并在明确采用模型时携带完整目标 |
 | 账号与用量 | 复用账号 owner、合同与错误；不增加静态 Provider 用量配置 |
 | 多客户端 | 记录 CAS，打开及自身写入后重读，不推送变更通知 |
@@ -74,7 +74,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `account` | 可选 `{namespace, loginMethods, state}`；namespace 为 `account` / `account.codex` / `account.grok`，登录方式为 `browser` / `device`，state 沿该 namespace 现有公开 status 回复；静态 authority 不含该字段 |
 | `actions` | 当前可用操作名：`update`、`delete`、`refresh`、`models.create`、`models.edit`、`models.reset`、`models.delete`、`models.set_enabled`、`preferences.update`、`login`、`logout`、`usage`；没有逐操作原因代码 |
 | `connection` | 下表静态记录安全连接；连接配置只在可选账号包内时为 `null` |
-| `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,actions:string[],endpointOverride?:NewApiEndpoint}[]`；路由覆盖限 §6 可执行子集。仅账号无本地目录记录时为 `null`，坏目录报错。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制 |
+| `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,missingLimits:("contextWindow"\|"maxOutputTokens")[],actions:string[],endpointOverride?:NewApiEndpoint}[]`；路由覆盖限 §6 可执行子集。仅账号无本地目录记录时为 `null`，坏目录报错。`missingLimits` 指出没有任何来源声明的上限（§3.5），否则为空。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制 |
 | `preferences` | model ID 到既有 `ModelPreferences` 的映射 |
 | `modelsListed` | 读取和不改 `baseUrl`、`credential`、`headers` 的更新不含该字段；其余更新说明本次写入如何处理记录自身的模型：`listed`、`bundled`、`unsupported` 或 `disabled` |
 
@@ -242,6 +242,81 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 原生 service 与 RPC 使用相同的 create、部分更新与模型操作。新自定义 Provider 使用规范 UUID；
 现有内置及显式导入的非 UUID 身份继续通过既定的部分写入接口编辑。
 
+### 3.5 声明的模型上限
+
+模型的上下文窗口与最大输出是来源声明的事实，Provider 从不假定。每项上限的声明来源由目录
+已有机制记录：
+
+| 来源 | 记录方式 | 作用范围 |
+| --- | --- | --- |
+| Provider 描述 | 存储描述上的 `capabilityOverrideFields`；描述中的非正值视为未声明 | 该描述所述的模型 |
+| 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider：条目仅在其 `metadata.raw` 声明处才有上限，其余取值在捆绑加载时删除；该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据仍是声明 | 匹配到的模型，或该 Provider 的全部模型 |
+| 用户 | 同一 `capabilityOverrideFields` 字段，写在描述覆盖或用户模型上：`models.edit` 为它编辑的每项上限写入，两个旧版导入器为导入时保留的每项值写入 | 覆盖所指的模型 |
+
+缺失是类型上的值，不是数字。目录侧使用 `CatalogCapabilities`：两项上限都是可选的，没有来源
+声明时缺省；存储描述、其覆盖、用户模型、投影结果和托管目录的模型都用它。面向 Session 的
+`ModelCapabilities` 两项上限仍然必填且为正，并且没有默认值，因此任何投影、夹具或回退都无法
+凭空造出窗口。只有一个转换把目录项变成 `ModelCapabilities`，任一上限缺失时它拒绝；这条转换
+就是采用路径，所以未声明的模型无法被采用。
+
+去掉默认值对工作区外的扩展 crate 是破坏性变更：用 `ModelCapabilities::default()` 或
+`..Default::default()` 构造的值不再编译。替代品是 `ModelCapabilities::with_limits`
+（`crates/dim-agent-types/src/model.rs`）；还需要设置其他字段的值保留结构体字面量，并以该
+构造函数为基础。
+
+线上形状：`provider.catalog` 的 `ProviderModel.capabilities` 与 `provider.management` 的
+`models[].model.capabilities` 把 `contextWindow`、`maxOutputTokens` 作为可选数字，缺键即
+未声明，`missingLimits` 指出缺的项。所有树内客户端都按可选取值：`dim-cli` 以
+`CatalogCapabilities` 解码目录项（`crates/dim-cli/src/configure.rs`、
+`crates/dim-cli/src/session_host.rs`），`dim-acp` 只按 ID、名称和不可用原因列出模型
+（`crates/dim-acp/src/config.rs`），Web 工作区读取同样三个字段（`web/src/rpc/read.ts`），
+`dim-client` 不解码该回复。`PROTOCOL_VERSION` 保持 3：客户端随守护进程一起发布，写入这种
+目录的构建就是读取它的构建，且 Web 入口拒绝为其他协议版本构建的资源
+（`crates/dim-app-server/src/web_entry.rs`、`web/src/rpc/client.ts`）。此变更之前构建、
+要求两个数字都在的协议 v3 客户端无法解码含未声明模型的目录；`hello.features` 不协商该形状。
+
+读取结果说明缺哪几项：`ProviderModel` 与 `ManagementModel` 带 `missingLimits`，若它是第一个
+适用原因，`unavailableReason` 为 `limits_undeclared`。缺任一项的模型永不可选：`select`、
+`configuration`（显式目标、默认解析和 Agents profile）、`apply_preferences`、
+`preferences.update` 以及每次请求前、取得凭据之前的可用性校验都沿既有不可用路径拒绝，请求
+路径的错误指出缺失的上限。启用或禁用这样的模型不改变其可选性。
+
+有效目录按来源补上缺失的上限：默认项和用户模型来自捆绑匹配，托管目录模型来自同一捆绑回退，
+描述覆盖未自行声明的上限则来自其基础项。probe、refresh 与创建只保存声明的值；`models.reset`
+让模型回到发现结果，发现结果没有声明时它重新变为未声明。
+
+格式 v24 保存客户端给出的上限却不写标记，其探测也为每个缺失字段补上假定值（窗口 128000、输出
+16384）。因此格式升级与两个旧版导入器都通过同一个函数，对用户模型、静态记录的描述覆盖与自建
+Provider 自有模型的每项上限单独判定：已列入 `capabilityOverrideFields` 或由 `metadata.raw` 声明的
+上限是声明；未标记且恰等于假定值的上限删除，因为它可能是探测填充；其余数值只可能来自输入或
+清单，保留并补上标记。该规则宁可再次询问，也不保留可能的假定值：用户若恰好输入 128000 或
+16384，升级后该项显示为未声明，用 `--set-missing-limits` 或 `/models` 重新声明即可。
+
+这些写入者会写标记：`models.edit` 为它编辑的每项上限写；两个旧版导入器为导入时保留的每项值写，
+描述覆盖同样写。`provider.create`、`provider.models.create` 与旧版探测都不写。静态记录的描述覆盖
+按逐字段规则，因为两个旧版导入器把旧库的 `modelConfigOverrides` 原样复制、不写标记，其中的值是
+用户输入；托管记录的描述覆盖按严格规则，因为它只由 `models.edit` 写入，而后者为它编辑的每项上限
+写标记。
+
+两个旧版导入器沿用同一划分：旧记录中 `bundled`/`remote` 行的 `models` 属于投影输出，按严格
+规则处理；用户模型与该行的描述覆盖按逐字段规则处理。`modelsSource` 为 `user` 的行的 `models`
+不是该行的输入，而是记录起步的种子（既有记录的 models，或没有目标时捆绑定义），导入保持它的
+原样，不加标记也不删除；捆绑定义的种子在捆绑加载处就已按严格规则处理。
+
+Session 保留已采用的能力快照。模型变为未声明的 Session 仍可恢复并保持可读；下一次请求在
+解析器处失败，错误指出缺失的上限，且发生在凭据或网络 I/O 之前。两项都声明后再选择该模型
+即采用新值；在此之前 `/usage` 报告已采用快照，与其他描述修改相同（§6）。
+
+托管账号目录遵循同一规则：中继与捆绑目录都未声明上限的模型按缺失投影，并保留其
+`unavailableReason`（托管目录投影）；其自有家族规则仍然声明窗口。宿主只在模型带原因时接受
+缺失的上限。[模型文件配置](../../../../crates/dim-cli/README.md#api-key-configuration)
+不变：它仍在加载时拒绝缺少任一项的条目并指出该条目
+（[#517](https://github.com/arcships/dim/issues/517)）。
+
+存储记录以缺省键表示缺失。[#522 格式决定](../../../design/appserver/native-storage-format.md#522-v26-格式决定)
+是引入它的格式决定，§6 说明升级对既有记录做了什么：清单投影的模型在 `metadata.raw` 中保留它来自的清单项目，
+因此该项目声明的上限即使存储条目没有标记也仍是声明，只删除没有任何来源声明的上限。
+
 ## 4. 客户端集成
 
 ```text
@@ -287,6 +362,17 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 刷新成功时记录它写入的版本，因此列举为空的结果不会再次询问；记录被写入（启停用、
 改端点）后再问一次。读取或刷新失败时该 provider 的提示行保留；面板关闭后才到达的
 回复只记录这次填充，下次打开再读。
+
+未声明的模型不是选择器行。每个至少有一个此类模型的 Provider 在模型行之后保留一行灰色提示：
+统计需要窗口的模型数量并给出声明命令；该 Provider 没有任何可选模型时，这条提示取代空 Provider
+行，而不是与之并列。`dimcode models PROVIDER --set-limits MODEL --context-window N
+--max-output-tokens N` 通过 `models.edit` 为单个模型声明两项上限；
+`--set-missing-limits --context-window N --max-output-tokens N` 为列表标为 `undeclared`
+的每个模型声明，即缺失上限是唯一障碍的启用模型；被禁用或因其他原因不可用的模型不写入。
+两种形式都必须同时给出两个具名值。两者都不能与
+`--refresh` 或 `--clear-preferences` 组合。两者都先读取记录版本，串接每次 `models.edit`
+回复的版本，然后像 `models PROVIDER` 一样打印目录。列表把上限未声明的模型标为
+`undeclared`，并在行下列出声明命令。
 
 ```text
 Select a model
@@ -345,6 +431,11 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 默认列表中的 ID 不同；不自动
 改名/覆盖、不持久化警告，也不新增迁移服务。
 
+两项模型上限另有自己的格式决定：[#522 格式决定](../../../design/appserver/native-storage-format.md#522-v26-格式决定)
+把未声明的上限变为缺省键（上一格式的读取器两种取值都解不了），并在启动事务内原地升级既有记录，
+而不是沿用版本号。该决定写明本次改动引入的格式版本、启动事务执行的改写，以及旧二进制的启动拒绝；
+§3.5 说明有效目录随后如何按来源补齐声明值。
+
 旧 v19 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
 不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v19 代码读取并实际重写新记录。
 不增加存储 owner 门禁、删除历史或格式号；未知数据库格式仍按原规则拒绝并保留字节。
@@ -354,6 +445,7 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 | 凭据、base URL、headers、代理、超时 | 下次请求解析当前连接；已发 I/O 保持其准入连接 |
 | 模型 descriptor/capability、持久偏好 | 已采用快照不变，下次显式采用生效；偏好还需客户端显式传入 |
 | 禁用/删除 Provider 或模型 | 下次请求/采用返回不可用/不存在，不强制切换或跨写引用 |
+| 声明上限，或移除其来源 | 已采用 Session 保留快照。出现未声明的上限时，下一次请求在凭据或网络 I/O 之前失败并指出缺失项；两项都声明后，重新选择该模型即采用（§3.5） |
 | refresh 或 endpoint override 改变有效路由 | 已采用路由标记不匹配时失败，提示重新选择；无标记 Session 在下次请求使用当前路由，两种修改均可能破坏协议相关历史，或丢失按旧协议映射的 effort/tier 选项 |
 
 静态 New API 选择时，Provider 在现有 ModelSelection.metadata.extensions["providerProtocol"]
@@ -369,12 +461,16 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 这是现有 metadata 扩展中的 Provider 自有数据，不加 core 字段、epoch 或注册表。
 托管账号原有 route/lease 校验保持。
 
-旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected。明确映射连接、默认、
-用户覆盖/新增、禁用、偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。
-非空静态用量设置、未支持 retryConfig/capabilityDefaults 或其他未映射字段拒绝并保留源，
-按以下冻结映射处理。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
-草稿、模板、用量回复、已解析凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、
-释放租约并结算已接受调用后移除服务。
+旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected；冻结映射由
+Provider 以单次纯转换持有：输入旧行字段、既有目标记录与捆绑目录，输出原生记录与省略
+的源字段，或拒绝原因。provider.import_legacy 与 Migration 的 Provider 步骤都调用它；
+Migration 保留自己的快照、回执、账本与报告。明确映射连接、默认、用户覆盖/新增、禁用、
+偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。无原生对应物的字段丢弃并
+报告为省略，该项照常导入：非空静态用量设置、retryConfig、capabilityDefaults，以及映射
+之外的 metadata 键。未知描述字段与启用/禁用列表冲突会改变模型本身，仍拒绝该项。不覆盖
+已有目标、不复制 OAuth grants、不因重复导入复活删除项。草稿、模板、用量回复、已解析
+凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、释放租约并结算已接受调用后
+移除服务。
 
 冻结的旧库结构通过 `modelsSource` 区分模型来源：
 
@@ -382,14 +478,26 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | --- | --- |
 | `modelsSource: bundled/remote`、`models` | 默认描述；只有 `remote` 设置 `remoteModels` |
 | `modelsSource: user`、`models` | `userModels`；已有内置项保留原生捆绑默认，ID 冲突则拒绝该项 |
-| `modelConfigOverrides` | 匹配用户模型的描述替换该用户项；其余保留为描述覆盖，已消失的默认也不会变成用户模型 |
+| `modelConfigOverrides` | 匹配用户模型的描述替换该用户项；其余保留为描述覆盖，已消失的默认也不会变成用户模型；其中每项上限保留取值并补上标记（§3.5） |
 | `metadata.enabledModelIds/disabledModelIds` | 默认和用户模型的显式禁用；列表冲突则拒绝 |
 | `metadata.modelPreferences` | 既有严格 `ModelPreferences` 字典 |
 | `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
 | `provider_selections` | 沿既有目标校验和导入账本导入明确的 scoped 选择 |
 
-不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值拒绝该项。
-其他 metadata 键、未知描述字段同样拒绝，源文件字节不变。
+旧行 source 为 builtin 时映射到该 ID 的内置项。没有目标时导入从该内置项的捆绑定义
+开始，与在已播种目标上的导入完全相同，因此 ID 没有捆绑定义的 builtin 行会被拒绝；已有
+目标必须是未改动的播种记录。custom 行的 ID 属于捆绑目录时拒绝。两个入口用同一解析器
+解析并校验既有目标记录，校验不通过则拒绝该项。Migration 在转换之前把不是未改动播种记录的
+目标归为 Conflict 且不带原因；其余情况下转换的拒绝原因同时到达两个入口。
+
+provider_selections 同样共用一次转换：工作区作用域是已存在目录的规范路径，所选模型
+必须在 Provider 目录中对该记录可用。目录已不存在的选择按该原因拒绝，它本就无法匹配。
+较早导入过的 Provider 行仍可供其选择使用：两个入口都从导入账本读取该记录，已存记录
+无法读取时选择按该读取错误拒绝。provider.import_legacy 的回复在已导入项上增加 omitted
+（转换丢弃的源字段名），导入的选择项不带该字段；该字段为增量，协议 v3 不变。
+
+不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置，也不报告。
+源文件字节不变。
 
 ## 7. 验收与交付
 
@@ -400,6 +508,7 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | 模型/路由 | 内置/自定义用户模型真实调用；create 的 probe 默认项，以及随后新增/编辑/启停/删除、refresh 后保留且不成为默认覆盖的手动/模板项；仅改端点时未有 descriptor 覆盖的默认项仍为 source:"default"，descriptor 继续随 refresh 更新；已有 descriptor 覆盖不变；reset 保留路由覆盖，clear 保留 descriptor 覆盖；显式/profile/默认选择均建标记，无目标 F3 与 Collaboration inherit 保留缺失；inherit 创建时不重新解析，首次请求校验已有标记；refresh 和 endpoint override 改路由时拒绝不匹配标记，重选后 effort/tier 正确；无标记 Session 在路由未变时继续工作，覆盖两种改变路由风险；显式删除用户模型解决 refresh 冲突 |
 | Probe | 未保存探测、合并当前记录且不检查版本、换 host 使用原凭据前校验，失败/超时/卸载无写入，过期回复丢弃，不宣称客户端可取消 |
 | 偏好 | 独立 set/clear、重启，空 patch/不支持值为业务错误，格式错误为边界错误；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
+| 模型上限 | 描述未声明上限的探测模型带 missingLimits 列出，被选择、采用和偏好拒绝；CLI 声明两项后变为可选，已采用快照带上声明的窗口；捆绑目录匹配保持已声明；托管模型缺上限时保留原因而不是替代窗口；模型文件配置仍拒绝缺任一项的条目 |
 | 账号 | 既有登录/登出/用量；托管目录同账号 refresh 保留偏好、descriptor 覆盖和禁用项，换账号则一起清空；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
 | 存储/导入 | 旧 v19 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
@@ -436,4 +545,6 @@ RPC 流程覆盖 CAS 与丢失 create 回复后的恢复。Desktop UI 验收归�
 管理读取只保留一份编辑快照；原 catalog 服务选择。create/update/probe 分别承担可恢复
 identity、保留秘密的局部写和未保存网络探测；Disconnect 复用 update。独立用户模型列表
 用于区分默认覆盖并让新增项可执行；路由标记沿已有 metadata 保留采用时协议含义。
+声明的上限不需要新状态：目录已有的标记与匹配说明值是否存在，缺失由目录类型承载，原因在投影处
+推导，因此不增加平行模型列表、第二份目录或 `limits` 实体。
 不需要通知、跨删除版本服务、模板实体、凭据抽象或第二份客户端配置。

@@ -17,6 +17,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `collaboration` | process | Collaboration | Rust-only | — |
 | `collaborationDirectory` | process | CollaborationDirectory | Rust-only | — |
 | `connectionHub` | process | Connection | Rust-only | — |
+| `executionSettingsHost` | process | ExecutionSettings | Rust-only | — |
 | `fileStorage` | process | FileStorage | Rust-only | — |
 | `grokOAuthService` | process | GrokOAuth | Rust-only | — |
 | `hostPlatform` | process | HostPlatform | Rust-only | — |
@@ -48,6 +49,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `agentConfig` | session | SessionScope | Rust-only | — |
+| `collaborationConfig` | session | SessionScope | Rust-only | — |
 | `collaborationSession` | session | CollaborationSession | Rust-only | — |
 | `commandRulesHost` | session | CommandRules | Rust-only | — |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | Rust-only | — |
@@ -67,6 +69,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `sessionLoader` | session | SessionScope | Rust-only | — |
 | `sessionMethods` | session | SessionMethods | yes | `register` async |
 | `sessionSkills` | session | Skills | Rust-only | — |
+| `skillsConfig` | session | SessionScope | Rust-only | — |
 | `timelineFactory` | session | SessionScope | Rust-only | — |
 | `timelineStore` | session | SessionScope | Rust-only | — |
 | `timelineTree` | session | TimelineTree | Rust-only | — |

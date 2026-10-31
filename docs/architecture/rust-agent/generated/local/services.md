@@ -29,10 +29,10 @@ flowchart LR
     p55["BranchScope"]
   end
   subgraph process["process"]
-    p4["rutis-loader"]
+    p2["rutis-loader"]
     p26["SkillsCatalog"]
-    p3["HostPlatform"]
-    p2["FileStorage"]
+    p5["HostPlatform"]
+    p4["FileStorage"]
   end
   subgraph session["session"]
     p30["session"]
@@ -137,9 +137,9 @@ flowchart LR
   p66 -->|"dim_agent_capabilities::permission::Permission@main"| p58
   p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p58
   p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p58
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p26
-  p2 -->|"dim_agent_capabilities::file_storage::FileStorage"| p3
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p51
+  p5 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p26
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p5
+  p5 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p51
   p45 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p51
   p48 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p51
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p51
@@ -155,13 +155,15 @@ flowchart LR
   p31 -->|"dim_agent_runtime::config::SessionIdentity@session"| p48
   p31 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p48
   p40 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p47
+  p31 -->|"dim_agent_capabilities::skills::SkillsConfig@session"| p47
   p26 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p47
   p49 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p47
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p47
   p31 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p47
   p31 -->|"dim_agent_runtime::scope::SessionLoader@session"| p47
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p46
+  p5 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p46
   p45 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p46
+  p39 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p46
   p48 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p46
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p46
   p31 -->|"dim_agent_runtime::config::SessionIdentity@session"| p46
@@ -172,7 +174,7 @@ flowchart LR
   p45 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p42
   p49 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p42
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p42
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p41
+  p5 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p41
   p40 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p41
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p41
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p40

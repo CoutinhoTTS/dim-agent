@@ -826,7 +826,7 @@
           },
           {
             "service": "dim_agent_capabilities::host::ModelHost",
-            "scope": "rutis-loader/shared/dim-agent-values/2@24",
+            "scope": "rutis-loader/shared/dim-agent-values/2@26",
             "status": "Ready"
           },
           {
@@ -854,7 +854,7 @@
           },
           {
             "service": "dim_agent_capabilities::host::ModelHost",
-            "scope": "rutis-loader/shared/dim-agent-values/2@24",
+            "scope": "rutis-loader/shared/dim-agent-values/2@26",
             "provider": 28,
             "generation": 1
           },
@@ -1783,7 +1783,7 @@
     "shuttingDown": false,
     "plugins": [
       {
-        "id": 4,
+        "id": 2,
         "parent": 1,
         "name": "rutis-loader",
         "state": "Active",
@@ -1794,7 +1794,7 @@
       },
       {
         "id": 26,
-        "parent": 4,
+        "parent": 2,
         "name": "SkillsCatalog",
         "state": "Active",
         "generation": 1,
@@ -1811,7 +1811,7 @@
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "scope": "dim-agent/1",
+            "scope": null,
             "status": "Ready"
           }
         ],
@@ -1819,7 +1819,7 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 3,
+            "provider": 5,
             "generation": 1
           },
           {
@@ -1830,15 +1830,15 @@
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "scope": "dim-agent/1",
-            "provider": 5,
+            "scope": null,
+            "provider": 3,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 3,
+            "provider": 5,
             "declared": true,
             "external": true
           },
@@ -1850,19 +1850,24 @@
           },
           {
             "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 5,
+            "provider": 3,
             "declared": true,
             "external": true
           }
         ]
       },
       {
-        "id": 3,
-        "parent": 1,
+        "id": 5,
+        "parent": 2,
         "name": "HostPlatform",
         "state": "Active",
         "generation": 1,
         "injects": [
+          {
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "scope": null,
+            "status": "Ready"
+          },
           {
             "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
@@ -1871,17 +1876,30 @@
         ],
         "resolved": [
           {
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "scope": null,
+            "provider": 1,
+            "generation": 0
+          },
+          {
             "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
-            "provider": 2,
+            "provider": 4,
             "generation": 1
           }
         ],
-        "reads": []
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "provider": 1,
+            "declared": true,
+            "external": false
+          }
+        ]
       },
       {
-        "id": 2,
-        "parent": 1,
+        "id": 4,
+        "parent": 2,
         "name": "FileStorage",
         "state": "Active",
         "generation": 1,
@@ -1893,13 +1911,13 @@
     "bindings": [
       {
         "service": "dim_agent_capabilities::file_storage::FileStorage",
-        "provider": 2,
+        "provider": 4,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_agent_capabilities::host_platform::HostPlatform",
-        "provider": 3,
+        "provider": 5,
         "generation": 1,
         "removing": false
       },
@@ -1911,13 +1929,13 @@
       },
       {
         "service": "dyn rutis_bridge::runtime::definitions::PluginMounter",
-        "provider": 4,
+        "provider": 2,
         "generation": 1,
         "removing": false
       },
       {
         "service": "rutis_loader::loader::Loader",
-        "provider": 4,
+        "provider": 2,
         "generation": 1,
         "removing": false
       }
@@ -2013,7 +2031,7 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 3,
+            "provider": 5,
             "generation": 1
           },
           {
@@ -2044,7 +2062,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 3,
+            "provider": 5,
             "declared": true,
             "external": true
           },
@@ -2296,6 +2314,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::skills::SkillsConfig@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
             "scope": null,
             "status": "Ready"
@@ -2326,6 +2349,12 @@
             "service": "dim_agent_capabilities::prompt_registry::PromptRegistry@session",
             "scope": null,
             "provider": 40,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::skills::SkillsConfig@session",
+            "scope": null,
+            "provider": 31,
             "generation": 1
           },
           {
@@ -2363,6 +2392,12 @@
           {
             "service": "dim_agent_capabilities::prompt_registry::PromptRegistry@session",
             "provider": 40,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::skills::SkillsConfig@session",
+            "provider": 31,
             "declared": true,
             "external": true
           },
@@ -2416,6 +2451,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::timeline_tree::TreeCommands@session",
             "scope": null,
             "status": "Ready"
@@ -2440,13 +2480,19 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 3,
+            "provider": 5,
             "generation": 1
           },
           {
             "service": "dim_agent_capabilities::methods::SessionMethods@session",
             "scope": null,
             "provider": 45,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "scope": null,
+            "provider": 39,
             "generation": 1
           },
           {
@@ -2477,13 +2523,19 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 3,
+            "provider": 5,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_agent_capabilities::methods::SessionMethods@session",
             "provider": 45,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::prompt_guide::GuideEntries@session",
+            "provider": 39,
             "declared": true,
             "external": true
           },
@@ -2691,7 +2743,7 @@
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
             "scope": null,
-            "provider": 3,
+            "provider": 5,
             "generation": 1
           },
           {
@@ -2710,7 +2762,7 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::host_platform::HostPlatform",
-            "provider": 3,
+            "provider": 5,
             "declared": true,
             "external": true
           },
@@ -3060,6 +3112,12 @@
       {
         "service": "dim_agent_capabilities::prompt_registry::PromptRegistry@session",
         "provider": 40,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::skills::SkillsConfig@session",
+        "provider": 31,
         "generation": 1,
         "removing": false
       },

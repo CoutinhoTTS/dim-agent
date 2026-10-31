@@ -37,13 +37,17 @@ fn view_version(view: &View) -> String {
 /// The Session's current Skill view, or why it is unavailable.
 pub struct SessionSkills {
     current: Mutex<View>,
+    /// The how-to-use text: [`super::INSTRUCTIONS`] or the factory
+    /// configuration's replacement.
+    instructions: Arc<str>,
     /// Notified when the current view changes.
     changed: watch::Sender<()>,
 }
 impl SessionSkills {
-    fn new(view: View) -> Self {
+    fn new(view: View, instructions: Arc<str>) -> Self {
         Self {
             current: Mutex::new(view),
+            instructions,
             changed: watch::Sender::new(()),
         }
     }
@@ -89,8 +93,8 @@ impl LoadPrompt for SessionSkills {
             if target.source == INSTRUCTIONS_SOURCE {
                 return Ok(Some(PromptEntry {
                     source: target.source,
-                    version: sha256_version(super::INSTRUCTIONS),
-                    body: super::INSTRUCTIONS.into(),
+                    version: sha256_version(&self.instructions),
+                    body: self.instructions.to_string(),
                     scope: target.scope,
                     delivery: PromptDelivery::System,
                     order: 30,
@@ -126,6 +130,13 @@ pub struct SkillsPlugin {
     prompts: Key<PromptRegistry>,
     tools: Key<ToolRegistry>,
     skills: Key<SessionSkills>,
+    /// The assembly's [`super::SkillsConfig`], when the assembly installed
+    /// the capability ([`super::install_with_config`]): the install call
+    /// registers the name and provides the value. The app server registers
+    /// the parts from its catalog plugin for every assembly with a home and
+    /// not every such assembly installs the capability, so a part with no
+    /// name to declare keeps the built-in [`super::INSTRUCTIONS`].
+    factory: Option<Key<super::SkillsConfig>>,
 }
 impl SkillsPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, Error> {
@@ -138,6 +149,10 @@ impl SkillsPlugin {
             prompts: names.key()?,
             tools: names.key()?,
             skills: names.key()?,
+            factory: names
+                .registered::<super::SkillsConfig>()
+                .then(|| names.key::<super::SkillsConfig>())
+                .transpose()?,
         })
     }
 }
@@ -146,14 +161,16 @@ impl DynPlugin for SkillsPlugin {
         "Skills"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
+        let mut keys = vec![
             self.catalog.erase(),
             self.config.erase(),
             self.loader.erase(),
             self.lifecycle.erase(),
             self.prompts.erase(),
             self.tools.erase(),
-        ]
+        ];
+        keys.extend(self.factory.iter().map(Key::erase));
+        keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -201,7 +218,17 @@ impl DynPlugin for SkillsPlugin {
                     }
                 })
                 .await?;
-            let skills = Arc::new(SessionSkills::new(initial));
+            // The factory configuration's text replaces the built-in
+            // instructions ([`super::SkillsConfig`]).
+            let instructions: Arc<str> = match &self.factory {
+                Some(key) => ctx
+                    .require_at(key)?
+                    .instructions
+                    .clone()
+                    .unwrap_or_else(|| super::INSTRUCTIONS.into()),
+                None => super::INSTRUCTIONS.into(),
+            };
+            let skills = Arc::new(SessionSkills::new(initial, instructions));
             let owner = skills.clone();
             let stopped = lifecycle.clone();
             tasks.spawn(async move {

@@ -162,16 +162,18 @@ async function fixture(t, options = {}) {
   let contribution
   let methods
   let part
+  const hosts = {
+    managementMethods: { async register(namespace, declarations, call) { methods = call } },
+    partRegistry: { async registerDefinition(scope, name, definition) { part = { scope, name, definition } } },
+  }
+  const all = { ...services, ...hosts }
   const open = async () => {
-    loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services: {
-      ...services,
-      managementMethods: { async register(namespace, declarations, call) { methods = call } },
-      partRegistry: { async registerDefinition(scope, name, definition) { part = { scope, name, definition } } },
-    } })
+    loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services: all })
     assert.equal(part.scope, 'session')
     tool = await load(part.definition, { services: {
       workflowRuns: loaded.service('workflowRuns'),
       toolRegistry: { async register(declaration, execute) { contribution = { declaration, execute } } },
+      guideEntries: { async register() {} },
     } })
   }
   await open()
@@ -191,7 +193,7 @@ async function fixture(t, options = {}) {
     if (reply.kind !== 'value') throw new Error(JSON.stringify(reply))
     return ['completed', 'failed', 'stopped', 'interrupted'].includes(reply.value.state) ? reply.value : undefined
   })
-  return { state, services, method, execute, settled, event, retireTool: () => tool.unload(),
+  return { state, services: all, method, execute, settled, event, retireTool: () => tool.unload(),
     retireOwner: () => loaded.unload(), reload: async () => { await close(); await open() } }
 }
 
@@ -982,4 +984,18 @@ test('reload retries deletion after it succeeded but removing the ownership reco
   await f.reload()
   await until(() => JSON.parse(f.state.stored).runs.length === 100)
   assert.deepEqual(f.state.deletes, ['owned-0', 'owned-0'])
+})
+
+test('a report guidance with a line break is refused when the plugin loads', async t => {
+  const f = await fixture(t)
+  for (const report_guidance of ['Read the run.\nThen decide.', 'Read the run.\rThen decide.']) {
+    let unexpected
+    try {
+      await assert.rejects(async () => {
+        unexpected = await load(plugin, { services: f.services, config: { packages: [], report_guidance } })
+      }, /report_guidance must be one line: the entry names the report's last line as guidance/)
+    } finally {
+      await unexpected?.unload()
+    }
+  }
 })
