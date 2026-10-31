@@ -469,8 +469,6 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_active = allocation::live();
     let peak = allocation::peak();
     let rss_active = rss_kb();
-    let trim_active = unsafe { malloc_trim(0) };
-    let rss_active_trim = rss_kb();
     let tasks_active = tokio::runtime::Handle::current()
         .metrics()
         .num_alive_tasks();
