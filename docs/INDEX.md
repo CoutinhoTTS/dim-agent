@@ -65,7 +65,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
 - [Summary evaluation: reasoning and target length (research, #170)](design/research/summary-eval.md)（[中文](zh/design/research/summary-eval.md)）
-- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md)
+- [F5 HostPlatform process isolation boundary](design/host-platform-isolation.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)

@@ -155,7 +155,8 @@ pub enum Effect {
     ReadIsolation,
     SaveIsolation {
         expected_revision: String,
-        policy: dim_agent_types::isolation::IsolationPolicy,
+        sandbox: bool,
+        network: bool,
     },
     ResetIsolation(String),
     SetModelPolicy {
@@ -465,14 +466,10 @@ impl PermissionPrompt {
         } else {
             collapse(&self.reason)
         };
-        let mut lines = vec![
+        vec![
             format!("# {description}"),
             format!("$ {}", self.command_preview()),
-        ];
-        if let Some(Value::String(sandbox)) = self.input.get("sandbox") {
-            lines.push(tf("boundary: {sandbox}", &[("sandbox", sandbox)]));
-        }
-        lines
+        ]
     }
 
     fn full_access(&self) -> Effect {
@@ -1562,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn escalated_exec_prompt_shows_the_requested_boundary() {
+    fn exec_prompt_shows_the_command_without_a_boundary() {
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let p = PermissionPrompt::new(
             "r1".into(),
@@ -1579,7 +1576,10 @@ mod tests {
             .map(|r| strip(r))
             .collect();
         assert!(rows[3].contains("$ curl https://example.com"));
-        assert!(rows[4].contains("boundary: host"), "{rows:#?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("boundary")),
+            "{rows:#?}"
+        );
     }
 
     #[test]

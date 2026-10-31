@@ -1,76 +1,9 @@
-//! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, Sandbox, TemporaryDirectory};
-use super::{IsolationEscalation as Escalation, IsolationPolicy as PolicyFile};
-use crate::file_storage::FileStorageError;
+//! The process boundary the sandbox switch applies, before ordinary spawn/PTY.
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory};
 use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
-use tokio_util::sync::CancellationToken;
 
-struct Policy {
-    sandbox: Sandbox,
-    escalation: Escalation,
-    read_only_paths: Option<Vec<PathBuf>>,
-    writable_paths: Option<Vec<PathBuf>>,
-    environment: Option<Vec<String>>,
-}
-
-impl Policy {
-    fn default_policy() -> Self {
-        Self {
-            sandbox: Sandbox::Workspace,
-            escalation: Escalation::Ask,
-            read_only_paths: None,
-            writable_paths: None,
-            environment: None,
-        }
-    }
-
-    /// Decodes the file's own version; a malformed file names the line and
-    /// column of the failure.
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let invalid = |error: serde_json::Error| {
-            format!(
-                "Invalid host-isolation.json at line {}, column {}",
-                error.line(),
-                error.column()
-            )
-        };
-        let file: PolicyFile = serde_json::from_slice(bytes).map_err(invalid)?;
-        let effective = super::isolation_policy::effective(&file)?;
-        Ok(Self {
-            sandbox: effective.sandbox,
-            escalation: effective.escalation,
-            read_only_paths: file.read_only_paths,
-            writable_paths: file.writable_paths,
-            environment: file.environment,
-        })
-    }
-
-    /// A call may narrow the node's tier freely. Widening it is the node's
-    /// decision, so a wider request needs `escalation: "ask"`.
-    fn resolve(
-        &self,
-        requested: Option<Sandbox>,
-        location: &str,
-    ) -> Result<Sandbox, ProcessSpecError> {
-        let Some(requested) = requested else {
-            return Ok(self.sandbox);
-        };
-        if requested <= self.sandbox || self.escalation == Escalation::Ask {
-            return Ok(requested);
-        }
-        Err(ProcessSpecError {
-            code: "isolation_denied",
-            reason: format!(
-                "sandbox \"{}\" is wider than this node's \"{}\" isolation policy; use /settings > Command isolation to select wider requests: ask (policy: {location}).",
-                requested.name(),
-                self.sandbox.name(),
-            ),
-        })
-    }
-}
-
-/// Resolves declared roots once at the policy boundary, each with its
+/// Resolves the system roots once at the sandbox boundary, each with its
 /// requested path and canonical source. Returns the directories, parents
 /// before children, and the regular files, which only read-only roots
 /// (`files`) may name.
@@ -127,7 +60,7 @@ pub(super) fn validate_overlap(
             })
         })
     {
-        return Err("A declared or resolved read-only isolation root cannot equal or be inside a writable root".into());
+        return Err("A read-only isolation root cannot equal or be inside a writable root".into());
     }
     Ok(())
 }
@@ -138,139 +71,96 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
-        requested: Option<Sandbox>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
         let invalid = |reason| ProcessSpecError {
             code: "isolation_config_invalid",
             reason,
         };
-        let bytes = match &self.isolation_file {
-            Some((storage, root, relative)) => {
-                let path = storage
-                    .path(*root, relative)
-                    .map_err(|e| invalid(e.to_string()))?;
-                match storage.read(&path, &CancellationToken::new()).await {
-                    Ok(bytes) => Some(bytes),
-                    Err(FileStorageError::Io(error))
-                        if error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        None
-                    }
-                    Err(error) => return Err(invalid(error.to_string())),
-                }
-            }
-            None => None,
-        };
-        let policy = match bytes {
-            Some(bytes) => Policy::decode(&bytes).map_err(invalid)?,
-            None => Policy::default_policy(),
-        };
-        let location = self.isolation_location();
-        let sandbox = policy.resolve(requested, &location)?;
-        let enabled = sandbox != Sandbox::Host;
-        let environment = policy.environment.unwrap_or_else(|| {
-            [
-                "PATH",
-                "HOME",
-                "LANG",
-                "LC_ALL",
-                "LC_CTYPE",
-                "TERM",
-                "NO_COLOR",
-                "PAGER",
-                "GIT_PAGER",
-                "GH_PAGER",
-                #[cfg(target_os = "macos")]
-                "DEVELOPER_DIR",
-                #[cfg(target_os = "macos")]
-                "XDG_CONFIG_HOME",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-        });
-        if environment
-            .iter()
-            .any(|name| name.is_empty() || name.contains(['\0', '=']))
-        {
-            return Err(invalid(
-                "Environment names must be nonempty and contain neither NUL nor '='".into(),
-            ));
+        let settings = self.execution_settings().await?;
+        if !settings.sandbox {
+            return Ok((spec, None, None));
         }
-        let (read_only_paths, default_files) = match policy.read_only_paths {
-            Some(paths) => (paths, Vec::new()),
-            None if !enabled => (Vec::new(), Vec::new()),
-            None => {
-                #[cfg(target_os = "macos")]
-                let paths = [
-                    "/System",
-                    "/usr",
-                    "/bin",
-                    "/sbin",
-                    "/Library/Apple",
-                    "/private/etc",
-                    "/etc",
-                    "/var/select",
-                ];
-                #[cfg(not(target_os = "macos"))]
-                let paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
-                let mut installed = Vec::new();
-                for path in paths {
-                    match tokio::fs::metadata(path).await {
-                        Ok(_) => installed.push(path.into()),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(invalid(format!("System isolation root {path}: {error}")));
-                        }
+        let environment: Vec<String> = [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "NO_COLOR",
+            "PAGER",
+            "GIT_PAGER",
+            "GH_PAGER",
+            #[cfg(target_os = "macos")]
+            "DEVELOPER_DIR",
+            #[cfg(target_os = "macos")]
+            "XDG_CONFIG_HOME",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let (read_only_paths, default_files) = {
+            #[cfg(target_os = "macos")]
+            let paths = [
+                "/System",
+                "/usr",
+                "/bin",
+                "/sbin",
+                "/Library/Apple",
+                "/private/etc",
+                "/etc",
+                "/var/select",
+            ];
+            #[cfg(not(target_os = "macos"))]
+            let paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+            let mut installed = Vec::new();
+            for path in paths {
+                match tokio::fs::metadata(path).await {
+                    Ok(_) => installed.push(path.into()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(invalid(format!("System isolation root {path}: {error}")));
                     }
                 }
-                #[cfg(target_os = "macos")]
-                {
-                    let developer = received(&environment, &spec.env, "DEVELOPER_DIR")
-                        .unwrap_or_else(|| "/var/select/developer_dir".into());
-                    if developer.is_absolute()
-                        && tokio::fs::metadata(&developer)
-                            .await
-                            .is_ok_and(|metadata| metadata.is_dir())
-                    {
-                        installed.push(developer);
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                let files = git_configuration(&environment, &spec.env).await;
-                #[cfg(not(target_os = "macos"))]
-                let files = Vec::new();
-                (installed, files)
             }
+            #[cfg(target_os = "macos")]
+            {
+                let developer = received(&environment, &spec.env, "DEVELOPER_DIR")
+                    .unwrap_or_else(|| "/var/select/developer_dir".into());
+                if developer.is_absolute()
+                    && tokio::fs::metadata(&developer)
+                        .await
+                        .is_ok_and(|metadata| metadata.is_dir())
+                {
+                    installed.push(developer);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            let files = git_configuration(&environment, &spec.env).await;
+            #[cfg(not(target_os = "macos"))]
+            let files = Vec::new();
+            (installed, files)
         };
         let (read_only, mut read_only_files) =
             roots(read_only_paths, true).await.map_err(invalid)?;
-        let default_writes = policy.writable_paths.is_none();
-        let writable_paths = policy.writable_paths.unwrap_or_else(|| {
-            if enabled {
-                std::iter::once(workspace)
-                    .chain(output_dir)
-                    .map(Path::to_path_buf)
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        });
+        let writable_paths: Vec<PathBuf> = std::iter::once(workspace)
+            .chain(output_dir)
+            .map(Path::to_path_buf)
+            .collect();
         let (mut writable, _) = roots(writable_paths, false).await.map_err(invalid)?;
         validate_overlap(&read_only, &read_only_files, &writable).map_err(invalid)?;
         read_only_files.extend(default_files);
-        if !enabled {
-            return Ok((spec, None, None));
-        }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
-        let temporary = if default_writes && cfg!(target_os = "macos") {
+        let temporary = if cfg!(target_os = "macos") {
             let temporary = temporary_directory()
                 .await
                 .map_err(|error| ProcessSpecError {
                     code: "isolation_unavailable",
-                    reason: format!("Isolated temporary directory: {error}; configure /settings > Command isolation (policy: {location})"),
+                    reason: format!(
+                        "Isolated temporary directory: {error}; turn Sandbox off in /settings > Execution"
+                    ),
                 })?;
             writable.push((temporary.0.clone(), temporary.0.clone()));
             spec.env.retain(|(name, _)| name != "TMPDIR");
@@ -286,23 +176,9 @@ impl HostPlatform {
             &read_only,
             &read_only_files,
             &writable,
-            sandbox == Sandbox::Network,
+            settings.network,
         )?;
-        Ok((spec, temporary, Some(Isolation { policy: location })))
-    }
-
-    /// Where the user changes this node's policy, for messages: the configured
-    /// file, or its name when no location is configured.
-    fn isolation_location(&self) -> String {
-        self.isolation_file
-            .as_ref()
-            .and_then(|(storage, root, relative)| {
-                Some(storage.root_path(*root).ok()?.join(relative))
-            })
-            .map_or_else(
-                || "host-isolation.json".into(),
-                |path| path.display().to_string(),
-            )
+        Ok((spec, temporary, Some(Isolation)))
     }
 }
 
@@ -461,10 +337,7 @@ fn prepare(
         })
         .ok_or_else(|| ProcessSpecError {
             code: "isolation_unavailable",
-            reason: format!(
-                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or use /settings > Command isolation to select host access (policy: {}).",
-                host.isolation_location()
-            ),
+            reason: "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or turn the sandbox off in /settings > Execution".into(),
         })?;
     let mut args: Vec<OsString> = [
         "--unshare-user",
@@ -578,58 +451,4 @@ async fn bubblewrap_binds_file_roots_after_the_directories_that_contain_them() {
     .collect();
     assert_eq!(binds(&read_only, &read_only_files, &writable), expected);
     std::fs::remove_dir_all(base).unwrap();
-}
-
-#[cfg(test)]
-#[test]
-fn policy_versions_name_the_sandbox_and_the_escalation() {
-    let network = Policy::decode(br#"{"version":1,"network":true}"#).unwrap();
-    assert_eq!(network.sandbox, Sandbox::Network);
-    assert_eq!(network.escalation, Escalation::Deny);
-
-    let disabled = Policy::decode(br#"{"version":1,"enabled":false}"#).unwrap();
-    assert_eq!(disabled.sandbox, Sandbox::Host);
-
-    let ask = Policy::decode(br#"{"version":2,"sandbox":"network","escalation":"ask"}"#).unwrap();
-    assert_eq!(ask.sandbox, Sandbox::Network);
-    assert_eq!(ask.escalation, Escalation::Ask);
-
-    let defaults = Policy::decode(br#"{"version":2}"#).unwrap();
-    assert_eq!(defaults.sandbox, Sandbox::Workspace);
-    assert_eq!(defaults.escalation, Escalation::Ask);
-
-    assert!(Policy::decode(br#"{"version":1,"sandbox":"host"}"#).is_err());
-    assert!(Policy::decode(br#"{"version":2,"enabled":false}"#).is_err());
-    assert!(Policy::decode(br#"{"version":3}"#).is_err());
-}
-
-#[cfg(test)]
-#[test]
-fn a_call_narrows_the_sandbox_and_needs_escalation_to_widen_it() {
-    let deny = Policy::decode(br#"{"version":2,"escalation":"deny"}"#).unwrap();
-    assert_eq!(deny.resolve(None, "policy").unwrap(), Sandbox::Workspace);
-    assert_eq!(
-        deny.resolve(Some(Sandbox::Workspace), "policy").unwrap(),
-        Sandbox::Workspace
-    );
-    let denied = deny.resolve(Some(Sandbox::Host), "policy").unwrap_err();
-    assert_eq!(denied.code, "isolation_denied");
-    assert!(
-        denied.reason.contains("/settings > Command isolation"),
-        "{}",
-        denied.reason
-    );
-
-    let ask = Policy::decode(br#"{"version":2,"escalation":"ask"}"#).unwrap();
-    assert_eq!(
-        ask.resolve(Some(Sandbox::Host), "policy").unwrap(),
-        Sandbox::Host
-    );
-
-    let node = Policy::decode(br#"{"version":2,"sandbox":"network","escalation":"ask"}"#).unwrap();
-    assert_eq!(node.resolve(None, "policy").unwrap(), Sandbox::Network);
-    assert_eq!(
-        node.resolve(Some(Sandbox::Workspace), "policy").unwrap(),
-        Sandbox::Workspace
-    );
 }

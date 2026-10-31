@@ -2593,10 +2593,12 @@ impl App {
             Effect::ReadIsolation => self.host.send(Command::ReadIsolation),
             Effect::SaveIsolation {
                 expected_revision,
-                policy,
+                sandbox,
+                network,
             } => self.host.send(Command::SaveIsolation {
                 expected_revision,
-                policy,
+                sandbox,
+                network,
             }),
             Effect::ResetIsolation(revision) => self.host.send(Command::ResetIsolation(revision)),
             Effect::ReadModelPolicy => self.host.send(Command::ReadModelPolicy),
@@ -5508,11 +5510,8 @@ mod tests {
     }
 
     #[test]
-    fn isolation_settings_edit_save_conflict_and_reset_without_model_execution() {
-        use dim_agent_types::isolation::{
-            IsolationEscalation, IsolationPolicy, IsolationPolicyEffective,
-            IsolationPolicySnapshot, IsolationPolicySource, Sandbox,
-        };
+    fn execution_settings_toggle_and_save() {
+        use crate::model::session::ExecutionSnapshot;
         let home = tempfile::tempdir().unwrap();
         let theme = test_theme();
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -5530,67 +5529,23 @@ mod tests {
         }
         app.handle_input(key(KeyCode::Enter));
         assert!(matches!(sent.borrow().last(), Some(Command::ReadIsolation)));
-        let policy = IsolationPolicy {
-            sandbox: Some(Sandbox::Host),
-            escalation: Some(IsolationEscalation::Deny),
-            environment: Some(Vec::new()),
-            read_only_paths: Some(vec!["/usr".into()]),
-            ..IsolationPolicy::default()
-        };
-        let snapshot = IsolationPolicySnapshot {
+        app.apply(Update::Isolation(Ok(ExecutionSnapshot {
             revision: "r1".into(),
-            path: home.path().join("host-isolation.json"),
-            source: IsolationPolicySource::File,
-            effective: IsolationPolicyEffective {
-                sandbox: Sandbox::Host,
-                escalation: IsolationEscalation::Deny,
-            },
-            policy,
-        };
-        app.apply(Update::Isolation(Ok(snapshot)));
-        app.handle_input(key(KeyCode::Enter));
-        app.handle_input(key(KeyCode::Up));
-        app.handle_input(key(KeyCode::Enter));
-        app.handle_input(key(KeyCode::Enter));
+            sandbox: false,
+            network: false,
+        })));
         app.handle_input(key(KeyCode::Enter));
         app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Down));
         app.handle_input(key(KeyCode::Enter));
-        app.handle_input(key(KeyCode::Enter));
-        for _ in 0..3 {
-            app.handle_input(key(KeyCode::Down));
-        }
-        app.handle_input(key(KeyCode::Enter));
-        match sent.borrow().last() {
+        assert!(matches!(
+            sent.borrow().last(),
             Some(Command::SaveIsolation {
                 expected_revision,
-                policy,
-            }) => {
-                assert_eq!(expected_revision, "r1");
-                assert_eq!(policy.sandbox, Some(Sandbox::Network));
-                assert_eq!(policy.escalation, Some(IsolationEscalation::Deny));
-                assert_eq!(policy.environment, Some(Vec::new()));
-                assert_eq!(policy.read_only_paths, Some(vec!["/usr".into()]));
-                assert_eq!(policy.writable_paths, None);
-            }
-            _ => panic!("settings save must use local management, not model exec"),
-        }
-        app.apply(Update::Isolation(Err("isolation_policy_conflict".into())));
-        for _ in 0..3 {
-            app.handle_input(key(KeyCode::Down));
-        }
-        app.handle_input(key(KeyCode::Enter));
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::SaveIsolation { expected_revision, policy }) if expected_revision == "r1" && policy.sandbox == Some(Sandbox::Network))
-        );
-        app.apply(Update::Isolation(Err("isolation_policy_conflict".into())));
-        for _ in 0..4 {
-            app.handle_input(key(KeyCode::Down));
-        }
-        app.handle_input(key(KeyCode::Enter));
-        app.handle_input(key(KeyCode::Char('y')));
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::ResetIsolation(revision)) if revision == "r1")
-        );
+                sandbox: true,
+                network: false,
+            }) if expected_revision == "r1"
+        ));
     }
 
     /// A picked message opens a line of the shown line with the submitted

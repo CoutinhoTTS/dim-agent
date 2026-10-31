@@ -38,9 +38,8 @@ Use --model-config PATH for independent API-key development.
 Migration imports Global .dim/v2 into .dim and CN .dimcode/v2 into .dimcode.
 Other commands use the isolated development home.
 Optional local configuration: .env.dev (see .env.example).
-A new development home runs commands without OS isolation: a new
-host-isolation.json with {"version": 2, "sandbox": "host"} is written to the
-daemon's home, and an existing file is kept.
+A new development home runs commands without OS isolation: the Sandbox
+switch defaults to off, and no host-isolation.json is written.
 USAGE
   exit 0
 fi
@@ -142,14 +141,6 @@ fi
 if [[ "$native_help" == false && "$migration" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)
-  policy_root=$product_home
-  if [[ -n "$model_config" ]]; then
-    policy_root="$product_home/rust"
-  fi
-  if [[ ! -e "$policy_root/host-isolation.json" ]]; then
-    mkdir -p -m 700 -- "$policy_root"
-    printf '%s\n' '{"version": 2, "sandbox": "host"}' >"$policy_root/host-isolation.json"
-  fi
   "$binary" --home "$product_home" daemon stop >&2
 fi
 # Bash 3.2 (macOS) treats an empty array as unset under `set -u`.

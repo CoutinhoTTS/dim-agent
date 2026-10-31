@@ -517,37 +517,18 @@ mod tests {
     }
 
     #[test]
-    fn an_exec_row_draws_the_boundary_it_requests() {
-        let escalated = [
-            call(
-                "exec",
-                json!({ "command": "cargo test", "sandbox": "host" }),
-                Some("ok"),
-            ),
-            call(
-                "exec",
-                json!({ "command": "ls -la", "sandbox": "network" }),
-                Some("a"),
-            ),
-        ];
-        let expanded = drawn(&escalated, Detail::Expanded, 120).join("\n");
-        assert!(expanded.contains("(boundary: host)"), "{expanded}");
-        assert!(expanded.contains("(boundary: network)"), "{expanded}");
-
-        let collapsed = drawn(&escalated, Detail::Collapsed, 120).join("\n");
-        assert!(
-            collapsed.contains("(boundary: network, host)"),
-            "{collapsed}"
-        );
-
-        let plain = [
-            call("exec", json!({ "command": "cargo test" }), Some("ok")),
-            call("exec", json!({ "command": "ls -la" }), Some("a")),
-        ];
+    fn an_exec_row_draws_its_command_and_no_boundary() {
+        let rows = [call(
+            "exec",
+            json!({ "command": "cargo test", "sandbox": "host" }),
+            Some("ok"),
+        )];
         for detail in [Detail::Expanded, Detail::Collapsed] {
-            let text = drawn(&plain, detail, 120).join("\n");
-            assert!(!text.contains("(boundary:"), "{text}");
+            let text = drawn(&rows, detail, 120).join("\n");
+            assert!(!text.contains("boundary"), "{text}");
         }
+        let expanded = drawn(&rows, Detail::Expanded, 120).join("\n");
+        assert!(expanded.contains("cargo test"), "{expanded}");
     }
 
     /// A completed compaction's detail draws its summary, then the digest

@@ -191,6 +191,13 @@ export function readModelRecording(value: unknown): ModelRecording {
   return { revision: string(source.revision), enabled: boolean(object(source.document).enabled) }
 }
 
+export type ExecutionSettings = { revision: string; sandbox: boolean; network: boolean }
+export function readExecutionSettings(value: unknown): ExecutionSettings {
+  const source = object(value)
+  const document = object(source.document)
+  return { revision: string(source.revision), sandbox: boolean(document.sandbox), network: boolean(document.network) }
+}
+
 export type ModalityModel = { id: string; name: string; vision: boolean; toolCalling: boolean; modalities: string[] }
 export type ModalityCatalog = { version: number; models: ModalityModel[] }
 export function readModalityCatalog(value: unknown): ModalityCatalog | undefined {

@@ -4716,26 +4716,16 @@ fn fresh_native_startup_uses_workspace_and_ask_without_policy_file() {
     wire.0.read_line(&mut line).unwrap();
     let hello: Value = serde_json::from_str(&line).unwrap();
     assert!(hello.get("result").is_some(), "{hello}");
-    wire.send(json!({"jsonrpc":"2.0","id":2,"method":"host.isolation.get","params":{}}));
+    wire.send(json!({"jsonrpc":"2.0","id":2,"method":"settings.read","params":{"source":"execution","scope":"user"}}));
     line.clear();
     wire.0.read_line(&mut line).unwrap();
     let snapshot: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(snapshot["result"]["source"], "defaults", "{snapshot}");
     assert_eq!(
-        snapshot["result"]["effective"],
-        json!({"sandbox":"workspace","escalation":"ask"})
+        snapshot["result"]["document"],
+        json!({"sandbox": false, "network": false}),
+        "{snapshot}"
     );
-    assert_eq!(
-        snapshot["result"]["path"],
-        home.0
-            .canonicalize()
-            .unwrap()
-            .join("rust/host-isolation.json")
-            .to_str()
-            .unwrap()
-    );
-    assert!(!home.0.join("rust/host-isolation.json").exists());
-    assert!(!home.0.join("host-isolation.json").exists());
+    assert!(!home.0.join("rust/execution.json").exists());
     assert!(
         home.command()
             .arg("--server")
