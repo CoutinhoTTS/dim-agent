@@ -394,7 +394,7 @@ impl ShellSession {
         // The persistent shell adds no failure note (host-platform-isolation.md#visibility).
         let (spec, temporary, _) = self
             .host
-            .prepare_isolated_process(spec, &self.config.cwd, Some(&self.config.output_dir), None)
+            .prepare_isolated_process(spec, &self.config.cwd, Some(&self.config.output_dir))
             .await
             .map_err(|error| HostError::failed(format!("{}: {}", error.code, error.reason)))?;
         let mut pty = self

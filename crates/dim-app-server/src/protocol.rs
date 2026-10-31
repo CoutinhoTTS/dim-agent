@@ -238,9 +238,6 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "permission.set_rules",
     "collaboration.model_policy",
     "collaboration.set_model_policy",
-    "host.isolation.get",
-    "host.isolation.update",
-    "host.isolation.reset",
     "host.exec_shell.get",
     "host.exec_shell.update",
     "mcp.catalog",
@@ -266,7 +263,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "plugin.remove",
 ];
 
-pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log"];
+pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log", "execution"];
 
 pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.permission.get",

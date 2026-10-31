@@ -194,12 +194,19 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     let catalog = dim_agent_capabilities::catalog();
     let build = Default::default();
     let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(
+            dim_agent_capabilities::execution_settings::ExecutionSettingsHost::fixed(
+                Default::default(),
+            ),
+        )
+        .unwrap();
     let platform = root.plugin(
         HostPlatformPlugin::new(
             &names,
             HostPlatformConfig {
+                execution: names.key().unwrap(),
                 exec_shell_file: Some((0, "exec-shell.json".into())),
-                ..HostPlatformConfig::default()
             },
         )
         .unwrap(),

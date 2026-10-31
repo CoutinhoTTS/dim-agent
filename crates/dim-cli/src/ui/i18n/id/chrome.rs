@@ -362,7 +362,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "Mouse (layar penuh)",
         "Permissions" => "Izin",
         "Tool approvals" => "Persetujuan tool",
-        "Command isolation" => "Isolasi perintah",
+        "Execution" => "Eksekusi",
         "Models" => "Model",
         "Model" => "Model",
         "not set" => "belum diatur",

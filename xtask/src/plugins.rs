@@ -9,6 +9,7 @@
 //! block and table against the diagnostics.
 use dim_agent_capabilities::{
     defaults,
+    execution_settings::ExecutionSettingsHost,
     file_storage::FileStorage,
     file_storage::FileStoragePlugin,
     hooks::{HookSourcesHost, NoHookSources},
@@ -61,21 +62,24 @@ const INFRASTRUCTURE: [&str; 13] = [
 struct GraphPlatform {
     home: PathBuf,
     storage: Key<FileStorage>,
+    execution: Key<ExecutionSettingsHost>,
 }
 impl DynPlugin for GraphPlatform {
     fn name(&self) -> &str {
         "HostPlatform"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.storage.erase()]
+        vec![self.storage.erase(), self.execution.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let execution = ctx.require_at(&self.execution)?;
             let mut platform = HostPlatform::current(ShellStatus::Unavailable {
                 code: "GRAPH_ONLY",
                 reason: "Graph generation does not execute commands".into(),
             })
-            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?
+            .with_execution_settings(ExecutionSettingsHost(execution.0.clone()));
             platform.home = self.home.clone();
             ctx.provide_as::<HostPlatform>(Arc::new(platform))?;
             Ok(Effect::Done)
@@ -140,6 +144,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         Ok(Box::new(GraphPlatform {
             home: home.clone(),
             storage: Key::of(),
+            execution: Key::of(),
         }))
     });
     defaults::mock_model_hosts(&mut builder);
@@ -162,6 +167,9 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
             MemorySkillSettings::default(),
         ))))?;
         root.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(GraphFiles))))?;
+        root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+            Default::default(),
+        )))?;
         Ok(())
     })
     .await?;

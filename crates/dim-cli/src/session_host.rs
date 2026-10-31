@@ -21,10 +21,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
-    ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
-    SubagentModelPolicy, SwitchKind, Update,
+    Account, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, EmptyProvider,
+    EmptyReason, ExecutionSnapshot, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
+    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem,
+    SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -1183,6 +1183,14 @@ impl Worker {
                     }
                     Err(error) => self.report(error.to_string(), true),
                 }
+                if self
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.provider_id == DIM_OAUTH_ID)
+                {
+                    let usage = self.account_usage(DIM_OAUTH_ID).await;
+                    self.send(Update::UsageReport(usage));
+                }
             }
             Command::Compact => self.compact().await,
             Command::ToggleWeb => {
@@ -1220,41 +1228,60 @@ impl Worker {
                 self.read_model_policy(false).await;
             }
             Command::ReadIsolation => {
-                if !self.client.supports(&[
-                    "host.isolation.get",
-                    "host.isolation.update",
-                    "host.isolation.reset",
-                ]) {
+                if !self.client.supports(&["settings.read", "settings.update"]) {
                     self.send(Update::Isolation(Err(
-                        "This daemon does not support Command isolation settings".into(),
+                        "This daemon does not support execution settings".into(),
                     )));
                 } else {
-                    let result = self.client.typed("host.isolation.get", json!({})).await;
-                    self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    let result = self
+                        .client
+                        .typed(
+                            "settings.read",
+                            json!({"source": "execution", "scope": "user"}),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(execution_snapshot);
+                    self.send(Update::Isolation(result));
                 }
             }
             Command::SaveIsolation {
                 expected_revision,
-                policy,
+                sandbox,
+                network,
             } => {
                 let result = self
                     .client
                     .typed(
-                        "host.isolation.update",
-                        json!({"expectedRevision": expected_revision, "policy": policy}),
+                        "settings.update",
+                        json!({
+                            "source": "execution",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"sandbox": sandbox, "network": network},
+                        }),
                     )
-                    .await;
-                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(execution_snapshot);
+                self.send(Update::Isolation(result));
             }
             Command::ResetIsolation(expected_revision) => {
                 let result = self
                     .client
                     .typed(
-                        "host.isolation.reset",
-                        json!({"expectedRevision": expected_revision}),
+                        "settings.update",
+                        json!({
+                            "source": "execution",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"sandbox": false, "network": false},
+                        }),
                     )
-                    .await;
-                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(execution_snapshot);
+                self.send(Update::Isolation(result));
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
@@ -1368,16 +1395,7 @@ impl Worker {
                 self.send(Update::Login(account));
             }
             Command::LoginUsage(provider_id) => {
-                let usage = self
-                    .client
-                    .typed("account.usage", json!({"providerId": provider_id}))
-                    .await
-                    .map_err(|error| {
-                        match error.downcast_ref::<client::RpcError>().and_then(app_error) {
-                            Some("unknown_method") => USAGE_MISSING.to_owned(),
-                            _ => error.to_string(),
-                        }
-                    });
+                let usage = self.account_usage(&provider_id).await;
                 self.send(Update::Usage(usage));
             }
             Command::Logout(provider_id) => {
@@ -1614,6 +1632,18 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    async fn account_usage(&mut self, provider_id: &str) -> Result<Usage, String> {
+        self.client
+            .typed("account.usage", json!({"providerId": provider_id}))
+            .await
+            .map_err(
+                |error| match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+                    Some("unknown_method") => USAGE_MISSING.to_owned(),
+                    _ => error.to_string(),
+                },
+            )
     }
 
     /// The main branch's context window as `session.context.usage`
@@ -3843,6 +3873,26 @@ struct SessionSummary {
     #[serde(default)]
     preview: Option<String>,
     title: Option<String>,
+}
+
+fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
+    let revision = value
+        .get("revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "execution settings response has no revision".to_string())?
+        .to_owned();
+    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
+    Ok(ExecutionSnapshot {
+        revision,
+        sandbox: document
+            .get("sandbox")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        network: document
+            .get("network")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 #[cfg(test)]

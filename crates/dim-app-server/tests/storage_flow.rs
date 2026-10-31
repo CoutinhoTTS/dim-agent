@@ -3113,6 +3113,71 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     db.close().await.unwrap();
 }
 
+/// ADR 010 and 011: a daemon that finds the old isolation policy names it on
+/// stderr, where its default log filter would hide a tracing event, and runs
+/// with the user's switches instead.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_daemon_names_an_ignored_host_isolation_file() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let home = std::env::temp_dir().join(format!("dim-legacy-policy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("host-isolation.json"),
+        r#"{"version":2,"sandbox":"host"}"#,
+    )
+    .unwrap();
+    let socket = PathBuf::from("/tmp").join(format!("dim-legacy-{}/s", uuid::Uuid::new_v4()));
+    let model_config = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dim-agent-aimux/examples/offline.json");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+        .args(["--model-config"])
+        .arg(model_config)
+        .args(["--no-ws", "--unix"])
+        .arg(&socket)
+        .arg("--home")
+        .arg(&home)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    if !ready.contains("unixPath") {
+        let mut stderr = String::new();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            child.stderr.take().unwrap().read_to_string(&mut stderr),
+        )
+        .await;
+        panic!("server did not start: {ready}{stderr}");
+    }
+    child.kill().await.unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .await
+        .unwrap();
+    let path = home.canonicalize().unwrap().join("host-isolation.json");
+    let line = format!(
+        "Ignoring {}: command isolation is a user setting in /settings > Execution; delete the file.",
+        path.display()
+    );
+    assert!(stderr.lines().any(|report| report == line), "{stderr}");
+    std::fs::remove_dir_all(&home).unwrap();
+    let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+}
+
 /// The daemon names the one-way upgrade on stderr, where its default log
 /// filter would hide a tracing event, and only on the start that upgrades.
 #[cfg(unix)]

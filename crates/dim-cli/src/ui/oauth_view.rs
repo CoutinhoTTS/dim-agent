@@ -31,7 +31,7 @@
 //! signs in by browser only and Grok by device code only, so they start on
 //! open and have no menu.
 
-use crate::model::session::{Account as AccountInfo, OauthEvent, OauthStart, Usage};
+use crate::model::session::{Account as AccountInfo, DIM_OAUTH_ID, OauthEvent, OauthStart, Usage};
 use crate::ui::i18n::{t, tf};
 use crate::ui::line_input::LineInput;
 use crate::ui::prompts::Effect;
@@ -43,8 +43,6 @@ use crate::ui::text::{display_width as width_of, truncate_cells, wrap_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 
-/// The Dim account provider, signed in with `/login`.
-pub const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 const CODEX_ID: &str = "openai-codex";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,7 +292,13 @@ impl OauthView {
         let usage = match (&self.usage, self.usage_loading) {
             (Some(Ok(usage)), _) => usage,
             (Some(Err(reason)), _) => {
-                rows.push((Row::Section, tf("Usage: {reason}", &[("reason", reason)])));
+                rows.push((
+                    Row::Section,
+                    tf(
+                        "Usage: {reason}",
+                        &[("reason", &crate::sanitize::safe(reason))],
+                    ),
+                ));
                 return rows;
             }
             (None, true) => {
@@ -303,6 +307,16 @@ impl OauthView {
             }
             (None, false) => return rows,
         };
+        rows.extend(
+            Self::render_usage(usage, width, p)
+                .into_iter()
+                .map(|text| (Row::Styled, text)),
+        );
+        rows
+    }
+
+    pub(super) fn render_usage(usage: &Usage, width: usize, p: &Palette) -> Vec<String> {
+        let mut rows = Vec::new();
         if let Some(plan) = &usage.plan {
             let mut parts: Vec<String> = Vec::new();
             parts.extend(plan.name.clone());
@@ -331,7 +345,8 @@ impl OauthView {
                 parts.push(tf("expires {date}", &[("date", short_date(date))]));
             }
             if !parts.is_empty() {
-                rows.push((Row::Section, parts.join(" · ")));
+                let text = crate::sanitize::safe(&parts.join(" · ")).replace(['\n', '\t'], " ");
+                rows.push(fg(&truncate_cells(&text, width), &p.muted));
             }
         }
         let mut meters: Vec<Meter> = Vec::new();
@@ -383,7 +398,7 @@ impl OauthView {
                 .map(|date| tf("resets {date}", &[("date", short_date(date))]));
             if amount.is_some() || feature.unlimited == Some(true) {
                 meters.push((
-                    feature_label(&feature.key),
+                    feature_label(&crate::sanitize::safe(&feature.key).replace(['\n', '\t'], " ")),
                     amount,
                     feature.unlimited == Some(true),
                     resets,
@@ -397,14 +412,19 @@ impl OauthView {
             .iter()
             .map(|(label, ..)| width_of(label))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(width);
+        let gap = " ".repeat(width.saturating_sub(label_width).min(2));
+        let room = width.saturating_sub(label_width + gap.len());
         for (label, amount, unlimited, when) in meters {
-            rows.push((Row::Section, String::new()));
+            rows.push(String::new());
+            let label = truncate_cells(&label, label_width);
             let label = format!("{label}{}", " ".repeat(label_width - width_of(&label)));
             let Some((used, total)) = amount.filter(|_| !unlimited) else {
-                rows.push((
-                    Row::Styled,
-                    format!("{}  {}", fg(&label, &p.text), fg(t("unlimited"), &p.muted)),
+                rows.push(format!(
+                    "{}{gap}{}",
+                    fg(&label, &p.text),
+                    fg(&truncate_cells(t("unlimited"), room), &p.muted)
                 ));
                 continue;
             };
@@ -418,25 +438,19 @@ impl OauthView {
                 tail.push_str(" · ");
                 tail.push_str(&when);
             }
-            let room = width.saturating_sub(label_width + 2);
-            rows.push((
-                Row::Styled,
-                format!(
-                    "{}  {}",
-                    fg(&label, &p.text),
-                    fg(&truncate_cells(&tail, room), &p.muted)
-                ),
+            let tail = crate::sanitize::safe(&tail).replace(['\n', '\t'], " ");
+            rows.push(format!(
+                "{}{gap}{}",
+                fg(&label, &p.text),
+                fg(&truncate_cells(&tail, room), &p.muted)
             ));
-            let bar_width = width.clamp(6, 40);
+            let bar_width = width.min(40);
             let filled = (ratio * bar_width as f64).round() as usize;
             let tone = if ratio >= 0.9 { &p.danger } else { &p.accent };
-            rows.push((
-                Row::Styled,
-                format!(
-                    "{}{}",
-                    fg(&"█".repeat(filled), tone),
-                    fg(&"░".repeat(bar_width - filled), &p.faint)
-                ),
+            rows.push(format!(
+                "{}{}",
+                fg(&"█".repeat(filled), tone),
+                fg(&"░".repeat(bar_width - filled), &p.faint)
             ));
         }
         rows

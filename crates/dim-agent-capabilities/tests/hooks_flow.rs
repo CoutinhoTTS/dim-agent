@@ -3,6 +3,7 @@
 #![cfg(unix)]
 use dim_agent_capabilities::{
     defaults,
+    execution_settings::ExecutionSettingsHost,
     history::HistoryRenderer,
     hooks::{
         HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost, HookSourcesSnapshot,
@@ -223,7 +224,8 @@ impl Env {
             source: ShellSource::Fallback,
             output_encoding: OutputEncoding::Utf8,
         }))
-        .unwrap();
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(Default::default()));
         platform.home = dir.join("home");
         let sources = Arc::new(Sources::default());
         *sources.home.lock().unwrap() = Some(dir.join("home"));

@@ -157,8 +157,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Edit" => "편집",
         "Write" => "쓰기",
         "Create" => "생성",
-        "boundary: {sandbox}" => "경계: {sandbox}",
-        " (boundary: {sandbox})" => " (경계: {sandbox})",
         " (detached)" => " (백그라운드)",
         "Checked on background task" => "백그라운드 작업 확인함",
         "Waiting…" => "대기 중…",
