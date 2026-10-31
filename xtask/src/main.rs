@@ -647,7 +647,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_restored = allocation::live();
     let peak_restored = allocation::peak();
     let rss_restored = rss_kb();
-    allocation::reset_peak();
+    allocation::reset_peak_now();
     session
         .submit(
             "measure restored context".into(),
