@@ -95,11 +95,17 @@ pub struct McpServerEntry {
 }
 impl McpServerEntry {
     pub fn enabled(&self) -> bool {
-        match &self.configuration {
-            McpServerSettings::Stdio { enabled, .. }
-            | McpServerSettings::Remote { enabled, .. } => enabled.unwrap_or(true),
-        }
+        self.configuration.enabled()
     }
+}
+
+/// One source's entry as that source declares it, for editing: the declared
+/// configuration, the source revision a write takes (absent for a plugin
+/// entry) and the enablement the entry runs with.
+pub struct McpEditableEntry {
+    pub configuration: McpServerSettings,
+    pub revision: Option<String>,
+    pub enabled: bool,
 }
 
 /// Source CAS tokens are distinct from connection and tool-source versions.
@@ -419,17 +425,18 @@ impl McpService {
     ) -> Result<McpServerEntry> {
         self.run(cancel, move |settings, cancel| async move {
             let Some(scope) = source.scope() else {
-                return settings
+                let configuration = settings
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
                     .await?
                     .document
                     .entries()
                     .find(|(entry, _)| *entry == id)
-                    .map(|(_, configuration)| McpServerEntry {
-                        source,
-                        configuration,
-                    })
-                    .ok_or(McpError::UnknownServer);
+                    .map(|(_, configuration)| configuration)
+                    .ok_or(McpError::UnknownServer)?;
+                return Ok(McpServerEntry {
+                    source,
+                    configuration,
+                });
             };
             let source = scope;
             let configuration = settings
@@ -439,14 +446,7 @@ impl McpService {
                 .mcp_servers
                 .remove(&id)
                 .ok_or(McpError::UnknownServer)?;
-            let enablement = match source {
-                SettingsScope::User => McpProjectEnablement::default(),
-                SettingsScope::Project(_) => settings
-                    .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
-                    .await
-                    .map(|snapshot| snapshot.document)
-                    .unwrap_or_default(),
-            };
+            let enablement = enablement(&settings, source, &cancel).await;
             Ok(McpServerEntry {
                 source: source.into(),
                 configuration: config::effective(
@@ -457,6 +457,75 @@ impl McpService {
                     &enablement,
                 )?,
             })
+        })
+        .await
+    }
+
+    /// One source's entry as that source declares it, for reading and patching.
+    pub async fn editable(
+        &self,
+        source: McpSource,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<McpEditableEntry> {
+        if id.trim().is_empty() {
+            return Err(McpError::InvalidId);
+        }
+        self.run(cancel, move |settings, cancel| async move {
+            let Some(scope) = source.scope() else {
+                let configuration = settings
+                    .read::<McpPluginServers>(SettingsScope::User, &cancel)
+                    .await?
+                    .document
+                    .declared(&id)
+                    .ok_or(McpError::UnknownServer)?;
+                return Ok(McpEditableEntry {
+                    enabled: configuration.enabled(),
+                    configuration,
+                    revision: None,
+                });
+            };
+            let mut snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
+            let configuration = snapshot
+                .document
+                .mcp_servers
+                .remove(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let enabled = match scope {
+                SettingsScope::User => configuration.enabled(),
+                SettingsScope::Project(_) => {
+                    let enablement = enablement(&settings, scope, &cancel).await;
+                    let workspace = config::workspace(&settings, scope)?;
+                    enablement.contains(&workspace, &id)
+                }
+            };
+            Ok(McpEditableEntry {
+                configuration,
+                revision: Some(snapshot.revision),
+                enabled,
+            })
+        })
+        .await
+    }
+
+    /// The configuration a Session runs, from the declared one a client reads
+    /// and patches.
+    pub async fn effective(
+        &self,
+        scope: SettingsScope,
+        id: String,
+        configuration: McpServerSettings,
+        cancel: &CancellationToken,
+    ) -> Result<McpServerSettings> {
+        self.run(cancel, move |settings, cancel| async move {
+            let enablement = enablement(&settings, scope, &cancel).await;
+            Ok(config::effective(
+                &settings,
+                scope,
+                &id,
+                configuration,
+                &enablement,
+            )?)
         })
         .await
     }
@@ -562,6 +631,23 @@ impl McpService {
             })
         };
         task.await?
+    }
+}
+
+/// The user's enablement of project entries; empty for the user source, whose
+/// entries carry their own field.
+async fn enablement(
+    settings: &SettingsService,
+    scope: SettingsScope,
+    cancel: &CancellationToken,
+) -> McpProjectEnablement {
+    match scope {
+        SettingsScope::User => McpProjectEnablement::default(),
+        SettingsScope::Project(_) => settings
+            .read::<McpProjectEnablement>(SettingsScope::User, cancel)
+            .await
+            .map(|snapshot| snapshot.document)
+            .unwrap_or_default(),
     }
 }
 

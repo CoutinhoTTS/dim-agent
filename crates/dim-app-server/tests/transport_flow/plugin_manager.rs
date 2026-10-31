@@ -1294,6 +1294,32 @@ async fn plugin_content_reaches_sessions_through_its_owners() {
         json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio"}]),
         "{catalog}"
     );
+    let entry = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"plugin","id":"kit:docs"}),
+        )
+        .await;
+    assert_ok(&entry);
+    assert_eq!(entry["result"]["enabled"], true);
+    assert!(
+        entry["result"].get("revision").is_none(),
+        "a plugin entry has no Settings revision: {entry}"
+    );
+    assert!(
+        entry["result"]["configuration"]["cwd"].is_null(),
+        "the edit read keeps the plugin's declared configuration: {entry}"
+    );
+    let inspection = client
+        .rpc("mcp.inspect", json!({"source":"plugin","id":"kit:docs"}))
+        .await;
+    assert_ok(&inspection);
+    assert!(
+        inspection["result"]["configuration"]["cwd"]
+            .as_str()
+            .is_some_and(|cwd| cwd.starts_with(home.to_str().unwrap())),
+        "a plugin entry runs inside its installed directory: {inspection}"
+    );
     assert_eq!(
         new_session_content(&mut client, &work).await,
         (vec!["review".into()], vec!["kit:docs".into()])
