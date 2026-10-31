@@ -1384,6 +1384,7 @@ dependencies = [
  "agent-client-protocol-schema",
  "base64 0.22.1",
  "dim-agent-capabilities",
+ "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
  "dim-cli",

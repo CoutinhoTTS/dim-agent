@@ -123,6 +123,10 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
+    HooksList,
+    HooksEnable {
+        enabled: bool,
+    },
     /// `recording [on|off]`: the daemon's model request record.
     Recording {
         enabled: Option<bool>,
@@ -464,6 +468,15 @@ impl Options {
                         _ => {
                             return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
+                    };
+                }
+                "hooks" if matches!(options.action, Action::Chat) => {
+                    options.action = match value(&mut args)?.as_str() {
+                        "list" => Action::HooksList,
+                        command @ ("enable" | "disable") => Action::HooksEnable {
+                            enabled: command == "enable",
+                        },
+                        _ => return Err("Use hooks list, hooks enable or hooks disable".into()),
                     };
                 }
                 "recording" if matches!(options.action, Action::Chat) => {

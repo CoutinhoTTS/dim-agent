@@ -2880,6 +2880,17 @@
       ]
     },
     {
+      "id": "dim_cli::hooks_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/hooks_command.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::images",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -22906,6 +22917,8 @@
         "path Action::Exec",
         "path Action::Export",
         "path Action::Help",
+        "path Action::HooksEnable",
+        "path Action::HooksList",
         "path Action::Login",
         "path Action::Logout",
         "path Action::McpEnable",
@@ -22992,6 +23005,15 @@
         "mod export",
         "path export::timeline",
         "path export::write"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::hooks_command",
+      "references": [
+        "mod hooks_command",
+        "path hooks_command::list",
+        "path hooks_command::set_enabled"
       ]
     },
     {
@@ -23783,6 +23805,45 @@
     },
     {
       "from": "dim_cli::export",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::hooks_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::hooks_command",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::hooks_command",
+      "to": "dim_cli::mcp_command",
+      "references": [
+        "path print_report",
+        "use crate::mcp_command::print_report"
+      ]
+    },
+    {
+      "from": "dim_cli::hooks_command",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::hooks_command",
       "to": "dim_client",
       "references": [
         "path Client",

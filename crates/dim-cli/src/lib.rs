@@ -7,6 +7,7 @@ mod composer;
 mod configure;
 mod display;
 mod export;
+mod hooks_command;
 mod images;
 mod input;
 mod leaf;
@@ -831,6 +832,14 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             let (rows, notes) =
                 mcp_command::set_enabled(&mut client, &options, id, *enabled).await?;
             mcp_command::print_report(rows, notes);
+            Ok(0)
+        }
+        Action::HooksList => {
+            hooks_command::list(&mut client, &options).await?;
+            Ok(0)
+        }
+        Action::HooksEnable { enabled } => {
+            hooks_command::set_enabled(&mut client, &options, *enabled).await?;
             Ok(0)
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
