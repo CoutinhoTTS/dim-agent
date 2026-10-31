@@ -2518,7 +2518,7 @@ async fn node_scheduler_report_lands_once_across_row_or_runtime_cleanup() {
         }
         let (restarted, ()) = tokio::join!(
             loader.restart(if kill_runtime {
-                "SessionNodeRuntime"
+                "session-node"
             } else {
                 "scheduler"
             }),
@@ -2766,15 +2766,14 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
     assert_eq!(reused["state"], "completed");
     assert_eq!(reused["session_origin"], "reuse");
 
-    loader
-        .set_overlay(
-            "retention-fixture",
-            Some(vec![
-                serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
-            ]),
-        )
-        .await
-        .unwrap();
+    session_typescript::fixture_layer(
+        &loader,
+        "retention-fixture",
+        Some(vec![
+            serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
+        ]),
+    )
+    .await;
     assert!(loader.get("scheduler").unwrap().view.is_none());
     let mut runs: Vec<_> = (0..102)
         .map(|index| {
@@ -2801,7 +2800,7 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
         .unwrap()
     };
     persist(&runs);
-    loader.set_overlay("retention-fixture", None).await.unwrap();
+    session_typescript::fixture_layer(&loader, "retention-fixture", None).await;
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while stored(&home)["runs"].as_array().unwrap().len() != 101 {
@@ -2837,15 +2836,14 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
             .any(|item| item["sessionId"] == expired)
     );
 
-    loader
-        .set_overlay(
-            "retention-fixture",
-            Some(vec![
-                serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
-            ]),
-        )
-        .await
-        .unwrap();
+    session_typescript::fixture_layer(
+        &loader,
+        "retention-fixture",
+        Some(vec![
+            serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
+        ]),
+    )
+    .await;
     runs.remove(1);
     for run in runs.iter_mut().skip(1) {
         run["session_id"] = external.clone();
@@ -2854,7 +2852,7 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
         run["input_event_id"] = reused["input_event_id"].clone();
     }
     persist(&runs);
-    loader.set_overlay("retention-fixture", None).await.unwrap();
+    session_typescript::fixture_layer(&loader, "retention-fixture", None).await;
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
     assert_eq!(
         stored(&home)["runs"],
@@ -2996,7 +2994,7 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
             .success()
     );
     drop(release);
-    loader.restart("SessionNodeRuntime").await.unwrap();
+    loader.restart("session-node").await.unwrap();
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while stored(&home)["runs"].as_array().unwrap().len() != 100 {
@@ -3072,15 +3070,14 @@ async fn node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_r
         .await;
     assert_ok(&accepted);
     let completed = settled(&mut client, &jobs[0], &accepted["result"]["run_id"]).await;
-    loader
-        .set_overlay(
-            "retention-fixture",
-            Some(vec![
-                serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
-            ]),
-        )
-        .await
-        .unwrap();
+    session_typescript::fixture_layer(
+        &loader,
+        "retention-fixture",
+        Some(vec![
+            serde_json::from_value(json!({"id":"scheduler","disabled":true})).unwrap(),
+        ]),
+    )
+    .await;
     let runs: Vec<_> = (0..100)
         .map(|index| {
             let mut run = completed.clone();
@@ -3099,7 +3096,7 @@ async fn node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_r
         .unwrap(),
     )
     .unwrap();
-    loader.set_overlay("retention-fixture", None).await.unwrap();
+    session_typescript::fixture_layer(&loader, "retention-fixture", None).await;
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
     let history_gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     assert_ok(

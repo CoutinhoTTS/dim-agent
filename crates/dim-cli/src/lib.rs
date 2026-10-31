@@ -29,6 +29,7 @@ mod session_host;
 mod ui;
 mod update;
 mod usage;
+mod version;
 mod web_install;
 mod wire;
 
@@ -73,9 +74,11 @@ pub fn run_cli() -> i32 {
 }
 
 /// The composition root: builds the client tree, loads what the action needs
-/// and disposes the tree before the exit code goes back.
+/// and disposes the tree before the exit code goes back. rutis reports
+/// nothing to the terminal: the CLI hears its plugins' failures where it
+/// awaits them, and the terminal may belong to the TUI.
 async fn run(options: Options) -> Result<i32> {
-    let root = rutis::Ctx::root()?;
+    let root = rutis::Ctx::root_with_sink(tokio::runtime::Handle::current(), Arc::new(|_| {}));
     let outcome = act(&root, options).await;
     let closed = root.shutdown().await;
     let code = outcome?;
@@ -102,7 +105,7 @@ async fn daemon_link(
 }
 
 /// Runs the ordinary TUI plugin directly, for an older daemon without the
-/// `ui.leaf` capability, initial model setup and a leaf's TUI child. The caller
+/// `ui.leaf.2` capability and for initial model setup. The caller
 /// owns the terminal; the daemon is only the protocol v3 business peer.
 async fn run_tui_with_connection(
     root: &rutis::Ctx,
@@ -135,10 +138,10 @@ async fn run_tui_with_connection(
     }
 }
 
-/// The interactive entry on a daemon that hosts UI leaves (Tui design
+/// The interactive entry on a daemon that keeps UI leaves (Tui design
 /// §3.6): this process creates or resumes the Session, mounts its leaf
-/// node and asks the daemon to host `Tui` in it. It ends when the `Tui`
-/// leaves or the daemon closes the link.
+/// node, asks the daemon to open a session with it, then runs its own
+/// `Tui`. It ends when the `Tui` leaves or the session ends.
 async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -147,7 +150,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     }
 
     let (link, connection) = daemon_link(root, options, true).await?;
-    if !connection.offers("ui.leaf") {
+    if !connection.offers("ui.leaf.2") {
         return run_tui_with_connection(root, options, link, connection).await;
     }
     let mut client = connection.take().ok_or("App Server did not start")?;
@@ -215,30 +218,36 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     };
 
     let leaf = leaf::Leaf::bind(options)?;
-    let (leave, left) = tokio::sync::oneshot::channel();
-    let (node, state) = leaf.node(options.clone(), leave);
+    let params = serde_json::json!({
+        "sessionId": session_id,
+        "kind": "tui",
+        "peer": leaf.peer,
+        "address": leaf.address,
+    });
+    let (node, ended) = leaf.node();
     let node = root.plugin(node);
     (&node).await.map_err(plugin_error)?;
-    let opened = client
-        .rpc(
-            "ui.open",
-            serde_json::json!({
-                "sessionId": session_id,
-                "kind": "tui",
-                "peer": leaf.peer,
-                "address": leaf.address,
-            }),
-        )
-        .await;
+    let opened = client.typed::<leaf::Opened>("ui.open", params).await;
     drop(client);
-    if let Err(error) = opened {
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            node.dispose().await?;
+            return Err(error);
+        }
+    };
+    let (leave, left) = tokio::sync::oneshot::channel();
+    let tui = root.plugin(leaf::LeafTui::new(options, session_id, opened, leave));
+    if let Err(error) = (&tui).await {
+        let _ = tui.dispose().await;
         node.dispose().await?;
-        return Err(error);
+        return Err(plugin_error(error));
     }
     let leave = tokio::select! {
         leave = left => leave.ok(),
-        () = leaf::stopped(&state) => None,
+        _ = ended => None,
     };
+    tui.dispose().await?;
     node.dispose().await?;
     match leave {
         Some(ui::tui::Leave::Exit(code)) => Ok(code),
@@ -442,7 +451,7 @@ fn prepare() -> Result<Option<Options>> {
         return Ok(None);
     }
     if matches!(options.action, Action::Version) {
-        println!("dimcode {}", env!("CARGO_PKG_VERSION"));
+        println!("dimcode {}", version::current());
         return Ok(None);
     }
     if matches!(options.action, Action::McpLogin(_)) && !std::io::stdin().is_terminal() {
@@ -505,6 +514,7 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
             writer: Box::new(tokio::io::stdout()),
         },
         agent_id,
+        version::current(),
     );
     let directory = options
         .directory
@@ -583,7 +593,19 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         return open_tui_leaf(root, &options).await;
     }
     if matches!(options.action, Action::WebInstall) {
-        return web_install::install(&options.home).await;
+        if !version::RELEASE {
+            return Err("A build from source has no published Web workspace; set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature".into());
+        }
+        let executable = std::env::current_exe().unwrap_or_default();
+        let assets = client::web_assets(&executable, &options.home);
+        return web_install::install(
+            &options.home,
+            version::VERSION,
+            &update::registry(),
+            assets,
+            &mut std::io::stdout(),
+        )
+        .await;
     }
     if let Action::Web {
         port,

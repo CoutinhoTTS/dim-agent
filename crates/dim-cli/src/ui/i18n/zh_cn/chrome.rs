@@ -186,8 +186,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "剪贴板：{reason}",
         "Wait for clipboard insertion before sending" => "请等待剪贴板内容插入后再发送",
         "A submission accepts at most 20 images" => "一次提交最多 20 张图片",
-        "[Image #{index}]" => "[图片 #{index}]",
-        "[Image #{index}{details}]" => "[图片 #{index}{details}]",
         "first frame" => "仅首帧",
         "re-encoded" => "已重新编码",
         "The current model does not accept images; remove {label} to send" => {

@@ -32,7 +32,9 @@ function visible(entries: DefinitionEntry[]) {
 
 export default definePlugin({
   name: 'Workflow',
-  config: z.toJSONSchema(options),
+  // A plain JSON Schema: zod's result also carries `~standard`, which
+  // rutis refuses as a Standard Schema.
+  config: JSON.parse(JSON.stringify(z.toJSONSchema(options))),
   inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods', 'partRegistry'],
   provides,
   async apply(ctx, config: z.infer<typeof options>) {

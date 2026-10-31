@@ -80,7 +80,7 @@ async fn respond(
     let messages = request["messages"].as_array().unwrap();
     let last = messages.last().unwrap();
     let prompt = last["content"].as_str().unwrap_or("");
-    if prompt == "reject401" {
+    if prompt.starts_with("reject401") {
         return Response::builder()
             .status(401)
             .header("content-type", "application/json")
@@ -633,6 +633,7 @@ async fn recorded_failures_and_cancellations_close_their_record() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let recording = Recording::start().await;
         let server = TestServer::start().await;
+        let url = format!("{}/chat/completions", server.url);
         let root = rutis::Ctx::root().unwrap();
         root.plugin(AimuxPlugin).await.unwrap();
         let host = root.get::<ModelHost>().unwrap();
@@ -658,7 +659,7 @@ async fn recorded_failures_and_cancellations_close_their_record() {
         let failure = host
             .0
             .invoke(
-                request("reject401"),
+                request("reject401 recorded"),
                 connection("expired-secret"),
                 CancellationToken::new(),
             )
@@ -677,7 +678,10 @@ async fn recorded_failures_and_cancellations_close_their_record() {
         ));
         let lines = recording
             .wait(1, |line| {
-                line["input"]["prompt"].to_string().contains("reject401")
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+                    && line["input"]["prompt"]
+                        .to_string()
+                        .contains("reject401 recorded")
             })
             .await;
         assert_eq!(lines.len(), 1, "one line for a failed call");
@@ -700,7 +704,8 @@ async fn recorded_failures_and_cancellations_close_their_record() {
         assert!(matches!(failure, HostError::Cancelled(_)), "{failure:?}");
         let lines = recording
             .wait(1, |line| {
-                line["input"]["prompt"].to_string().contains("slowheaders")
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+                    && line["input"]["prompt"].to_string().contains("slowheaders")
             })
             .await;
         assert_eq!(lines.len(), 1, "one line for a cancelled call");
