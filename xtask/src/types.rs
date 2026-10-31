@@ -10,7 +10,7 @@ fn file(root: &Path) -> PathBuf {
 }
 
 fn declarations(root: &Path) -> Result<String> {
-    rutis_bridge::build::Exports::new()
+    rutis_types::Exports::new()
         .declared(
             "dim_agent_types::PermissionPolicy",
             "import('./plugin.js').PermissionPolicy",

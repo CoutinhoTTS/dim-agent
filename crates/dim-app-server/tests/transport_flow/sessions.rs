@@ -2088,7 +2088,7 @@ async fn node_crash_resubmission_gets_the_original_receipt() {
         reply.get("error").is_some(),
         "the dead Node cannot return its receipt: {reply}"
     );
-    tokio::time::timeout(Duration::from_secs(5), loader.restart("SessionNodeRuntime"))
+    tokio::time::timeout(Duration::from_secs(5), loader.restart("session-node"))
         .await
         .expect("the runtime restart does not wait for the admitted input")
         .unwrap();

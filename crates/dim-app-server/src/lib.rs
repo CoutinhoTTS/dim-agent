@@ -45,9 +45,8 @@ use dim_agent_runtime::{
     wait_active,
 };
 use rutis::Ctx;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
-use rutis_loader::runtime::RowsSource;
-use rutis_loader::runtime::RuntimeRows;
+use rutis::host::{CtxHost, FiberView, Key};
+use rutis_loader::runtime::SessionRows;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -260,7 +259,7 @@ pub const RESTARTABLE: [&str; 5] = ["Rpc", "Connection", "Transport", "Agents", 
 struct Processes {
     loader: rutis_loader::Loader,
     view: FiberView,
-    runtime_rows: Vec<Key<RuntimeRows>>,
+    runtime_rows: Vec<Key<SessionRows>>,
     required: Vec<String>,
 }
 impl Processes {
@@ -332,10 +331,7 @@ impl Processes {
             .iter()
             .find(|key| root.get_at(key).is_none())
         {
-            return AgentError::Build(format!(
-                "runtime row declarations were not published: {:?}",
-                key.erase()
-            ));
+            return AgentError::Build(format!("runtime rows were not released: {:?}", key.erase()));
         }
         wait_active(
             root,
@@ -371,7 +367,7 @@ impl Drop for Startup {
 }
 
 /// Builds the process tree, opens admission once required host rows are Active
-/// and runtime declarations are published, and returns the listener addresses.
+/// and the runtimes have released their rows, and returns the listener addresses.
 pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Result<RunningServer> {
     if config.managed_provider.is_some() && config.product_home.is_none() {
         return Err(ServerError::Configuration(
@@ -545,6 +541,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle.clone(),
         armed: true,
     };
+    root.provide(rutis_bridge::LocalId(
+        rutis_bridge::PeerId::new("dim-daemon").expect("a peer id"),
+    ))
+    .map_err(|error| ServerError::Runtime(error.into()))?;
     let mut builtins = Modules::new();
     dim_agent_capabilities::register_names(&mut builder);
     register_names(builder.catalog_mut());
@@ -809,11 +809,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             {
                 std::fs::create_dir_all(project)?;
             }
-            let (runtimes, node, python) = (
-                runtimes.clone(),
-                parts.node.runtime.clone(),
-                python.runtime.clone(),
-            );
+            let (runtimes, node, python) = (runtimes.clone(), parts.node.clone(), python.clone());
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),
@@ -827,33 +823,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 },
             )?);
         }
-        let runtimes = parts.runtimes().zip([
-            ("SessionNodeRuntime", "SessionNodeRows"),
-            ("SessionPythonRuntime", "SessionPythonRows"),
-        ]);
-        for (foreign, (runtime_row, rows_row)) in runtimes {
+        for foreign in parts.runtimes() {
             if acquire.is_some() {
-                optional.push(rows_row);
+                optional.push(foreign.row);
             } else {
-                let runtime = foreign.runtime.clone();
-                rows.push(register_part(
-                    &mut builtins,
-                    builder.catalog(),
-                    move |_| Ok(Box::new(NodeRuntime(runtime.clone(), runtime_row))),
-                )?);
+                root.provide_at(foreign.command.clone(), foreign.launch.clone())
+                    .map_err(|error| ServerError::Runtime(error.into()))?;
             }
-            let resolver = foreign.rows.clone();
-            let name = foreign.name;
+            let runtime = foreign.clone();
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),
-                move |_| {
-                    Ok(Box::new(NodeRows {
-                        resolver: resolver.clone(),
-                        runtime: Key::dynamic(name),
-                        name: rows_row,
-                    }))
-                },
+                move |_| Ok(Box::new(runtime.connection())),
             )?);
         }
     }
@@ -981,7 +962,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .iter()
         .filter(|_| acquire.is_none())
         .flat_map(|parts| parts.runtimes())
-        .map(|foreign| Key::dynamic(foreign.rows.runtime_name().to_owned()))
+        .map(|foreign| SessionRows::key(foreign.row))
         .collect();
     let plugin_layer = match &plugins {
         Some(state) => {
@@ -992,11 +973,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 .filter(|id| required.contains(id))
                 .collect();
             let layer = state
-                .layer(
-                    builtins,
-                    builder.catalog().clone(),
-                    session_parts.as_ref().map(|parts| parts.node.rows.clone()),
-                )
+                .layer(builtins, builder.catalog().clone())
                 .map_err(ServerError::Configuration)?;
             required.retain(|row| !layer.off.contains(row));
             required.extend(layer.locked);
@@ -1007,9 +984,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }
         None => None,
     };
+    let sessions = session_parts.map(|parts| {
+        let (sessions, snapshots) = parts.resolver(builder.catalog());
+        let rows: Vec<_> = parts.runtimes().map(|foreign| foreign.row).collect();
+        (sessions, snapshots, rows)
+    });
     let mut resolver = rutis_loader::Chain::new().with(builtins);
-    if let Some(parts) = session_parts {
-        resolver = resolver.with_shared(parts.resolver);
+    if let Some((_, snapshots, _)) = &sessions {
+        resolver = resolver.with_shared(snapshots.clone());
     }
     let plugin = rutis_loader::LoaderPlugin::new(
         resolver,
@@ -1019,6 +1001,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         },
     );
     let loader = plugin.handle();
+    if let Some((sessions, _, _)) = &sessions {
+        sessions.attach(&loader);
+    }
     let loader_view = root.plugin(plugin);
     let processes = Processes {
         loader,
@@ -1044,6 +1029,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     &CancellationToken::new(),
                 )
                 .await?;
+                if let Some((sessions, _, rows)) = &sessions {
+                    for row in rows {
+                        sessions.follow_row(row);
+                    }
+                }
                 let layers = std::iter::once(assembly.clone())
                     .chain(plugin_layer.clone())
                     .collect();
@@ -1168,31 +1158,6 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     directory.create(path)
 }
 
-/// A runtime's rows part. Its rows listen to the bus themselves.
-struct NodeRows {
-    resolver: Arc<rutis_loader::runtime::RuntimeResolver>,
-    /// Gated on its runtime, which is registered under the runtime's name.
-    runtime: Key<rutis_bridge::runtime::Runtime>,
-    name: &'static str,
-}
-impl DynPlugin for NodeRows {
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn injects(&self) -> Vec<TypeKey> {
-        vec![self.runtime.erase(), TypeKey::of::<rutis_loader::Loader>()]
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
-        Box::pin(async move {
-            DynPlugin::apply(
-                &rutis_loader::runtime::RuntimeRowsPlugin::new(self.resolver.clone()),
-                ctx,
-            )
-            .await
-        })
-    }
-}
-
 /// Graceful shutdown: stop admission, settle Agent work, drain commands,
 /// close connections, then release the process tree.
 async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownReason> {
@@ -1246,14 +1211,4 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
     };
     control.complete_shutdown(result.is_ok()).await;
     result
-}
-
-struct NodeRuntime(Arc<rutis_bridge::runtime::LocalRuntime>, &'static str);
-impl DynPlugin for NodeRuntime {
-    fn name(&self) -> &str {
-        self.1
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
-        DynPlugin::apply(self.0.as_ref(), ctx)
-    }
 }
