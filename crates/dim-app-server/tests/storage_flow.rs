@@ -1,7 +1,7 @@
 use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
-    TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
+    AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
+    Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
@@ -5744,6 +5744,93 @@ async fn policy_facts_keeps_a_queued_input_consumed_after_turn_start() {
     assert!(ids.contains(&"event-1"), "{ids:?}");
     assert!(ids.contains(&"event-2"), "{ids:?}");
     assert!(ids.contains(&"event-3"), "{ids:?}");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_facts_selects_latest_completed_compaction_in_both_stores() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = MemoryTimelineStore::default();
+    sqlite
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let diagnostics: Box<CompactionDiagnosticsRecord> = serde_json::from_value(serde_json::json!({
+        "reason": "auto", "trigger": "threshold", "estimatedInputTokens": 1,
+        "entriesReplaced": 1, "modelCallCount": 1, "durationMs": 1,
+        "strategy": {"kind": "summary"}
+    }))
+    .unwrap();
+    let events = vec![
+        record(
+            1,
+            EventKind::ContextCompaction(completed("event-0", "summary", 1)),
+        ),
+        record(
+            2,
+            EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: None,
+                request_id: None,
+                command: None,
+                start: None,
+                through: 1,
+                outcome: ContextCompactionResult::Failed {
+                    error: "failed".into(),
+                    diagnostics: None,
+                },
+            }),
+        ),
+        record(
+            3,
+            EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: None,
+                request_id: None,
+                command: None,
+                start: None,
+                through: 1,
+                outcome: ContextCompactionResult::Skipped {
+                    reason: "skipped".into(),
+                    diagnostics,
+                },
+            }),
+        ),
+    ];
+    append(&sqlite, key("session", "main"), events.clone())
+        .await
+        .unwrap();
+    memory
+        .append(
+            key("session", "main"),
+            events,
+            Box::new(|result| assert!(result.is_ok())),
+        )
+        .unwrap();
+    let sqlite_facts = sqlite
+        .policy_facts(&key("session", "main"), 3, "")
+        .await
+        .unwrap();
+    let memory_facts = memory
+        .policy_facts(&key("session", "main"), 3, "")
+        .await
+        .unwrap();
+    let sqlite_ids: Vec<_> = sqlite_facts
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    let memory_ids: Vec<_> = memory_facts
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    assert_eq!(sqlite_ids, memory_ids);
+    assert_eq!(sqlite_ids, ["event-1"]);
     db.close().await.unwrap();
 }
 

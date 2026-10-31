@@ -2049,7 +2049,7 @@ fn policy_rows(
                 "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind=?4 \
                  AND (?4 != 'context/compaction' OR \
-                   json_extract(body, '$.record.event.data.outcome.status')='completed') \
+                   json_extract(body, '$.record.event.data.status')='completed') \
                  ORDER BY sequence DESC LIMIT 1",
             )
             .map_err(error)?
