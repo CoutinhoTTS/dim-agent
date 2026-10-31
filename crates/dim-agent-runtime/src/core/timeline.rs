@@ -8,7 +8,7 @@ use dim_agent_types::{
     TimelinePosition,
 };
 use rutis::events::SyncCall;
-use rutis::host::{CtxHost, ErrorKind, InstanceId};
+use rutis::host::{ErrorKind, InstanceId};
 use rutis::service;
 use rutis::{Ctx, Disposer, Event};
 use serde::{Deserialize, Serialize};

@@ -2,13 +2,18 @@
 //! keeps live state small; glibc can still retain freed arenas, so trim only
 //! when RSS is already large and at most once per few seconds.
 
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_os = "linux")]
 const TRIM_THRESHOLD_KB: u64 = 40 * 1024;
+#[cfg(target_os = "linux")]
 const TRIM_INTERVAL_MS: u64 = 5_000;
 
+#[cfg(target_os = "linux")]
 static LAST_TRIM_MS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
 fn rss_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status.lines().find_map(|line| {
@@ -17,6 +22,7 @@ fn rss_kb() -> Option<u64> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
