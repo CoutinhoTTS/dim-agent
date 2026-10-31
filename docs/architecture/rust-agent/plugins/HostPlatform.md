@@ -61,7 +61,12 @@ dependency or assembly changes are needed for these owner operations.
 
 The [process isolation design](../../../design/host-platform-isolation.md) owns the boundary
 contract: the two switches, their defaults, each platform's roots, the temporary
-directory and the failure note. `prepare_isolated_process(spec, workspace, output_dir)` reads
+directory and the failure note. `HostPlatform::current` captures the fixed platform-roots list
+as `platform_roots` when the platform mounts; the sandbox builder filters it to the roots
+installed on this host, and the `FileAccessFacts` service reads the same list, so the system fact
+is non-empty with the sandbox off. The effective developer directory and git's global
+configuration are added by the builder per process and are not facts.
+`prepare_isolated_process(spec, workspace, output_dir)` reads
 the switches through the port at every call, selects the existing environment values and wraps
 the argv in Seatbelt or bubblewrap. The immutable Session workspace, not the command cwd,
 supplies default writes; ShellSession also supplies its owned output directory, WorkspaceTools

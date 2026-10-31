@@ -503,7 +503,7 @@ What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/
 
 - **No prompt.** Read admission uses the tool name and risk category, so
   a path outside the working directory is decided like one inside it. Write admission under
-  `workspace-write` separately checks the [workspace target](../../architecture/rust-agent/plugins/Permission.md#workspace-write-targets). `read` declares
+  `workspace-write` separately checks the [file-access facts](../../architecture/rust-agent/plugins/Permission.md#file-access-facts). `read` declares
   `read_filesystem`, which every preset allows; the product profile's default preset is
   `workspace-write` ([main.rs](../../../crates/dim-app-server/src/main.rs)). The model therefore
   reads a pasted file without an approval prompt, as Attachments needs. A policy that lists
@@ -573,8 +573,9 @@ outside the workspace.
    source's files).
 
 SessionStore answers "which files does S own" from `session_file_owners`, whose primary key
-`(session_id, file_id)` serves that lookup, so v15 needs no change for it. The query is added
-with that item's design; nothing calls it before then.
+`(session_id, file_id)` serves that lookup, so v15 needs no change for it. `sessionFiles.owns`
+is that query; [ADR 014](../adr/014-file-access-facts.md) reads it as the session-owned fact for
+writes, and [ADR 013](../adr/013-command-output-ownership.md)'s output table extends it.
 
 Rejected alternatives:
 
@@ -709,12 +710,18 @@ App Server type:
 pub struct StoredSessionFile { pub file_id: String, pub path: PathBuf, pub bytes: u64 }
 pub enum SessionFileErrorCode { NotFound, Invalid, TooLarge, NodeUnavailable, Cancelled, Storage }
 pub struct SessionFileError { pub code: SessionFileErrorCode, pub message: String }
-pub trait PutSessionFile: Send + Sync + 'static {
+pub trait SessionFilesService: Send + Sync + 'static {
     fn put(&self, session_id: String, name: String, content: Vec<u8>, cancel: CancellationToken)
         -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+    fn owns(&self, session_id: String, path: PathBuf)
+        -> Pin<Box<dyn Future<Output = Result<bool, SessionFileError>> + Send + '_>>;
 }
-pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
+pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
 ```
+
+`owns` takes the resolved absolute path. It reads the `session_file_owners` rows of the
+Session's attachments; ADR 013's output table extends it. A path outside
+`<db>.session-files/<fileId>/` is unowned, and a query failure is an error that denies access.
 
 `SessionStorePlugin` takes the database directory's root index, provides `SessionFilesHost`, and
 reads `FileStorage` with `ctx.get_as` on each call. The fork, release and sweep steps are

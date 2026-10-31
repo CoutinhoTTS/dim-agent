@@ -490,11 +490,13 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 pub struct StoredSessionFile { pub file_id: String, pub path: PathBuf, pub bytes: u64 }
 pub enum SessionFileErrorCode { NotFound, Invalid, TooLarge, NodeUnavailable, Cancelled, Storage }
 pub struct SessionFileError { pub code: SessionFileErrorCode, pub message: String }
-pub trait PutSessionFile: Send + Sync + 'static {
+pub trait SessionFilesService: Send + Sync + 'static {
     fn put(&self, session_id: String, name: String, content: Vec<u8>, cancel: CancellationToken)
         -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+    fn owns(&self, session_id: String, path: PathBuf)
+        -> Pin<Box<dyn Future<Output = Result<bool, SessionFileError>> + Send + '_>>;
 }
-pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
+pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
 ```
 
 `SessionStorePlugin` 接收数据库目录的根索引，提供 `SessionFilesHost`，并在每次调用时用 `ctx.get_as` 读取 `FileStorage`。分叉、释放和清扫步骤是 SessionStore 基于原生存储连接的方法，供 S5c 使用。

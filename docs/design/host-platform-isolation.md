@@ -54,6 +54,12 @@ keeps the boundary it started with. Shell and runtime discovery stay outside the
 
 ## Platform bindings
 
+`HostPlatform` captures the fixed platform-roots list below when it mounts. The sandbox binds
+the installed roots, and the `FileAccessFacts` service reads the same list as its system fact
+([ADR 014](../adr/014-file-access-facts.md) D1), so the fact holds with the sandbox off. The
+developer directory and git's global configuration files are per-process additions and are not
+facts.
+
 ### macOS
 
 `/usr/bin/sandbox-exec` with a `HostPlatform`-generated Seatbelt profile: deny by default, allow

@@ -141,6 +141,47 @@ pub enum ShellStatus {
     Unavailable { code: &'static str, reason: String },
 }
 
+/// ADR 014 D1's fixed system roots: the sandbox builder mounts them read-only
+/// and file access treats them as read-only facts. macOS names `/private/etc`
+/// and its `/etc` alias; Windows has no sandbox backend and no roots.
+const PLATFORM_ROOTS: &[&str] = {
+    if cfg!(target_os = "macos") {
+        &[
+            "/System",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/Library/Apple",
+            "/private/etc",
+            "/etc",
+            "/var/select",
+        ]
+    } else if cfg!(unix) {
+        &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
+    } else {
+        &[]
+    }
+};
+
+/// The fixed roots at their requested paths and, where the host resolves a
+/// symlink or firmlink, their canonical forms: the sandbox binds the requested
+/// destination and the facts compare a resolved path.
+fn platform_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for path in PLATFORM_ROOTS {
+        let path = PathBuf::from(path);
+        if !roots.contains(&path) {
+            roots.push(path.clone());
+        }
+        if let Ok(canonical) = std::fs::canonicalize(&path)
+            && !roots.contains(&canonical)
+        {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
 /// Process facts and the source of the exec shell preference.
 #[derive(Clone)]
 pub struct HostPlatform {
@@ -153,6 +194,9 @@ pub struct HostPlatform {
     pub timezone: Option<String>,
     /// Environment of the service process at start; never a client's.
     pub env: Vec<(OsString, OsString)>,
+    /// The fixed system roots, captured when the platform mounts. The sandbox
+    /// and file-access facts read this one list.
+    pub platform_roots: Vec<PathBuf>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<dyn ExecutionSettingsSource>>,
@@ -267,6 +311,7 @@ impl HostPlatform {
             .into(),
             timezone: iana_time_zone::get_timezone().ok(),
             env,
+            platform_roots: platform_roots(),
             shell: Arc::new(Mutex::new(ResolvedShell {
                 config: Ok(None),
                 status: shell,
