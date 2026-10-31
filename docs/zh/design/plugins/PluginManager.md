@@ -2,7 +2,7 @@
 
 状态：草案，2026-10-27 已与维护者对齐。需求：[插件管理](../../../design/plugin-management.md)（[#432](https://github.com/arcships/dim/issues/432)）。Issue：[#3](https://github.com/arcships/dim/issues/3)、[#384](https://github.com/arcships/dim/issues/384)。作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程：安装按宿主进行）。语言：Rust。里程碑：§0 中标出的部分属于 M1。
 
-PluginManager 保存一个宿主的插件配置：装了哪些插件，它们从哪里来，每个名字使用哪个插件，哪些名字被关闭。它把这份配置保存在自己的文件 `plugins.json` 中，格式是 Dim 自己的格式。它不保存运行时状态。插件是否已加载、正在运行或已失败，是 rutis 的状态，从 rutis-loader 读取。一个所有者持有什么内容（skill、MCP 服务器、hook），是该所有者的状态。PluginManager 通过向所有者下达命令来执行配置变更：插件代码交给 rutis-loader，内容交给 SkillsCatalog、Mcp 和 Hooks。每个所有者自己做决定，自己保存状态。
+PluginManager 保存一个宿主的插件配置：装了哪些插件，它们从哪里来，每个名字使用哪个插件，哪些名字被关闭。它把这份配置保存在自己的文件 `plugins.json` 中，格式是 Dim 自己的格式。它不保存运行时状态，只在内存中记下它自己拒绝的内容（§3.7）。插件是否已加载、正在运行或已失败，是 rutis 的状态，从 rutis-loader 读取。一个所有者持有什么内容（skill、MCP 服务器、hook），是该所有者的状态。PluginManager 通过向所有者下达命令来执行配置变更：插件代码交给 rutis-loader，内容交给 SkillsCatalog、Mcp 和 Hooks。每个所有者自己做决定，自己保存状态。
 
 一个插件是一个带有清单的目录。它可以带代码（TypeScript 或 Python 写的 rutis 插件），可以带内容（skill、MCP 配置、hook），也可以两者都带。插件按**名字**识别。可以安装多个同名插件，但同一时间只使用其中一个。打开另一个，就会替换正在使用的那个。内置插件就是这样被替换的。
 
@@ -235,7 +235,7 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 对于 P 带有的每种内容和每个存在的所有者，PluginManager 调用该所有者的 `register({plugin, dir, document})`；撤回时调用 `withdraw({plugin})`，其中 `plugin` 是插件的 id：已安装插件的 id，或默认插件的名字（§7），因此可以安全地用在服务器 id 和文件名中。一个名字从一个插件切换到另一个插件时，撤回旧插件的内容；插件不再带有的种类被撤回。所有者把登记的内容作为自己的状态保存，持久化它，并在自己重新加载后恢复它。PluginManager 不监视所有者，也不代替它们再次登记任何东西。PluginManager 要调用某个所有者而它不存在时，跳过它；回复中列出被跳过的种类。所有者报告它持有哪些插件 id 的内容。在启动时，以及 PluginManager 打开某个所有者的名字时，PluginManager 为每个正在使用的插件登记该种类的内容，并为该所有者持有的其他 id 撤回这种内容；所有者从不查找插件。因此，所有者关闭期间被删除的插件，或进程在写入 `plugins.json` 之后、向所有者发命令之前停止而留下的内容，都不会再次运行；拒绝的原因在重启后会再次报告。
 
-所有者校验交给它的内容。它拒绝的内容（不通过 Mcp 校验的 MCP 文档，`SKILL.md` 无法解析的 Skill）不影响插件的其他内容和代码：回复在 `refused` 中列出它，`plugin.list` 显示调用时各所有者对该插件报告的内容。
+所有者校验交给它的内容。它拒绝的内容（不通过 Mcp 校验的 MCP 文档，`SKILL.md` 无法解析的 Skill）不影响插件的其他内容和代码：回复在 `refused` 中列出它，`plugin.list` 显示调用时各所有者对该插件报告的内容。PluginManager 拒绝无法读取或不是合法 JSON 的 JSON 内容文件。它把这种拒绝保存在内存中，按插件 id 和种类记录，并在该种类的文档再次读取并交给所有者、该种类被撤回、或插件被移除时清除；`plugin.list` 在同一个 `refused` 条目中显示它，代替所有者的拒绝。启动和所有者打开时的 reconcile 中的拒绝，按插件 id、种类和错误记录为 `warn` 日志。
 
 ## 4. 时序与冲突
 
