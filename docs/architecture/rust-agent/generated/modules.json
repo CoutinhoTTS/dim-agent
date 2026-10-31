@@ -29394,6 +29394,8 @@
       "references": [
         "mod detect",
         "path detect::Env",
+        "path detect::appearance_from_colorfgbg",
+        "path detect::appearance_from_override",
         "path detect::color_mode",
         "path detect::resolve_appearance"
       ]
@@ -29404,6 +29406,7 @@
       "references": [
         "mod palette",
         "path Appearance",
+        "path Appearance::Dark",
         "path CodePalette",
         "path ColorMode",
         "path Palette",
@@ -30998,7 +31001,6 @@
       "references": [
         "path ThemePanel",
         "path ThemePanel::new",
-        "path crate::ui::theme_panel::SYSTEM",
         "path crate::ui::theme_panel::label_of",
         "path crate::ui::theme_panel::save_theme_id",
         "path crate::ui::theme_panel::saved_theme_id",
