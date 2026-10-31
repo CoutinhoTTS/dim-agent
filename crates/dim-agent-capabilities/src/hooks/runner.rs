@@ -625,6 +625,10 @@ impl View {
                 if session_started(event) {
                     self.started = true;
                 }
+                if follow_up_input(event) {
+                    self.follow_up_input = Some(event.id.clone());
+                    self.follow_ups += 1;
+                }
             }
             EventKind::InputConsumed(data) => {
                 if self.operator_inputs.remove(&data.input_id) {
@@ -877,13 +881,7 @@ impl Branch {
         if blocks.is_empty() {
             return;
         }
-        self.write(
-            trigger,
-            InputMode::Append,
-            blocks,
-            false,
-            Validity::Unstarted,
-        );
+        self.write(trigger, InputMode::Append, blocks, Validity::Unstarted);
     }
 
     async fn post_tools(self: &Arc<Self>, trigger: u64, calls: Vec<ToolRun>) {
@@ -937,7 +935,7 @@ impl Branch {
         if blocks.is_empty() {
             return;
         }
-        self.write(trigger, InputMode::Append, blocks, false, Validity::Branch);
+        self.write(trigger, InputMode::Append, blocks, Validity::Branch);
     }
 
     async fn stop(self: &Arc<Self>, trigger: u64, from_follow_up: bool) {
@@ -973,7 +971,6 @@ impl Branch {
             trigger,
             InputMode::Queue,
             vec![raw(text, None)],
-            true,
             Validity::Branch,
         );
     }
@@ -1027,10 +1024,9 @@ impl Branch {
         trigger: u64,
         mode: InputMode,
         blocks: Vec<InputBlock>,
-        follow_up: bool,
         validity: Validity,
     ) -> Option<Arc<AgentEvent>> {
-        let mut view = self.view.lock().unwrap();
+        let view = self.view.lock().unwrap();
         let moved_on = view.interrupted > trigger || view.spoken > trigger;
         let started = validity == Validity::Unstarted && view.started;
         if moved_on || started {
@@ -1052,12 +1048,6 @@ impl Branch {
                 return None;
             }
         };
-        // Recorded under the same lock the fold takes, so the consumed input
-        // is always recognised.
-        if follow_up {
-            view.follow_up_input = Some(event.id.clone());
-            view.follow_ups += 1;
-        }
         Some(event)
     }
 }
@@ -1142,6 +1132,20 @@ fn operator_input(data: &InputMessageData) -> bool {
             data.blocks.first(),
             Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-")
         )
+}
+
+/// Whether `event` is a follow-up input Hooks wrote: its block carries the
+/// `follow-up` marker (§3.4). Only Hooks writes `dim-hooks` markers.
+fn follow_up_input(event: &AgentEvent) -> bool {
+    let EventKind::InputMessage(data) = &event.kind else {
+        return false;
+    };
+    data.blocks.iter().any(|block| {
+        matches!(
+            block,
+            InputBlock::Raw { text, .. } if text.starts_with("<dim-hooks kind=\"follow-up\">")
+        )
+    })
 }
 
 fn session_started(event: &AgentEvent) -> bool {
@@ -1270,7 +1274,7 @@ mod tests {
     use crate::host::HostFuture;
     use dim_agent_types::{
         ApprovalCallData, ContentBlock, InputConsumedData, InputDeletedData, ToolCall,
-        ToolCallData, ToolResult, ToolResultData, UserInput,
+        ToolCallData, ToolResult, ToolResultData, TurnEndData, UserInput,
     };
     use std::path::PathBuf;
 
@@ -1365,6 +1369,50 @@ mod tests {
             }),
         ));
         assert_eq!(view.spoken, 0, "a deleted input moved spoken");
+    }
+
+    /// AGENTS rule 4: the follow-up identity and count are read from the
+    /// branch, so a replay folds the same state a live fold held. A turn the
+    /// follow-up drove keeps the count; an operator turn resets it.
+    #[test]
+    fn the_follow_up_state_is_rebuilt_from_the_branch() {
+        let follow_up = event(
+            1,
+            EventKind::InputMessage(InputMessageData {
+                blocks: vec![raw(
+                    element("dim-hooks", &[("kind", "follow-up")], "reason"),
+                    None,
+                )],
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            }),
+        );
+        let turn_end = |sequence| {
+            event(
+                sequence,
+                EventKind::TurnEnd(TurnEndData {
+                    turn_id: "turn".into(),
+                    outcome: TurnOutcome::Completed {
+                        reason: "stop".into(),
+                    },
+                }),
+            )
+        };
+        let mut view = View::default();
+        view.fold(&follow_up);
+        assert_eq!(view.follow_ups, 1, "the follow-up was not counted");
+        assert_eq!(view.follow_up_input.as_deref(), Some(follow_up.id.as_str()));
+        view.fold(&event(
+            2,
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: follow_up.id.clone(),
+            }),
+        ));
+        assert!(view.consuming, "the follow-up turn was not recognized");
+        view.fold(&turn_end(3));
+        assert_eq!(view.follow_ups, 1, "a follow-up turn reset the count");
+        view.fold(&turn_end(4));
+        assert_eq!(view.follow_ups, 0, "an operator turn did not reset it");
     }
 
     /// F10: `fold` registers the run's token before its task starts, so the
