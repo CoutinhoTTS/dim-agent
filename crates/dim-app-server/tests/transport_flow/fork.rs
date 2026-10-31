@@ -138,7 +138,8 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     let fork = agent.get_session(&fid).unwrap();
     assert_eq!(
         reply["result"]["sequence"].as_u64().unwrap(),
-        fork.sequence("main").unwrap()
+        at + 2,
+        "the reply names the fork's main head at publication: session/forked at at + 1, branch/resume at at + 2"
     );
 
     let mut children = vec![done.clone(), running.clone(), steered.clone()];
@@ -163,6 +164,7 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     assert_eq!(tail[0].kind.key(), "session/forked");
     assert_eq!(tail[1].kind.key(), "branch/resume");
     assert_eq!(failed_creations(tail), children, "{:?}", keys(tail));
+    assert_eq!(tail.len(), 2 + children.len(), "{:?}", keys(tail));
     assert_eq!(fork.branches().len(), 1, "only main is active in the fork");
 
     let rows = |sql: &str| count(&store, sql, [&fid, &sid]);
