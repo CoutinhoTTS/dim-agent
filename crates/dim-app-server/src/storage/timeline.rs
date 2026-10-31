@@ -1983,19 +1983,6 @@ fn window_rows(
     );
     if let Some(turn) = turn {
         rows.push(turn);
-        let previous_end: Option<i64> = connection
-            .prepare(
-                "SELECT MAX(sequence) FROM timeline_events \
-                 WHERE session_id=?1 AND branch_id=?2 AND sequence<?3 AND kind='turn/end'",
-            )
-            .map_err(error)?
-            .query_row(params![key.session_id, key.branch_id, turn.0], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(error)?
-            .flatten();
-        let start = previous_end.unwrap_or(0) + 1;
         rows.extend(
             connection
                 .prepare(
@@ -2366,11 +2353,11 @@ impl TimelineStore for SqliteTimelineStore {
             for (sequence, last_sequence) in rows {
                 let sequence = sequence as u64;
                 let last_sequence = last_sequence as u64;
-                if let Some((_, range)) = ranges.last_mut() {
-                    if *range.end() + 1 >= sequence {
-                        *range = *range.start()..=last_sequence.max(*range.end());
-                        continue;
-                    }
+                if let Some((_, range)) = ranges.last_mut()
+                    && *range.end() + 1 >= sequence
+                {
+                    *range = *range.start()..=last_sequence.max(*range.end());
+                    continue;
                 }
                 ranges.push((key.branch_id.clone(), sequence..=last_sequence));
             }
@@ -2425,11 +2412,11 @@ impl TimelineStore for SqliteTimelineStore {
             for (sequence, last_sequence) in rows {
                 let sequence = sequence as u64;
                 let last_sequence = last_sequence as u64;
-                if let Some((_, range)) = ranges.last_mut() {
-                    if *range.end() + 1 >= sequence {
-                        *range = *range.start()..=last_sequence.max(*range.end());
-                        continue;
-                    }
+                if let Some((_, range)) = ranges.last_mut()
+                    && *range.end() + 1 >= sequence
+                {
+                    *range = *range.start()..=last_sequence.max(*range.end());
+                    continue;
                 }
                 ranges.push((key.branch_id.clone(), sequence..=last_sequence));
             }

@@ -163,7 +163,7 @@ impl Pass<'_> {
             return Err("Compaction cut lies inside the retained tail.");
         }
         let pinned = pinned_inputs(self.view, Some(window), self.turn, &retain_from, self.model);
-        let digest = digest_entries(self.view, window, &retain_from, self.model);
+        let digest = digest_entries(self.view, window, self.model);
         let message = digest
             .as_ref()
             .map(|digest| digest_message(&digest.entries, digest.dropped));
@@ -307,6 +307,7 @@ impl ContextPolicy {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare(
         &self,
         request: Arc<ModelRequest>,
@@ -325,6 +326,7 @@ impl ContextPolicy {
     }
 
     /// The prepared request and the trigger's estimate of it.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_estimated(
         &self,
         request: Arc<ModelRequest>,
@@ -1123,7 +1125,6 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
 fn digest_entries(
     view: &View,
     window: &PolicyWindow,
-    retain_from: &str,
     model: &dyn ContextModel,
 ) -> Option<DigestEntries> {
     // The compaction in effect is the latest completed record of the view,
@@ -1205,7 +1206,7 @@ fn digest_entries(
             }
             entries = entries.split_off(high);
         }
-        return (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped });
+        (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped })
     }
 }
 

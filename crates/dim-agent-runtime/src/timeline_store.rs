@@ -253,7 +253,7 @@ pub trait TimelineStore: Send + Sync + 'static {
         &'a self,
         key: &'a TimelineKey,
         through: u64,
-        turn_id: &'a str,
+        _turn_id: &'a str,
         cut: &'a str,
     ) -> BoxFuture<'a, Result<PolicyWindow>> {
         Box::pin(async move {
