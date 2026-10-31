@@ -5548,3 +5548,97 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
         before
     );
 }
+
+#[tokio::test]
+async fn policy_window_keeps_a_queued_input_consumed_after_turn_start() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("queued", Some(InputMode::Queue))),
+            ),
+            record(
+                2,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            text(4, "anchor"),
+        ],
+    )
+    .await
+    .unwrap();
+    let window = store
+        .policy_window(&key("session", "main"), 4, "turn", "event-4")
+        .await
+        .unwrap();
+    let ids: Vec<_> = window
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    assert!(ids.contains(&"event-1"), "{ids:?}");
+    assert!(ids.contains(&"event-2"), "{ids:?}");
+    assert!(ids.contains(&"event-3"), "{ids:?}");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_facts_keeps_a_queued_input_consumed_after_turn_start() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("queued", Some(InputMode::Queue))),
+            ),
+            record(
+                2,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            text(4, "after"),
+        ],
+    )
+    .await
+    .unwrap();
+    let facts = store
+        .policy_facts(&key("session", "main"), 4, "turn")
+        .await
+        .unwrap();
+    let ids: Vec<_> = facts.events.iter().map(|event| event.id.as_str()).collect();
+    assert!(ids.contains(&"event-1"), "{ids:?}");
+    assert!(ids.contains(&"event-2"), "{ids:?}");
+    assert!(ids.contains(&"event-3"), "{ids:?}");
+    db.close().await.unwrap();
+}

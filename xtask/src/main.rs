@@ -573,6 +573,7 @@ async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Erro
         [database, session] => (PathBuf::from(database), session.clone()),
         _ => return Err("context-breakdown needs DB and SESSION".into()),
     };
+    let (directory, database) = disposable_database(&database)?;
     let db = dim_app_server::storage::SqliteStorage::open(database)?;
     let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
     let agent = agent_with_store(store).await?;
@@ -665,6 +666,7 @@ async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Erro
     session.close().await?;
     agent.close().await?;
     drop(db);
+    std::fs::remove_dir_all(&directory)?;
     Ok(())
 }
 
@@ -679,6 +681,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     };
     let baseline = allocation::live();
     let rss_baseline = rss_kb();
+    let (directory, database) = disposable_database(&database)?;
     let db = dim_app_server::storage::SqliteStorage::open(database)?;
     let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
     let agent = agent_with_store(store).await?;
@@ -721,6 +724,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_after_agent = allocation::live();
     let rss_after_agent = rss_kb();
     drop(db);
+    std::fs::remove_dir_all(&directory)?;
     let trim_result = trim_heap();
     let rss_after_trim = rss_kb();
     let live_after_trim = allocation::live();
@@ -763,6 +767,21 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn disposable_database(
+    database: &std::path::Path,
+) -> std::result::Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let directory = std::env::temp_dir().join(format!("dim-replay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory)?;
+    let copy = directory.join("timeline.sqlite");
+    let source = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    source.backup(rusqlite::MAIN_DB, &copy, None)?;
+    Ok((directory, copy))
 }
 
 fn rss_kb() -> Option<u64> {

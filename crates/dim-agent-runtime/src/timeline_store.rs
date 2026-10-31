@@ -217,7 +217,20 @@ pub trait TimelineStore: Send + Sync + 'static {
                     .map(|record| record.event.sequence)
             };
             let configured = latest(&|kind| matches!(kind, EventKind::ContextConfigured(_)));
-            let compaction = latest(&|kind| matches!(kind, EventKind::ContextCompaction(_)));
+            let compaction = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ContextCompaction(data)
+                        if matches!(
+                            data.outcome,
+                            dim_agent_types::ContextCompactionResult::Completed { .. }
+                        ) =>
+                    {
+                        Some(record.event.sequence)
+                    }
+                    _ => None,
+                });
             let usage = records
                 .iter()
                 .rev()

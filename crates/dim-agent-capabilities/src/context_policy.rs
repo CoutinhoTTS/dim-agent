@@ -1004,11 +1004,20 @@ impl ContextPolicy {
                 diagnostics,
             }) => {
                 let turn_id = pass.turn.map_or("", |(turn_id, _)| turn_id);
-                let window = self
+                let window = match self
                     .timeline
                     .policy_window(pass.view.facts.through, turn_id, &retain_from)
                     .await
-                    .unwrap_or_default();
+                {
+                    Ok(window) => window,
+                    Err(error) => {
+                        return StepOutcome::Failed {
+                            retain_from: Some(retain_from),
+                            error: error.to_string(),
+                            diagnostics: Some(diagnostics),
+                        };
+                    }
+                };
                 match pass.compose(&window, retain_from.clone(), replacement) {
                     Ok(composed) => StepOutcome::Completed {
                         composed,
@@ -1326,8 +1335,20 @@ fn digest_entries(
             }
             None => (Vec::new(), false),
         };
+        let cut_index = view
+            .context
+            .order
+            .iter()
+            .position(|event| event.id == window.cut);
         for event in &window.tool_results {
-            if event.sequence > window.cut_sequence {
+            let after_cut = cut_index.map_or(event.sequence > window.cut_sequence, |cut| {
+                view.context
+                    .order
+                    .iter()
+                    .position(|ordered| ordered.id == event.id)
+                    .is_none_or(|index| index >= cut)
+            });
+            if after_cut {
                 continue;
             }
             let EventKind::ToolResult(data) = &event.kind else {
