@@ -2764,7 +2764,6 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
-            model: self.label.as_ref().map(ModelLabel::full),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -2791,10 +2790,6 @@ impl App {
                 let panel = crate::ui::isolation_panel::IsolationPanel::new(&self.approvals);
                 self.open_prompt(Prompt::Isolation(Box::new(panel)));
                 self.host.send(Command::ReadIsolation);
-            }
-            Setting::Model => {
-                self.open_prompt(Prompt::Models(ModelsPanel::new()));
-                self.host.send(Command::ListModels);
             }
             Setting::StartupForm => {
                 let fullscreen = !crate::ui::config::saved_fullscreen(&self.home);
@@ -5521,6 +5516,37 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn settings_omits_model_selection_and_model_command_keeps_it() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 32), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let screen = |drawn: &mut Drawn| {
+                if fullscreen {
+                    let frame = drawn.app.frame(drawn.size);
+                    let mut screen = FullScreen::new(drawn.size, true);
+                    let bytes = screen.render(&frame, drawn.size, &drawn.app.palette, &drawn.app);
+                    let mut terminal = crate::ui::render::testterm::Emu::new(100, 32);
+                    terminal.feed(&bytes);
+                    terminal.rows_text().join("\n")
+                } else {
+                    drawn.emu.rows_text().join("\n")
+                }
+            };
+            typed(&mut drawn.app, "/settings");
+            drawn.key(KeyCode::Enter);
+            let settings = screen(&mut drawn);
+            assert!(settings.contains("Settings"), "{settings}");
+            assert!(settings.contains("Execution"), "{settings}");
+            assert!(!settings.contains("Model"), "{settings}");
+            drawn.key(KeyCode::Esc);
+            typed(&mut drawn.app, "/model");
+            drawn.key(KeyCode::Enter);
+            let models = screen(&mut drawn);
+            assert!(models.contains("Select a model"), "{models}");
+        }
     }
 
     #[test]

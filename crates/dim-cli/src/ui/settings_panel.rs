@@ -36,7 +36,6 @@ pub struct Values {
     pub mouse: bool,
     pub notify: bool,
     pub approvals: String,
-    pub model: Option<String>,
 }
 
 /// One row: a switch flips in place, a link opens its picker.
@@ -50,10 +49,9 @@ pub enum Setting {
     Notify,
     Approvals,
     Isolation,
-    Model,
 }
 
-const ROWS: [(Setting, &str); 9] = [
+const ROWS: [(Setting, &str); 8] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
@@ -62,7 +60,6 @@ const ROWS: [(Setting, &str); 9] = [
     (Setting::Notify, "notify"),
     (Setting::Approvals, "approvals"),
     (Setting::Isolation, "isolation"),
-    (Setting::Model, "model"),
 ];
 
 impl Setting {
@@ -137,12 +134,6 @@ impl SettingsPanel {
                 link(&values.approvals),
             ),
             row(Setting::Isolation, "Execution", link("")),
-            Item::heading(t("Models")),
-            row(
-                Setting::Model,
-                "Model",
-                link(values.model.as_deref().unwrap_or(t("not set"))),
-            ),
         ];
         let mut list = ListPanel::new(
             "Settings",
