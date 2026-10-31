@@ -171,6 +171,8 @@ included;
 answered request starts no command;
 `exit_two_is_a_failure_at_session_start_and_notification` pins that exit 2 at
 the two observation hooks is the reported failure, not a block;
+`a_session_start_hook_reads_only_its_context` pins that `SessionStart` reads
+`additionalContext` alone, not another event's `decision` and `reason`;
 `a_failure_keeps_a_bounded_stderr_excerpt` pins the diagnostic's excerpt; and
 `hooks_settings.rs`'s `a_hook_point_reads_sources_without_authorizing_a_project`
 pins that reading a Session's sources never authorizes a workspace.

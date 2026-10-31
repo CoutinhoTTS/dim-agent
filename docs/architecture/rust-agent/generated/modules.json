@@ -8492,8 +8492,10 @@
       "to": "dim_agent_capabilities::hooks::document",
       "references": [
         "path HookEvent::Notification",
+        "path HookEvent::PostToolUse",
         "path HookEvent::SessionStart",
         "path HooksDocument",
+        "path OnFailure::Continue",
         "path handlers",
         "use crate::hooks::HooksDocument"
       ]
@@ -8504,11 +8506,13 @@
       "references": [
         "path FOLLOWED_EVENTS",
         "path HookResult::Failed",
+        "path HookResult::Success",
         "path HookRun",
         "path HooksRuntime",
         "path Pending::default",
         "path View::default",
         "path approval_point",
+        "path contribution_of",
         "path failed"
       ]
     },

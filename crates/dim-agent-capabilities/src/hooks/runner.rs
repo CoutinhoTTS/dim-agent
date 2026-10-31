@@ -410,7 +410,16 @@ fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
                 Ok(Value::Object(object)) => {
                     report_ignored_fields(&object);
                     let mut parts: Vec<&str> = Vec::new();
-                    if object.get("decision").and_then(Value::as_str) == Some("block")
+                    // A.4 lists `decision` and `reason` only for the
+                    // `PostToolUse` rows; `SessionStart` reads only
+                    // `additionalContext`, and plain text stays its context
+                    // (A.3).
+                    let blocking = matches!(
+                        event,
+                        HookEvent::PostToolUse | HookEvent::PostToolUseFailure
+                    );
+                    if blocking
+                        && object.get("decision").and_then(Value::as_str) == Some("block")
                         && let Some(reason) = object.get("reason").and_then(Value::as_str)
                     {
                         parts.push(reason);
@@ -1384,6 +1393,35 @@ mod tests {
             );
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /// A.4 gives `SessionStart` only `hookSpecificOutput.additionalContext`,
+    /// so a top-level `decision: "block"` with its `reason` is not that
+    /// event's protocol; the `PostToolUse` rows read both. Plain text stays a
+    /// `SessionStart` hook's context (A.3).
+    #[test]
+    fn a_session_start_hook_reads_only_its_context() {
+        let object = "{\"decision\":\"block\",\"reason\":\"blocking reason\",\
+                      \"hookSpecificOutput\":{\"additionalContext\":\"start context\"}}";
+        let run = |stdout: &str| HookRun {
+            result: HookResult::Success {
+                stdout: stdout.into(),
+            },
+            on_failure: OnFailure::Continue,
+        };
+        assert_eq!(
+            contribution_of(HookEvent::SessionStart, &run(object)).as_deref(),
+            Some("start context"),
+            "a SessionStart hook contributed its decision"
+        );
+        assert_eq!(
+            contribution_of(HookEvent::SessionStart, &run("plain text")).as_deref(),
+            Some("plain text"),
+            "plain text stopped being the SessionStart context"
+        );
+        let both = contribution_of(HookEvent::PostToolUse, &run(object)).expect("a contribution");
+        assert!(both.contains("blocking reason"), "{both}");
+        assert!(both.contains("start context"), "{both}");
     }
 
     /// F4: a result settles its call, and the call's input (whole file
