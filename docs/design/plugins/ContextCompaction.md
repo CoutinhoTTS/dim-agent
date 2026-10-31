@@ -1612,9 +1612,12 @@ AGENTS.md keeps automated tests for flows and contracts. It is an `xtask` comman
 `measure`, which already runs with an optional real model configuration:
 
 ```bash
-cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low] [--candidate FILE [--candidate-length FILE] [--target OUTPUT_SHARE,INPUT_SHARE]]
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 20 --out DIR [--reasoning inherit|off|low] [--candidate FILE [--candidate-length FILE] [--target OUTPUT_SHARE,INPUT_SHARE]]
 ```
 
+- `--runs N` is the runs of every case in every arm, and a verdict needs 20 judged runs of every
+  case per arm (§8.1). `--runs 3` is therefore a smoke run: it exercises the runner and its
+  verdict is at best `inconclusive`.
 - Without `--reasoning` the runner runs phase 1: the three reasoning arms (`inherit`, `off`,
   `low`) with no target instruction. `--reasoning VALUE` runs phase 2 instead: the no-instruction
   arm plus the four `(α, β)` arms, with `VALUE` being the reasoning value phase 1 chose for the

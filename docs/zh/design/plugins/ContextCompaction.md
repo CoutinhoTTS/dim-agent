@@ -839,9 +839,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 **放在哪里。** 不在 CI 中：它调用真实模型，结果不确定且要花钱，而 AGENTS.md 把自动化测试留给流程与合同。它是 `measure` 旁边的一个 `xtask` 命令，`measure` 已经可以选配真实模型配置运行：
 
 ```bash
-cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low] [--candidate FILE [--candidate-length FILE] [--target OUTPUT_SHARE,INPUT_SHARE]]
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 20 --out DIR [--reasoning inherit|off|low] [--candidate FILE [--candidate-length FILE] [--target OUTPUT_SHARE,INPUT_SHARE]]
 ```
 
+- `--runs N` 是每个用例在每个分组各跑几次；结论需要每个用例在每个分组至少 20 次已判运行（§8.1）。因此 `--runs 3` 只是一次冒烟运行：它验证运行器本身，结论至多是 `inconclusive`。
 - 不带 `--reasoning` 时运行器执行第一阶段：三个推理分组（`inherit`、`off`、`low`），不带目标指令。带 `--reasoning VALUE` 时执行第二阶段：无指令分组加四个 `(α, β)` 分组，`VALUE` 是第一阶段为该模型选定的推理值。
 - `--candidate FILE` 读取一个 UTF-8 文本文件，内容作为候选系统提示。它需要 `--reasoning VALUE`，并取代两个阶段的分组，而不是与它们并列：运行器在同一批用例上运行两个分组 `current` 与 `candidate`，两者都用 `VALUE`，并共用一条目标规则——给了 `--target OUTPUT_SHARE,INPUT_SHARE` 就用它，没有就不写目标。每个份额是大于 0、至多 1 的小数。`--candidate` 缺 `--reasoning`、`--target` 缺 `--candidate`、份额格式错误、文件不是 UTF-8 文本，都在任何模型调用之前拒绝。
 - `--candidate-length FILE` 读取一个 UTF-8 文本文件，内容作为候选分组的目标句（§13.3）：一个恰好带一个 `{target}` 占位符的模板，占位符填入 token 数。它需要 `--candidate` 和 `--target`，所以两个分组共用同一条目标规则，只有句子不同；文件不是 UTF-8 文本或占位符个数不是一，都在任何模型调用之前拒绝。
