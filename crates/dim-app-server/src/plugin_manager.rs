@@ -515,8 +515,8 @@ fn dir_of(record: &Record, defaults: &Defaults, name: &str, used: &Use) -> Optio
 struct Outcome {
     status: Option<Value>,
     skipped: Vec<Kind>,
-    /// Content an owner refused: `{kind, error}`.
-    refused: Vec<Value>,
+    /// Content an owner refused or PluginManager could not read, by kind.
+    refused: Vec<Refusal>,
     restart_required: bool,
 }
 impl Outcome {
@@ -529,7 +529,7 @@ impl Outcome {
             map.insert("skipped".into(), json!(self.skipped));
         }
         if !self.refused.is_empty() {
-            map.insert("refused".into(), json!(self.refused));
+            map.insert("refused".into(), json!(refused_entries(&self.refused)));
         }
         if self.restart_required {
             map.insert("restartRequired".into(), json!(true));
@@ -547,11 +547,14 @@ struct Change {
 /// Logs each content refusal of a reconcile at `warn` (§3.7), with the
 /// plugin id, the kind and the error.
 fn log_refused(plugin: &str, outcome: &Outcome) {
-    for refusal in &outcome.refused {
+    for (kind, error) in &outcome.refused {
+        // The kind's name as the replies show it: its `Serialize`, the one
+        // place the names are written.
+        let name = serde_json::to_value(kind).unwrap_or_default();
         tracing::warn!(
             %plugin,
-            kind = refusal["kind"].as_str().unwrap_or_default(),
-            error = refusal["error"].as_str().unwrap_or_default(),
+            kind = name.as_str().unwrap_or_default(),
+            %error,
             "plugin content refused",
         );
     }
@@ -583,8 +586,19 @@ pub(crate) struct Owners {
 /// The row names of the content owners and the kind each takes.
 const OWNERS: [(&str, Kind); 2] = [("SkillsCatalog", Kind::Skills), ("Mcp", Kind::Mcp)];
 
-fn refused(kind: Kind, error: impl std::fmt::Display) -> Value {
-    json!({"kind": kind, "error": error.to_string()})
+/// A content refusal: the kind and the error it came with (§3.7).
+type Refusal = (Kind, String);
+
+/// What a reply's or `plugin.list`'s `refused` holds (A.1): `{kind, error}`.
+fn refused_entries(refusals: &[Refusal]) -> Vec<Value> {
+    refusals
+        .iter()
+        .map(|(kind, error)| json!({"kind": kind, "error": error}))
+        .collect()
+}
+
+fn refused(kind: Kind, error: impl std::fmt::Display) -> Refusal {
+    (kind, error.to_string())
 }
 
 /// A plugin's JSON content document at `path` (§3.7): the one read and parse
@@ -760,7 +774,7 @@ impl Owners {
     /// of a kind it could not read, else what that kind's owner reports.
     /// Nothing for a kind whose owner is absent, as turning it off runs no
     /// `register`: its content is not there to be refused.
-    async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Value> {
+    async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Refusal> {
         let mut found = Vec::new();
         if manifest.skills.is_some()
             && let Some(catalog) = self.ctx.get_at(&self.skills)
@@ -1555,7 +1569,8 @@ impl Manager {
                                 let plugin = own_id(&name, used).expect("not a built-in");
                                 let refused = self.owners.refused(plugin, &manifest).await;
                                 if !refused.is_empty() {
-                                    fields.insert("refused".into(), json!(refused));
+                                    fields
+                                        .insert("refused".into(), json!(refused_entries(&refused)));
                                 }
                             }
                             Some(Err(error)) => {
