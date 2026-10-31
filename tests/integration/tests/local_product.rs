@@ -263,7 +263,7 @@ async fn workspace_write_asks_for_each_external_mutation() {
             let request = approval_request(&session).await;
             assert_eq!(
                 request.call.name, "edit",
-                "outside reads still run without asking"
+                "outside reads run without asking when the facts are absent"
             );
             assert_ne!(request.approval_id, first.approval_id);
             assert_eq!(std::fs::read_to_string(&target).unwrap(), old);

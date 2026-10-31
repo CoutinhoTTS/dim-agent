@@ -436,8 +436,8 @@ This section adds CLI entry points over those contracts and the
 
 | Preset | What runs (Permission's existing decision, after `disallowedTools` and deny rules) |
 | --- | --- |
-| `read-only` | Reads and Session tools run; file writes, commands, network and unclassified tools are denied |
-| `workspace-write` | Reads, workspace file writes and Session tools run; writes to system roots or Session-owned files are denied; other outside writes without a matching write grant, commands, network and unclassified tools ask |
+| `read-only` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; Session tools run; file writes, commands, network and unclassified tools are denied |
+| `workspace-write` | Those reads run and other reads ask; workspace file writes and Session tools run; writes to system roots or Session-owned files are denied; other outside writes without a matching write grant, commands, network and unclassified tools ask |
 | `full-access` | Every tool call runs without asking |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
@@ -641,7 +641,7 @@ Approval
 
 | Choice | Preset | What runs |
 | --- | --- | --- |
-| Ask | `workspace-write` | Reads and workspace writes run; writes to system roots or Session-owned files are denied; commands, network, other outside writes and unclassified tools ask |
+| Ask | `workspace-write` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; workspace writes run; writes to system roots or Session-owned files are denied; commands, network, other outside writes and unclassified tools ask |
 | Full access | `full-access` | Every tool call runs without asking |
 
 Ask is the product default. Enter on the choice already in force closes the menu. Full access
@@ -750,25 +750,28 @@ filter.
 
 ### "Allow for this session"
 
-For `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
-session` (ADR 012). The CLI sends the tool's path unchanged to `session.grants.add
-{sessionId, path, kind: "file", mode: "write"}`. Reads never ask, so they have no grant to
-offer. The daemon resolves `~`, a relative path, `..` and symlinks against the Session workspace
-and stores the canonical path; a new file is resolved by its parent and final name. The CLI
-decides no path or kind locally.
+For `read`, `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
+session` (ADR 012). Under `read-only` and `workspace-write`, `read` asks for a path outside the
+workspace, system roots, Session-owned files and granted paths, so the action appears for it
+([ADR 014](../../adr/014-file-access-facts.md#d2-read-and-write)). The CLI sends the tool's path
+unchanged to `session.grants.add {sessionId, path, kind: "file", mode}`: the mode is `read` for
+`read` and `write` otherwise. The daemon resolves `~`, a relative path, `..` and symlinks against
+the Session workspace and stores the canonical path; a new file is resolved by its parent and
+final name. The CLI decides no path or kind locally.
 
 ```text
-[approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
-  path: /home/user/.zshrc
+[approval] read: Reading outside the session workspace requires approval: /home/user/.ssh/config
+  path: /home/user/.ssh/config
 › Allow once   Allow for this session   Reject   Full access
 ```
 
 `Allow for this session` writes the grant first, then answers `approval.respond allow`; the
 recheck sees the grant. If the write fails, the CLI shows `Grant not saved: <error>` and still
-allows the call once, as the user asked, so no failed store write blocks the turn. This prompt
-does not list or remove grants; revocation has no client surface yet. A grant is consulted only
-at the `Ask` step, a `read` grant never authorizes a write, and a fork starts without the
-source's grants.
+allows the call once, as the user asked, so no failed store write blocks the turn. A read
+outside the facts in a non-interactive run (`exec`) is denied with the ordinary refusal and exit
+code 3; no new error path is added. This prompt does not list or remove grants; revocation has
+no client surface yet. A grant is consulted only at the `Ask` step, a write grant also admits a
+read, a `read` grant never authorizes a write, and a fork starts without the source's grants.
 
 ### Decisions
 

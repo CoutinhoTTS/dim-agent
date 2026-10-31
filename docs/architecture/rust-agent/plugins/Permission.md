@@ -26,11 +26,12 @@ cache or event.
 | `B:Dispatcher` | Replay local policies, apply committed policy changes and settle update waiters. |
 | `B:Timeline` | Write changes and read ancestor policies. |
 
-`S:FileAccessFacts` and `P:HostPlatform` are looked up when a write is decided,
-after the part is active, not while it loads; a composition without the App
-Server facts part decides a write by the workspace alone, and one without
-HostPlatform keeps the fallback for relative targets. Neither is an injected
-dependency, so their absence does not gate the part.
+`S:FileAccessFacts` and `P:HostPlatform` are looked up when a file call is
+decided, after the part is active, not while it loads; a composition without the
+App Server facts part decides a write by the workspace alone and keeps a read's
+preset rule, and one without HostPlatform keeps the fallback for relative
+targets. Neither is an injected dependency, so their absence does not gate the
+part.
 
 
 ### Events and lifetime
@@ -61,23 +62,29 @@ with `facts(session_id, preset, path, mode) -> FileFacts`: `workspace` from
 `SessionFiles.owns`, and `grant` from the Session's grants. The part holds no
 state; it reads at use time and imports no SessionStore. A query failure denies.
 
-For a write, Permission resolves the call's path to the same canonical target
-the tool owner admitted and calls the service with the branch preset and
-`write`. It uses WorkspaceTools' `resolve_path` for both absolute and relative
+For a file call, Permission resolves the call's path to the same canonical target
+the tool owner admitted and calls the service with the branch preset and the
+call's mode (`read` for `read`, `grep` and `glob`; `write` for `write` and
+`edit`). It uses WorkspaceTools' `resolve_path` for both absolute and relative
 targets, so cwd, `~`, `..` and symlinks are settled before the query; a
-composition without HostPlatform cannot expand `~` or join a relative target
-and keeps the fallback rule below. A system root or Session-owned artifact is
-denied, not asked, under `read-only` and `workspace-write`, including when
-`allowedTools` names the tool. A `read-only` write is otherwise denied by its
-preset; `full-access` admits file-tool writes everywhere without a query.
-`workspace-write` allows a workspace target, allows a target covered by a write
-grant, and asks otherwise. A write grant is inert under `read-only`; a read
-grant never permits a write. A composition without the facts service keeps the
-workspace-only rule below. Reads are unchanged until
-[ADR 014 D2/D4](../../../adr/014-file-access-facts.md#d2-read-and-write) lands
-for them.
+`grep` or `glob` without a path targets the Session cwd. A composition without
+HostPlatform cannot expand `~` or join a relative target and keeps the fallback
+rules below. The path check runs before the tool lists and `allowedTools`, so an
+allowed tool does not bypass a path fact; a resolution failure refuses the call.
 
-### Workspace write targets
+For a write, a system root or Session-owned artifact is denied, not asked, under
+`read-only` and `workspace-write`, including when `allowedTools` names the tool.
+A `read-only` write is otherwise denied by its preset; `full-access` admits
+file-tool writes everywhere without a query. `workspace-write` allows a
+workspace target, allows a target covered by a write grant, and asks otherwise.
+A write grant is inert under `read-only`; a read grant never permits a write.
+
+For a read, a target inside the workspace, a system root, a Session-owned
+artifact or a grant is allowed under `read-only` and `workspace-write`; another
+target asks. `full-access` allows reads without a query. Without the facts
+service a read keeps the preset rule: `read_filesystem` is allowed.
+
+### Write targets without the facts
 
 Decision for [#294](https://github.com/arcships/dim/issues/294): under
 `workspace-write`, a `write_filesystem` call runs automatically only when the
@@ -93,7 +100,7 @@ home-relative paths using its own HostPlatform facts and applies its shared
 path boundary: platform path handling, lexical components and canonicalization
 of the longest existing prefix, including a new file's parent. ToolExecutor
 passes that resolved call to both Approval and execution, so retargeting an
-original symlink while approval is pending does not redirect the approved write.
+original symlink while approval is pending does not redirect the approved call.
 The model's original tool-call fact stays unchanged. Permission applies the same
 resolver to a call it receives unresolved, and the facts compare the workspace,
 system roots, owned artifacts and grants against that canonical target. Compare
@@ -113,18 +120,19 @@ target: a file grant matches the exact path, a directory grant matches by
 component, and a write requires a write grant. Permission applies no grant by
 itself, so there is one path resolver. A grant read failure denies; a cancelled
 read propagates. No grant becomes a Timeline fact, preset or
-output-directory exemption. Reads stay path-independent under the current
-presets, including Session attachments and command output; ADR 014's outside
-read ask will use the same `grant` fact. Host-generated output and configured
-commands retain their own execution contracts under ADR 003. This is tool
-admission, not an OS filesystem sandbox against concurrent filesystem mutation.
+output-directory exemption. A write grant also admits a read; a read grant
+never admits a write. Session attachments and command output are
+Session-owned facts, so reading them needs no grant. Host-generated output and
+configured commands retain their own execution contracts under ADR 003. This is
+tool admission, not an OS filesystem sandbox against concurrent filesystem
+mutation.
 
 The CLI uses its existing approval prompt, with the resolved outside target in
 the reason and a Session-scoped grant action for file tools:
 
 ```text
-[approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
-  path: /home/user/.zshrc
+[approval] read: Reading outside the session workspace requires approval: /home/user/.ssh/config
+  path: /home/user/.ssh/config
 › Allow once   Allow for this session   Reject   Full access
 ```
 
@@ -171,6 +179,7 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `a_policy_tightened_during_the_rules_read_decides_the_call`,
 `a_composition_without_facts_builds_and_asks`,
 `file_write_facts_decide_each_path_by_preset`,
+`file_read_facts_decide_each_path_by_preset`,
 `a_session_grant_matches_only_the_canonical_target_and_mode`.
 
 [session_files_flow.rs](../../../../crates/dim-app-server/tests/session_files_flow.rs)
@@ -178,13 +187,17 @@ checks `sessionFiles.owns` against the attachment owner rows.
 
 [session_grants.rs](../../../../crates/dim-app-server/tests/transport_flow/session_grants.rs)
 covers the `session.grants.add/remove` methods, a write grant admitting the
-next outside write without an approval request, and its removal making the
-next write ask.
+next outside write without an approval request, its removal making the next
+write ask, and an outside read that asks until a read grant admits it.
 
 [local_product.rs](../../../../tests/integration/tests/local_product.rs) verifies
 real workspace writes, per-call external write/edit approvals despite explicit
 tool allows, outside reads, denied edits, host output targets, parent symlinks,
 unresolvable targets and the unchanged read-only/full-access presets.
+
+[cli_flow.rs](../../../../crates/dimcode/tests/cli_flow.rs) verifies that a
+non-interactive run answers an outside-read approval with the ordinary denial
+and exits 3.
 
 <!-- generated:plugin Permission — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
