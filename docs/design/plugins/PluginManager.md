@@ -358,9 +358,22 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 
+The client RPC boundary omits Git source userinfo, query and fragment, preserving
+the repository path, ref and commit. The persisted source is unchanged and remains
+available to update. Only catalog candidate sources, top-level status errors and
+direct content-refusal errors are projected; plugin-owned settings are not traversed.
+Status and content-refusal errors carry a generic message at this boundary, including
+in mutation replies: arbitrary Git, loader, manifest and content-error text can contain
+credentials.
+
 ### A.2 Errors
 
 `plugin_exists`, `plugin_not_found`, `invalid_id`, `path_outside_plugins` (both before any file system change, §7), `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
+
+The codes are stable across clients. Client RPC errors identify their code with a
+stable, actionable description without including the owner's raw diagnostic message
+or echoing request fields; the descriptions above identify the owner's error, not a
+permission to publish secrets.
 
 ## Appendix B. Conflict table
 

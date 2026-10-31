@@ -44,6 +44,17 @@ has members. Dropping a `ProcessTree` signals only when the tree was neither
 confirmed terminated nor reaped on its own; otherwise a recycled pid or reused
 group could receive `SIGKILL`.
 
+`read_exec_shell_settings(cancel)` reads the current version-1 preference and
+detected shell choices, returning the byte revision, optional explicit executable
+and any parse error. `update_exec_shell_settings(expected_revision, executable_path,
+cancel)` validates the selection with the same resolver used by execution, then
+replaces the preference atomically under a FileStorage lease if its byte revision
+still matches. An absent executable selects automatic detection; a malformed
+preference can be repaired using its current revision. Missing files have revision
+`absent`. App Server exposes these operations as trusted local management methods
+`host.exec_shell.get` and `host.exec_shell.update`, never model tools. No service,
+dependency or assembly changes are needed for these owner operations.
+
 The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
 Seatbelt, Landlock and bubblewrap wrappers through these existing process and PTY APIs. It
 does not establish product acceptance. Host-local policy and native consumer acceptance are

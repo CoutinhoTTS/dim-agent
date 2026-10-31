@@ -3010,14 +3010,15 @@ async fn a_configured_description_reaches_the_request_declaration() {
     let description =
         "Work with the other lines of this session. Configured for the #549 flow test.";
     let probe = Arc::new(Probe::default());
-    let agent = builder_with_branch_config(
+    let agent = MinimalHost::start(&builder_with_branch_config(
         &probe,
         BranchToolConfig {
             description: Some(description.into()),
             ..Default::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();

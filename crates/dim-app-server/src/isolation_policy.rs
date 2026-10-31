@@ -1,6 +1,6 @@
 use crate::{methods::ManagementMethods, protocol::Empty};
 use dim_agent_capabilities::{
-    host_platform::{HostPlatform, IsolationPolicy, IsolationPolicyError},
+    host_platform::{ExecShellSettingsError, HostPlatform, IsolationPolicy, IsolationPolicyError},
     methods::{Interruption, MethodDecl, RpcError, params, reply},
 };
 use dim_agent_runtime::Names;
@@ -20,6 +20,24 @@ struct Update {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Reset {
     expected_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateShell {
+    expected_revision: String,
+    #[serde(default, deserialize_with = "crate::protocol::optional_non_null")]
+    executable_path: Option<String>,
+}
+
+fn shell_failed(error: ExecShellSettingsError) -> RpcError {
+    match error {
+        ExecShellSettingsError::Invalid(reason) => RpcError::invalid(reason),
+        ExecShellSettingsError::Conflict => {
+            RpcError::app(-32000, "exec_shell_conflict", error.to_string())
+        }
+        error => RpcError::app(-32000, "exec_shell_failed", error.to_string()),
+    }
 }
 
 fn failed(error: IsolationPolicyError) -> RpcError {
@@ -57,6 +75,45 @@ impl DynPlugin for IsolationPolicyPlugin {
         Box::pin(async move {
             let platform = ctx.require_at(&self.platform)?;
             let methods = ctx.require_at(&self.methods)?;
+            let shell_platform = platform.clone();
+            methods.register(
+                ctx,
+                "host.exec_shell",
+                vec![
+                    MethodDecl::new("host.exec_shell.get", false, Interruption::Report),
+                    MethodDecl::new("host.exec_shell.update", true, Interruption::Report),
+                ],
+                Arc::new(move |method, value, stopping, _| {
+                    let platform = shell_platform.clone();
+                    Box::pin(async move {
+                        match method.as_str() {
+                            "host.exec_shell.get" => {
+                                let _: Empty = params(value)?;
+                                reply(
+                                    platform
+                                        .read_exec_shell_settings(&stopping)
+                                        .await
+                                        .map_err(shell_failed)?,
+                                )
+                            }
+                            "host.exec_shell.update" => {
+                                let p: UpdateShell = params(value)?;
+                                reply(
+                                    platform
+                                        .update_exec_shell_settings(
+                                            &p.expected_revision,
+                                            p.executable_path,
+                                            &stopping,
+                                        )
+                                        .await
+                                        .map_err(shell_failed)?,
+                                )
+                            }
+                            _ => unreachable!("registered exec shell management method"),
+                        }
+                    })
+                }),
+            )?;
             methods.register(
                 ctx,
                 "host.isolation",
