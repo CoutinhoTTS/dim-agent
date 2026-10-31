@@ -40,3 +40,164 @@ pub(super) fn configure(
     }
     Ok(config)
 }
+
+fn restore<T: Clone>(current: &mut Option<T>, declared: Option<&T>) {
+    *current = declared.cloned();
+}
+
+/// The protocol's own option struct, created from the declared configuration
+/// when it carries one and otherwise only reached when the adopted one exists.
+fn options_for<'a, T: Default>(
+    config: &'a mut ModelConfig,
+    declared: Option<&T>,
+    slot: impl FnOnce(&mut ProviderOptions) -> &mut Option<T>,
+) -> Option<&'a mut T> {
+    match declared {
+        Some(_) => {
+            Some(slot(config.provider_options.get_or_insert_default()).get_or_insert_default())
+        }
+        None => slot(config.provider_options.as_mut()?).as_mut(),
+    }
+}
+
+/// Puts the reasoning controls [`configure`] replaces back to the model's
+/// declared configuration, so a cleared effort carries what an explicit
+/// adoption of the same model would.
+pub(super) fn restore_reasoning(
+    config: &mut ModelConfig,
+    declared: &ModelConfig,
+    protocol: ModelProtocol,
+) {
+    let declared_reasoning = declared.reasoning.as_ref();
+    let reasoning = config.reasoning.get_or_insert_default();
+    restore(
+        &mut reasoning.effort,
+        declared_reasoning.and_then(|value| value.effort.as_ref()),
+    );
+    restore(
+        &mut reasoning.enabled,
+        declared_reasoning.and_then(|value| value.enabled.as_ref()),
+    );
+    restore(
+        &mut reasoning.budget_tokens,
+        declared_reasoning.and_then(|value| value.budget_tokens.as_ref()),
+    );
+    if *reasoning == ProviderReasoningConfig::default() {
+        config.reasoning = None;
+    }
+    let declared_options = declared.provider_options.as_ref();
+    match protocol {
+        ModelProtocol::Anthropic => {
+            let declared = declared_options.and_then(|options| options.anthropic.as_ref());
+            if let Some(options) = options_for(config, declared, |options| &mut options.anthropic) {
+                restore(
+                    &mut options.effort,
+                    declared.and_then(|value| value.effort.as_ref()),
+                );
+                restore(
+                    &mut options.thinking,
+                    declared.and_then(|value| value.thinking.as_ref()),
+                );
+            }
+        }
+        ModelProtocol::OpenaiCompatible => {
+            let declared = declared_options.and_then(|options| options.openai_compatible.as_ref());
+            if let Some(options) =
+                options_for(config, declared, |options| &mut options.openai_compatible)
+            {
+                restore(
+                    &mut options.reasoning_effort,
+                    declared.and_then(|value| value.reasoning_effort.as_ref()),
+                );
+                restore(
+                    &mut options.thinking,
+                    declared.and_then(|value| value.thinking.as_ref()),
+                );
+                restore(
+                    &mut options.enable_thinking,
+                    declared.and_then(|value| value.enable_thinking.as_ref()),
+                );
+            }
+        }
+        ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => {
+            let declared = declared_options.and_then(|options| options.openai.as_ref());
+            if let Some(options) = options_for(config, declared, |options| &mut options.openai) {
+                restore(
+                    &mut options.reasoning_effort,
+                    declared.and_then(|value| value.reasoning_effort.as_ref()),
+                );
+            }
+        }
+        ModelProtocol::Xai | ModelProtocol::XaiResponses => {
+            let declared = declared_options.and_then(|options| options.xai.as_ref());
+            if let Some(options) = options_for(config, declared, |options| &mut options.xai) {
+                restore(
+                    &mut options.reasoning_effort,
+                    declared.and_then(|value| value.reasoning_effort.as_ref()),
+                );
+            }
+        }
+        ModelProtocol::Gemini => {
+            let declared = declared_options
+                .and_then(|options| options.gemini.as_ref())
+                .and_then(|options| options.thinking_config.as_ref())
+                .and_then(|config| config.thinking_budget);
+            match declared {
+                Some(budget) => {
+                    config
+                        .provider_options
+                        .get_or_insert_default()
+                        .gemini
+                        .get_or_insert_default()
+                        .thinking_config
+                        .get_or_insert_default()
+                        .thinking_budget = Some(budget);
+                }
+                None => {
+                    if let Some(options) = config
+                        .provider_options
+                        .as_mut()
+                        .and_then(|options| options.gemini.as_mut())
+                        .and_then(|options| options.thinking_config.as_mut())
+                    {
+                        options.thinking_budget = None;
+                    }
+                }
+            }
+        }
+        ModelProtocol::Bedrock => {}
+    }
+}
+
+/// Puts the service-tier control [`configure`] replaces back to the model's
+/// declared configuration.
+pub(super) fn restore_service_tier(
+    config: &mut ModelConfig,
+    declared: &ModelConfig,
+    protocol: ModelProtocol,
+) {
+    let declared_options = declared.provider_options.as_ref();
+    match protocol {
+        ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => {
+            let declared = declared_options.and_then(|options| options.openai.as_ref());
+            if let Some(options) = options_for(config, declared, |options| &mut options.openai) {
+                restore(
+                    &mut options.service_tier,
+                    declared.and_then(|value| value.service_tier.as_ref()),
+                );
+            }
+        }
+        ModelProtocol::OpenaiCompatible => {
+            let declared = declared_options.and_then(|options| options.openai_compatible.as_ref());
+            if let Some(options) =
+                options_for(config, declared, |options| &mut options.openai_compatible)
+            {
+                restore(
+                    &mut options.service_tier,
+                    declared.and_then(|value| value.service_tier.as_ref()),
+                );
+            }
+        }
+        _ => {}
+    }
+}

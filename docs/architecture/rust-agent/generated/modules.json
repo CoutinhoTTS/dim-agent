@@ -17235,8 +17235,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_types::model",
       "references": [
-        "path crate::provider::ModelPreferences",
-        "path crate::provider::ModelPreferences::default"
+        "path crate::provider::ModelPreferences"
       ]
     },
     {
@@ -17574,6 +17573,14 @@
     },
     {
       "from": "dim_app_server::connection::subscription",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot",
+        "use dim_agent_capabilities::prompt_state::PromptSnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::subscription",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path SessionBroadcast",
@@ -17629,6 +17636,13 @@
         "path dim_agent_types::ApprovalRequestData",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::subscription",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
       ]
     },
     {
@@ -20361,6 +20375,7 @@
         "path CatalogCapabilities",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
+        "path ModelConfig::default",
         "path ModelPreferences",
         "path ModelPreferences::default",
         "path ModelRequest",
@@ -20483,6 +20498,13 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path crate::protocol::ModelPreferenceUpdate"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::auxiliary",
       "references": [
         "mod auxiliary",
@@ -20561,7 +20583,9 @@
       "references": [
         "mod preferences",
         "path preferences",
-        "path preferences::configure"
+        "path preferences::configure",
+        "path preferences::restore_reasoning",
+        "path preferences::restore_service_tier"
       ]
     },
     {
@@ -21082,10 +21106,14 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path ModelProtocol",
+        "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
+        "path ModelProtocol::Gemini",
         "path ModelProtocol::OpenaiChat",
         "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
+        "path ModelProtocol::Xai",
+        "path ModelProtocol::XaiResponses",
         "path reasoning_config",
         "use dim_agent_capabilities::host::ModelProtocol",
         "use dim_agent_capabilities::host::reasoning_config"
@@ -21098,7 +21126,9 @@
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelPreferences",
-        "path ModelPreferences::default"
+        "path ModelPreferences::default",
+        "path ProviderOptions",
+        "path ProviderReasoningConfig::default"
       ]
     },
     {
