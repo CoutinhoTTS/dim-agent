@@ -129,7 +129,7 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 | `session/set_mode` | 条件可接 | 仅提供 `read-only`、`workspace-write`、`full-access`。先 get policy/version，再 update `{sessionId,branchId:"main",expectedVersion,policy:<保留工具列表，仅替换 preset>}`。冲突返回错误并刷新；不盲重试旧 policy，不映射 plan mode |
 | `session/set_config_option` | 条件可接 | `mode` 复用上一行。`model` 仅在安全 provider catalog 和 `session.model.update` 可用时提供：保留 catalog 中 native model id，使用生成该选项的 providerId 调用 `{sessionId,branchId:"main",providerId,modelId}`。等待原生 `{model,outcome:"adopted"|"unchanged"}` 并接收 `context/configured`，再返回完整 configOptions；`configuration_superseded` 时刷新并报错，不把请求值直接当 currentValue |
 
-mode 和 model 的选项来自当前 Session 的公开状态，不能用用户偏好默认值冒充已采用值。模型切换影响可用选项时重读 catalog；超时或连接丢失后的写入不能报告为未应用。effort、fast/service tier 的写入口虽然存在，但 RPC 未提供完整的 Session 当前值读取；首版不发布这些 config options。不同 Session 的可选方法逐个检查，不能因另一个 Session 安装了插件就假定可用。
+mode 和 model 的选项来自当前 Session 的公开状态，不能用用户偏好默认值冒充已采用值。模型切换影响可用选项时重读 catalog；超时或连接丢失后的写入不能报告为未应用。effort、fast/service tier 的写入口虽然存在，公开 `context/configured` 视图现在也读回已采用的 `model_preferences`，但首版不发布这些 config options。不同 Session 的可选方法逐个检查，不能因另一个 Session 安装了插件就假定可用。
 
 new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Session 插件接入 `mcpServers`，与原生工具并存，不写共享配置。只有旧 daemon 缺少 `mcp.temporary.capabilities` 时保留接受并忽略行为，且不声明 HTTP/SSE MCP 能力。非空 `additionalDirectories` 仍在创建或 attach 前拒绝。
 
@@ -542,7 +542,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | [#329](https://github.com/arcships/dim/issues/329)、[#349](https://github.com/arcships/dim/pull/349) | Provider 管理插件、版本化安全视图、局部更新及 CLI 迁移已存在；ACP 的全量配置和进程作用域另见 §4.5，不把原生持久化编辑直接宣称为临时路由覆盖 |
 | [#61](https://github.com/arcships/dim/issues/61)、[#26](https://github.com/arcships/dim/issues/26)、[#279](https://github.com/arcships/dim/issues/279) | native fork/delete 与 cut 的边界；fork 不重置 Permission，不等于文件撤销，附件读取/归档不在此新增 |
 | [#277](https://github.com/arcships/dim/issues/277)、[#384](https://github.com/arcships/dim/issues/384)、[#432](https://github.com/arcships/dim/issues/432)、[#3](https://github.com/arcships/dim/issues/3) | daemon 可选插件的实际安装/启用另归产品机制；Gateway 不安装业务插件，不因 first-party client plugin 必须等待 marketplace 或结构管理实现 |
-| [#403](https://github.com/arcships/dim/issues/403)、[#405](https://github.com/arcships/dim/issues/405) | 外语插件部件定义与 rutis 机制；main 已接入 rutis 0.17.1。Gateway 为 native client plugin，TemporaryMcp 为 native Session part，均直接使用现有机制，不构成外语运行时依赖 |
+| [#403](https://github.com/arcships/dim/issues/403)、[#405](https://github.com/arcships/dim/issues/405) | 外语插件部件定义与 rutis 机制；main 已接入 rutis 0.19.2。Gateway 为 native client plugin，TemporaryMcp 为 native Session part，均直接使用现有机制，不构成外语运行时依赖 |
 | [#145](https://github.com/arcships/dim/issues/145)、[#5](https://github.com/arcships/dim/issues/5) | 反向 ACP client 和远程节点不是此交付；共享协议 schema/一致性场景即可，不拉入运行时生命周期 |
 | [#263](https://github.com/arcships/dim/issues/263)、[#264](https://github.com/arcships/dim/issues/264) | 复用已有 collaboration facts 投影最小执行状态；查询、输出和 addressed stop 另按每执行归属接入，不能因 snapshot 可读就宣称完整 Lody subagent/task 支持 |
 | [#143](https://github.com/arcships/dim/issues/143)、[#422](https://github.com/arcships/dim/issues/422) | Hooks/Pursuit 各自交付；Gateway 不实现 prompt hooks、Goal evaluator 或 Goal 的续轮结算 |

@@ -1343,7 +1343,7 @@ fn image_text(blocks: &[ContentBlock]) -> Option<String> {
             ContentBlock::Text { text } => text.clone(),
             ContentBlock::Image { .. } => {
                 images += 1;
-                format!("[Image #{images}]")
+                crate::images::marker(images, "")
             }
         })
         .collect::<Vec<_>>()

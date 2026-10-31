@@ -20,6 +20,10 @@ pub struct Event {
 pub struct Configuration {
     pub provider_id: String,
     pub model_id: String,
+    /// The effective preferences the adopted configuration sends; absent when
+    /// it carries none.
+    #[serde(default)]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
 pub enum EventContent {
     BranchCreate(BranchCreateData),

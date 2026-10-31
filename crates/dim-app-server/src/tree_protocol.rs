@@ -90,15 +90,23 @@ impl ProductEvent {
 }
 impl Serialize for ProductEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if let EventKind::ContextConfigured(data) = &self.0.kind {
-            serde_json::json!({
+        if let EventKind::ContextConfigured(configured) = &self.0.kind {
+            let mut view = serde_json::json!({
                 "id": self.0.id, "sequence": self.0.sequence, "create_at": self.0.create_at,
                 "type": "context", "name": "configured",
-                "data": {"timeline": data.timeline, "revision": data.revision,
-                    "previous": data.previous, "prompt": data.prompt,
-                    "provider_id": data.settings.provider_id, "model_id": data.settings.model_id}
-            })
-            .serialize(serializer)
+                "data": {"timeline": configured.timeline, "revision": configured.revision,
+                    "previous": configured.previous, "prompt": configured.prompt,
+                    "provider_id": configured.settings.provider_id,
+                    "model_id": configured.settings.model_id}
+            });
+            if let Some(preferences) = crate::provider::adopted_selection_preferences(
+                configured.settings.config.as_ref(),
+                configured.settings.metadata.as_ref(),
+            ) {
+                view["data"]["model_preferences"] =
+                    serde_json::to_value(preferences).map_err(serde::ser::Error::custom)?;
+            }
+            view.serialize(serializer)
         } else {
             self.0.serialize(serializer)
         }
@@ -244,4 +252,78 @@ pub struct ApprovalResolved {
     pub branch_id: String,
     pub request_id: String,
     pub decision: ApprovalDecision,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dim_agent_types::*;
+
+    fn configured(config: Option<ModelConfig>, metadata: Option<RequestMetadata>) -> ProductEvent {
+        ProductEvent(Arc::new(AgentEvent {
+            id: "event".into(),
+            sequence: 1,
+            create_at: 0,
+            tags: None,
+            kind: EventKind::ContextConfigured(ContextConfiguredData {
+                timeline: "main".into(),
+                revision: "revision".into(),
+                previous: None,
+                prompt: None,
+                settings: Box::new(ModelConfiguration {
+                    provider_id: "provider".into(),
+                    model_id: "model".into(),
+                    capability_snapshot: None,
+                    tools: None,
+                    tool_sources: Vec::new(),
+                    config,
+                    metadata,
+                }),
+                system: None,
+                system_source: None,
+            }),
+        }))
+    }
+
+    fn effort() -> ModelConfig {
+        ModelConfig {
+            reasoning: Some(ProviderReasoningConfig {
+                effort: Some("high".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn protocol(value: serde_json::Value) -> RequestMetadata {
+        RequestMetadata {
+            extensions: serde_json::Map::from_iter([("providerProtocol".into(), value)]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stored_event_without_a_protocol_projects_no_model_preferences() {
+        for event in [
+            configured(Some(effort()), None),
+            configured(
+                Some(effort()),
+                Some(protocol(serde_json::json!("no-such-protocol"))),
+            ),
+            configured(None, Some(protocol(serde_json::json!("openai-chat")))),
+        ] {
+            let view = serde_json::to_value(&event).unwrap();
+            assert!(view["data"].get("model_preferences").is_none(), "{view}");
+        }
+        let view = serde_json::to_value(configured(
+            Some(effort()),
+            Some(protocol(serde_json::json!("openai-chat"))),
+        ))
+        .unwrap();
+        assert_eq!(
+            view["data"]["model_preferences"],
+            serde_json::json!({"reasoningEffort": "high"}),
+            "{view}"
+        );
+    }
 }

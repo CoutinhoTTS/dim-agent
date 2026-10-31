@@ -221,8 +221,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Tunggu clipboard disisipkan sebelum kirim"
         }
         "A submission accepts at most 20 images" => "Maks. 20 gambar per kiriman",
-        "[Image #{index}]" => "[Gambar #{index}]",
-        "[Image #{index}{details}]" => "[Gambar #{index}{details}]",
         "first frame" => "hanya frame pertama",
         "re-encoded" => "dikodekan ulang",
         "The current model does not accept images; remove {label} to send" => {

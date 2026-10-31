@@ -46,6 +46,7 @@ impl Worker {
             attached_session = std::mem::take(&mut self.parked);
         }
         self.projection = Projection::default();
+        self.last_usage = None;
         self.cursors.clear();
         self.focus = "main".into();
         self.side = None;

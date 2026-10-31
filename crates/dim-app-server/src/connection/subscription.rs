@@ -492,9 +492,16 @@ impl Connection {
                 attached_clients,
                 ..record
             };
+            let reply = AttachResult {
+                session: record,
+                model_preferences: crate::provider::adopted_selection_preferences(
+                    session.config().model.config.as_ref(),
+                    session.config().model.metadata.as_ref(),
+                ),
+            };
             if self
                 .sender
-                .send(Outbound::result(id, Ok(Reply::Attach(record))), false)
+                .send(Outbound::result(id, Ok(Reply::Attach(reply))), false)
                 .is_err()
             {
                 attachments.remove(&session_id);

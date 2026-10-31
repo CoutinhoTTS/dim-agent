@@ -414,6 +414,16 @@ The terminal UI remembers the preset chosen in `/approval` or its `/approvals` p
 `permissionPreset` in the product home's `config.json`: without the flag, the sessions it creates
 get it in `session.create`, and a resumed one has `main` switched to it before attach. The flag
 wins for one run; choosing another preset in either menu replaces the remembered one.
+On the home screen without an active Session, either menu saves the preset without requiring
+account sign-in or creating a Session. The first message creates the Session with that selection,
+including within the same client process. With an active Session, the selection is remembered
+only after its permission update succeeds. Full access still requires confirmation in either case.
+
+```text
+Home > /approvals > select preset
+  -> confirm if full access -> remember preset (no Session or login required)
+  -> first message -> session.create {permissionPolicy: selected preset}
+```
 
 ```text
 $ dimcode exec --permission full-access -p 'Run the tests'

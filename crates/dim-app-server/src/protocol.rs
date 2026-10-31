@@ -749,8 +749,8 @@ pub struct WebToggled {
 pub struct UiAttach {
     pub session_id: String,
     pub kind: String,
-    /// Present when the daemon started this leaf: its id and the attach
-    /// token it received in the hosted `Tui` config.
+    /// Present for a UI leaf: its id and the attach token from `ui.open`'s
+    /// reply.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub ui_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -762,7 +762,8 @@ pub struct UiAttached {
     pub ui_id: String,
     pub generation: u64,
 }
-/// `ui.open`: link to a UI leaf and host `Tui` in it (Tui design §3.6).
+/// `ui.open`: open a session with a UI leaf, which runs its own `Tui`
+/// (Tui design §3.6).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiOpen {
@@ -772,7 +773,7 @@ pub struct UiOpen {
     pub peer: String,
     /// Where the leaf waits for the daemon's link.
     pub address: String,
-    /// An interface of the same Session to close once this leaf is loaded.
+    /// An interface of the same Session to close once this leaf attaches.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub replace: Option<String>,
     /// The generation `replace` must still have.
@@ -784,8 +785,10 @@ pub struct UiOpen {
 pub struct UiOpened {
     pub ui_id: String,
     pub generation: u64,
+    /// The one-time token the leaf's `Tui` passes to `ui.attach`.
+    pub token: String,
 }
-/// `ui.close`: remove a registration; a leaf is unloaded and its link closed.
+/// `ui.close`: remove a registration; a leaf's session is closed.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiClose {
@@ -878,6 +881,11 @@ pub struct PingResult {
 pub struct CreateResult {
     pub session_id: String,
     pub model: ModelId,
+    /// The preferences the Session's adopted configuration sends, derived from
+    /// it; only on this reply, not on `session.list` items, and absent when it
+    /// carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
     pub sequence: u64,
 }
 /// The fork's id and its `main` head once it is published.
@@ -903,6 +911,16 @@ pub struct SessionInfo {
     /// protocol v3 only.
     #[serde(flatten)]
     pub title: Option<crate::storage::TitleFields>,
+}
+/// The `session.attach` reply: the attached Session's directory record, as
+/// `session.list` gives it, plus the preferences its adopted configuration
+/// sends. Only this reply and `session.create` name them; list items do not.
+#[derive(Debug, Serialize)]
+pub struct AttachResult {
+    #[serde(flatten)]
+    pub session: SessionInfo,
+    #[serde(rename = "modelPreferences", skip_serializing_if = "Option::is_none")]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -946,8 +964,9 @@ pub enum Reply {
     Create(CreateResult),
     Fork(ForkResult),
     List(Vec<SessionInfo>),
-    /// The attached Session's directory record, as `session.list` gives it.
-    Attach(SessionInfo),
+    /// The attached Session's directory record, as `session.list` gives it,
+    /// plus the preferences its adopted configuration sends.
+    Attach(AttachResult),
     Summaries(Vec<SessionSummary>),
     Catalog(CatalogResult),
     Submit(SubmitResult),

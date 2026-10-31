@@ -1,9 +1,10 @@
 #![cfg(unix)]
 //! End-to-end evidence for UI leaves (Tui design §3.6): the interactive
-//! `dimcode` process is a rutis node in which the daemon hosts `Tui`. It
-//! keeps the shell's terminal until it leaves and returns the TUI's exit
-//! code; `ui.close` and daemon shutdown unload `Tui`, which restores the
-//! terminal, and the process exits when its link stops.
+//! `dimcode` process is a rutis kernel in session with the daemon, running
+//! its own `Tui`. It keeps the shell's terminal until it leaves and returns
+//! the TUI's exit code; `ui.close` and daemon shutdown close the session,
+//! the process restores the terminal and exits. A `Tui` that fails to load
+//! ends the process nonzero, and with it the session.
 
 use serde_json::{Value, json};
 use std::{
@@ -515,4 +516,110 @@ fn a_home_the_daemon_fits_also_fits_its_leaf() {
     let shown = wait_exit(&mut child, &pty);
     assert!(shown.contains("SHELL-RETURNED:0"), "{shown:?}");
     let _ = rpc.call("daemon.shutdown", json!({}));
+}
+
+/// A daemon that opens the leaf's session and replies to `ui.open`, then
+/// drops the connection the leaf's `Tui` opens, so that `Tui` fails to load.
+/// Returns whether the leaf's session ended.
+async fn refusing_daemon(
+    listener: std::os::unix::net::UnixListener,
+    model_config: PathBuf,
+) -> bool {
+    use rutis::host::{CtxHost, FiberState};
+    use rutis_bridge::{LocalId, PeerId, Session};
+    use sha2::Digest;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    struct Shut(std::os::unix::net::UnixStream);
+    impl rutis_bridge::channel::Closer for Shut {
+        fn close(&self, _: rutis_bridge::Close) {
+            let _ = self.0.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    let profile = format!(
+        "{:x}",
+        sha2::Sha256::digest(std::fs::read(model_config).unwrap())
+    );
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    root.provide(LocalId(PeerId::new("dim-daemon").unwrap()))
+        .unwrap();
+    let (read, mut write) = listener.accept().await.unwrap().0.into_split();
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    let session = loop {
+        let line = lines.next_line().await.unwrap().expect("a request");
+        let request: Value = serde_json::from_str(&line).unwrap();
+        let mut session = None;
+        let result = match request["method"].as_str().unwrap() {
+            "hello" => json!({"instanceId": "fake", "serverVersion": env!("CARGO_PKG_VERSION"),
+                "protocolVersion": 3,
+                "daemonProfile": {"kind": "configured", "modelConfigSha256": profile},
+                "features": ["session.create", "session.history", "ui.attach", "ui.leaf.2"]}),
+            "session.create" => json!({"sessionId": "session", "sequence": 0}),
+            "session.attach" => json!({"sessionId": "session", "cwd": "/workspace", "createdAt": 1,
+                "running": false, "sequence": 0, "attachedClients": 1}),
+            "ui.open" => {
+                let path = request["params"]["address"].as_str().unwrap();
+                let stream =
+                    std::os::unix::net::UnixStream::connect(path.strip_prefix("unix:").unwrap())
+                        .unwrap();
+                let reader = stream.try_clone().unwrap();
+                let closer = std::sync::Arc::new(Shut(stream.try_clone().unwrap()));
+                let channel = rutis_bridge::pipe::framed(reader, stream, closer);
+                let greeted = Session::handshake(&root, channel).await.unwrap();
+                assert_eq!(greeted.id(), request["params"]["peer"]);
+                let view = root.plugin(greeted);
+                (&view).await.unwrap();
+                session = Some(view);
+                json!({"uiId": request["params"]["peer"], "generation": 1, "token": "token"})
+            }
+            other => panic!("unexpected request {other}"),
+        };
+        let reply = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
+        write
+            .write_all(format!("{reply}\n").as_bytes())
+            .await
+            .unwrap();
+        if let Some(session) = session {
+            break session;
+        }
+    };
+    drop(listener.accept().await.unwrap());
+    let mut state = session.watch();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(15),
+        state.wait_for(|s| matches!(s.state, FiberState::Disposed | FiberState::Failed)),
+    )
+    .await
+    .is_ok();
+    let _ = root.shutdown().await;
+    ended
+}
+
+#[test]
+fn a_leaf_whose_tui_fails_to_load_exits_nonzero_and_ends_its_session() {
+    let home = Home::new("tui-fails");
+    private_dir(&home.home.join("rust")).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(home.socket()).unwrap();
+    std::fs::set_permissions(home.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let model_config =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../dim-agent-aimux/examples/offline.json");
+    let daemon = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(refusing_daemon(listener, model_config))
+    });
+    let pty = Pty::new();
+    let mut child = home.dimcode(&pty);
+    let shown = wait_exit(&mut child, &pty);
+    assert!(
+        shown.contains("SHELL-RETURNED:") && !shown.contains("SHELL-RETURNED:0"),
+        "{shown:?}"
+    );
+    assert_restored(&pty);
+    assert!(daemon.join().unwrap(), "the leaf's session did not end");
 }

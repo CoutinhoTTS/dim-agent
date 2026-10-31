@@ -62,6 +62,7 @@ use crate::ui::transcript::tool_group::{
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
+use crate::wire::Configuration;
 
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
@@ -85,6 +86,7 @@ const REWRITE_LOG: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
+const GIT_BRANCH_POLL: Duration = Duration::from_secs(10);
 /// One blank column of margin before every document row (L's content pad).
 const MARGIN: usize = 1;
 /// Revision of the transcript the planner is tracking; a session switch bumps it.
@@ -682,6 +684,45 @@ enum Outcome {
     Exit(i32),
 }
 
+/// The adopted model as the label draws it: `provider / model`, and the
+/// reasoning effort the configuration sends when it carries one.
+struct ModelLabel {
+    model: String,
+    effort: Option<String>,
+}
+
+impl ModelLabel {
+    fn new(configuration: &Configuration) -> Self {
+        Self {
+            model: format!("{} / {}", configuration.provider_id, configuration.model_id),
+            effort: configuration
+                .model_preferences
+                .as_ref()
+                .and_then(|preferences| preferences.reasoning_effort.clone()),
+        }
+    }
+
+    fn full(&self) -> String {
+        match &self.effort {
+            Some(effort) => format!("{} · {effort}", self.model),
+            None => self.model.clone(),
+        }
+    }
+
+    /// The first shape of the label that `fits`, whole before whole minus the
+    /// effort; `None` when even the model alone does not fit.
+    fn fitted(&self, fits: impl Fn(&str) -> bool) -> Option<String> {
+        let full = self.full();
+        if fits(&full) {
+            return Some(full);
+        }
+        if self.effort.is_some() && fits(&self.model) {
+            return Some(self.model.clone());
+        }
+        None
+    }
+}
+
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -701,8 +742,8 @@ struct App {
     reports: Vec<(String, Tone)>,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
-    /// `provider / model` once the session exists.
-    label: Option<String>,
+    /// The adopted model and its reasoning effort, once the session exists.
+    label: Option<ModelLabel>,
     failure: Option<String>,
     /// The App Server asked this interface to leave: one more frame shows
     /// why, then the interface exits and the Session carries on.
@@ -819,8 +860,10 @@ struct App {
     /// from the palette through the command's argument until it runs
     /// ([`Self::command_entry_open`]).
     command_entry: bool,
-    /// The workspace's git branch for the banner, read once.
+    /// The workspace's git branch for the banner and composer.
     branch: String,
+    git_head: Option<PathBuf>,
+    git_checked: Instant,
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
     /// A Ctrl+V clipboard read in progress.
@@ -926,6 +969,8 @@ impl App {
             .is_none_or(|v| v != false);
         let mut composer = Composer::new(past);
         composer.set_root(PathBuf::from(&cwd_key));
+        let git_head = git_head(&cwd_key);
+        let branch = git_head.as_deref().and_then(git_branch);
         Self {
             host,
             composer,
@@ -991,7 +1036,9 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch: git_branch().unwrap_or_else(|| t("Not available").into()),
+            branch: branch.unwrap_or_else(|| t("Not available").into()),
+            git_head,
+            git_checked: Instant::now(),
             shell: None,
             clipboard: None,
             image_read: None,
@@ -1252,6 +1299,15 @@ impl App {
         self.sync_task_details();
         let now = Instant::now();
         let mut changed = false;
+        if now.duration_since(self.git_checked) >= GIT_BRANCH_POLL {
+            self.git_checked = now;
+            if let Some(branch) = self.git_head.as_deref().and_then(git_branch)
+                && branch != self.branch
+            {
+                self.branch = branch;
+                changed = true;
+            }
+        }
         if let Some(Prompt::Tasks(panel)) = &mut self.prompt
             && let Some(snapshot) = &self.snapshot
             && panel.tick(snapshot)
@@ -1347,8 +1403,8 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Ready { provider, model } => {
-                self.label = Some(format!("{provider} / {model}"));
+            Update::Ready(configuration) => {
+                self.label = Some(ModelLabel::new(&configuration));
             }
             Update::ModelFeatures {
                 images,
@@ -1493,7 +1549,9 @@ impl App {
                                 &[("title", title)],
                             )),
                         }
-                        self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        if !self.session_id.is_empty() {
+                            self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        }
                     }
                     self.approvals = mode;
                 }
@@ -2678,7 +2736,7 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
-            model: self.label.clone(),
+            model: self.label.as_ref().map(ModelLabel::full),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -3350,8 +3408,14 @@ impl App {
         if self.fullscreen {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
+            let room = outer.saturating_sub(2);
+            let left = title.as_ref().map_or(0, |(text, _)| width_of(text) + 3);
+            let model = self
+                .label
+                .as_ref()
+                .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
+                .map(|label| fg(&label, &p.highlight));
             let title = title.map(|(text, label)| label(text));
-            let model = self.label.as_deref().map(|label| fg(label, &p.highlight));
             let docked = self.dock_status(status.as_deref());
             let place = fg(
                 &fit_place(self.place_label(), docked.as_deref(), outer),
@@ -4246,12 +4310,16 @@ impl App {
             left.push_str(&slot);
         }
         let total = cols.saturating_sub(2);
-        let line = match &self.label {
-            Some(label) if width_of(&left) + 2 + width_of(label) <= total => {
-                let gap = total - width_of(&left) - width_of(label);
+        let label = self
+            .label
+            .as_ref()
+            .and_then(|label| label.fitted(|text| width_of(&left) + 2 + width_of(text) <= total));
+        let line = match label {
+            Some(label) => {
+                let gap = total - width_of(&left) - width_of(&label);
                 format!("{left}{}{label}", " ".repeat(gap))
             }
-            _ => clip(&left, total).0,
+            None => clip(&left, total).0,
         };
         if let Some((text, _)) = &self.notice
             && let Some(at) = line.find(text.as_str())
@@ -4530,14 +4598,17 @@ fn pad_block(rows: &[String]) -> String {
 }
 
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::version::current();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| t("Not available").into());
     let branch = branch.to_owned();
     let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
     let greeting = [
-        tf("Welcome to DIM {version}!", &[("version", version)]),
+        tf(
+            "Welcome to DIM {version}!",
+            &[("version", version.as_str())],
+        ),
         t("Type / for commands · Ctrl+O for the palette").to_owned(),
     ];
     let header = startup_header(&greeting, body_width);
@@ -4712,17 +4783,31 @@ fn workspace_label(branch: &str) -> String {
     format!("{cwd} ({branch})")
 }
 
-fn git_branch() -> Option<String> {
+fn git_head(cwd: &str) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .args(["rev-parse", "--git-path", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!name.is_empty()).then_some(name)
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!path.is_empty()).then(|| std::path::Path::new(cwd).join(path))
+}
+
+fn git_branch(head: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(head).ok()?;
+    let head = head.trim();
+    if head.is_empty() {
+        return None;
+    }
+    Some(
+        head.strip_prefix("ref: refs/heads/")
+            .unwrap_or("HEAD")
+            .to_owned(),
+    )
 }
 
 /// The box printed under the transcript on exit, with the command that
@@ -4910,6 +4995,140 @@ fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_tracks_git_switches_in_repositories_and_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let linked = root.path().join("linked");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-q", "-b", "original"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked-original",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let nested = repo.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let theme = test_theme();
+        let mut apps = Vec::new();
+        for (cwd, expected) in [(&nested, "original"), (&linked, "linked-original")] {
+            for fullscreen in [false, true] {
+                let mut app = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette.clone(),
+                    root.path().join("home"),
+                    cwd.to_string_lossy().into_owned(),
+                );
+                app.fullscreen = fullscreen;
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})")))
+                );
+                apps.push(app);
+            }
+        }
+        git(&repo, &["switch", "-q", "-c", "feature/updated"]);
+        git(&linked, &["switch", "-q", "-c", "feature/linked-updated"]);
+        for (expected, linked_expected) in [
+            ("feature/updated", "feature/linked-updated"),
+            ("HEAD", "HEAD"),
+            ("feature/updated", "feature/linked-updated"),
+        ] {
+            if expected == "HEAD" {
+                git(&repo, &["switch", "-q", "--detach"]);
+                git(&linked, &["switch", "-q", "--detach"]);
+            } else {
+                git(&repo, &["switch", "-q", expected]);
+                git(&linked, &["switch", "-q", linked_expected]);
+            }
+            for (index, app) in apps.iter_mut().enumerate() {
+                app.git_checked = Instant::now();
+                assert!(!app.tick(), "a Git switch must wait for the next check");
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(app.tick(), "a Git switch must request a repaint");
+                let expected = if index < 2 { expected } else { linked_expected };
+                let frame = app.frame((160, 30));
+                let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
+                let bytes = if app.fullscreen {
+                    FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, app)
+                } else {
+                    Screen::new((160, 30), true).render(&frame, (160, 30))
+                };
+                emu.feed(&bytes);
+                assert!(
+                    emu.rows_text()
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "composer must show {expected}"
+                );
+            }
+        }
+        for (index, app) in apps.iter_mut().enumerate() {
+            app.git_checked -= GIT_BRANCH_POLL;
+            assert!(!app.tick(), "an unchanged HEAD must not request a repaint");
+            let expected = if index < 2 {
+                "feature/updated"
+            } else {
+                "feature/linked-updated"
+            };
+            let head = app.git_head.clone().unwrap();
+            let saved = std::fs::read(&head).unwrap();
+            std::fs::remove_file(&head).unwrap();
+            for missing in [true, false] {
+                if !missing {
+                    std::fs::write(&head, "").unwrap();
+                }
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(!app.tick(), "a failed HEAD read must not request a repaint");
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "a missing or empty HEAD must preserve the last branch label"
+                );
+            }
+            std::fs::write(&head, saved).unwrap();
+        }
+    }
 
     #[test]
     fn pending_clipboard_allows_file_selection_but_waits_before_submission() {
@@ -6773,8 +6992,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(
-            app.composer.text(),
-            format!("[wide.png · {width}×2 → {MAX_EDGE}×1]")
+            app.composer.display_text(),
+            format!("[Image #1 · {width}×2 → {MAX_EDGE}×1]")
         );
         assert!(app.notice.is_none());
     }

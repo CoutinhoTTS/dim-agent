@@ -1,6 +1,6 @@
 # RuntimeManager
 
-RuntimeManager supplies the Node and Python rutis runtimes that plugin code runs in ([#476](https://github.com/arcships/dim/issues/476)). It is a process plugin of the App Server, one loader row. It acquires each runtime that is on (a download of a fixed version into the home, verified against its official checksum, or one already installed on the machine), keeps what it installed in its own file, and starts the runtime process. Plugin rows gate on their runtime's name under rutis' rules and start by themselves once RuntimeManager provides it.
+RuntimeManager supplies the Node and Python rutis runtimes that plugin code runs in ([#476](https://github.com/arcships/dim/issues/476)). It is a process plugin of the App Server, one loader row. It acquires each runtime that is on (a download of a fixed version into the home, verified against its official checksum, or one already installed on the machine), keeps what it installed in its own file, and provides the runtime's launch command. The runtime's connection row starts the process once the command is there, and plugin rows wait for that runtime's session under rutis' rules.
 
 The release ships the executable, the default configuration file and the default plugins, not the runtimes ([release packaging](../../release/README.md#local-packaging)).
 
@@ -21,22 +21,25 @@ The release ships the executable, the default configuration file and the default
 
 ```text
 App Server startup
-  Parts::new: LocalRuntime objects and row resolvers from fixed paths (§2.3)
-  rows: RuntimeManager (required), SessionNodeRows, SessionPythonRows (not required), plugin rows
+  Parts::new: launch commands and the rows' resolver from fixed paths (§2.3)
+  rows: RuntimeManager (required), session-node, py (not required), plugin rows
         │
         ▼
 RuntimeManager apply: registers `runtime` methods and RuntimeService, then a task per runtime that is on
         │  acquire (§3): installed and matching the fixed versions? else download → verify → unpack → rename
         ▼
-ctx.plugin(LocalRuntime)  ──provides──▶  Runtime#session-node / Runtime#py
-                                              │ rutis gating
-                                              ▼
-                     SessionNodeRows / SessionPythonRows → plugin rows: Pending → Active
+ctx.provide_at(nodeRuntime / pythonRuntime, launch command)
+        │ rutis gating: the connection row injects it
+        ▼
+session-node / py: start the process, greet, mount its session, keep RuntimeStatus
+        │ the session releases its rows
+        ▼
+plugin rows session-node:… / py:…: Pending → Active
 ```
 
-- **RuntimeManager** (process row `RuntimeManager`, required): its `apply` only registers; acquisition runs in its own tasks, so it is Active at once and startup never waits for a download. A runtime it has acquired is mounted as its child, so the runtime process ends when RuntimeManager unloads.
-- **The runtime's name** is the contract. `Runtime#session-node` and `Runtime#py` are provided by the mounted `LocalRuntime`; nothing else announces readiness. Rows that need a runtime wait for it as rutis waits for any injected service, and `Loader::waiting_for` names it, which is what `plugin.list` shows ([PluginManager §2.5](PluginManager.md#25-runtimes)).
-- **Replaceable**: RuntimeManager is a plugin. Another plugin providing the same runtime names replaces it.
+- **RuntimeManager** (process row `RuntimeManager`, required): its `apply` only registers; acquisition runs in its own tasks, so it is Active at once and startup never waits for a download. A runtime it has acquired gets its launch command provided from RuntimeManager's context, so the command is withdrawn, and the runtime process ends, when RuntimeManager unloads. It mounts no children and holds no handle.
+- **The connection rows** `session-node` and `py` are the runtimes. Each injects its launch command, a Rust-only process service (`nodeRuntime`, `pythonRuntime`), so rutis starts it once the command is provided. It starts the process, mounts the session on its channel and keeps the runtime's `RuntimeStatus` (`starting`, `ready`, or `down` with a reason) at a Rust-only process key named after the row. A plugin row runs on that session and waits for it as rutis waits for any runtime; `Loader::waits` names the connection row, which is what `plugin.list` shows ([PluginManager §2.5](PluginManager.md#25-runtimes)).
+- **Replaceable**: RuntimeManager is a plugin. Another plugin providing the same launch commands replaces it.
 
 ## 2. Data
 
@@ -77,7 +80,7 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 }
 ```
 
-- `source`: `download` uses the archive above; `system` uses the interpreter on `PATH` (`node`; `python3`, or `python` on Windows), checked when it is acquired: Node 22.19 or later (the `engines` of `@arcships/rutis-runtime`) with its bundled npm (`npm-cli.js` where the official archives and installers put it; a Node without it fails with a reason naming that path), Python 3.10 or later with pip. A check that fails is that runtime's failure (§3.3).
+- `source`: `download` uses the archive above; `system` uses the interpreter on `PATH` (`node`; `python3`, or `python` on Windows), checked when it is acquired: Node 22.19 or later (the `engines` of `@arcships/rutis-runtime`) with its bundled npm (`npm-cli.js` where the official archives and installers put it; a Node without it fails with a reason naming that path), Python 3.12 or later with pip. A check that fails is that runtime's failure (§3.3).
 - `auto`: `true` acquires the runtime at every start. `false` leaves it off until `runtime.install` (§5); once installed, it is recorded (§2.4) and acquired at every start like an `auto` one.
 - The user overrides the preset in `<home>/runtimes/config.json`, the same shape, merged per runtime and field over the preset. It is in the home, so only the user's local configuration changes it; no project source does.
 
@@ -93,7 +96,9 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 | `config.json` | the user's override (§2.2), optional |
 | `*.partial/`, `*.download` | work in progress; removed before each attempt |
 
-Every path is a function of the fixed versions, the configuration and the home, so the App Server builds the `LocalRuntime` objects and the row resolvers from them before reconciliation, as it does today with configured paths; the runtime process starts only when RuntimeManager mounts the runtime. With `source: system`, the interpreter path is looked up on `PATH` when the App Server builds the objects.
+Every path is a function of the fixed versions, the configuration and the home, so the App Server builds the launch commands and the rows' resolver from them before reconciliation, as it does with configured paths; the runtime process starts only when RuntimeManager provides the command. With `source: system`, the interpreter path is looked up on `PATH` when the App Server builds the commands.
+
+The launch commands are those rutis-host's own launchers use for these packages: Node runs `node --import tsx src/runner.mjs` in the `@arcships/rutis-runtime` package; Python runs `python -m rutis` in its project, with the `rutis` package and the project on `PYTHONPATH`, and `PYTHONUNBUFFERED=1` and `PYTHONDONTWRITEBYTECODE=1`. Each process takes its channel, `--id <row>` and its anchor as its last arguments.
 
 The Python runtime's project directory is `<home>/plugins/.python/`, PluginManager's (§4). The Node runtime's anchor is the `package.json` of its packages directory.
 
@@ -104,15 +109,15 @@ The Python runtime's project directory is `<home>/plugins/.python/`, PluginManag
   "python": { "source": "download", "version": "3.12.15+20261003", "sha256": "…", "packages": "python-packages-…" } }
 ```
 
-Written by RuntimeManager only, after a runtime and its packages are installed. `version` is the fixed version for `download`; for `system` it is the version of the interpreter, which is checked at every start, and `runtime.list` reports the same. `sha256` is the official digest the archive was verified against. An entry whose source, version and packages equal what the fixed versions and configuration give, with its directories present, is installed: the next start uses it without downloading. An entry for an `auto: false` runtime means the user installed it. Nothing else is stored; whether a runtime is running is rutis' state (`RuntimeHandle::state`).
+Written by RuntimeManager only, after a runtime and its packages are installed. `version` is the fixed version for `download`; for `system` it is the version of the interpreter, which is checked at every start, and `runtime.list` reports the same. `sha256` is the official digest the archive was verified against. An entry whose source, version and packages equal what the fixed versions and configuration give, with its directories present, is installed: the next start uses it without downloading. An entry for an `auto: false` runtime means the user installed it. Nothing else is stored; whether a runtime is running is its connection's `RuntimeStatus`.
 
 ## 3. Flows
 
 ### 3.1 Startup
 
-1. The App Server reads the fixed versions and the configuration, builds the `LocalRuntime` objects from the fixed paths (§2.3), and adds the rows: `RuntimeManager` (required), `SessionNodeRows` and `SessionPythonRows` (not required), and the plugin rows.
+1. The App Server reads the fixed versions and the configuration, builds the launch commands from the fixed paths (§2.3), and adds the rows: `RuntimeManager` (required), `session-node` and `py` (not required), and the plugin rows.
 2. RuntimeManager's `apply` registers `runtime` with `managementMethods` and provides `RuntimeService`, then starts one task per runtime that is on (`auto`, or recorded in `runtimes.json`).
-3. Each task acquires its runtime (§3.2) and mounts it. The runtime rows and then the plugin rows waiting for it start by themselves. The two runtimes are independent: one failing does not affect the other.
+3. Each task acquires its runtime (§3.2) and provides its launch command. The connection row and then the plugin rows waiting for its session start by themselves. The two runtimes are independent: one failing does not affect the other.
 
 Startup does not wait for any runtime: a first start without a network reaches the user with the plugin rows Pending.
 
@@ -124,15 +129,15 @@ For each runtime, in its task:
 2. `download`: read the archive's SHA-256 from the official checksum file (a file it does not list is not downloaded), then fetch the archive from each source in order into `<home>/runtimes/<directory>.download`, compute SHA-256 while writing, and keep the first that matches. Unpack it only after it matches, into `<directory>.partial/`, refusing entries that leave the directory and links that point outside it. Rename the unpacked directory to its final path, replacing nothing that verified before. `system`: look up and check the interpreter (§2.2).
 3. Packages, into `<dir>.partial/` then renamed: Node runs `npm ci --ignore-scripts --omit=dev --no-audit --no-fund --registry <r>` with the verified (or system) Node's own npm over the pinned `package.json` and lock, trying each registry in order; npm verifies every package against the lock's `integrity`. Python runs `python -m pip install --require-hashes --no-deps --only-binary :all: --target <dir> --index-url <i> -r requirements`, trying each index in order.
 4. Write `runtimes.json`.
-5. Mount the `LocalRuntime` as RuntimeManager's child.
+5. Provide the launch command from RuntimeManager's context.
 
 Nothing unverified is executed: the interpreter that runs npm or pip is the verified archive (or the one the user chose with `system`), npm installs with scripts off and checks each package against the pinned lock, and pip refuses any file without its pinned hash.
 
 ### 3.3 Failure and offline
 
-A runtime whose acquisition fails is `failed` with its reason, which lists each source and its error, in `runtime.list`. Nothing was replaced: a partial directory is removed on the next attempt and the previous installed version, if any, stays. Plugin rows needing it stay Pending, waiting for its name. The next attempt is the next start or `runtime.install` (§5); there is no automatic retry.
+A runtime whose acquisition fails is `failed` with its reason, which lists each source and its error, in `runtime.list`. Nothing was replaced: a partial directory is removed on the next attempt and the previous installed version, if any, stays. Plugin rows needing it stay Pending, waiting for its connection row's session. The next attempt is the next start or `runtime.install` (§5); there is no automatic retry.
 
-When the runtime process ends on its own, rutis withdraws the runtime's name and the rows waiting for it go back to Pending; `runtime.list` shows rutis' runtime state and reason. `runtime.install` of a runtime whose process has ended mounts it again.
+When the runtime process ends on its own, its session ends and the rows on it go back to Pending. The connection row stays Active and its `RuntimeStatus` is `down` with how the process ended (for example `exited with exit status: 1`); a launch or a greeting that fails is `down` with its error. `runtime.list` shows that status and reason. `runtime.install` of a runtime that is `down` withdraws its launch command and provides it again, so rutis starts the connection row again with a new process.
 
 ### 3.4 Upgrade and rollback
 
@@ -151,9 +156,10 @@ The rutis Python runtime is one process; a row `py:<module>` is imported with `i
 
 | Interface | Content |
 | --- | --- |
-| Runtime names | `Runtime#session-node`, `Runtime#py`: provided while the runtime runs. |
-| `RuntimeService` (Rust process service) | `list() -> [RuntimeStatus]`; `install(name)`: turns the runtime on and starts its acquisition; does nothing while it is being acquired or is running; after a failure or an ended process, tries again. Read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
-| `runtime.list` (management method) | `[{name, source, version, status, reason?}]`; `status` is `off`, `acquiring`, `failed`, or rutis' runtime state once mounted (`idle`, `starting`, `ready`, `down`, with its reason). |
+| Launch commands | `nodeRuntime`, `pythonRuntime`: Rust-only process services the connection rows `session-node` and `py` inject; provided once the runtime is acquired. |
+| `RuntimeStatus` | Kept by each connection row at a Rust-only process key named after the row: `starting`, `ready`, or `down` with its reason. RuntimeManager reads it. |
+| `RuntimeService` (Rust process service) | `list() -> [RuntimeEntry]`; `install(name)`: turns the runtime on and starts its acquisition; does nothing while it is being acquired or is running; after a failed acquisition, acquires again; once its connection is `down`, provides its launch command again. Read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
+| `runtime.list` (management method) | `[{name, source, version, status, reason?}]`; `status` is `off`, `acquiring`, `failed`, or, once the launch command is provided, the connection's `RuntimeStatus`: `starting` (also while the connection row has not started), `ready`, or `down` with its reason. |
 | `runtime.install {name}` (management method, mutating) | `RuntimeService::install`; replies at once with the status. |
 | `dimcode runtime list`, `dimcode runtime install <node|python>` | The methods above. |
 
@@ -184,24 +190,24 @@ RuntimeManager is not a Capability: it has no Timeline state, writes no Timeline
 
 | Rule | How this document complies |
 | --- | --- |
-| Principles §4 rule 1 (commands for others' state) | RuntimeManager owns its record and directories. PluginManager asks with `install`; plugin rows' state is rutis'. |
+| Principles §4 rule 1 (commands for others' state) | RuntimeManager owns its record and directories. PluginManager asks with `install`; plugin rows' state is rutis', and a runtime's `RuntimeStatus` is its connection row's, which RuntimeManager only reads. |
 | Principles §4 rule 2 (handover) | Not applicable. |
 | Principles §4 rule 3 (before callbacks only) | No intervention before a write. |
-| Principles §4 rule 4 (no business meaning in core) | The runtime names are rutis' own; rutis gating carries no Dim meaning. |
+| Principles §4 rule 4 (no business meaning in core) | The connection rows are rutis' form for a host's own connection; rutis gating carries no Dim meaning. |
 | Principles §4 rules 5, 6 | Not applicable: no Timeline batch and nothing enters model context. |
-| Principles §4 rule 7 (public events and services only) | rutis-bridge's `LocalRuntime` and rutis-loader's gating and `RuntimeResolver`, unchanged and unwrapped. |
+| Principles §4 rule 7 (public events and services only) | rutis-bridge's `Launcher`, `pipe::greeted`, `pipe::Processes` and `Session`, and rutis-loader's gating and `SessionResolver`, unchanged and unwrapped. |
 | Principles §4 rule 8 (requirements to mechanism owners) | §9: none to rutis; one to PluginManager. |
 | Principles §4 rule 9 (only facts later decisions use) | `runtimes.json` records only what the next start decides with: what is installed. |
 | Principles §1 | A process plugin of the App Server. |
 | ADR 002 D1 (scope follows state) | Process: runtimes are per host. |
-| ADR 002 D2 (no wiring modules) | No wiring: plugin rows meet the runtime through its name. |
+| ADR 002 D2 (no wiring modules) | No wiring: plugin rows meet the runtime through its connection row's session. |
 | ADR 002 D3 (dependencies follow scope) | Process dependencies only (`managementMethods`). |
 | ADR 002 D4 (structural vs business configuration) | `runtimes` is product configuration in the default configuration file; the user's override is in the home. |
-| ADR 002 D5 (language-neutral contracts) | Runtime names and JSON methods. |
+| ADR 002 D5 (language-neutral contracts) | Connection rows and JSON methods. |
 
 ## 9. Requirements raised to mechanism owners
 
-None to rutis: `LocalRuntime` built from fixed paths starts its process only when mounted, and rows wait for `Runtime#<name>` under rutis-loader 0.17.1's existing gating.
+None to rutis: a connection row starts its process only once its launch command is provided, and rows wait for its session under rutis-loader 0.19.1's existing gating.
 
 **R1. PluginManager: Python links and the runtime request (M1).**
 

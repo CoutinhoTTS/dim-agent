@@ -225,8 +225,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "Área de transferência: {reason}",
         "Wait for clipboard insertion before sending" => "Aguarde a colagem antes de enviar",
         "A submission accepts at most 20 images" => "Máximo de 20 imagens por envio",
-        "[Image #{index}]" => "[Imagem #{index}]",
-        "[Image #{index}{details}]" => "[Imagem #{index}{details}]",
         "first frame" => "apenas o primeiro fotograma",
         "re-encoded" => "recodificada",
         "The current model does not accept images; remove {label} to send" => {

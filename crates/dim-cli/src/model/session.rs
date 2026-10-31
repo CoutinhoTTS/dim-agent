@@ -9,6 +9,7 @@
 
 use crate::model::shell::ShellResult;
 use crate::model::view::{MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot};
+use crate::wire::Configuration;
 
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -533,11 +534,9 @@ pub enum CompactReply {
 
 #[allow(dead_code)]
 pub enum Update {
-    /// The session exists; `provider` / `model` label the status line.
-    Ready {
-        provider: String,
-        model: String,
-    },
+    /// The session's adopted configuration: `provider / model`, and the
+    /// reasoning effort it sends when it carries one, label the status line.
+    Ready(Configuration),
     /// What the session's model offers, once its catalog entry is known:
     /// image input, and the priority/default service tiers of `/fast`.
     ModelFeatures {

@@ -257,10 +257,13 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
-    /// The composer's context reading is out of date: a run on main ended, a
-    /// compaction result arrived on main, or the session or its model
-    /// changed.
+    /// The composer's context reading is out of date: a model request on main
+    /// finished, a run on main ended, a compaction result arrived on main, or
+    /// the session or its model changed.
     context_stale: bool,
+    /// The last `model/usage` on main, folded from the events so `/usage`
+    /// can report its cache read share.
+    last_usage: Option<LastUsage>,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
     /// The catalog version each provider was last asked to refill at in this
@@ -367,6 +370,7 @@ async fn run(
         login: None,
         login_callbacks: unbounded_channel(),
         context_stale: false,
+        last_usage: None,
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
@@ -450,9 +454,13 @@ struct Created {
 /// The record `session.attach` replies for the Session it opened. A server
 /// from before the record existed replies `{}`.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Attached {
     #[serde(default)]
     model: Option<ModelId>,
+    /// The adopted configuration's preferences; absent when it carries none.
+    #[serde(default)]
+    model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
 
 #[derive(Deserialize)]
@@ -552,6 +560,49 @@ impl ContextUsage {
 
 fn tokens(value: f64) -> u64 {
     value.max(0.0).round() as u64
+}
+
+/// The last `model/usage` fact on `main`: the counters `/usage` reports the
+/// cache read share of.
+#[derive(Clone, Copy)]
+struct LastUsage {
+    prompt_tokens: u64,
+    cache_read_tokens: Option<u64>,
+}
+
+impl LastUsage {
+    /// The share `/usage` prints, or `None` when the counters cannot
+    /// produce one.
+    fn percent(&self) -> Option<String> {
+        cache_hit_rate(self.prompt_tokens, self.cache_read_tokens)
+    }
+}
+
+/// The cache read share of one request, floored at every step so the figure
+/// never flatters: `100%` only when every prompt token was a cache read, one
+/// decimal rounded down between 99% and 100%, an integer rounded down below
+/// that, and `<1%` for a positive share too small for an integer. `None` when
+/// the request reported no cache read count, its cache reads exceed its
+/// prompt, or its prompt is zero, so a reported zero stays `0%`.
+fn cache_hit_rate(prompt_tokens: u64, cache_read_tokens: Option<u64>) -> Option<String> {
+    let cache_read_tokens = cache_read_tokens?;
+    if prompt_tokens == 0 || cache_read_tokens > prompt_tokens {
+        return None;
+    }
+    if cache_read_tokens == prompt_tokens {
+        return Some("100%".to_owned());
+    }
+    if cache_read_tokens == 0 {
+        return Some("0%".to_owned());
+    }
+    let tenths = u128::from(cache_read_tokens) * 1000 / u128::from(prompt_tokens);
+    Some(if tenths >= 990 {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    } else if tenths >= 10 {
+        format!("{}%", tenths / 10)
+    } else {
+        "<1%".to_owned()
+    })
 }
 
 #[derive(Deserialize)]
@@ -718,24 +769,24 @@ impl Worker {
             .await?;
         // Without a record, find the model in the catalog: this is the only
         // caller of `list()` besides `/resume`, and only for an older server.
+        let model_preferences = attached.model_preferences;
         let model = match model.or(attached.model) {
             Some(model) => model,
             None => self.model_of(&session_id).await?,
         };
+        let configuration = Configuration {
+            provider_id: model.provider_id.clone(),
+            model_id: model.model_id.clone(),
+            model_preferences,
+        };
         self.session_id = session_id.clone();
         self.register_ui().await;
         self.mcp_required.clear();
-        self.model = Some(Configuration {
-            provider_id: model.provider_id.clone(),
-            model_id: model.model_id.clone(),
-        });
+        self.model = Some(configuration.clone());
         self.discover_branch("main");
         self.poll_task_history().await?;
         let features = self.model_features(&model).await;
-        self.send(Update::Ready {
-            provider: model.provider_id,
-            model: model.model_id,
-        });
+        self.send(Update::Ready(configuration));
         self.send(features);
         if self.client.supports(&permission::PRESET_METHODS) {
             let preset = permission::read(&mut self.client, &session_id)
@@ -1108,10 +1159,31 @@ impl Worker {
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
-            Command::Usage => match self.context_usage().await {
-                Ok(usage) => self.report(usage.describe(), false),
-                Err(error) => self.report(error.to_string(), true),
-            },
+            Command::Usage => {
+                let reading = self.context_usage().await;
+                // Pages land oldest first: until `main`'s history has
+                // finished loading, an earlier page's older request is not
+                // the newest, so the segment waits for `done`.
+                let loaded = self
+                    .task_history
+                    .get("main")
+                    .is_some_and(|history| history.done);
+                let cached = self
+                    .last_usage
+                    .filter(|_| loaded)
+                    .and_then(|usage| usage.percent());
+                match reading {
+                    Ok(usage) => {
+                        let mut line = usage.describe();
+                        if let Some(cached) = cached {
+                            line.push_str(" · last request cached ");
+                            line.push_str(&cached);
+                        }
+                        self.report(line, false)
+                    }
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::Compact => self.compact().await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -1256,15 +1328,24 @@ impl Worker {
             Command::SetApprovals(mode) => {
                 let result = match permission::parse_preset(&mode) {
                     Err(error) => Err(error.to_string()),
-                    Ok(_) if self.session_id.is_empty() => Err(NO_SESSION.to_owned()),
-                    Ok(_) if !self.client.supports(&permission::PRESET_METHODS) => {
+                    Ok(_)
+                        if !self.session_id.is_empty()
+                            && !self.client.supports(&permission::PRESET_METHODS) =>
+                    {
                         Err("This daemon cannot change the permission preset".to_owned())
                     }
                     Ok(preset) => {
-                        let session_id = self.session_id.clone();
-                        permission::select(&mut self.client, &session_id, preset)
-                            .await
-                            .map(|()| permission::name(preset).to_owned())
+                        let result = if self.session_id.is_empty() {
+                            Ok(())
+                        } else {
+                            let session_id = self.session_id.clone();
+                            permission::select(&mut self.client, &session_id, preset).await
+                        };
+                        result
+                            .map(|()| {
+                                self.options.permission = Some(preset);
+                                permission::name(preset).to_owned()
+                            })
                             .map_err(|error| error.to_string())
                     }
                 };
@@ -1695,6 +1776,13 @@ impl Worker {
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
+                    // Live only: history pages arrive as `session.history`
+                    // replies applied by `apply`, so they spend no read.
+                    if notice.branch_id == "main"
+                        && matches!(notice.event.content, EventContent::ModelEnd(_))
+                    {
+                        self.context_stale = true;
+                    }
                     self.task_event(&notice.branch_id, notice.event);
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
                     self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
@@ -2731,14 +2819,13 @@ impl Worker {
                 model_id,
             };
             let features = self.model_features(&model).await;
-            self.model = Some(Configuration {
+            let configuration = Configuration {
                 provider_id: model.provider_id.clone(),
                 model_id: model.model_id.clone(),
-            });
-            self.send(Update::Ready {
-                provider: model.provider_id.clone(),
-                model: model.model_id.clone(),
-            });
+                model_preferences: None,
+            };
+            self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration));
             self.send(features);
             model
         } else {
@@ -2760,10 +2847,24 @@ impl Worker {
                 }
             };
             let features = self.model_features(&updated.model).await;
-            self.send(Update::Ready {
-                provider: updated.model.provider_id.clone(),
-                model: updated.model.model_id.clone(),
-            });
+            // Re-picking the model the label already shows keeps its
+            // preferences: an `unchanged` outcome publishes no fact, and when
+            // the model changed the adopted fact draws the new ones.
+            let model_preferences = self
+                .model
+                .as_ref()
+                .filter(|shown| {
+                    shown.provider_id == updated.model.provider_id
+                        && shown.model_id == updated.model.model_id
+                })
+                .and_then(|shown| shown.model_preferences.clone());
+            let configuration = Configuration {
+                provider_id: updated.model.provider_id.clone(),
+                model_id: updated.model.model_id.clone(),
+                model_preferences,
+            };
+            self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration));
             self.send(features);
             self.context_stale = true;
             updated.model
@@ -3315,6 +3416,7 @@ impl Worker {
             && let EventContent::Configuration(configuration) = &event.content
         {
             self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration.clone()));
         }
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content
@@ -3325,6 +3427,14 @@ impl Worker {
         }
         if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
             self.context_stale = true;
+        }
+        if branch_id == "main"
+            && let EventContent::ModelUsage(data) = &event.content
+        {
+            self.last_usage = Some(LastUsage {
+                prompt_tokens: tokens(data.usage.prompt_tokens),
+                cache_read_tokens: data.usage.cache_read_tokens.map(tokens),
+            });
         }
         self.projection.apply(branch_id, &event);
         if let EventContent::ExecEnded(data) = &event.content
