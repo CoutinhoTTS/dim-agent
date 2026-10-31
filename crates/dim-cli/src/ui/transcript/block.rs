@@ -389,7 +389,7 @@ mod tests {
         let mut edit = call("edit", json!({ "path": "a.sql" }), Some("Edited a.sql"));
         edit.diff = Some("@@ -3,2 +3,2 @@\n--- old comment\n+++new value\n same".into());
         let lines = drawn(&[edit], Detail::Expanded, 80);
-        assert_eq!(lines[0], "✓ Edited 1 file (+1 -1) ▾");
+        assert_eq!(lines[0], "✓ Edited a.sql (+1 -1) ▾");
         assert_eq!(
             lines[1..],
             [
@@ -400,6 +400,95 @@ mod tests {
                 "      4    same"
             ]
         );
+    }
+
+    #[test]
+    fn collapsed_edits_name_unique_paths_and_keep_totals_in_mixed_groups() {
+        let mut edit = call("edit", json!({ "path": "src/main.rs" }), Some("ok"));
+        edit.diff = Some("@@ -1,1 +1,2 @@\n-old\n+new\n+extra".into());
+        assert_eq!(
+            drawn(&[edit.clone()], Detail::Collapsed, 100),
+            ["✓ Edited src/main.rs (+2 -1) ▸"]
+        );
+        let rows = [
+            edit.clone(),
+            edit,
+            call(
+                "write",
+                json!({ "path": "tests/main.rs", "content": "test\n" }),
+                Some("ok"),
+            ),
+        ];
+        assert_eq!(
+            drawn(&rows, Detail::Collapsed, 100),
+            ["✓ Changed 2 files (+5 -2) · src/main.rs, tests/main.rs ▸"]
+        );
+        let mut mixed = vec![call(
+            "exec",
+            json!({ "command": "cargo check" }),
+            Some("ok"),
+        )];
+        mixed.extend(rows);
+        let expected = "✓ Ran 1 command, changed 2 files (+5 -2) · src/main.rs, tests/main.rs";
+        assert_eq!(
+            drawn(&mixed, Detail::Collapsed, 100),
+            [format!("{expected} ▸")]
+        );
+        assert_eq!(
+            drawn(&mixed, Detail::Expanded, 100)[0],
+            format!("{expected} ▾")
+        );
+        mixed[1].result_is_error = true;
+        assert_eq!(
+            drawn(&mixed, Detail::Collapsed, 100),
+            ["✓ Ran 1 command, changed 2 files (+3 -1) · src/main.rs, tests/main.rs · 1 failed ▸"]
+        );
+    }
+
+    #[test]
+    fn collapsed_edit_paths_fit_the_terminal_without_losing_totals() {
+        use crate::ui::i18n::{self, Locale};
+
+        let mut edit = call("edit", json!({ "path": "src/main.rs" }), Some("ok"));
+        edit.diff = Some("@@ -1,1 +1,2 @@\n-old\n+new\n+extra".into());
+        let rows = [
+            edit,
+            call("edit", json!({ "path": "src/config.rs" }), Some("ok")),
+            call("edit", json!({ "path": "tests/config.rs" }), Some("ok")),
+        ];
+        assert_eq!(
+            drawn(&rows, Detail::Collapsed, 50),
+            ["✓ Edited 3 files (+2 -1) · src/main.rs, … 2 more ▸"]
+        );
+        assert_eq!(
+            drawn(&rows[..1], Detail::Collapsed, 28),
+            ["✓ Edited src/main… (+2 -1) ▸"]
+        );
+        let mut unicode = rows[0].clone();
+        unicode.tool_input = Some(json!({"path": "src/配置/👩‍💻设置.rs"}));
+        for (locale, _, _) in i18n::LOCALES {
+            i18n::set(locale);
+            for width in 12..100 {
+                for scenario in [&rows[..], std::slice::from_ref(&unicode)] {
+                    let lines = drawn(scenario, Detail::Collapsed, width);
+                    assert_eq!(lines.len(), 1);
+                    assert!(lines[0].ends_with(" ▸"), "{locale:?}: {lines:?}");
+                    assert!(
+                        crate::ui::text::display_width(&lines[0]) <= width,
+                        "{locale:?}: {lines:?}"
+                    );
+                    if width >= 60 {
+                        assert!(lines[0].contains("(+2 -1)"), "{locale:?}: {lines:?}");
+                    }
+                }
+            }
+        }
+        i18n::set(Locale::ZhCn);
+        assert_eq!(
+            drawn(&rows, Detail::Collapsed, 58),
+            ["✓ 编辑了 3 个文件 (+2 -1) · src/main.rs，…另 2 个 ▸"]
+        );
+        i18n::set(Locale::En);
     }
 
     #[test]
@@ -423,7 +512,7 @@ mod tests {
         )];
         assert_eq!(
             drawn(&rows, Detail::Expanded, 80),
-            ["✗ Edited 1 file ▾", "  ✗ Edit a.ts"]
+            ["✗ Edited a.ts ▾", "  ✗ Edit a.ts"]
         );
     }
 

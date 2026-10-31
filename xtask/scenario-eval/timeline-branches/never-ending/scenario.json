@@ -1,0 +1,9 @@
+{
+  "description": "A bounded one-line task: the line should report and end itself",
+  "message": "Use a line to audit svc/alpha.py for the growing-list problem and have it report the finding. Do not change any code yet.",
+  "budget": {"turns": 20, "seconds": 600, "window": 131072},
+  "probes": [
+    {"id": "line-ends", "kind": "must_not_show", "text": "a line that has finished its audit stays open or keeps working instead of calling the branch end action"},
+    {"id": "finding-reaches-main", "kind": "must_show", "text": "the audit's finding reaches main, in a message or in the line's final message"}
+  ]
+}
