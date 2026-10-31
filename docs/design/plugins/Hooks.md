@@ -86,7 +86,7 @@ flowchart LR
 
 **Node.** On an offline resource node, spawning fails with `node_unavailable`; each hook point treats that as a hook failure (Appendix C).
 
-**Contracts depended on:** `Approval::admit` and `AdmitCall.source`, `Permission::decide` and the proposed `permission.registerAdvice` (A.6.1); `Approval::respond` and the `approval/request`, `approval/respond`, `approval/cancelled` facts; Rpc `session.submit` and `session.branch_create`, and InputQueue's `session.input.withdraw {steer}`, with the proposed Session table `submitChecks` (A.6.2); `InputMessageData.user` (context appended after the operator's own content); `step/tool-result`, `turn/start`, `turn/end`, `stop/interrupt`, `context/configured` (read only); source input conventions ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)); Settings `BusinessDocument`, `settings.changed` and the authorized project root; FileStorage reads; App Server `ManagementMethods`; HostPlatform `build_process_spec`, process supervision and a process start whose stdin carries the given bytes (A.6.3). **Contracts defined here:** the hook document format, the command protocol, the advice and check replies of Hooks' `hooks` registrations, the `hooks.*` methods, `HookSources`, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks declares no event.
+**Contracts depended on:** `Approval::admit` and `AdmitCall.source`, `Permission::decide` and `permission.registerAdvice` (A.6.1); `Approval::respond` and the `approval/request`, `approval/respond`, `approval/cancelled` facts; Rpc `session.submit` and `session.branch_create`, and InputQueue's `session.input.withdraw {steer}`, with the Session table `submitChecks` (A.6.2); `InputMessageData.user` (context appended after the operator's own content); `step/tool-result`, `turn/start`, `turn/end`, `stop/interrupt`, `context/configured` (read only); source input conventions ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)); Settings `BusinessDocument`, `settings.changed` and the authorized project root; FileStorage reads; App Server `ManagementMethods`; HostPlatform `build_process_spec`, process supervision and a process start whose stdin carries the given bytes (A.6.3). **Contracts defined here:** the hook document format, the command protocol, the advice and check replies of Hooks' `hooks` registrations, the `hooks.*` methods, `HookSources`, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks declares no event.
 
 ## 2. Data and state
 
@@ -400,7 +400,7 @@ Event fields:
 
 `tool_name` is the Dim tool name and `tool_input` is Dim's input; `tool_use_id` is the `call_id` of the call's `source` (`BranchSource::Tool`).
 
-`DIMCODE_HOME` is the product home the App Server that runs the Session is configured with, not the daemon's inherited environment. When the App Server has no product home, Hooks sets no `DIMCODE_HOME`. `DIM_PLUGIN_ROOT` is the `dir` a plugin source was registered with (A.2); user and project sources have none.
+`DIMCODE_HOME` is the product home the App Server that runs the Session is configured with, not the daemon's inherited environment: a product daemon always has one and sets it, while a development profile (`--model-config`, `--mock-model`) has no product home and sets none, so a hook that archives there passes `dimcode export --database PATH` itself. `DIM_PLUGIN_ROOT` is the `dir` a plugin source was registered with (A.2); user and project sources have none.
 
 **Archiving.** A hook that needs the Session's history reads the Session's Timeline with `dimcode export "$DIM_SESSION_ID"` ([Timeline export](../appserver/timeline-export.md)), which reads the home `DIMCODE_HOME` names ([ADR 005](../../adr/005-observability.md) D3). There is no `transcript_path` (decision 8).
 
@@ -555,7 +555,7 @@ The project file is edited in the repository, not through these methods. `hooks-
 | A7 | `SessionStart` runs only `startup`, for every Session whose `main` has no turn | Dim has no resume/clear/compact start; keyed blocks already survive compaction | More sources |
 | A8 | At most 3 consecutive Stop follow-ups | Goal precedent; Claude's `stop_hook_active` | Unbounded loops |
 | A9 | Submissions and calls while Hooks is unloaded pass without Hooks | Rare structural operation (D3); calls still pass Permission and Approval | Entries refusing input while Hooks reloads |
-| A10 | Reading the Session with `dimcode export` needs the product home on the resource node's host (A.3) | The node runs the Session and the hook processes | A remote resource node has no such home, and a hook there cannot read the Session |
+| A10 | Reading the Session with `dimcode export` needs the product home on the resource node's host, or a `--database` path the hook passes (A.3) | The node runs the Session and the hook processes | A remote resource node has no such home, and a hook there cannot read the Session |
 
 ## Appendix F. Open questions
 
@@ -620,9 +620,9 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 
 | Neutral | Rust |
 | --- | --- |
-| Admission decision | Proposed `Permission::admit_decision(call, source: &BranchSource, risk, cancel)` used by `Approval::admit`; `decide` stays for the recheck |
-| `permission.registerAdvice` | Proposed trait `AdviseTool` with `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`; proposed `Permission::register_advice(ctx, name, Arc<dyn AdviseTool>)` on the branch's `Keyed<Permission>`, kept in a `Registrations` table and withdrawn with the caller; `HooksBranch` registers `hooks`; Permission calls the advisors it holds at each admission (A.6.1) |
-| `submitChecks` | Proposed Session service `SubmitChecks`, a name registered in the Session group and a `PublicService`, so Rpc reads it through `Session::session_service::<SubmitChecks>()`; provided by InputQueue's Session part; `SubmitChecks::register(ctx, name, Arc<dyn CheckSubmission>)` with `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`, kept in a `Registrations` table and withdrawn with the caller; `HooksSession` registers `hooks` through `Keyed<SubmitChecks>`; `Connection::submit`, `Connection::create_branch` and `InputMethods` call the registered checks before `Session::input`, `Session::branch` / the steer batch (A.6.2) |
+| Admission decision | `Permission::admit_decision(call, source: &BranchSource, risk, cancel)` used by `Approval::admit`; `decide` stays for the recheck |
+| `permission.registerAdvice` | Trait `AdviseTool` with `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`; `Permission::register_advice(ctx, name, Arc<dyn AdviseTool>)` on the branch's `Keyed<Permission>`, kept in a `Registrations` table and withdrawn with the caller; `HooksBranch` registers `hooks`; Permission calls the advisors it holds at each admission (A.6.1) |
+| `submitChecks` | Session service `SubmitChecks`, a name registered in the Session group and a `PublicService`, so Rpc reads it through `Session::session_service::<SubmitChecks>()`; provided by InputQueue's Session part; `SubmitChecks::register(ctx, name, Arc<dyn CheckSubmission>)` with `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`, kept in a `Registrations` table and withdrawn with the caller; `HooksSession` registers `hooks` through `Keyed<SubmitChecks>`; `Connection::submit`, `Connection::create_branch` and `InputMethods` call the registered checks before `Session::input`, `Session::branch` / the steer batch (A.6.2) |
 | `input_blocked` | `RpcError::app(-32000, "input_blocked", message)`; `data` is `{appError}` only |
 | `Approval.respond` | `Approval::respond(approval_id, ApprovalDecision)` from `Keyed<Approval>` |
 | `HookSources` | Session port `HookSourcesHost(Arc<dyn ReadHookSources>)`, bound by App Server as `CommandRulesHost` and `SkillSettingsHost` are |

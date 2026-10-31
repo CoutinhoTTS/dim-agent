@@ -86,7 +86,7 @@ flowchart LR
 
 **节点。** 资源节点离线时，启动进程以 `node_unavailable` 失败；每个 Hook 点把它当作 Hook 失败处理（附录 C）。
 
-**依赖的契约：** `Approval::admit` 与 `AdmitCall.source`、`Permission::decide` 与提议的 `permission.registerAdvice`（A.6.1）；Approval 的 `respond` 与 `approval/request`、`approval/respond`、`approval/cancelled` 事实；Rpc `session.submit` 与 `session.branch_create`，以及 InputQueue 的 `session.input.withdraw {steer}`，和提议的 Session 表 `submitChecks`（A.6.2）；`InputMessageData.user`（上下文追加在操作者自己的内容之后）；`step/tool-result`、`turn/start`、`turn/end`、`stop/interrupt`、`context/configured`（只读）；来源输入约定（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）；Settings 的 `BusinessDocument`、`settings.changed` 与已授权的项目根；FileStorage 读取；App Server 的 `ManagementMethods`；HostPlatform 的 `build_process_spec`、进程监管，以及把给定字节写入 stdin 的进程启动（A.6.3）。**本文定义的契约：** Hook 文档格式、命令协议、Hooks 的 `hooks` 登记给出的建议与检查回复、`hooks.*` 方法、`HookSources`、来源名 `hooks`（标记 `dim-hooks`，键命名空间 `hooks:`）。Hooks 不声明任何事件。
+**依赖的契约：** `Approval::admit` 与 `AdmitCall.source`、`Permission::decide` 与 `permission.registerAdvice`（A.6.1）；Approval 的 `respond` 与 `approval/request`、`approval/respond`、`approval/cancelled` 事实；Rpc `session.submit` 与 `session.branch_create`，以及 InputQueue 的 `session.input.withdraw {steer}`，和 Session 表 `submitChecks`（A.6.2）；`InputMessageData.user`（上下文追加在操作者自己的内容之后）；`step/tool-result`、`turn/start`、`turn/end`、`stop/interrupt`、`context/configured`（只读）；来源输入约定（[Session 访问 A.2](../contracts/session-access.md#a2-来源输入约定)）；Settings 的 `BusinessDocument`、`settings.changed` 与已授权的项目根；FileStorage 读取；App Server 的 `ManagementMethods`；HostPlatform 的 `build_process_spec`、进程监管，以及把给定字节写入 stdin 的进程启动（A.6.3）。**本文定义的契约：** Hook 文档格式、命令协议、Hooks 的 `hooks` 登记给出的建议与检查回复、`hooks.*` 方法、`HookSources`、来源名 `hooks`（标记 `dim-hooks`，键命名空间 `hooks:`）。Hooks 不声明任何事件。
 
 ## 2. 数据与状态
 
@@ -400,7 +400,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 
 `tool_name` 是 Dim 工具名，`tool_input` 是 Dim 的输入；`tool_use_id` 是调用的 `source`（`BranchSource::Tool`）中的 `call_id`。
 
-`DIMCODE_HOME` 是运行该 Session 的 App Server 所配置的产品 home，不是守护进程继承的环境。App Server 没有产品 home 时，Hooks 不设置 `DIMCODE_HOME`。`DIM_PLUGIN_ROOT` 是插件来源登记时的 `dir`（A.2）；用户与项目来源没有。
+`DIMCODE_HOME` 是运行该 Session 的 App Server 所配置的产品 home，不是守护进程继承的环境：产品守护进程总是有并设置它；开发 profile（`--model-config`、`--mock-model`）没有产品 home，也不设置，因此在那里归档的 Hook 自行传入 `dimcode export --database PATH`。`DIM_PLUGIN_ROOT` 是插件来源登记时的 `dir`（A.2）；用户与项目来源没有。
 
 **归档。** 需要 Session 历史的 Hook 用 `dimcode export "$DIM_SESSION_ID"` 读取该 Session 的 Timeline（[Timeline 导出](../appserver/timeline-export.md)），它读取 `DIMCODE_HOME` 指定的 home（[ADR 005](../../../adr/005-observability.md) D3）。没有 `transcript_path`（决定 8）。
 
@@ -556,7 +556,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 | A7 | `SessionStart` 只运行 `startup`，对 `main` 没有 turn 的每个 Session | Dim 没有 resume/clear/compact 启动；带键块已能在压缩中保留 | 更多来源 |
 | A8 | Stop 续跑连续最多 3 次 | Goal 先例；Claude 的 `stop_hook_active` | 无界循环 |
 | A9 | Hooks 未装载期间的提交与调用不经过 Hooks | 罕见的结构性操作（D3）；调用仍经过 Permission 与 Approval | 入口在 Hooks 重载期间拒绝输入 |
-| A10 | 用 `dimcode export` 读取 Session 需要资源节点宿主机上有该产品 home（A.3） | 该节点运行 Session 与 Hook 进程 | 远程资源节点没有这个 home，其上的 Hook 无法读取 Session |
+| A10 | 用 `dimcode export` 读取 Session 需要资源节点宿主机上有该产品 home，或由 Hook 自行传入 `--database` 路径（A.3） | 该节点运行 Session 与 Hook 进程 | 远程资源节点没有这个 home，其上的 Hook 无法读取 Session |
 
 ## 附录 F. 待对齐问题
 
@@ -621,9 +621,9 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 
 | 中立 | Rust |
 | --- | --- |
-| 准入决定 | 提议的 `Permission::admit_decision(call, source: &BranchSource, risk, cancel)`，由 `Approval::admit` 使用；`decide` 保留给复核 |
-| `permission.registerAdvice` | 提议的 trait `AdviseTool`，含 `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`；提议的 `Permission::register_advice(ctx, name, Arc<dyn AdviseTool>)`，经分支的 `Keyed<Permission>` 调用，保存在一张 `Registrations` 表中，随调用方撤下；`HooksBranch` 登记 `hooks`；Permission 每次准入时调用它持有的建议方（A.6.1） |
-| `submitChecks` | 提议的 Session 服务 `SubmitChecks`，是登记在 Session 组中的名字，也是 `PublicService`，所以 Rpc 经 `Session::session_service::<SubmitChecks>()` 读取它；由 InputQueue 的 Session 部件提供；`SubmitChecks::register(ctx, name, Arc<dyn CheckSubmission>)`，含 `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`，保存在一张 `Registrations` 表中，随调用方撤下；`HooksSession` 经 `Keyed<SubmitChecks>` 登记 `hooks`；`Connection::submit`、`Connection::create_branch` 与 `InputMethods` 在 `Session::input`、`Session::branch` / steer 批次之前调用已登记的检查（A.6.2） |
+| 准入决定 | `Permission::admit_decision(call, source: &BranchSource, risk, cancel)`，由 `Approval::admit` 使用；`decide` 保留给复核 |
+| `permission.registerAdvice` | trait `AdviseTool`，含 `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`；`Permission::register_advice(ctx, name, Arc<dyn AdviseTool>)`，经分支的 `Keyed<Permission>` 调用，保存在一张 `Registrations` 表中，随调用方撤下；`HooksBranch` 登记 `hooks`；Permission 每次准入时调用它持有的建议方（A.6.1） |
+| `submitChecks` | Session 服务 `SubmitChecks`，是登记在 Session 组中的名字，也是 `PublicService`，所以 Rpc 经 `Session::session_service::<SubmitChecks>()` 读取它；由 InputQueue 的 Session 部件提供；`SubmitChecks::register(ctx, name, Arc<dyn CheckSubmission>)`，含 `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`，保存在一张 `Registrations` 表中，随调用方撤下；`HooksSession` 经 `Keyed<SubmitChecks>` 登记 `hooks`；`Connection::submit`、`Connection::create_branch` 与 `InputMethods` 在 `Session::input`、`Session::branch` / steer 批次之前调用已登记的检查（A.6.2） |
 | `input_blocked` | `RpcError::app(-32000, "input_blocked", message)`；`data` 只有 `{appError}` |
 | `Approval.respond` | 经 `Keyed<Approval>` 调用 `Approval::respond(approval_id, ApprovalDecision)` |
 | `HookSources` | Session 端口 `HookSourcesHost(Arc<dyn ReadHookSources>)`，由 App Server 绑定，如同 `CommandRulesHost` 与 `SkillSettingsHost` |
