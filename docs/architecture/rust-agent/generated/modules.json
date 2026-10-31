@@ -23466,6 +23466,14 @@
       ]
     },
     {
+      "from": "dim_cli::model::session",
+      "to": "dim_client::wire",
+      "references": [
+        "path Configuration",
+        "use crate::wire::Configuration"
+      ]
+    },
+    {
       "from": "dim_cli::model::shell",
       "to": "dim_cli::model::shell::tests",
       "references": [
@@ -24456,6 +24464,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path dim_agent_types::CatalogCapabilities",
+        "path dim_agent_types::ModelPreferences",
         "path dim_agent_types::ModelReasoning",
         "path dim_agent_types::ModelServiceTier"
       ]
@@ -31155,6 +31164,14 @@
       ]
     },
     {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_client::wire",
+      "references": [
+        "path Configuration",
+        "use crate::wire::Configuration"
+      ]
+    },
+    {
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::clipboard",
       "references": [
@@ -31563,6 +31580,13 @@
         "path ToolUseStartData",
         "path TurnEndData",
         "path TurnStartData"
+      ]
+    },
+    {
+      "from": "dim_client::wire",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path dim_agent_types::ModelPreferences"
       ]
     },
     {
