@@ -10,14 +10,16 @@
 //! that a one-sided mid-p Fisher exact test on both arms' counts confirms. The
 //! family is fixed before any data — fact recall, exact recall, the violation
 //! rate, the failed-run rate and the unjudged-run rate — and Holm adjusts it
-//! at a family-wise `α = 0.10`. A failed run enters no probe's rate; it is
-//! compared once, as the failed-run rate. The unjudged-run rate counts a run
-//! once however many of its probes the judge left unanswered, because the
-//! judge answers all of them in one call. The verdict is `fail` when any
-//! comparison is a regression, `pass` when none is and every case ran 20 times
-//! in each arm, and `inconclusive` otherwise. The multi-arm runs read their
-//! decisions from the same test: each arm's loss and p-value against the
-//! decision's baseline stand beside the table.
+//! at a family-wise `α = 0.10`. A failed run — its compaction or its judge
+//! call — enters no probe's rate; it is compared once, as the failed-run
+//! rate. An unjudged run, whose judge answered unreadably or left a probe
+//! without a verdict, enters none of them either, and the unjudged-run rate
+//! counts it once however many of its probes the judge left unanswered,
+//! because the judge answers all of them in one call. The verdict is `fail`
+//! when any comparison is a regression, `pass` when none is and every case
+//! ran 20 times in each arm, and `inconclusive` otherwise. The multi-arm runs
+//! read their decisions from the same test: each arm's loss and p-value
+//! against the decision's baseline stand beside the table.
 use crate::app_server;
 use crate::rule::{self, Comparison, Counts, Worse};
 use crate::scenario_eval::text_tokens;
@@ -132,7 +134,7 @@ pub async fn run() -> Result<()> {
                     &judged,
                 );
                 let configuration = outcome.configuration(&summarizer);
-                metrics.add(&arm, case, &outcome, &probes, &configuration);
+                metrics.add(&arm, case, &outcome, &judged, &probes, &configuration);
                 let directory = options.out.join(&arm.id);
                 std::fs::create_dir_all(&directory)?;
                 std::fs::write(
@@ -1074,23 +1076,34 @@ impl Verdict {
     }
 }
 
-/// What a run's judge step produced.
+/// What a run's judge step produced (model-prompts §8.1).
 enum Judged {
     /// The judge answered; a probe it skipped stays `unparsed`.
     Verdicts(BTreeMap<String, (Verdict, Option<String>)>),
     /// The compaction left no summary, so there is nothing to judge; the
     /// judged probes are absent without a judge call.
     NoSummary,
-    /// The judge call or its answer failed; every judged probe is `unparsed`
-    /// and the evaluation goes on (ContextCompaction §13.4).
-    Unavailable(String),
+    /// A judge call failed — a window overflow, a transport or an HTTP error,
+    /// on the call or on its retry — so the run's judging did not happen and
+    /// the run is a failed run, the same event as the scenario runner's
+    /// `call_failed`. The evaluation goes on (ContextCompaction §13.4).
+    Failed(String),
+    /// The judge answered and its reply holds no verdict list: the run is
+    /// unjudged, and enters none of its arm's probe rates.
+    Unreadable(String),
 }
 impl Judged {
     fn error(&self) -> Option<&str> {
         match self {
-            Self::Unavailable(error) => Some(error),
+            Self::Failed(error) | Self::Unreadable(error) => Some(error),
             _ => None,
         }
+    }
+    /// Whether a judge call failed: the run's judging did not happen, so the
+    /// run is a failed run and is compared once, as the failed-run rate
+    /// (model-prompts §8.1).
+    fn failed_call(&self) -> bool {
+        matches!(self, Self::Failed(_))
     }
 }
 
@@ -1121,7 +1134,7 @@ fn probe_records(probes: &[Probe], summary: &str, judged: &Judged) -> Vec<Value>
                         .map_or(("unparsed", None), |(verdict, quote)| {
                             (verdict.name(), quote.clone())
                         }),
-                    Judged::Unavailable(_) => ("unparsed", None),
+                    Judged::Failed(_) | Judged::Unreadable(_) => ("unparsed", None),
                 },
             };
             json!({"id": probe.id, "kind": probe.kind, "text": probe.text, "verdict": verdict, "quote": quote})
@@ -1164,8 +1177,18 @@ async fn judge_run(
     .await
     {
         Ok(verdicts) => Judged::Verdicts(verdicts),
-        Err(error) => Judged::Unavailable(error),
+        Err(JudgeError::Call(error)) => Judged::Failed(error),
+        Err(JudgeError::Unreadable(error)) => Judged::Unreadable(error),
     }
+}
+
+/// Why a run's judge left it without verdicts (model-prompts §8.1). The two
+/// are told apart by where they happened, never by reading the error's text.
+enum JudgeError {
+    /// A call failed: a window overflow, a transport or an HTTP error.
+    Call(String),
+    /// The judge answered, and the reply holds no verdict list.
+    Unreadable(String),
 }
 
 async fn judge_probes(
@@ -1176,7 +1199,7 @@ async fn judge_probes(
     summary: &str,
     cancel: &CancellationToken,
     no_temperature: &mut bool,
-) -> std::result::Result<BTreeMap<String, (Verdict, Option<String>)>, String> {
+) -> std::result::Result<BTreeMap<String, (Verdict, Option<String>)>, JudgeError> {
     let statements = case
         .probes
         .iter()
@@ -1209,18 +1232,23 @@ async fn judge_probes(
                 .and_then(|config| config.temperature)
                 .is_none()
             {
-                return Err(format!("the judge failed: {error}"));
+                return Err(JudgeError::Call(format!("the judge failed: {error}")));
             }
             retry.config.as_mut().expect("a config").temperature = None;
             *no_temperature = true;
             match complete(host, resolver, &Arc::new(retry), cancel).await {
                 Ok(reply) => reply,
-                Err(retry) => return Err(format!("the judge failed: {error}, then {retry}")),
+                Err(retry) => {
+                    return Err(JudgeError::Call(format!(
+                        "the judge failed: {error}, then {retry}"
+                    )));
+                }
             }
         }
     };
-    let parsed = parse_judgements(&reply)
-        .map_err(|_| format!("the judge answered with no verdict list: {reply}"))?;
+    let parsed = parse_judgements(&reply).map_err(|_| {
+        JudgeError::Unreadable(format!("the judge answered with no verdict list: {reply}"))
+    })?;
     Ok(parsed
         .into_iter()
         .map(|judgement| {
@@ -1369,8 +1397,9 @@ impl Configuration {
 }
 
 /// The arm's metrics over its cases and runs (ContextCompaction §13.4). A
-/// failed run enters no probe's rate: it is compared once, as the failed-run
-/// rate (model-prompts §8.1).
+/// failed run — its compaction or its judge call — enters no probe's rate: it
+/// is compared once, as the failed-run rate (model-prompts §8.1). An unjudged
+/// run enters none of them either.
 #[derive(Default)]
 struct Metrics {
     /// The exact probes' present count out of their counted probes.
@@ -1412,6 +1441,7 @@ impl Metrics {
         arm: &Arm,
         case: &Prepared,
         run: &Run,
+        judged: &Judged,
         probes: &[Value],
         configuration: &Configuration,
     ) {
@@ -1436,29 +1466,47 @@ impl Metrics {
                 return;
             }
         }
-        self.add_probes(&case.probes, probes);
+        if judged.failed_call() {
+            self.failed += 1;
+            return;
+        }
+        if self.add_probes(&case.probes, probes) {
+            self.unjudged_runs += 1;
+        }
     }
-    /// Counts one run's probes, and the run in the unjudged-run rate when the
-    /// judge left any of its `fact` or `absent` probes without a verdict: the
-    /// judge answers all of a run's such probes in one call, so an unusable
-    /// answer leaves them together and counts once (ContextCompaction §13.4).
-    fn add_probes(&mut self, probes: &[Probe], records: &[Value]) {
-        let mut left_unjudged = false;
+    /// Counts one run's probes and says whether the judge left any of them
+    /// without a verdict. An unjudged run enters none of its arm's probe
+    /// rates — not even the probes its reply did answer — because the run's
+    /// evidence is that one reply (model-prompts §8.1). The judge answers all
+    /// of a run's `fact` and `absent` probes in one call, so an unusable
+    /// answer leaves them together and counts the run once, while the
+    /// `unjudged` column still lists every probe the judge did not answer, for
+    /// the operator to correct by hand (ContextCompaction §13.4).
+    fn add_probes(&mut self, probes: &[Probe], records: &[Value]) -> bool {
+        let left_without_verdict = |probe: &Probe, record: &Value| {
+            matches!(probe.kind, ProbeKind::Fact | ProbeKind::Absent)
+                && record["verdict"].as_str() == Some("unparsed")
+        };
+        let unjudged = probes
+            .iter()
+            .zip(records)
+            .any(|(probe, record)| left_without_verdict(probe, record));
         for (probe, record) in probes.iter().zip(records) {
             let verdict = record["verdict"].as_str();
             let present = verdict == Some("present");
             match probe.kind {
                 ProbeKind::Exact => {
-                    self.exact = count(self.exact, present);
+                    if !unjudged {
+                        self.exact = count(self.exact, present);
+                    }
                 }
                 ProbeKind::Fact | ProbeKind::Absent => {
-                    let unjudged = verdict == Some("unparsed");
+                    let missing = left_without_verdict(probe, record);
                     self.unjudged = Counts::new(
-                        self.unjudged.outcome + u64::from(unjudged),
+                        self.unjudged.outcome + u64::from(missing),
                         self.unjudged.total + 1,
                     );
                     if unjudged {
-                        left_unjudged = true;
                         continue;
                     }
                     match probe.kind {
@@ -1475,7 +1523,7 @@ impl Metrics {
                 }
             }
         }
-        self.unjudged_runs += usize::from(left_unjudged);
+        unjudged
     }
     fn row(&self, arm: &Arm) -> Value {
         let by_item: BTreeMap<&str, Value> = self
@@ -1835,9 +1883,9 @@ mod tests {
     use super::*;
     use dim_agent_capabilities::host::{
         HostFuture, ModelConnection, ModelDriver, ModelStopReason, ResolveModelConnection,
-        ResolvedModelConnection,
+        ResolvedModelConnection, StrategyDiagnostics,
     };
-    use dim_agent_types::ModelCapabilitySnapshot;
+    use dim_agent_types::{CompactionStrategyRecord, ModelCapabilitySnapshot};
     use dim_app_server::model_catalog::FieldUpdate;
     use dim_app_server::provider::{CreateProvider, PreferencesPatch};
     use std::sync::Mutex;
@@ -1992,54 +2040,167 @@ mod tests {
         assert_eq!(failed.candidate, Counts::new(1, 21));
     }
 
-    /// The unjudged-run rate counts the run, not its probes: the judge
-    /// answers all of a run's `fact` and `absent` probes in one call, so an
-    /// unusable answer adds one run to the comparison and each probe to the
-    /// column (ContextCompaction §13.4).
+    /// A case as the metrics tests run it: its probes, and nothing a run
+    /// reads.
+    fn prepared(id: &str, probes: Vec<Probe>) -> Prepared {
+        Prepared {
+            id: id.into(),
+            description: String::new(),
+            probes,
+            steps: Vec::new(),
+            checkpoint: None,
+            window: 0.,
+            output: 0.,
+        }
+    }
+    fn probe(id: &str, kind: ProbeKind) -> Probe {
+        Probe {
+            id: id.into(),
+            kind,
+            text: id.into(),
+            item: None,
+        }
+    }
+    /// The arm a metrics test counts into.
+    fn arm(id: &str) -> Arm {
+        Arm {
+            id: id.into(),
+            reasoning: SummaryReasoning::Off,
+            target: None,
+            prompt: None,
+            length_sentence: None,
+        }
+    }
+    /// A run whose compaction completed; the metrics read its label, its
+    /// steps' details and its duration, so its diagnostics carry nothing.
+    fn completed() -> Run {
+        Run {
+            steps: vec![RunStep {
+                duration: Duration::ZERO,
+                outcome: Ok(StrategyOutcome::Completed {
+                    retain_from: "m0".into(),
+                    replacement: Vec::new(),
+                    diagnostics: StrategyDiagnostics {
+                        model_call_count: 0,
+                        model_usage: None,
+                        record: CompactionStrategyRecord {
+                            kind: "summary".into(),
+                            details: Default::default(),
+                        },
+                    },
+                }),
+            }],
+            duration: Duration::ZERO,
+        }
+    }
+    /// A judge call that fails makes a failed run — the same event as the
+    /// scenario runner's `call_failed` — so the run is compared once, as the
+    /// failed-run rate, and none of its probes counts (model-prompts §8.1).
     #[test]
-    fn an_unjudged_run_counts_once_however_many_probes_it_left() {
-        let probes = [
-            Probe {
-                id: "a".into(),
-                kind: ProbeKind::Fact,
-                text: "a".into(),
-                item: None,
-            },
-            Probe {
-                id: "b".into(),
-                kind: ProbeKind::Fact,
-                text: "b".into(),
-                item: None,
-            },
-            Probe {
-                id: "c".into(),
-                kind: ProbeKind::Absent,
-                text: "c".into(),
-                item: None,
-            },
-        ];
-        let unparsed = [
-            json!({"verdict": "unparsed"}),
-            json!({"verdict": "unparsed"}),
-            json!({"verdict": "unparsed"}),
-        ];
-        let mut candidate = level(20);
-        candidate.add_probes(&probes, &unparsed);
-        assert_eq!(
-            candidate.unjudged,
-            Counts::new(3, 53),
-            "three to the column"
+    fn a_failed_judge_call_makes_a_failed_run() {
+        let case = prepared(
+            "case",
+            vec![probe("a", ProbeKind::Fact), probe("b", ProbeKind::Exact)],
         );
-        let family = comparisons(&level(20), &candidate);
-        let unjudged = family
-            .iter()
-            .find(|comparison| comparison.name == "unjudged runs")
-            .unwrap();
-        assert_eq!(
-            unjudged.candidate,
-            Counts::new(1, 20),
-            "one unjudged run to the comparison"
+        let judged = Judged::Failed("the judge failed: HTTP 500".into());
+        let probes = probe_records(&case.probes, "the summary", &judged);
+        let mut metrics = Metrics::default();
+        metrics.add(
+            &arm("candidate"),
+            &case,
+            &completed(),
+            &judged,
+            &probes,
+            &Configuration::default(),
         );
+        assert_eq!(
+            (metrics.runs, metrics.failed, metrics.unjudged_runs),
+            (1, 1, 0),
+            "a failed call is a failed run, not an unjudged one"
+        );
+        assert_eq!(
+            metrics.facts,
+            Counts::default(),
+            "a failed run enters no probe rate"
+        );
+        assert_eq!(metrics.exact, Counts::default());
+    }
+
+    /// A reply with no verdict list leaves the run unjudged: none of its
+    /// probes counts, not even the mechanical `exact` one, and the
+    /// unjudged-run rate counts the run once however many probes the judge
+    /// left (model-prompts §8.1, ContextCompaction §13.4).
+    #[test]
+    fn an_unreadable_answer_leaves_the_run_unjudged() {
+        let case = prepared(
+            "case",
+            vec![
+                probe("a", ProbeKind::Fact),
+                probe("b", ProbeKind::Exact),
+                probe("c", ProbeKind::Absent),
+            ],
+        );
+        let judged = Judged::Unreadable("the judge answered with no verdict list".into());
+        let probes = probe_records(&case.probes, "the summary", &judged);
+        let mut metrics = Metrics::default();
+        metrics.add(
+            &arm("candidate"),
+            &case,
+            &completed(),
+            &judged,
+            &probes,
+            &Configuration::default(),
+        );
+        assert_eq!(
+            (metrics.runs, metrics.failed, metrics.unjudged_runs),
+            (1, 0, 1),
+            "the unjudged-run rate counts the run"
+        );
+        assert_eq!(
+            metrics.facts,
+            Counts::default(),
+            "an unjudged run enters no probe rate"
+        );
+        assert_eq!(metrics.exact, Counts::default());
+        assert_eq!(metrics.violations, Counts::default());
+        assert_eq!(
+            metrics.unjudged,
+            Counts::new(2, 2),
+            "the column lists both judged probes"
+        );
+    }
+
+    /// A reply that answers some probes only leaves the run unjudged too: the
+    /// probes it did answer stay out of the arm's rates, because the run's
+    /// evidence is that one reply (model-prompts §8.1).
+    #[test]
+    fn a_partially_answered_reply_leaves_the_run_unjudged() {
+        let case = prepared(
+            "case",
+            vec![probe("a", ProbeKind::Fact), probe("b", ProbeKind::Fact)],
+        );
+        let answered: BTreeMap<String, (Verdict, Option<String>)> =
+            [("a".to_owned(), (Verdict::Present, None))]
+                .into_iter()
+                .collect();
+        let judged = Judged::Verdicts(answered);
+        let probes = probe_records(&case.probes, "the summary", &judged);
+        let mut metrics = Metrics::default();
+        metrics.add(
+            &arm("candidate"),
+            &case,
+            &completed(),
+            &judged,
+            &probes,
+            &Configuration::default(),
+        );
+        assert_eq!(metrics.unjudged_runs, 1);
+        assert_eq!(
+            metrics.facts,
+            Counts::default(),
+            "even the probe the reply answered stays out"
+        );
+        assert_eq!(metrics.unjudged, Counts::new(1, 2));
     }
 
     /// The target phase's baseline is the arm that keeps the most facts,
