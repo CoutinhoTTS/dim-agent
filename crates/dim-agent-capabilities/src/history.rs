@@ -185,7 +185,10 @@ impl HistoryRenderer {
         if batch == 0 {
             return Ok(StreamedContext::fallback());
         }
-        if !std::ptr::eq(self.render as *const (), project_context_history as *const ()) {
+        if !std::ptr::eq(
+            self.render as *const (),
+            project_context_history as *const (),
+        ) {
             return Ok(StreamedContext::fallback());
         }
         let mut state = None;
