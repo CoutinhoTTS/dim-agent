@@ -12,7 +12,6 @@ async fn execution_settings_decide_the_next_process_boundary() {
     use dim_agent_runtime::SessionConfig;
     use dim_agent_types::{PermissionPolicy, PermissionPreset};
     use std::os::unix::fs::DirBuilderExt;
-    use std::os::unix::fs::PermissionsExt;
 
     let home = std::path::PathBuf::from("/tmp").join(format!("ex-{}", uuid::Uuid::new_v4()));
     std::fs::DirBuilder::new()
@@ -140,6 +139,7 @@ async fn execution_settings_decide_the_next_process_boundary() {
     assert!(available, "macOS has the seatbelt backend: {backend}");
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        use std::os::unix::fs::PermissionsExt;
         let expected = std::env::var_os("PATH").is_some_and(|path| {
             std::env::split_paths(&path).any(|directory| {
                 let bwrap = directory.join("bwrap");
