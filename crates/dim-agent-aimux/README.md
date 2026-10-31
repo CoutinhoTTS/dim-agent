@@ -24,7 +24,7 @@ Aimux 无目录或 Session 依赖，独占可释放的 HTTP client。卸载关�
 
 ## Anthropic 提示缓存断点
 
-请求的 `ModelProtocol` 是 anthropic 时，`src/request.rs` 的转换器在请求里标两个提示缓存断点；其他协议不带断点，Bedrock 不变。放在哪里是 dim 的产品决定：aimux 只负责线上编码（part 或消息上的 `providerOptions.anthropic.cacheControl`，每个请求至多四个断点），自己不放断点。
+请求的 `ModelProtocol` 是 anthropic 时，`src/request.rs` 的转换器在请求里最多标两个提示缓存断点；其他协议不带断点，Bedrock 不变。放在哪里是 dim 的产品决定：aimux 只负责线上编码（part 或消息上的 `providerOptions.anthropic.cacheControl`，每个请求至多四个断点），自己不放断点。
 
 - **System 末尾**：System 的最后一个块标一个断点，工具声明与 System 因此合成一个缓存前缀。这个前缀在一次 Session 内保持一份，因为 System 只放静态文本（[model-prompts §5 第 3 条](../../docs/design/model-prompts.md#5-scopes)）；System 已带显式断点（`SystemPromptPart::Text` 的 `cache_control`）时原样保留，不再加 System 断点。
 - **显式断点由生产者负责**：显式标记必须保持在 API 的四个以内，端口原样保留、不裁剪。超过四个时，vendored 转换器在请求里保留前四个、丢弃其余标记并报 unsupported 警告；请求发出之后，dim 以 `Unsupported model parameter: cacheControl breakpoint limit` 失败。
