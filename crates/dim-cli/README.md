@@ -1016,7 +1016,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/usage` | Reports the branch's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so |
 | `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The transcript row shows the work and its outcome; the reply is reported when the method answers — `completed`, `skipped` with its reason, or the method's failure (`compaction_failed`, `compaction_cancelled`). A daemon without the method says it does not support context compaction |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
-| Paste of local file paths | An image becomes an `[Image: name]` token sent as an image block; another file is inserted as its path. At most 20 images, a group all or nothing |
+| Paste of local file paths | An image the model takes becomes an `[Image #N]` token sent as an image block; another file is inserted as its path, and so is an image the model does not take. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
 | A paste of 4 lines or 201 characters or more | Stays a `[... N lines]` token; on send it is stored with `attachment.put` and referenced as `[Pasted text: PATH (N lines)]` |
 

@@ -229,8 +229,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Espera a pegar el portapapeles antes de enviar"
         }
         "A submission accepts at most 20 images" => "Máximo 20 imágenes por envío",
-        "[Image #{index}]" => "[Imagen #{index}]",
-        "[Image #{index}{details}]" => "[Imagen #{index}{details}]",
         "first frame" => "solo el primer fotograma",
         "re-encoded" => "recodificada",
         "The current model does not accept images; remove {label} to send" => {
