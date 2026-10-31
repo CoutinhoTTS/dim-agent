@@ -647,6 +647,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_restored = allocation::live();
     let peak_restored = allocation::peak();
     let rss_restored = rss_kb();
+    allocation::reset_peak();
     session
         .submit(
             "measure restored context".into(),
@@ -687,9 +688,10 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
         "liveBaseline": baseline,
         "liveAfterAgent": live_agent,
         "liveRestored": live_restored,
-        "peakRestored": peak_restored,
         "liveActive": live_active,
-        "peak": peak,
+        "peak": peak_restored.max(peak),
+        "peakRestored": peak_restored,
+        "peakTurn": peak,
         "liveCloseImmediate": live_close_immediate,
         "liveSettled": live_settled,
         "liveAfterAgentClose": live_after_agent,

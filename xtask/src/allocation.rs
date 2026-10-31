@@ -44,3 +44,6 @@ pub fn live() -> usize {
 pub fn peak() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
+pub fn reset_peak() {
+    PEAK.store(live(), Ordering::Relaxed);
+}
