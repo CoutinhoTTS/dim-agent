@@ -47,6 +47,7 @@ struct Remote {
     revision: AtomicUsize,
     events: broadcast::Sender<String>,
     images: AtomicBool,
+    nullable: AtomicBool,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -61,6 +62,7 @@ impl Remote {
             revision: AtomicUsize::new(0),
             events: broadcast::channel(16).0,
             images: AtomicBool::new(false),
+            nullable: AtomicBool::new(false),
         })
     }
 }
@@ -94,6 +96,9 @@ async fn rpc(
             if remote.images.load(Ordering::SeqCst) {
                 tools.push(json!({"name":"screenshot","description":"Capture the screen and return the PNG.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}));
             }
+            if remote.nullable.load(Ordering::SeqCst) {
+                tools.push(json!({"name":"spaces","description":"List spaces","inputSchema":{"type":"object","properties":{"space_id":{"type":["string","null"]}},"required":["space_id"]}}));
+            }
             json!({"tools":tools})
         }
         "tools/call" => {
@@ -102,7 +107,9 @@ async fn rpc(
                 .lock()
                 .unwrap()
                 .push(body["params"]["name"].as_str().unwrap().into());
-            if body["params"]["name"] == "screenshot" {
+            if body["params"]["name"] == "spaces" {
+                json!({"content":[{"type":"text","text":"spaces-ok"}]})
+            } else if body["params"]["name"] == "screenshot" {
                 json!({"content":[
                     {"type":"text","text":"screenshot captured"},
                     {"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=","mimeType":"image/png"}
@@ -492,6 +499,19 @@ async fn results(session: &Session) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn declared(tools: &[ToolDefinition], original: &str) -> ToolDefinition {
+    tools
+        .iter()
+        .find(|tool| {
+            tool.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.mcp_original_tool_name.as_deref())
+                == Some(original)
+        })
+        .unwrap_or_else(|| panic!("{original} was not declared"))
+        .clone()
 }
 
 async fn temporary(
@@ -897,6 +917,57 @@ async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_sess
     );
     assert!(results(&session).await.last().unwrap().contains("isError"));
     state(&session, McpSourceState::Disabled).await;
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_type_array_tool_registers_calls_and_stores_the_canonical_form() {
+    let env = Env::new().await;
+    env.remote.nullable.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let canonical = json!({
+        "type": "object",
+        "properties": {"space_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+        "required": ["space_id"]
+    });
+    env.turn(&session, Action::Text).await;
+    let sent = env.model.requests.lock().unwrap()[0].clone();
+    let spaces = declared(sent.tools.as_ref().unwrap(), "spaces");
+    assert_eq!(
+        serde_json::to_value(&spaces.input_schema).unwrap(),
+        canonical
+    );
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: Some(spaces.name.clone()),
+        },
+    )
+    .await;
+    assert!(
+        results(&session)
+            .await
+            .last()
+            .unwrap()
+            .contains("spaces-ok")
+    );
+    let history = session.history("main", None).await.unwrap();
+    let called = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&declared(called.tools.as_ref().unwrap(), "spaces").input_schema)
+            .unwrap(),
+        canonical,
+        "the stored request carries the canonical form"
+    );
     env.close().await;
 }
 
