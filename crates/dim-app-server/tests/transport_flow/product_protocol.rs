@@ -365,6 +365,18 @@ async fn project_entry_edits_keep_the_declared_configuration() {
         json!({"command":"never-start-this-fixture-2","args":["--flag"]}),
         "an edit writes the patched field and leaves the declared entry otherwise unchanged"
     );
+    assert!(
+        stored["mcpServers"]["local"].get("cwd").is_none(),
+        "an edit must not write the resolved workspace path into the project file"
+    );
+    assert!(
+        stored["mcpServers"]["local"].get("enabled").is_none(),
+        "an edit must not write the user record's enablement into the project file"
+    );
+    assert!(
+        !stored.to_string().contains(project.to_str().unwrap()),
+        "the project file names no workspace path"
+    );
     let after = client
         .rpc(
             "mcp.configuration",
