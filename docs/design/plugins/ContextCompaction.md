@@ -1795,9 +1795,11 @@ arm's value are counted as `fellBack`, so an arm the model rejects is not compar
 (§13.2). A probe the judge did not answer is counted as `unjudged`, in a column of its own for the
 operator to correct by hand, and the unjudged-run rate compares a run whose judge left any of its
 `fact` or `absent` probes unanswered: the judge answers all of a run's such probes in one call,
-so an unusable answer leaves them together and counts the run once. A failed compaction enters
-no probe's rate: it is compared once, as the failed-run rate, so it moves neither `F`, `X` nor
-`V`.
+so an unusable answer leaves them together and counts the run once. An unjudged run enters none
+of its arm's probe rates — not even the probes its reply did answer (§8.1). A judge call that
+fails — a window overflow, a transport or an HTTP error — is the other case: the run is a failed
+run, and the failed-run rate compares it. A failed compaction enters no probe's rate either: it
+is compared once, as the failed-run rate, so it moves neither `F`, `X` nor `V`.
 
 The report adds, per arm, `F` broken down by `item` over the `fact` probes that carry one: a
 second table, one row per item and one column per arm, a cell reading `–` where the arm has no
@@ -1831,20 +1833,24 @@ provisional classes under [#565](https://github.com/arcships/dim/issues/565); a 
 fails the rule changes the default there.
 
 **Decision criteria** ([model-facing prompts §8.1](../model-prompts.md#81-the-rule)'s test, with
-`δ = 0.05`, Holm at a family-wise `α = 0.10` and a floor of 20 runs of every case per arm):
+`δ = 0.05`, Holm at a family-wise `α = 0.10` and a floor of 20 judged runs of every case per
+arm):
 
 - **An arm against its baseline.** Each arm is compared with the baseline its decision names —
   `inherit` for the reasoning phase, and the best phase 2 arm for the target phase — on `F`, `X`,
   `V`, the failed-run rate and the unjudged-run rate, and those five comparisons are the arm's
-  family. An arm passes when none of them is a regression and every case ran at least 20 times in
-  each arm; it is inconclusive below that floor. The table prints each arm's loss and p-value
-  against the baseline, so the decision is read off the same test.
+  family. An arm passes when none of them is a regression and every case has at least 20 judged
+  runs in each arm; it is inconclusive below that floor, and a kind no case carries stays out of
+  the family (§8.1). The table prints each arm's loss and p-value against the baseline, so the
+  decision is read off the same test.
 - **Reasoning default.** For a class, the default is the first of `off`, `low`, `inherit` that
   passes against `inherit` on every class: the cheapest value that loses no measured quality.
-- **Keep the setting or not.** If on every class the default is also the best arm — no other
-  arm's `F` is more than `δ` above it — the setting is not shipped: the value becomes a strategy
-  constant and `compaction.json` is not introduced (ablation). Otherwise the setting ships with
-  that default, and the note says which classes benefit from another value.
+- **Keep the setting or not.** If on every class no other arm beats the default on `F` by the
+  test — each other arm takes the current arm's place and the default the candidate's, and none
+  of those comparisons rejects; a gap the test does not confirm decides nothing — the setting is
+  not shipped: the value becomes a strategy constant and `compaction.json` is not introduced
+  (ablation). Otherwise the setting ships with that default, and the note says which classes
+  benefit from another value.
 - **Target length.** An arm passes when none of its five comparisons against the best phase 2 arm
   is a regression; no instruction is one of the arms. If no instruction passes and its `C` and
   failures are no higher than those of every passing target arm, no instruction is kept.

@@ -20,7 +20,9 @@ Every statement carries its kind of evidence:
 | 2 | Introduce the setting? | No: `off` is a strategy constant and `compaction.json` is removed | §3.4: `off` passed the non-inferiority check on these cases, and no other arm's `F` is more than `δ` above it |
 | 3 | Target length instruction | None | §4: every phase-2 arm passes, and the no-instruction arm's cut-offs and failures are no higher than any target arm's |
 
-The rule and `δ = 0.05` are §13.4's. The decisions are taken on the class that ran, the
+The rule and `δ = 0.05` are [model-facing prompts §8.1](../model-prompts.md#81-the-rule)'s test,
+restated for this evaluation in §13.4: the family, the mid-p test, the Holm adjustment and the
+floor of judged runs are all that section's. The decisions are taken on the class that ran, the
 OpenAI-compatible one, and are provisional for every other class §13.4 requires: the OpenAI
 Responses class could not run (§2.3), no model of the Anthropic budget-thinking class was in this
 evaluation (§2.1), and the non-reasoning control is the same model on a second endpoint, whose
@@ -199,11 +201,16 @@ arm's remaining `exact` miss is a real omission, as in §3.1.
 
 ### 3.3 Decision
 
-A reasoning arm passes on a class when `F ≥ F_inherit − δ`, `X ≥ X_inherit − δ`,
-`V ≤ V_inherit` and its failures are no more than `inherit`'s; the default is the first of
+A reasoning arm passes on a class when no comparison of its family against `inherit` — `F`, `X`,
+`V`, the failed-run rate and the unjudged-run rate — is a regression by the rule of [model-facing
+prompts §8.1](../model-prompts.md#81-the-rule): the family, `δ = 0.05`, the Holm adjustment at a
+family-wise `α = 0.10` and the floor of judged runs are §13.4's. The default is the first of
 `off`, `low`, `inherit` that passes on every class. The rule is stated for every class and is not
 weakened here: what limits this evaluation is the evidence, so Coverage (§13.4, §2.1) says which
-classes contributed and §1 states the scope of the decision.
+classes contributed and §1 states the scope of the decision. The decisions below were taken under
+the rule in force then — each rate within `δ` of `inherit`, and no more violations or failures —
+and stand as recorded under [#170](https://github.com/arcships/dim/issues/170); the rerun under
+[#565](https://github.com/arcships/dim/issues/565) applies the current rule.
 
 [Measured] On the OpenAI-compatible class (`inherit`: `F` 0.958, `X` 0.958, `V` 0, failures 0):
 
