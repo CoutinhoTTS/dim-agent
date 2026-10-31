@@ -512,14 +512,7 @@ impl ToolRegistry {
         declaration: serde_json::Value,
         execute: Reference,
     ) -> Result<(), Error> {
-        let definition: ToolDefinition = serde_json::from_value(declaration)
-            .map_err(|error| invalid(format!("invalid tool declaration: {error}")))?;
-        if definition.risk.as_ref().is_none_or(|risk| risk.is_empty()) {
-            return Err(invalid(format!(
-                "tool {} must declare its risk",
-                definition.name
-            )));
-        }
+        let definition = foreign_definition(declaration)?;
         self.register(
             ctx,
             ToolContribution {
@@ -537,6 +530,25 @@ impl ToolRegistry {
 
 fn invalid(message: String) -> Error {
     AgentError::InvalidInput(message).into()
+}
+
+/// Parses a foreign tool's declaration, naming the tool and the offending
+/// schema path when it is refused.
+fn foreign_definition(declaration: serde_json::Value) -> Result<ToolDefinition, Error> {
+    let tool = declaration
+        .get("name")
+        .and_then(|name| name.as_str())
+        .map(|name| format!("tool {name}: "))
+        .unwrap_or_default();
+    let definition: ToolDefinition = serde_json::from_value(declaration)
+        .map_err(|error| invalid(format!("invalid tool declaration: {tool}{error}")))?;
+    if definition.risk.as_ref().is_none_or(|risk| risk.is_empty()) {
+        return Err(invalid(format!(
+            "tool {} must declare its risk",
+            definition.name
+        )));
+    }
+    Ok(definition)
 }
 
 /// Whether a source key is a registered tool's. Like a host tool, it is

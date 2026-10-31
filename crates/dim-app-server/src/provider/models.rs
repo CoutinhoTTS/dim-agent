@@ -26,8 +26,7 @@ impl PreferencesPatch {
                     model_id: model.id.clone(),
                 },
             )?;
-            requested
-                .configure(&snapshot, protocol, &model.config)
+            super::preferences::configure(&requested, &snapshot, protocol, &model.config)
                 .map_err(|message| ProviderError::InvalidConfig(message.into()))?;
         }
         Ok(())

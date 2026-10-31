@@ -395,3 +395,181 @@ async fn tool_name_compatibility_preserves_hash_recovery_and_rejects_wire_collis
     };
     assert!(error.to_string().contains("tools[1].name"));
 }
+
+// The canonical schema every protocol must send for a tool whose input
+// schema arrived from MCP with a `type` array on one property.
+
+fn mcp_shaped_tool() -> Value {
+    json!({
+        "name": "spaces", "description": "", "source": "dynamic",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"space_id": {"type": ["string", "null"]}},
+            "required": ["space_id"]
+        }
+    })
+}
+
+fn canonical_shaped_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"space_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+        "required": ["space_id"]
+    })
+}
+
+fn tool_request(tools: Vec<Value>) -> ModelRequest {
+    serde_json::from_value(json!({
+        "providerId": "application-alias", "modelId": "gpt-4o",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": tools
+    }))
+    .unwrap()
+}
+
+fn options(kind: ProviderKind) -> CallOptions {
+    options_with(mcp_shaped_tool(), kind)
+}
+
+fn options_with(tool: Value, kind: ProviderKind) -> CallOptions {
+    convert(&tool_request(vec![tool]), &kind, None)
+        .unwrap()
+        .options
+}
+
+/// The same tool with `additionalProperties: false`, which xAI's body strips.
+fn mcp_shaped_tool_closed() -> Value {
+    let mut tool = mcp_shaped_tool();
+    tool["inputSchema"]["additionalProperties"] = json!(false);
+    tool
+}
+
+#[test]
+fn the_openai_chat_body_carries_the_canonical_tool_schema() {
+    let body = aimux_providers::openai::convert::build_request_body(
+        "gpt-4o",
+        &options(ProviderKind::OpenaiChat),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"],
+        canonical_shaped_schema()
+    );
+}
+
+#[test]
+fn the_openai_compatible_body_carries_the_canonical_tool_schema() {
+    let body = aimux_providers::openai::convert::build_request_body(
+        "gpt-4o",
+        &options(ProviderKind::OpenaiCompatible),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"],
+        canonical_shaped_schema()
+    );
+}
+
+#[test]
+fn the_openai_responses_body_carries_the_canonical_tool_schema() {
+    let body = aimux_providers::openai::responses::convert::build_responses_request_body(
+        "gpt-5",
+        &options(ProviderKind::OpenaiResponses),
+        false,
+    )
+    .body;
+    assert_eq!(body["tools"][0]["parameters"], canonical_shaped_schema());
+}
+
+#[test]
+fn the_anthropic_body_carries_the_canonical_tool_schema() {
+    let body = aimux_providers::anthropic::convert::build_request_body(
+        "claude-sonnet-4-5",
+        &options(ProviderKind::Anthropic),
+        false,
+    )
+    .unwrap();
+    assert_eq!(body["tools"][0]["input_schema"], canonical_shaped_schema());
+}
+
+#[test]
+fn the_xai_body_carries_the_canonical_tool_schema_without_additional_properties() {
+    let body = aimux_providers::xai::convert::build_request_body_with_warnings(
+        "grok-4",
+        &options_with(mcp_shaped_tool_closed(), ProviderKind::Xai),
+        false,
+    )
+    .unwrap()
+    .body;
+    let parameters = &body["tools"][0]["function"]["parameters"];
+    assert_eq!(parameters, &canonical_shaped_schema());
+    assert!(
+        parameters.get("additionalProperties").is_none(),
+        "xAI strips additionalProperties: false: {parameters}"
+    );
+}
+
+#[test]
+fn the_xai_responses_body_carries_the_canonical_tool_schema_without_additional_properties() {
+    let body = aimux_providers::xai::responses::convert::build_responses_request_body(
+        "grok-4",
+        &options_with(mcp_shaped_tool_closed(), ProviderKind::XaiResponses),
+        false,
+    )
+    .unwrap()
+    .body;
+    let parameters = &body["tools"][0]["parameters"];
+    assert_eq!(parameters, &canonical_shaped_schema());
+    assert!(
+        parameters.get("additionalProperties").is_none(),
+        "xAI strips additionalProperties: false: {parameters}"
+    );
+}
+
+#[test]
+fn the_bedrock_body_carries_the_canonical_tool_schema() {
+    let body = aimux_providers::bedrock::convert::build_request_body(
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        &options(ProviderKind::Bedrock),
+    )
+    .unwrap();
+    assert_eq!(
+        body["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"],
+        canonical_shaped_schema()
+    );
+}
+
+#[test]
+fn the_gemini_body_folds_the_nullable_type_into_a_nullable_field() {
+    let body = aimux_providers::google::convert::build_request_body(
+        "gemini-2.5-pro",
+        &options(ProviderKind::Gemini),
+    );
+    let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert_eq!(
+        parameters["properties"]["space_id"],
+        json!({"type": "string", "nullable": true})
+    );
+    assert_eq!(parameters["required"], json!(["space_id"]));
+}
+
+/// Gemini's OpenAPI 3.0 subset drops `not`, so a property stored as `{}` (from
+/// the boolean subschema `true`) and one stored as `{"not": {}}` (from `false`)
+/// both reach the wire as the empty schema. Recorded here so a change in the
+/// converter is visible; dim does not compensate.
+#[test]
+fn gemini_emits_stored_boolean_subschemas_as_empty_schemas() {
+    let request = tool_request(vec![json!({
+        "name": "flags", "description": "", "source": "dynamic",
+        "inputSchema": {"type": "object", "properties": {"x": true, "y": false}}
+    })]);
+    let options = convert(&request, &ProviderKind::Gemini, None)
+        .unwrap()
+        .options;
+    let body = aimux_providers::google::convert::build_request_body("gemini-2.5-pro", &options);
+    let properties = &body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"];
+    assert_eq!(properties["x"], json!({}));
+    assert_eq!(properties["y"], json!({}));
+}

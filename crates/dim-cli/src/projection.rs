@@ -59,12 +59,15 @@ pub struct Projection {
     running: bool,
     approvals: Vec<ApprovalView>,
     pub questions: crate::question::Pending,
-    /// Messages InputQueue still holds: submitted while a turn ran and not
-    /// applied yet. Shown in the queue strip; each enters the transcript
-    /// when its `input/applied` comes, so the transcript keeps the order
-    /// the model sees. Withdrawal re-submits the kept `UserInput` as Steer.
-    /// Each keeps its input id and the sequence it was submitted at.
+    /// Written messages without their `input/applied` yet. Each enters the
+    /// transcript when it comes, so the transcript keeps the order the model
+    /// sees and a withdrawn input never becomes a row; the queue strip shows
+    /// them while a turn runs. Withdrawal re-submits the kept `UserInput` as
+    /// Steer. Each keeps its input id and the sequence it was submitted at.
     held: Vec<(String, u64, UserInput)>,
+    /// The row each written user message draws in, by input id, until its
+    /// `input/consumed` settles that row.
+    input_rows: HashMap<String, usize>,
     /// Unfinished tasks and the latest 50 terminal results.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
@@ -213,12 +216,7 @@ impl Projection {
         match &event.content {
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    let held = self.running && data.mode != Some(InputMode::Append);
-                    if held {
-                        self.held.push((event.id.clone(), sequence, user.clone()));
-                    } else {
-                        self.push_user(sequence, sequence, user);
-                    }
+                    self.held.push((event.id.clone(), sequence, user.clone()));
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     ShellRun::parse(text).is_some().then(|| text.clone())
@@ -233,8 +231,8 @@ impl Projection {
             }
             EventContent::InputApplied(data) => {
                 if let Some(index) = self.held.iter().position(|(id, _, _)| *id == data.input_id) {
-                    let (_, submitted, user) = self.held.remove(index);
-                    self.push_user(sequence, submitted, &user);
+                    let (id, submitted, user) = self.held.remove(index);
+                    self.push_user(&id, sequence, submitted, &user);
                 }
             }
             EventContent::InputDeleted(data) => {
@@ -609,13 +607,17 @@ impl Projection {
                 self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
+            EventContent::InputConsumed(data) => {
+                if let Some(index) = self.input_rows.remove(&data.input_id) {
+                    self.row(index).pending = false;
+                }
+            }
             EventContent::Configuration(_)
             | EventContent::ToolCall(_)
             | EventContent::BranchStart(_)
             | EventContent::BranchCreateFailed(_)
             | EventContent::BranchEnded(_)
             | EventContent::PermissionChanged(_)
-            | EventContent::InputConsumed(_)
             | EventContent::InputWithdraw(_)
             | EventContent::TurnStart(_)
             | EventContent::ModelUsage(_)
@@ -671,8 +673,9 @@ impl Projection {
 
     /// A user message as a transcript row: a shell run's record draws as one.
     /// It cuts just before `submitted`, where its input was written, even
-    /// when it enters the transcript later (timeline UI §4.1).
-    fn push_user(&mut self, sequence: u64, submitted: u64, user: &UserInput) {
+    /// when it enters the transcript later (timeline UI §4.1), and a message
+    /// stays pending until the model consumes it (§4.8).
+    fn push_user(&mut self, input_id: &str, sequence: u64, submitted: u64, user: &UserInput) {
         let text = text_of(&user.content);
         let kind = if ShellRun::parse(&text).is_some() {
             RowKind::Shell
@@ -680,8 +683,11 @@ impl Projection {
             RowKind::UserMessage
         };
         let index = self.push(format!("user-{sequence}"), kind, text);
-        self.row(index).cut = Some(submitted.saturating_sub(1));
-        self.row(index).display = image_text(&user.content);
+        let row = self.row(index);
+        row.cut = Some(submitted.saturating_sub(1));
+        row.display = image_text(&user.content);
+        row.pending = kind == RowKind::UserMessage;
+        self.input_rows.insert(input_id.to_owned(), index);
     }
 
     /// The content of a held message, to re-submit it as Steer.
@@ -760,15 +766,18 @@ impl Projection {
             running: self.running,
             approvals: self.approvals.clone(),
             questions: self.questions.calls().cloned().collect(),
-            queued: self
-                .held
-                .iter()
-                .map(|(id, _, user)| QueuedInput {
-                    id: id.clone(),
-                    text: text_of(&user.content),
-                    display: image_text(&user.content),
-                })
-                .collect(),
+            queued: if self.running {
+                self.held
+                    .iter()
+                    .map(|(id, _, user)| QueuedInput {
+                        id: id.clone(),
+                        text: text_of(&user.content),
+                        display: image_text(&user.content),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             tasks: self.tasks.clone(),
             ended: self.ended,
             ..ViewSnapshot::default()
@@ -1578,18 +1587,26 @@ mod tests {
                 }),
             )
         };
-        let said = |sequence: u64, text: &str| {
+        let said = |sequence: u64, id: &str, text: &str| {
             serde_json::json!({
-                "sequence": sequence, "create_at": sequence * 1000, "type": "input", "name": "message",
+                "id": id, "sequence": sequence, "create_at": sequence * 1000, "type": "input", "name": "message",
                 "data": {"user": {"content": [{"type": "text", "text": text}]}},
+            })
+        };
+        let applied = |sequence: u64, id: &str| {
+            serde_json::json!({
+                "id": format!("ap-{sequence}"), "sequence": sequence, "create_at": sequence * 1000,
+                "type": "input", "name": "applied", "data": {"input_id": id},
             })
         };
         apply(
             &mut main,
             &[
-                said(1, "find the leak"),
-                said(2, "try the parser"),
-                create(4, "b-7c", "parser race hypothesis\nrest"),
+                said(1, "in-1", "find the leak"),
+                said(2, "in-2", "try the parser"),
+                applied(3, "in-1"),
+                applied(4, "in-2"),
+                create(6, "b-7c", "parser race hypothesis\nrest"),
             ],
         );
         assert_eq!(
@@ -1600,7 +1617,7 @@ mod tests {
                 purpose: "parser race hypothesis".into(),
                 state: LineState::Waiting,
                 cut: Some(LineCut {
-                    sequence: 3,
+                    sequence: 5,
                     messages: 2,
                 }),
             }]
@@ -1616,8 +1633,10 @@ mod tests {
         apply(
             &mut picked,
             &[
-                said(1, "find the leak"),
-                said(2, "try the parser"),
+                said(1, "in-3", "find the leak"),
+                said(2, "in-4", "try the parser"),
+                applied(3, "in-3"),
+                applied(4, "in-4"),
                 line_event(
                     5,
                     "create",
@@ -1669,7 +1688,7 @@ mod tests {
         assert_eq!(main.line_views()[1].state, LineState::EndedByOperation);
         main.apply(
             "b-7c",
-            &serde_json::from_value(said(10, "check it")).unwrap(),
+            &serde_json::from_value(said(10, "in-5", "check it")).unwrap(),
         );
         let nested: Event =
             serde_json::from_value(create(13, "b-90", "review the change")).unwrap();
@@ -1755,7 +1774,7 @@ mod tests {
         };
         let history = input(1, "history-image", serde_json::json!([image]));
         let mixed = input(
-            2,
+            4,
             "mixed-images",
             serde_json::json!([
                 {"type": "text", "text": "Compare"}, image,
@@ -1763,11 +1782,26 @@ mod tests {
             ]),
         );
         let applied = serde_json::json!({
-            "id": "applied", "sequence": 3, "create_at": 3,
+            "id": "applied", "sequence": 5, "create_at": 5,
             "type": "input", "name": "applied", "data": {"input_id": "mixed-images"},
         });
+        let history_applied = serde_json::json!({
+            "id": "history-applied", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied", "data": {"input_id": "history-image"},
+        });
+        let history_consumed = serde_json::json!({
+            "id": "history-consumed", "sequence": 3, "create_at": 3,
+            "type": "input", "name": "consumed", "data": {"input_id": "history-image"},
+        });
         let mut live = Projection::default();
-        apply(&mut live, std::slice::from_ref(&history));
+        apply(
+            &mut live,
+            &[
+                history.clone(),
+                history_applied.clone(),
+                history_consumed.clone(),
+            ],
+        );
         assert!(live.snapshot().rows[0].text.is_empty());
         assert_eq!(
             live.snapshot().rows[0].display.as_deref(),
@@ -1790,7 +1824,10 @@ mod tests {
         let previous = crate::ui::i18n::active();
         crate::ui::i18n::set(crate::ui::i18n::Locale::ZhCn);
         let mut replay = Projection::default();
-        apply(&mut replay, &[history, mixed, applied]);
+        apply(
+            &mut replay,
+            &[history, history_applied, history_consumed, mixed, applied],
+        );
         assert!(replay.snapshot().rows[0].text.is_empty());
         assert_eq!(
             replay.snapshot().rows[0].display.as_deref(),
@@ -1852,6 +1889,122 @@ mod tests {
             main.line_views()[0].cut.map(|cut| cut.messages),
             Some(1),
             "a withdrawn message is not counted"
+        );
+    }
+
+    #[test]
+    fn a_user_message_stays_pending_until_it_is_consumed() {
+        let input = |sequence: u64, id: &str, text: &str, mode: &str| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": sequence * 1000,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": text}]}, "mode": mode},
+            })
+        };
+        let control = |sequence: u64, name: &str, id: &str| {
+            serde_json::json!({
+                "id": format!("ev-{sequence}"), "sequence": sequence, "create_at": sequence * 1000,
+                "type": "input", "name": name, "data": {"input_id": id},
+            })
+        };
+        let mut main = Projection::default();
+        apply(&mut main, &[input(1, "in-1", "find the leak", "queue")]);
+        assert!(
+            main.snapshot().rows.is_empty(),
+            "a message enters the transcript when the queue applies it"
+        );
+        assert!(
+            main.snapshot().queued.is_empty(),
+            "the queue strip belongs to a running turn"
+        );
+        apply(&mut main, &[control(2, "applied", "in-1")]);
+        let rows = main.snapshot().rows;
+        assert!(
+            rows[0].pending,
+            "a message applied but not consumed is pending"
+        );
+        apply(&mut main, &[control(3, "consumed", "in-1")]);
+        assert!(
+            !main.snapshot().rows[0].pending,
+            "a consumed message settles out of pending"
+        );
+        main.set_running(true);
+        apply(&mut main, &[input(4, "in-2", "and the test", "queue")]);
+        assert_eq!(
+            main.snapshot().queued.len(),
+            1,
+            "a message queued while a turn runs waits in the queue strip"
+        );
+        assert_eq!(
+            main.snapshot().rows.len(),
+            1,
+            "a message without its input/applied is not in the transcript"
+        );
+        apply(&mut main, &[control(5, "applied", "in-2")]);
+        let rows = main.snapshot().rows;
+        assert_eq!(rows[1].text, "and the test");
+        assert!(
+            rows[1].pending,
+            "a message applied but not consumed is pending"
+        );
+        assert!(
+            main.snapshot().queued.is_empty(),
+            "an applied message leaves the queue strip"
+        );
+        // A cancelled turn settles its own row after the applied message
+        // (timeline UI §4.8): the message has to be committed first.
+        apply(
+            &mut main,
+            &[serde_json::json!({
+                "id": "end-6", "sequence": 6, "create_at": 6000,
+                "type": "turn", "name": "end",
+                "data": {"turn_id": "t1", "status": "cancelled", "reason": "user stop"},
+            })],
+        );
+        let rows = main.snapshot().rows;
+        assert_eq!(rows.last().map(|row| row.text.as_str()), Some("stopped"));
+        assert!(
+            rows.iter()
+                .any(|row| row.text == "and the test" && row.pending),
+            "a stop leaves the applied message pending"
+        );
+        apply(&mut main, &[control(7, "consumed", "in-2")]);
+        assert!(
+            !main.snapshot().rows[1].pending,
+            "a consumed message settles out of pending"
+        );
+        apply(
+            &mut main,
+            &[
+                input(8, "in-3", "withdrawn", "queue"),
+                control(9, "deleted", "in-3"),
+            ],
+        );
+        assert!(
+            main.snapshot()
+                .rows
+                .iter()
+                .all(|row| row.text != "withdrawn"),
+            "a withdrawn message never becomes a row"
+        );
+        // A reattach folds history before it knows whether the line runs; the
+        // same events still draw nothing without their `input/applied`.
+        let mut replay = Projection::default();
+        apply(
+            &mut replay,
+            &[
+                input(1, "in-5", "withdrawn", "queue"),
+                control(2, "deleted", "in-5"),
+                input(3, "in-6", "sent later", "queue"),
+            ],
+        );
+        assert!(
+            replay.snapshot().rows.is_empty(),
+            "replay draws nothing before its input/applied"
+        );
+        assert!(
+            replay.snapshot().queued.is_empty(),
+            "replay does not guess that a turn runs"
         );
     }
 

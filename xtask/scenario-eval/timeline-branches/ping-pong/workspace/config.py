@@ -1,0 +1,3 @@
+DEFAULT_TIMEOUT = 30
+MAX_RETRIES = 3
+BASE_URL = "http://localhost:8080"

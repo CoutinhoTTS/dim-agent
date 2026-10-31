@@ -3,6 +3,7 @@ mod app_server;
 mod catalog;
 mod modules;
 mod plugins;
+mod rule;
 mod scenario_eval;
 mod summary_eval;
 mod types;

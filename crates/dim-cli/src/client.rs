@@ -72,9 +72,15 @@ fn default_plugins(executable: &Path) -> Option<PathBuf> {
 /// two sentences without their full stops; `None` for any other failure. A
 /// daemon started with no frontend while the CLI now finds one beside the
 /// executable or in `DIMCODE_WEB_ASSETS` keeps serving without it until it
-/// restarts; otherwise `dimcode web install` brings this version's.
+/// restarts; otherwise a released build installs this version's with
+/// `dimcode web install`, while a build from source, which has none
+/// published, is pointed at `DIMCODE_WEB_ASSETS` or the embedded-web build.
 pub fn web_hint(error: &crate::Error, executable: &Path, home: &Path) -> Option<(String, String)> {
-    let install = "Install it with `dimcode web install`".to_owned();
+    let install = if crate::version::RELEASE {
+        "Install it with `dimcode web install`".to_owned()
+    } else {
+        "Set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature".to_owned()
+    };
     match app_error(error)? {
         "web_assets_missing" if web_assets(executable, home).is_some() => Some((
             "The Web workspace was installed after the daemon started".into(),
@@ -84,7 +90,7 @@ pub fn web_hint(error: &crate::Error, executable: &Path, home: &Path) -> Option<
         "web_assets_incompatible" => Some((
             format!(
                 "The installed Web workspace does not fit dimcode {}",
-                env!("CARGO_PKG_VERSION")
+                crate::version::current()
             ),
             install,
         )),

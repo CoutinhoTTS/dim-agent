@@ -236,6 +236,7 @@ pub(crate) struct Gateway {
     tasks: TaskTracker,
     stop: CancellationToken,
     agent_id: Option<String>,
+    version: String,
     initialized: bool,
     initializing: bool,
     creating: usize,
@@ -283,6 +284,7 @@ impl Gateway {
         tasks: TaskTracker,
         stop: CancellationToken,
         agent_id: Option<String>,
+        version: String,
         login: Option<crate::auth::Login>,
         outbox: Outbox,
         mcp: crate::mcp::Bindings,
@@ -294,6 +296,7 @@ impl Gateway {
             tasks,
             stop,
             agent_id,
+            version,
             initialized: false,
             initializing: false,
             creating: 0,
@@ -1055,7 +1058,7 @@ impl Gateway {
                         if self.rpc.supports("session.delete") {
                             capabilities["sessionCapabilities"]["delete"] = json!({});
                         }
-                        reply.respond(json!({"protocolVersion":1,"agentInfo":{"name":"dimcode","version":env!("CARGO_PKG_VERSION")},"authMethods":self.auth_methods.iter().map(|method|method.value()).collect::<Vec<_>>(),"agentCapabilities":capabilities}))?;
+                        reply.respond(json!({"protocolVersion":1,"agentInfo":{"name":"dimcode","version":self.version},"authMethods":self.auth_methods.iter().map(|method|method.value()).collect::<Vec<_>>(),"agentCapabilities":capabilities}))?;
                     }
                     Err(error) => reply.respond_with_error(error)?,
                 }

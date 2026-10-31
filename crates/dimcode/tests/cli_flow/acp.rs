@@ -42,6 +42,40 @@ fn recovery_hello(wire: &mut Wire, instance: &str) {
 }
 
 #[test]
+fn acp_stdio_reports_the_version_the_cli_prints() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(METHODS);
+        detached_eof(wire);
+    });
+    let printed = home.command().arg("--version").output().unwrap();
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let version = String::from_utf8_lossy(&printed.stdout)
+        .trim()
+        .strip_prefix("dimcode ")
+        .expect("--version prints `dimcode` and the build's version")
+        .to_owned();
+    let mut peer = Peer::start(&home);
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    );
+    let initialized = peer.response(1);
+    assert_eq!(
+        initialized["result"]["agentInfo"]["version"],
+        json!(version),
+        "initialize must advertise the build identity --version prints"
+    );
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_distinguishes_rejected_and_uncertain_submissions_on_a_live_connection() {
     let cases = [
         Some("invalid_params"),

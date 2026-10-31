@@ -506,12 +506,17 @@ pub(crate) fn render_block(
 ) -> Vec<String> {
     match block {
         Block::Banner => Vec::new(),
-        Block::User { text, display, .. } => render_user(
+        Block::User {
+            text,
+            display,
+            pending,
+            ..
+        } => render_user(
             &crate::sanitize::safe(display.as_deref().unwrap_or(text)),
             width,
             &UserStyle {
-                color: &p.user,
-                surface: p.surface.as_deref(),
+                color: if *pending { &p.muted } else { &p.user },
+                surface: if *pending { None } else { p.surface.as_deref() },
             },
         ),
         Block::Assistant(text) => markdown.render(&crate::sanitize::safe(text), width, 0),

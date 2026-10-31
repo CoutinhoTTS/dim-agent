@@ -3006,6 +3006,106 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
     db.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_upgrade() {
+    let tools: Vec<ToolDefinition> = serde_json::from_value(serde_json::json!([{
+        "name": "lookup", "description": "Look up an item", "source": "dynamic",
+        "inputSchema": {"type": "object", "properties": {
+            "space_id": {"type": ["string", "null"]}
+        }, "required": ["space_id"]}
+    }]))
+    .unwrap();
+    let canonical = serde_json::json!({
+        "type": "object",
+        "properties": {"space_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+        "required": ["space_id"]
+    });
+    assert_eq!(
+        serde_json::to_value(&tools[0].input_schema).unwrap(),
+        canonical
+    );
+    let configured = record(
+        1,
+        EventKind::ContextConfigured(ContextConfiguredData {
+            timeline: "main".into(),
+            revision: "configuration".into(),
+            previous: None,
+            prompt: None,
+            settings: Box::new(ModelConfiguration {
+                provider_id: "mock".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                tools: Some(tools.clone()),
+                tool_sources: vec![],
+                config: None,
+                metadata: None,
+            }),
+            system: None,
+            system_source: None,
+        }),
+    );
+    let mut request = ModelRequest::new("mock", "test", vec![Message::text(Role::User, "Hi")]);
+    request.tools = Some(Arc::new(tools.clone()));
+    let called = record(
+        2,
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: Arc::new(request),
+            configuration: None,
+            prompt: None,
+        }),
+    );
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("schema", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("schema", "main"),
+        vec![configured.clone(), called.clone()],
+    )
+    .await
+    .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), [26]);
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::to_value(&tools).unwrap(),
+        "the stored bytes carry the canonical form"
+    );
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None, "the store is already version 26");
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session("schema".into()).await.unwrap();
+    let restored = session.history("main", Some(2)).await.unwrap();
+    assert_eq!(restored[0], configured.event);
+    assert_eq!(restored[1], called.event);
+    agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// The daemon names the one-way upgrade on stderr, where its default log
 /// filter would hide a tracing event, and only on the start that upgrades.
 #[cfg(unix)]

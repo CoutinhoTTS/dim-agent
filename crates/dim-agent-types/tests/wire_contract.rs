@@ -453,6 +453,31 @@ fn a_v1_connection_receives_a_tool_result_without_its_effects() {
 }
 
 #[test]
+fn an_adopted_configuration_stores_no_derived_preferences() {
+    let settings = ModelConfiguration {
+        provider_id: "provider".into(),
+        model_id: "model".into(),
+        capability_snapshot: None,
+        tools: Some(Vec::new()),
+        tool_sources: Vec::new(),
+        config: Some(ModelConfig::default()),
+        metadata: Some(RequestMetadata::default()),
+    };
+    let value = serde_json::to_value(&settings).unwrap();
+    let keys: BTreeSet<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["providerId", "modelId", "tools", "config", "metadata"]),
+        "{value}"
+    );
+}
+
+#[test]
 fn a_system_source_round_trips_and_an_older_record_keeps_its_system() {
     let data = ContextConfiguredData {
         timeline: "main".into(),

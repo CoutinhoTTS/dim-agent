@@ -414,7 +414,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 ### A.5.2 评估
 
-目标块的句子与续跑块的句子是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。Goal 的插件清单（`runtime/plugins/goal/dim-plugin.json`）承载它们，位置是 `code.config.texts.objective` 与 `code.config.texts.continuation`，分支处写为 `{branch}` 由代码替换。两句话分别判定，各一个 `--text` id，因为运行器一次只替换一个文本。
+目标块的句子与续跑块的句子是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。Goal 的插件清单（`runtime/plugins/goal/dim-plugin.json`）承载它们，位置是 `code.config.texts.objective` 与 `code.config.texts.continuation`，分支处写为 `{branch}` 由代码替换。两句话分别判定，各一个 `--text` id；一次评估可以同时带上这两对 `--text`/`--candidate`，因此它们按本节所说的同一次改动来判定。
 
 ### A.6 Timeline 机制
 
