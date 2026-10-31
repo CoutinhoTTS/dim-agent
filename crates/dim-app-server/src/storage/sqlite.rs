@@ -118,10 +118,10 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX session_catalog_with_preview ON session_catalog(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL",
     ),
 ];
-/// The v26 text of a table v27 adds a column to; `schema_of` uses it to
-/// recognize an older store.
-const AGENT_SESSIONS_V25: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))";
-const AGENTS_V25: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
+/// The text of a table before v27 adds a column to it; `schema_of` uses it
+/// to recognize a store older than v27.
+const AGENT_SESSIONS_BEFORE_V27: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))";
+const AGENTS_BEFORE_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
 /// v27 adds a column to two tables, which `SCHEMA` cannot express as a new
 /// entry: the upgrade alters them before it creates the indexes on them.
 const V27_COLUMNS: &str = "ALTER TABLE agent_sessions ADD COLUMN leader_session_id TEXT REFERENCES agent_sessions(session_id);
@@ -193,8 +193,8 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
         .map(|&(name, sql)| {
             let sql = match name {
                 "agent_store_format" => format_table(version),
-                "agent_sessions" if version < 27 => AGENT_SESSIONS_V25.to_owned(),
-                "agents" if version < 27 => AGENTS_V25.to_owned(),
+                "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
+                "agents" if version < 27 => AGENTS_BEFORE_V27.to_owned(),
                 _ => sql.to_owned(),
             };
             (name, sql)

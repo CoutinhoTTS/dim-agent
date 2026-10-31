@@ -241,6 +241,9 @@ impl Inner {
 /// this state outlive a reload of the `Agents` directory logic.
 pub(crate) struct AgentDirectory {
     inner: Mutex<Inner>,
+    /// The first generation that loads a store removes unfinished delegations;
+    /// later generations may run while a creation is in flight.
+    finished: AtomicBool,
     default_agent_id: OnceLock<String>,
     /// The protocol instance: it stays while the Agents and their Sessions
     /// do, so clients of an `Agents` reload keep their Sessions.
@@ -283,6 +286,7 @@ impl Plugin for AgentDirectoryPlugin {
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
         ctx.provide_as::<AgentDirectory>(Arc::new(AgentDirectory {
             inner: Mutex::new(Inner::default()),
+            finished: AtomicBool::new(false),
             default_agent_id: OnceLock::new(),
             server_instance_id: uuid::Uuid::new_v4().to_string(),
         }))?;
@@ -506,7 +510,9 @@ impl AgentIndex {
     /// as they are.
     async fn install_default(self: &Arc<Self>) -> Result<(), AgentOpError> {
         let agent_id = self.default_agent_id().to_owned();
-        if let Some(records) = &self.records {
+        if let Some(records) = &self.records
+            && !self.directory.finished.swap(true, Ordering::SeqCst)
+        {
             self.remove_unfinished(records).await;
         }
         let stored = match &self.records {
@@ -1203,7 +1209,7 @@ impl AgentIndex {
                 .member_sessions(agent_id)
                 .await
                 .map(|members| !members.is_empty())
-                .unwrap_or(true),
+                .unwrap_or(false),
             None => false,
         }
     }

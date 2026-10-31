@@ -278,7 +278,7 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 
 - **创建。** 只有 `acquire`、`session.close`、创建（`admit`）和删除会创建槽。`acquire` 和 `session.close` 在索引锁下一步完成查找 Session 的所有者
   与创建槽，因此删除一旦忘记了某个 Session，就不会再有任何东西给它一个新的、未关闭的槽。只检查关闭标志的读取（`session.list`、`session.summaries`、
-  Rpc 的关闭检查、Collaboration 的 Team 状态及其对已卸载 Session 的计数）只查找槽，不创建槽。
+  Rpc 的关闭检查、Collaboration 的 Team 状态）只查找槽，不创建槽。
 - **移除。** 只在索引锁下进行，且仅当映射持有该槽唯一的引用、其 Session 未装载、它没有记着需要保留的关闭时才移除。其他每个引用都在这把锁下取得，或
   从持有者已有的引用复制而来，所以检查期间计数不会增加，任何持有者手中的槽都是映射中的那个。
 - **删除。** 删除了 Session 行的删除把槽同时标为已删除和已关闭：仍在闸门处等待的调用方会看到它已关闭，这些调用方离开后就没有东西保留这个槽。

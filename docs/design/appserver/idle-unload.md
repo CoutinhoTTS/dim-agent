@@ -319,7 +319,7 @@ pass, the slots released since the previous one.
 - **Creation.** Only `acquire`, `session.close`, a creation (`admit`) and a delete create a slot. `acquire` and
   `session.close` look up the Session's owner and create the slot in one step under the index lock, so once a delete
   has forgotten a Session, nothing gives it a new, open slot. Reads that only check the closed flag (`session.list`,
-  `session.summaries`, Rpc's close check, Collaboration's Team status and its count of unloaded Sessions) look the
+  `session.summaries`, Rpc's close check and Collaboration's Team status) look the
   slot up and create none.
 - **Removal.** Only under the index lock, and only when the map holds the slot's sole reference, its Session is not
   loaded, and it records no close to keep. Every other reference is taken under that lock or cloned from one a holder

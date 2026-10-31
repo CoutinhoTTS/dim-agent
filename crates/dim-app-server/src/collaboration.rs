@@ -1,8 +1,8 @@
 //! Team collaboration; member admission is specified in
 //! `docs/design/subagent-tool-approval.md`.
 //!
-//! `CollaborationDirectoryPlugin` (process) owns member relations and temporary
-//! Agent records across reloads. `CollaborationSession` (Session) provides the `agent` tool and
+//! `CollaborationDirectoryPlugin` (process) owns member relations across
+//! reloads. `CollaborationSession` (Session) provides the `agent` tool and
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
@@ -359,8 +359,8 @@ impl Collaboration {
         self.session_ended(&watched.agent_id, id).await;
     }
     /// The end of Session `id` of Agent `agent_id`, by a business close or
-    /// by the delete of an unloaded Session: its relations go, and a
-    /// temporary Agent closes with its last Session.
+    /// by the delete of an unloaded Session: its relations go, and an owned
+    /// Agent is released once no member Session's rows remain.
     async fn session_ended(self: &Arc<Self>, agent_id: &str, id: &str) {
         self.directory
             .relations
@@ -873,8 +873,8 @@ impl CollaborationSession {
             session_id,
         };
         let (kind, action) = match input {
-            Input::List {} => return Ok(self.list()),
-            Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id)),
+            Input::List {} => return Ok(self.list().await),
+            Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id).await),
             Input::Result { result_id } => {
                 return Ok(self.result(&context.branch_id, &result_id).await);
             }
@@ -1001,19 +1001,28 @@ impl CollaborationSession {
         )
     }
 
-    /// The full profile of one Agent this leader may address.
-    fn inspect(&self, agent_id: &str) -> ToolResult {
+    /// The full profile of one Agent this leader may address. An owned Agent
+    /// with no member Session is an incomplete delegation, so it answers as
+    /// absent, as a `request` for it does.
+    async fn inspect(&self, agent_id: &str) -> ToolResult {
         let host = self
             .collaboration
             .visible(agent_id, &self.session_id)
             .then(|| self.collaboration.index.host(Some(agent_id)))
             .flatten();
-        match host {
+        let addressable = match &host {
+            Some(host) if host.owner.is_some() => {
+                self.collaboration.index.has_members(agent_id).await
+            }
+            Some(_) => true,
+            None => false,
+        };
+        match host.filter(|_| addressable) {
             Some(host) => success(json!({"agentId": agent_id, "profile": host.profile})),
             None => refusal(Refusal::AgentNotFound, "no such agent is available to you"),
         }
     }
-    fn list(&self) -> ToolResult {
+    async fn list(&self) -> ToolResult {
         let participants: Vec<Value> = self
             .collaboration
             .team(&self.session_id)
@@ -1026,21 +1035,24 @@ impl CollaborationSession {
             .collect();
         let mut result = json!({"role": self.role, "participants": participants});
         if self.role == CollaborationRole::Leader {
-            result["agents"] = self
-                .collaboration
-                .index
-                .hosts()
-                .into_iter()
-                .filter(|host| {
-                    host.owner
-                        .as_deref()
-                        .is_none_or(|owner| owner == self.session_id)
-                })
-                .map(|host| {
-                    json!({"agentId": host.agent_id, "name": host.profile.name,
-                        "description": host.profile.description})
-                })
-                .collect();
+            let mut agents = vec![];
+            for host in self.collaboration.index.hosts() {
+                if host
+                    .owner
+                    .as_deref()
+                    .is_some_and(|owner| owner != self.session_id)
+                {
+                    continue;
+                }
+                if host.owner.is_some()
+                    && !self.collaboration.index.has_members(&host.agent_id).await
+                {
+                    continue;
+                }
+                agents.push(json!({"agentId": host.agent_id, "name": host.profile.name,
+                    "description": host.profile.description}));
+            }
+            result["agents"] = agents.into();
         }
         success(result)
     }

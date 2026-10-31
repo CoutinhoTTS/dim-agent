@@ -1435,8 +1435,8 @@ async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
 }
 
 /// cancel ends a request cancelled and stops other member work as idle,
-/// close removes the member but keeps its Session, a temporary Agent closes
-/// with its last Session, and an externally closed member fails its request.
+/// close removes the member but keeps its Session and its Agent's record, and
+/// an externally closed member fails its request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn members_cancel_close_and_leave_the_team() {
     let (server, agent) = launch_team().await;
@@ -3926,6 +3926,179 @@ async fn team_of(client: &mut Client, lead: &str, lead_session: &Session) -> Vec
         .collect()
 }
 
+/// Two members of one owned Agent deleted at the same time: the Agent's
+/// record goes with the last of them, and neither member Session survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_the_last_two_members_together_ends_their_agent() {
+    let directory = std::env::temp_dir().join(format!("dim-team-delete-{}", uuid::Uuid::new_v4()));
+    let database = directory.join("dimcode.sqlite");
+    let config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, true, 3).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": lead}))
+            .await,
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "prompt": "hello", "profile": {"name": "helper",
+            "description": "temporary", "systemPrompt": "", "tools": []}}),
+        ),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 1).await;
+    let first = next_member(&lead_session, 0).await;
+    let temporary = last_ok(&events(&lead_session).await)["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": temporary, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 2).await;
+    let second = next_member(&lead_session, 1).await;
+
+    let mut other = Client::new_version(&server, true, 3).await;
+    let (deleted, _) = tokio::join!(
+        client.rpc("session.delete", json!({"sessionId": first})),
+        other.rpc("session.delete", json!({"sessionId": second})),
+    );
+    assert_ok(&deleted);
+
+    poll("both members disappear", async || {
+        let listed = client.rpc("session.list", json!({})).await;
+        let ids: Vec<&str> = listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|info| info["sessionId"].as_str().unwrap())
+            .collect();
+        (!ids.contains(&first.as_str()) && !ids.contains(&second.as_str())).then_some(())
+    })
+    .await;
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let agents: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE agent_id=?1",
+            [&temporary],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        agents, 0,
+        "the last member's delete removes the Agent record"
+    );
+    let members: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM agent_sessions WHERE session_id IN (?1, ?2)",
+            [&first, &second],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(members, 0);
+    assert!(
+        !listed(&mut client, &lead, &lead_session, &temporary).await,
+        "the team no longer offers the ended Agent"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// A store left with an incomplete delegation and an orphaned one: startup
+/// removes both before it serves, and leaves no member rows behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_removes_an_incomplete_and_an_orphaned_delegation() {
+    let directory = std::env::temp_dir().join(format!("dim-team-startup-{}", uuid::Uuid::new_v4()));
+    let database = directory.join("dimcode.sqlite");
+    let profile = json!({"name": "left", "description": "", "systemPrompt": "", "tools": []});
+    let config = serde_json::to_string(&dim_agent_runtime::SessionConfig::default()).unwrap();
+    {
+        let store = dim_app_server::storage::SqliteStorage::open(database.clone()).unwrap();
+        drop(store);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agents(agent_id, profile, is_default, owner_session_id) VALUES('default', ?1, 1, NULL)",
+                rusqlite::params![profile.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agents(agent_id, profile, is_default, owner_session_id) VALUES(?1, ?2, 0, 'leader-gone')",
+                rusqlite::params!["incomplete", profile.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agents(agent_id, profile, is_default, owner_session_id) VALUES(?1, ?2, 0, 'leader-gone')",
+                rusqlite::params!["orphan", profile.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_sessions(session_id, config, created_at_ms, leader_session_id) VALUES('member', ?1, 0, 'leader-gone')",
+                rusqlite::params![config],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_owners(session_id, agent_id, protocol_version) VALUES('member', 'orphan', 3)",
+                [],
+            )
+            .unwrap();
+    }
+    let config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("agent.list", json!({})).await;
+    assert_eq!(
+        listed["result"].as_array().unwrap().len(),
+        1,
+        "only the default Agent is served: {listed}"
+    );
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let agents: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE agent_id IN ('incomplete', 'orphan')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agents, 0);
+    let members: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM agent_sessions WHERE session_id='member'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(members, 0);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
 /// Whether the leader's `agent` tool lists Agent `id`.
 async fn listed(client: &mut Client, lead: &str, lead_session: &Session, id: &str) -> bool {
     say(client, lead, tool(json!({"action": "list"})), "queue").await;
@@ -3937,11 +4110,11 @@ async fn listed(client: &mut Client, lead: &str, lead_session: &Session, id: &st
         .any(|agent| agent["agentId"] == id)
 }
 
-/// Idle unload §7: a temporary Agent closes with its last Session, loaded or
-/// not. The leader creates two members on a temporary Agent, and both
-/// unload. Closing one leaves the other unloaded, so the Agent stays and the
-/// leader's next request restores that member. Closing it, now the last
-/// Session, closes the Agent.
+/// Idle unload §7: an owned Agent keeps its record while its member rows do.
+/// The leader creates two members on a temporary Agent, and both unload.
+/// Closing one leaves the other unloaded, so the Agent stays and the leader's
+/// next request restores that member. Closing the last member keeps the
+/// Agent; deleting both members ends it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
     let (server, agent, _gate, directory) =
