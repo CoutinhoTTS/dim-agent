@@ -36,12 +36,14 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Rust agent design documents](architecture/README.md#design-documents)
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
 - [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）
+- [Context replay memory plan](design/context-replay-memory.md)（中文）：每步重建的拷贝链、按边界重放与共享消息
 - [Compaction requirements](design/compaction-quality.md): what compaction keeps, what users see and control, its cost bounds, how its quality is judged (#428)（[中文](zh/design/compaction-quality.md)）
 - [Model-facing prompts](design/model-prompts.md): the channels that carry model text, protocol versus policy, who may change what, the input guide, one prompt language, and how a prompt change is judged (#429)（[中文](zh/design/model-prompts.md)）
 - [Timeline-first TUI](design/timeline-ui.md): the TUI's Timeline as the primary surface, opening lines and forks from a point of it, line markers and cuts（[中文](zh/design/timeline-ui.md)）
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
+- [内存快速增长与不释放：分析方案](architecture/memory-investigation.md)（中文）：同版本隔离复现、进程内存与存活分配分析
 - [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions（[中文](zh/design/clients.md)）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
