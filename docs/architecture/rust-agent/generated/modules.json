@@ -24875,6 +24875,7 @@
         "path Event",
         "path EventContent::Configuration",
         "path EventContent::ExecEnded",
+        "path EventContent::ModelUsage",
         "path EventContent::PermissionChanged",
         "path Progress",
         "use crate::wire::Configuration",
@@ -31238,6 +31239,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::fullscreen",
+      "references": [
+        "path FullScreen::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::render::markdown",
       "references": [
         "path MarkdownRenderer::new"
@@ -31336,6 +31344,7 @@
         "path App",
         "path App::new",
         "path ClipboardRead::Native",
+        "path GIT_BRANCH_POLL",
         "path ImageRead",
         "path LOAD_MORE",
         "path Prompt::Ask",
@@ -33475,6 +33484,22 @@
     {
       "module": "dim_cli::ui::timeline_panel::tests",
       "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "Locale::En"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "Locale::ZhCn"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "i18n::LOCALES"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "i18n::set"
     },
     {
       "module": "dim_cli::ui::transcript::blocks",

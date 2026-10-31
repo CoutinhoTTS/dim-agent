@@ -1,0 +1,9 @@
+{
+  "description": "A short sequential task: opening a line for it is over-splitting",
+  "message": "Rename the setting `MAX_SIZE` to `MAX_ITEMS` in settings.py and in README.md, then run `python3 -m unittest -q test_settings.py` and tell me the result.",
+  "budget": {"turns": 20, "seconds": 600, "window": 131072},
+  "probes": [
+    {"id": "no-line-for-short-task", "kind": "must_not_show", "text": "main opens a line for this short sequential rename instead of doing it itself"},
+    {"id": "rename-done", "kind": "must_show", "text": "MAX_ITEMS is in settings.py and README.md and the test result is reported"}
+  ]
+}

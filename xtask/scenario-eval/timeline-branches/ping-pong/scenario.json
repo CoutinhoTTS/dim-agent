@@ -1,0 +1,12 @@
+{
+  "description": "A line reviews config.py while the baseline changes; the operator steers main, and main must answer without a steer loop",
+  "message": "Use a line to review config.py: for each setting, where is it used and what would break if it changed? Have it write the review to docs/config-review.md, and have it check every usage site in the code rather than trusting the docstrings.",
+  "steers": [
+    {"whenToolCall": "config.py", "text": "Change DEFAULT_TIMEOUT in config.py from 30 to 45 before the review is finished."}
+  ],
+  "budget": {"turns": 30, "seconds": 900, "window": 131072},
+  "probes": [
+    {"id": "no-ping-pong", "kind": "must_not_show", "text": "main and a line exchange steer messages that do not move the work forward"},
+    {"id": "steer-acted-on", "kind": "must_show", "text": "main acts on the operator's steer and the line learns about the changed DEFAULT_TIMEOUT"}
+  ]
+}
