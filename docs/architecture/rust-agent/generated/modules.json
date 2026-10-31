@@ -30844,7 +30844,6 @@
         "path Setting::Approvals",
         "path Setting::Isolation",
         "path Setting::Language",
-        "path Setting::Model",
         "path Setting::Mouse",
         "path Setting::Notify",
         "path Setting::StartupForm",
