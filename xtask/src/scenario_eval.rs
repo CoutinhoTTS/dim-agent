@@ -4008,6 +4008,11 @@ mod tests {
             let directory = options.out.join(arm).join("case").join("run-0");
             assert_view_rebuilds(&directory);
             let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+            assert_eq!(
+                submitted_mode(&export, "second"),
+                Some(json!("steer")),
+                "{arm}: the timed steer's input/message carries mode steer"
+            );
             let view = std::fs::read_to_string(directory.join("judge-view.jsonl")).unwrap();
             let changed = after_history_change(&export);
             let rendered: Value = serde_json::from_str(view.lines().nth(changed).unwrap()).unwrap();
@@ -4135,6 +4140,26 @@ mod tests {
                     .then(|| line["event"]["data"]["request"].clone())
             })
             .collect()
+    }
+
+    /// The mode `session.submit` carried for the `input/message` event in
+    /// `export` whose user text is `text`
+    fn submitted_mode(export: &str, text: &str) -> Option<Value> {
+        export
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|line| {
+                line["event"]["type"] == "input"
+                    && line["event"]["name"] == "message"
+                    && line["event"]["data"]["user"]["content"]
+                        .as_array()
+                        .is_some_and(|blocks| {
+                            blocks
+                                .iter()
+                                .any(|block| block["text"].as_str() == Some(text))
+                        })
+            })
+            .map(|line| line["event"]["data"]["mode"].clone())
     }
 
     /// The line of a run's export holding the first request whose messages do
@@ -4278,6 +4303,20 @@ mod tests {
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         for arm in ["current", "candidate"] {
+            let export = std::fs::read_to_string(
+                options
+                    .out
+                    .join(arm)
+                    .join("case")
+                    .join("run-0")
+                    .join("timeline.jsonl"),
+            )
+            .unwrap();
+            assert_eq!(
+                submitted_mode(&export, STEER),
+                Some(json!("steer")),
+                "{arm}: the event-triggered steer's input/message carries mode steer"
+            );
             let requests = fixture.arm(arm);
             assert!(
                 (2..=3).contains(&requests.len()),
