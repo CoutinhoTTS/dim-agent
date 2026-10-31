@@ -163,7 +163,7 @@ impl Pass<'_> {
             return Err("Compaction cut lies inside the retained tail.");
         }
         let pinned = pinned_inputs(self.view, Some(window), self.turn, &retain_from, self.model);
-        let digest = digest_entries(self.view, &retain_from, self.model);
+        let digest = digest_entries(self.view, Some(window), &retain_from, self.model);
         let message = digest
             .as_ref()
             .map(|digest| digest_message(&digest.entries, digest.dropped));
@@ -832,14 +832,12 @@ impl ContextPolicy {
                 replacement,
                 diagnostics,
             }) => {
-                let window = match pass.turn {
-                    Some((turn_id, _)) => self
-                        .timeline
-                        .policy_window(pass.view.facts.through, turn_id, &retain_from)
-                        .await
-                        .unwrap_or_default(),
-                    None => PolicyWindow::default(),
-                };
+                let turn_id = pass.turn.map_or("", |(turn_id, _)| turn_id);
+                let window = self
+                    .timeline
+                    .policy_window(pass.view.facts.through, turn_id, &retain_from)
+                    .await
+                    .unwrap_or_default();
                 match pass.compose(&window, retain_from.clone(), replacement) {
                     Ok(composed) => StepOutcome::Completed {
                         composed,
@@ -1126,6 +1124,7 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
 /// its events nor as the compaction it applies.
 fn digest_entries(
     view: &View,
+    window: Option<&PolicyWindow>,
     retain_from: &str,
     model: &dyn ContextModel,
 ) -> Option<DigestEntries> {
@@ -1145,6 +1144,71 @@ fn digest_entries(
             }
             _ => None,
         });
+    if let Some(window) = window {
+        let (mut entries, mut dropped) = match previous {
+            Some(data) => {
+                let ContextCompactionResult::Completed { digest_entries, .. } = &data.outcome
+                else {
+                    unreachable!("matched a completed compaction")
+                };
+                (
+                    digest_entries
+                        .as_ref()
+                        .map(|digest| digest.entries.clone())
+                        .unwrap_or_default(),
+                    digest_entries.as_ref().is_some_and(|digest| digest.dropped),
+                )
+            }
+            None => (Vec::new(), false),
+        };
+        for event in &window.tool_results {
+            if event.sequence > window.cut_sequence {
+                continue;
+            }
+            let EventKind::ToolResult(data) = &event.kind else {
+                continue;
+            };
+            for result in &data.results {
+                for effect in result.result.effects.iter().flatten() {
+                    let entry = shortened(effect);
+                    let key = digest_key(&entry);
+                    if let Some(index) = entries
+                        .iter()
+                        .position(|existing| digest_key(existing) == key)
+                    {
+                        entries.remove(index);
+                    }
+                    entries.push(entry);
+                }
+            }
+        }
+        let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
+        let count = |entries: &[ToolEffect], dropped: bool| {
+            model.count_tokens(&ModelRequest::new(
+                "",
+                "",
+                vec![digest_message(entries, dropped)],
+            )) - empty
+        };
+        let limit = DIGEST_SHARE * input_budget(model);
+        if (dropped || !entries.is_empty()) && count(&entries, dropped) > limit {
+            dropped = true;
+            let fits = |kept: usize| count(&entries[kept..], true) <= limit;
+            let (mut low, mut high) = (0, entries.len());
+            if fits(high) {
+                while high - low > 1 {
+                    let middle = low + (high - low) / 2;
+                    if fits(middle) {
+                        high = middle;
+                    } else {
+                        low = middle;
+                    }
+                }
+            }
+            entries = entries.split_off(high);
+        }
+        return (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped });
+    }
     let events = &view.context.events;
     let end = events.iter().position(|event| event.id == retain_from)?;
     let (start, mut entries, mut dropped) = match previous {
