@@ -257,9 +257,9 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
-    /// The composer's context reading is out of date: a run on main ended, a
-    /// compaction result arrived on main, or the session or its model
-    /// changed.
+    /// The composer's context reading is out of date: a model request on main
+    /// finished, a run on main ended, a compaction result arrived on main, or
+    /// the session or its model changed.
     context_stale: bool,
     /// The last `model/usage` on main, folded from the events so `/usage`
     /// can report its cache read share.
@@ -1753,6 +1753,13 @@ impl Worker {
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
+                    // Live only: history pages arrive as `session.history`
+                    // replies applied by `apply`, so they spend no read.
+                    if notice.branch_id == "main"
+                        && matches!(notice.event.content, EventContent::ModelEnd(_))
+                    {
+                        self.context_stale = true;
+                    }
                     self.task_event(&notice.branch_id, notice.event);
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
                     self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
