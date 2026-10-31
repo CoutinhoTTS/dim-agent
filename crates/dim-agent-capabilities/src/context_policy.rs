@@ -105,6 +105,23 @@ impl PolicyContext {
         }
     }
 
+    pub fn from_stream(streamed: &crate::history::StreamedContext) -> Self {
+        let compaction = streamed
+            .compaction
+            .as_ref()
+            .and_then(|event| match &event.kind {
+                EventKind::ContextCompaction(data) => Some(data.clone()),
+                _ => None,
+            });
+        Self {
+            configuration: streamed.configuration.clone(),
+            compaction,
+            order: streamed.order.clone(),
+            full: None,
+            checkpoint: streamed.checkpoint.clone(),
+        }
+    }
+
     pub fn configuration(&self) -> Option<&ContextConfiguredData> {
         self.configuration.as_ref()
     }
