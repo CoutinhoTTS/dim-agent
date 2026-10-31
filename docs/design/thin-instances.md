@@ -8,9 +8,9 @@ Rules: [design rules](../architecture/rust-agent/principles.md), [ADR 002](../ad
 [ADR 004](../adr/004-loader-plugin-management.md), [ADR 006](../adr/006-plugin-contract.md) D3, D4 and D6,
 [How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts).
 
-Builds on: rutis 0.19.2, which the 0.19 upgrade ([#730](https://github.com/arcships/dim/pull/730)) pins;
-#730 lands first. It supersedes [#645](https://github.com/arcships/dim/pull/645) and the "one row per
-instance" draft of this design.
+Builds on: rutis 0.19.2, which the 0.19 upgrade ([#730](https://github.com/arcships/dim/pull/730)) pins
+and has landed. It replaces the "one row per instance" draft of this design, and the row-handle
+read [#645](https://github.com/arcships/dim/pull/645) added goes with it.
 Decision: [ADR 015](../adr/015-scopes-are-plugins.md) (Proposed).
 
 ## 1. Scope and non-goals
@@ -216,7 +216,7 @@ durable identities, so Session and branch ids are unaffected.
   `ServiceCatalog::key_in`, to tell a name's group; the Agent group as an instanced group.
 - **rutis-bridge:** `host_key_in`.
 - The part registry and the mounters, as in How Dim uses rutis §2.
-- The 0.19 upgrade (#730), which pins 0.19.2, lands first.
+- The 0.19 upgrade (#730), which pins 0.19.2 and has landed.
 
 ## 5. Cross-module requirements
 
@@ -297,10 +297,10 @@ instances from its position in the tree, and a host marks its own scopes with `m
 - The Chinese mirrors: [How Dim uses rutis](../zh/design/rutis-usage.md) `:359` and
   [Plugin contract](../zh/design/plugin-contract.md) `:52`.
 - The generated graphs, through `xtask graph`.
-- #645 does not land: this design supersedes it, and it stays open until this design lands. 0.19.1
-  has the `Loader::instance_rows` it pinned ([rutis#941](https://github.com/arcships/rutis/issues/941)),
-  but this design removes the instance rows it reads. Its Git pin and its build.md paragraph do not
-  land.
+- #645 landed on 0.19.2 as a follow-up that reads current row handles through the published
+  `Loader::instance_rows` ([rutis#941](https://github.com/arcships/rutis/issues/941)), with no
+  behavior change. This design still removes the instance rows that read relies on, so that code
+  goes when this lands.
 
 ## Appendix A. Rust binding
 

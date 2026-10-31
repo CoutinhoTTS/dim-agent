@@ -2,8 +2,7 @@
 
 [English](../../design/rutis-0.19-upgrade.md)
 
-状态：已实现，放置步骤（M6）在 [#721](https://github.com/arcships/dim/pull/721)，步骤 1–6 在
-[#730](https://github.com/arcships/dim/pull/730)；§6 的度量证据尚未补齐。
+状态：Ready。
 
 Issue：[#681](https://github.com/arcships/dim/issues/681)。
 
@@ -131,10 +130,11 @@ crate 靠搜索定位。此前在 70ad3835 上对 0.19.0 做的同样试编译�
 **与本次升级相关的未完成工作。**
 
 - [#518](https://github.com/arcships/dim/issues/518) 在等 rutis#808，0.19 带上了它。本次升级凭 §6 的测量结果关闭它。
-- [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，它通过 Git 固定版本
-  引入 rutis#920。rutis#920 已经关闭、没有合并，0.19.1 加入了 `Loader::instance_rows`（rutis#941）。#594 改走
-  [#684](https://github.com/arcships/dim/pull/684)：Session 和分支变成用 0.19.1 公开的 `mark_scope` 标记自己的插件，
-  不再有实例行可查。#684 的设计已经合入（79fbb1b3），它的实现在本次升级之后进行。#645 不合入：#684 取代了它。
+- [#645](https://github.com/arcships/dim/pull/645) 为 [#594](https://github.com/arcships/dim/issues/594) 使用 `Loader::instance_rows`，0.19.1 发布了它（rutis#941），
+  rutis#920 则已关闭、没有合并。#645 随后以 0.19.2 上的后续改动合入：装配通过这个 API 读取当前的
+  行句柄，行为不变。但 #594 不是这样解决的：Session 和分支变成用公开的 `mark_scope` 标记自己的插件，
+  不再有实例行可查。[#684](https://github.com/arcships/dim/pull/684) 承载这个设计（已合入，79fbb1b3），
+  它的实现在本次升级之后进行。
 
 ## 4. 决策
 
@@ -547,7 +547,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | leaf 建立了会话，但它的 `Tui` 一直不 attach | 在 `START` 之后关闭；替换时在新界面 attach 之前保留旧界面（M8） |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
-| #645 先合入 | 它对 rutis#920 的 Git 固定版本与 0.19.1 的固定版本（M1）冲突，它查询的实例行也会随 #684 去掉。它不合入；§3 让 #594 改走 #684 |
+| #645 合入 | 它在本次升级之后合入，用的是 0.19.2 公开的 `Loader::instance_rows`，行为不变，因此与固定版本和本次升级都不冲突；它读取的实例行会随 #684 去掉（§3） |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |
 | 不认识的 npm 名字会一直等待，而不是失败 | `RuntimeManager` 的状态会显示这个等待；M9 调整依赖原有失败行为的测试 |

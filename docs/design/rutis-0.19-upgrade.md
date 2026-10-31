@@ -1,8 +1,6 @@
 # Upgrading to rutis 0.19.2
 
-Status: implemented, the placement step (M6) in [#721](https://github.com/arcships/dim/pull/721) and
-steps 1–6 in [#730](https://github.com/arcships/dim/pull/730); the measurement evidence of §6 is
-still outstanding.
+Status: Ready.
 
 Issue: [#681](https://github.com/arcships/dim/issues/681).
 
@@ -148,12 +146,12 @@ the build on its own base before it starts.
 - [#518](https://github.com/arcships/dim/issues/518) waits for rutis#808, which 0.19 ships. The
   upgrade closes it on the measurement of §6.
 - [#645](https://github.com/arcships/dim/pull/645) serves [#594](https://github.com/arcships/dim/issues/594)
-  with `Loader::instance_rows`, through a Git pin of rutis#920. rutis#920 was closed unmerged,
-  and 0.19.1 adds `Loader::instance_rows` (rutis#941). #594 takes
-  [#684](https://github.com/arcships/dim/pull/684) instead: Sessions and branches become plugins that
-  mark their scope with 0.19.1's public `mark_scope`, so there are no instance rows left to query.
-  #684's design has landed (79fbb1b3), and its implementation follows this upgrade. #645 does not
-  land: #684 supersedes it.
+  with `Loader::instance_rows`, which 0.19.1 publishes (rutis#941) after rutis#920 was closed
+  unmerged. It landed on 0.19.2 as a follow-up: the assembly reads its current row handles through
+  that API and no behavior changes. That is not how #594 goes: Sessions and branches become plugins
+  that mark their scope with the public `mark_scope`, so no instance rows are left to query.
+  [#684](https://github.com/arcships/dim/pull/684) carries that design (landed, 79fbb1b3), and its
+  implementation follows this upgrade.
 
 ## 4. Decisions
 
@@ -657,7 +655,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | A leaf starts its session but its `Tui` never attaches | Closed after `START`; a replacement keeps the old interface until the new one attaches (M8) |
 | A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each minimal host hold one |
 | Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 states its expected graph diff |
-| #645 lands first | Its Git pin of rutis#920 conflicts with the 0.19.1 pins (M1), and the instance rows it queries go with #684. It does not land; §3 routes #594 to #684 |
+| #645 lands | It landed after the upgrade, on the published `Loader::instance_rows` of 0.19.2 and with no behavior change, so it conflicts with neither the pins nor this upgrade; the instance rows it reads go when #684 lands (§3) |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |
 | Unknown npm names wait instead of failing | `RuntimeManager`'s status shows the wait; M9 adjusts the test that relied on the failure |
