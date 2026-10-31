@@ -377,7 +377,7 @@ fn history_window(
         let visible = wire::ProductEvent::new(record.event, version);
         let bytes = match &visible {
             Some(product) => serde_json::to_vec(product)
-                .map_err(|error| RpcError::app(-32000, "history_too_large", error.to_string()))?
+                .map_err(|error| RpcError::wire(-32603, error.to_string()))?
                 .len(),
             None => 0,
         };
