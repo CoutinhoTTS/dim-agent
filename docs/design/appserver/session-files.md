@@ -480,8 +480,9 @@ history, as moving a workspace breaks paths into it.
 ### 11.1 Reading a Session file
 
 **Decision: the model reads a Session file the way it reads any file. The read never asks,
-records no grant, and S5a adds no authority, rule or exception.** Permission, Approval and
-WorkspaceTools stay unchanged.
+records no grant, and S5a adds no authority, rule or exception.** Read admission, Approval and
+WorkspaceTools stay unchanged; ADR 012's Session grants apply to the Ask step of writes, which a
+Session file read never reaches.
 
 ```
  model: read {path: "<database directory>/<db>.session-files/<fileId>/paste.txt"}
@@ -507,11 +508,12 @@ What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/
   `workspace-write` ([main.rs](../../../crates/dim-app-server/src/main.rs)). The model therefore
   reads a pasted file without an approval prompt, as Attachments needs. A policy that lists
   `read` in `disallowedTools` denies it, like every other `read`.
-- **No grant to widen.** An approval answer is `allow` or `deny` for one call, and Dim records
-  no "always allow" ([AcpGateway](../plugins/AcpGateway.md) never offers `allow_always`). A policy
-  change (`session.permission.update`, written as `permission/changed`) holds a preset and tool
-  names, never a path. Remembered decisions (`/approvals`) are planned but not designed; none
-  can come from a `read` that never asks, and §11.2 keeps it that way. A Session file read is allowed without an approval request, so it leaves nothing
+- **No grant to widen reads.** `read` never asks, so it records no grant; the CLI's "Allow for
+  this session" action belongs to the write/edit Ask under
+  [ADR 012](../../adr/012-session-grants.md) and is consulted only there. A policy change
+  (`session.permission.update`, written as `permission/changed`) holds a preset and tool names,
+  never a path. Remembered read decisions (`/approvals`) are planned but not designed; none can
+  come from a `read` that never asks, and §11.2 keeps it that way. A Session file read is allowed without an approval request, so it leaves nothing
   behind that could cover `dimcode.sqlite`, the database directory or `~/.dimcode`.
 - **The FileStorage root confers nothing.** Registering the database directory as a FileStorage
   root (§3.1) lets SessionStore write there through FileStorage. `read` never consults

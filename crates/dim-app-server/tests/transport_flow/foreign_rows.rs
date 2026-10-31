@@ -363,7 +363,10 @@ async def script(loader):
     await attempt("reload", loader.reload("target"))
     await attempt("create", loader.create({{"id": "added", "name": "py:target"}}))
     await attempt("remove", loader.remove("target"))
-    pathlib.Path({:?}).write_text(json.dumps(outcome))
+    result = pathlib.Path({:?})
+    temporary = result.with_suffix(".tmp")
+    temporary.write_text(json.dumps(outcome))
+    temporary.replace(result)
 
 
 def apply(ctx, config):

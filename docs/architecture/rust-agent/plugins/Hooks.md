@@ -144,6 +144,7 @@ reported by `hooks.catalog` rather than at the hook point.
 `a_second_session_start_does_not_run_the_hooks_again`,
 `the_session_start_block_is_still_in_context_after_compaction`,
 `post_tool_use_follows_the_protocol_for_success_block_and_failure`,
+`a_hook_context_cannot_close_its_runtime_block`,
 `post_tool_use_failure_runs_only_for_error_results`,
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
@@ -152,8 +153,8 @@ reported by `hooks.catalog` rather than at the hook point.
 `stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns`,
 `a_context_only_stop_writes_no_follow_up_and_starts_no_turn`,
 `a_stop_follow_up_carries_the_block_reason_then_the_context`,
+`a_stop_follow_up_is_recognized_when_its_reason_carries_markup`,
 `only_the_follow_ups_turn_reports_stop_hook_active`,
-`the_follow_up_state_is_rebuilt_from_the_branch`,
 `permission_request_answers_through_approval`,
 `a_failed_permission_request_with_block_denies_the_approval`,
 `a_failed_permission_request_with_continue_answers_allow`,
@@ -171,11 +172,22 @@ reported by `hooks.catalog` rather than at the hook point.
 `disable_all_hooks_turns_every_source_off`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
+`the_follow_up_state_is_rebuilt_from_the_branch` pins that the follow-up's
+identity and consecutive count are rebuilt from the branch, not carried in
+memory; `a_deleted_operator_input_is_forgotten` pins that a withdrawn operator
+input leaves the record and moves nothing;
+`the_live_subscription_follows_exactly_the_kinds_the_folds_match` pins that the
+live subscription follows every event kind the two folds handle, `input/deleted`
+included;
 `a_live_request_registers_its_token_before_its_task_starts`,
 `an_answer_folded_before_the_task_starts_runs_no_permission_command` and
 `an_answer_folded_during_the_read_runs_no_permission_command` pin that an
-answered request starts no command; `a_failure_keeps_a_bounded_stderr_excerpt`
-pins the diagnostic's excerpt; and
+answered request starts no command;
+`exit_two_is_a_failure_at_session_start_and_notification` pins that exit 2 at
+the two observation hooks is the reported failure, not a block;
+`a_session_start_hook_reads_only_its_context` pins that `SessionStart` reads
+`additionalContext` alone, not another event's `decision` and `reason`;
+`a_failure_keeps_a_bounded_stderr_excerpt` pins the diagnostic's excerpt; and
 `hooks_settings.rs`'s `a_hook_point_reads_sources_without_authorizing_a_project`
 pins that reading a Session's sources never authorizes a workspace.
 [hooks_settings_flow.rs](../../../../crates/dim-app-server/tests/hooks_settings_flow.rs):

@@ -322,8 +322,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Tool approvals" => "工具核准",
         "Execution" => "執行",
         "Models" => "模型",
-        "Model" => "模型",
-        "not set" => "未設定",
         "Settings" => "設定",
         "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ 移動 · Enter 選擇 · ←→/Space 變更 · Esc 關閉"

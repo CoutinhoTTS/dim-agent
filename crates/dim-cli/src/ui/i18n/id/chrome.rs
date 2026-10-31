@@ -364,8 +364,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Tool approvals" => "Persetujuan tool",
         "Execution" => "Eksekusi",
         "Models" => "Model",
-        "Model" => "Model",
-        "not set" => "belum diatur",
         "Settings" => "Pengaturan",
         "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ pindah · Enter pilih · ←→/Space ubah · Esc tutup"

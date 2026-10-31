@@ -370,8 +370,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Tool approvals" => "Tool-Freigaben",
         "Execution" => "Ausführung",
         "Models" => "Modelle",
-        "Model" => "Modell",
-        "not set" => "nicht gesetzt",
         "Settings" => "Einstellungen",
         "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ bewegen · Enter wählen · ←→/Space ändern · Esc schließen"

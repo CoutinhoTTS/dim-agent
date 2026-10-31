@@ -5,16 +5,21 @@ use dim_agent_capabilities::{
     host::*,
     model_provider::ModelProviderPlugin,
     permission::{
-        CommandRulesHost, Decision, Permission, PermissionState, PermissionUpdateError,
-        ReadCommandRules,
+        CommandRulesHost, Decision, NoCommandRules, Permission, PermissionState,
+        PermissionUpdateError, ReadCommandRules,
     },
     prompt::InitialPromptConfiguration,
+    session_grants::{ReadSessionGrants, SessionGrantsHost},
     tool_registry::definition,
 };
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
-use dim_agent_types::*;
+use dim_agent_types::{
+    grant::{GrantKind, GrantMode, SessionGrant},
+    *,
+};
 use std::{
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -84,6 +89,31 @@ impl ReadCommandRules for TestRules {
         Box::pin(async move { rules.ok_or_else(|| HostError::failed("invalid rules file")) })
     }
 }
+
+/// The Session's grants as the test sets them; `None` is an unreadable
+/// source.
+struct TestGrants(Mutex<Option<Vec<SessionGrant>>>);
+impl TestGrants {
+    fn new(grants: Vec<SessionGrant>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(Some(grants))))
+    }
+    fn set(&self, grants: Option<Vec<SessionGrant>>) {
+        *self.0.lock().unwrap() = grants;
+    }
+}
+impl ReadSessionGrants for TestGrants {
+    fn grants(&self, _: CancellationToken) -> HostFuture<'_, Vec<SessionGrant>> {
+        let grants = self.0.lock().unwrap().clone();
+        Box::pin(async move { grants.ok_or_else(|| HostError::failed("invalid grants store")) })
+    }
+}
+fn grant(path: impl Into<PathBuf>, kind: GrantKind, mode: GrantMode) -> SessionGrant {
+    SessionGrant {
+        path: path.into(),
+        kind,
+        mode,
+    }
+}
 fn rule(command: &str, matching: CommandMatch, decision: CommandRuleDecision) -> CommandRule {
     CommandRule {
         command: command.into(),
@@ -113,11 +143,31 @@ async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) ->
     defaults::tool_host(&mut builder, tools);
     MinimalHost::start(&builder).await.unwrap()
 }
+/// The same profile with `grants` bound in place of the empty host.
+async fn granted_agent(tools: Arc<RiskTools>, grants: Arc<dyn ReadSessionGrants>) -> MinimalHost {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
+        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+        .session_value(Arc::new(SessionGrantsHost(grants)));
+    defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
+    defaults::mock_model_hosts(&mut builder);
+    defaults::tool_host(&mut builder, tools);
+    MinimalHost::start(&builder).await.unwrap()
+}
 fn config(policy: PermissionPolicy) -> SessionConfig {
     SessionConfig {
         tools: Some(TOOLS.iter().map(|(name, _)| name.to_string()).collect()),
         permission_policy: policy,
         ..SessionConfig::default()
+    }
+}
+fn config_in(cwd: &Path, policy: PermissionPolicy) -> SessionConfig {
+    SessionConfig {
+        cwd: cwd.to_string_lossy().into_owned(),
+        ..config(policy)
     }
 }
 fn preset(preset: PermissionPreset) -> PermissionPolicy {
@@ -219,6 +269,158 @@ async fn verdict(permission: &Permission, name: &str, risk: Option<&str>) -> &'s
         Decision::Ask { .. } => "ask",
         Decision::Deny { .. } => "deny",
     }
+}
+/// Decides a `write` call for `path`.
+async fn decide_write(permission: &Permission, path: &Path) -> Decision {
+    let mut input = JsonObject::new();
+    input.insert("path".into(), path.to_string_lossy().into_owned().into());
+    permission
+        .decide(
+            &ApprovalCallData {
+                name: "write".into(),
+                input,
+            },
+            Some("write_filesystem"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+}
+fn temporary_directory(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("dim-permission-{name}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::canonicalize(path).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_composition_without_grants_builds_and_asks() {
+    let work = temporary_directory("no-grants");
+    let agent = agent(Arc::new(RiskTools::default())).await;
+    let session = agent
+        .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+        .await
+        .unwrap();
+    let permission = session.service::<Permission>("main").unwrap();
+    let target = work.parent().unwrap().join("outside.txt");
+    assert!(matches!(
+        decide_write(&permission, &target).await,
+        Decision::Ask { .. }
+    ));
+    session.close().await.unwrap();
+    agent.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(work);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_grant_matches_only_the_canonical_target_and_mode() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let root = temporary_directory("grants");
+        let work = root.join("work");
+        let granted = root.join("granted");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&granted).unwrap();
+        let grants = TestGrants::new(Vec::new());
+        let tools = Arc::new(RiskTools::default());
+        let agent = granted_agent(tools.clone(), grants.clone()).await;
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        let target = granted.join("new.txt");
+
+        assert!(matches!(
+            decide_write(&permission, &target).await,
+            Decision::Ask { .. }
+        ));
+        grants.set(Some(vec![grant(
+            &target,
+            GrantKind::File,
+            GrantMode::Write,
+        )]));
+        assert_eq!(decide_write(&permission, &target).await, Decision::Allow);
+
+        // A read grant cannot authorize a write.
+        grants.set(Some(vec![grant(&target, GrantKind::File, GrantMode::Read)]));
+        assert!(matches!(
+            decide_write(&permission, &target).await,
+            Decision::Ask { .. }
+        ));
+
+        // A directory grant covers children but not a `..` escape.
+        grants.set(Some(vec![grant(
+            &granted,
+            GrantKind::Dir,
+            GrantMode::Write,
+        )]));
+        assert_eq!(
+            decide_write(&permission, &granted.join("child.txt")).await,
+            Decision::Allow
+        );
+        assert!(matches!(
+            decide_write(&permission, &granted.join("..").join("escaped.txt")).await,
+            Decision::Ask { .. }
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            // A symlink is matched by its canonical target: a file grant on
+            // the target admits the link, and a directory grant does not
+            // cover a link that resolves outside it.
+            let real = granted.join("real.txt");
+            let link = granted.join("link.txt");
+            std::fs::write(&real, b"real").unwrap();
+            symlink(&real, &link).unwrap();
+            grants.set(Some(vec![grant(&real, GrantKind::File, GrantMode::Write)]));
+            assert_eq!(decide_write(&permission, &link).await, Decision::Allow);
+
+            let outside = root.join("outside");
+            let escape = granted.join("escape");
+            std::fs::create_dir_all(&outside).unwrap();
+            symlink(&outside, &escape).unwrap();
+            grants.set(Some(vec![grant(
+                &granted,
+                GrantKind::Dir,
+                GrantMode::Write,
+            )]));
+            assert!(matches!(
+                decide_write(&permission, &escape.join("child.txt")).await,
+                Decision::Ask { .. }
+            ));
+        }
+
+        // The end-to-end call re-checks through Permission and runs without
+        // an approval prompt.
+        grants.set(Some(vec![grant(
+            &granted,
+            GrantKind::Dir,
+            GrantMode::Write,
+        )]));
+        let input = serde_json::json!({"path": target});
+        session
+            .submit(format!("tool:write {input}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        assert_ne!(last_result(&session, "main").await.is_error, Some(true));
+        assert_eq!(approval_requests(&session).await, 0);
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+
+        // A grant source that cannot be read denies instead of asking.
+        grants.set(None);
+        assert!(matches!(
+            decide_write(&permission, &target).await,
+            Decision::Deny { .. }
+        ));
+
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    })
+    .await
+    .expect("grant flow completed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

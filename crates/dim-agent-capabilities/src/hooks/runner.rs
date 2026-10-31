@@ -258,9 +258,7 @@ impl HooksRuntime {
                 if overflow {
                     failed("stdout exceeded 64 KiB", &stderr)
                 } else if status.code() == Some(2) {
-                    HookResult::Blocked {
-                        reason: String::from_utf8_lossy(&stderr).into_owned(),
-                    }
+                    exit_two(handler.event, &stderr)
                 } else if status.success() {
                     HookResult::Success {
                         stdout: String::from_utf8_lossy(&bytes).into_owned(),
@@ -355,6 +353,35 @@ fn failed(reason: impl Into<String>, stderr: &[u8]) -> HookResult {
     }
 }
 
+/// What exit 2 means at each event (A.4's Exit 2 column). Every event names
+/// its own meaning, so adding one is a choice and never a fall-through to a
+/// default; `UserPromptSubmit` blocks, as its A.4 row says.
+fn exit_two(event: HookEvent, stderr: &[u8]) -> HookResult {
+    match event {
+        // A.4 marks these as failure: the run is the failure `report` logs,
+        // with the stderr excerpt, and the point contributes nothing (A.5,
+        // "diagnostic only" for observation hooks).
+        HookEvent::SessionStart | HookEvent::Notification => failed("exited with 2", stderr),
+        // Every other event keeps its blocking meaning (A.4's Exit 2 column).
+        HookEvent::PreToolUse
+        | HookEvent::UserPromptSubmit
+        | HookEvent::PermissionRequest
+        | HookEvent::PostToolUse
+        | HookEvent::PostToolUseFailure
+        | HookEvent::Stop => HookResult::Blocked {
+            reason: String::from_utf8_lossy(stderr).into_owned(),
+        },
+    }
+}
+
+/// A hook point's own text, escaped for the runtime block it goes into. The
+/// cap is applied to the hook's text before this (A.4 bounds the context and
+/// the reason, not their escaped form), so escaping never eats into what a
+/// hook may contribute.
+fn escaped(parts: &[String]) -> String {
+    crate::context_block::text(&parts.join("\n"))
+}
+
 /// Bounds one hook's context at 16 KiB and drops an empty one (A.4).
 fn capped(text: &str) -> Option<String> {
     let text = text.trim();
@@ -375,11 +402,9 @@ fn capped(text: &str) -> Option<String> {
 fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
     match &run.result {
         HookResult::Failed { .. } => None,
-        HookResult::Blocked { reason } => match event {
-            // A blocking result is not that event's protocol (§A.4).
-            HookEvent::SessionStart | HookEvent::Notification => None,
-            _ => capped(reason),
-        },
+        // The observation hooks' exit 2 is a failure (`exit_two`), so a
+        // blocking result here is always the event's own protocol (A.4).
+        HookResult::Blocked { reason } => capped(reason),
         HookResult::Success { stdout } => {
             let trimmed = stdout.trim();
             if trimmed.is_empty() {
@@ -389,7 +414,16 @@ fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
                 Ok(Value::Object(object)) => {
                     report_ignored_fields(&object);
                     let mut parts: Vec<&str> = Vec::new();
-                    if object.get("decision").and_then(Value::as_str) == Some("block")
+                    // A.4 lists `decision` and `reason` only for the
+                    // `PostToolUse` rows; `SessionStart` reads only
+                    // `additionalContext`, and plain text stays its context
+                    // (A.3).
+                    let blocking = matches!(
+                        event,
+                        HookEvent::PostToolUse | HookEvent::PostToolUseFailure
+                    );
+                    if blocking
+                        && object.get("decision").and_then(Value::as_str) == Some("block")
                         && let Some(reason) = object.get("reason").and_then(Value::as_str)
                     {
                         parts.push(reason);
@@ -884,7 +918,11 @@ impl Branch {
             .filter_map(|(index, run)| {
                 let context = contribution_of(HookEvent::SessionStart, run)?;
                 Some(raw(
-                    element("dim-hooks", &[("kind", "session-start")], &context),
+                    element(
+                        "dim-hooks",
+                        &[("kind", "session-start")],
+                        &escaped(&[context]),
+                    ),
                     Some(format!("{SESSION_START_KEY}{}", index + 1)),
                 ))
             })
@@ -938,7 +976,7 @@ impl Branch {
                         ("call_id", &call.call_id),
                         ("tool", &call.name),
                     ],
-                    &context.join("\n"),
+                    &escaped(&context),
                 ),
                 None,
             ));
@@ -977,11 +1015,13 @@ impl Branch {
             return;
         }
         parts.extend(outputs.iter().filter_map(|out| out.context.clone()));
-        let text = element("dim-hooks", &[("kind", "follow-up")], &parts.join("\n"));
+        // The follow-up is read back by its opening marker (`follow_up_input`),
+        // which the escape leaves alone: it covers the body only.
+        let follow_up = element("dim-hooks", &[("kind", "follow-up")], &escaped(&parts));
         self.write(
             trigger,
             InputMode::Queue,
-            vec![raw(text, None)],
+            vec![raw(follow_up, None)],
             Validity::Branch,
         );
     }
@@ -1171,6 +1211,25 @@ fn session_started(event: &AgentEvent) -> bool {
     })
 }
 
+/// The events this branch folds, in the one list its live subscription uses.
+/// Every arm [`View::fold`] and [`Branch::fold`] match names its key here: a
+/// kind folded on replay but not delivered live would leave a live Session's
+/// view disagreeing with a rebuilt one (AGENTS rule 4).
+const FOLLOWED_EVENTS: [&str; 12] = [
+    "stop/interrupt",
+    "input/message",
+    "input/consumed",
+    "input/deleted",
+    "turn/start",
+    "turn/end",
+    "step/tool-call",
+    "step/tool-result",
+    "context/configured",
+    "approval/request",
+    "approval/respond",
+    "approval/cancelled",
+];
+
 pub struct HooksBranchPlugin {
     runtime: Key<HooksRuntime>,
     timeline: Key<Timeline>,
@@ -1228,34 +1287,17 @@ impl DynPlugin for HooksBranchPlugin {
             });
             let owner = branch.clone();
             dispatcher
-                .follow(
-                    ctx,
-                    "HooksBranch",
-                    &[
-                        "stop/interrupt",
-                        "input/message",
-                        "input/consumed",
-                        "turn/start",
-                        "turn/end",
-                        "step/tool-call",
-                        "step/tool-result",
-                        "approval/request",
-                        "approval/respond",
-                        "approval/cancelled",
-                        "context/configured",
-                    ],
-                    move |delivery| {
-                        match delivery {
-                            Delivery::Replay(events) => {
-                                for event in &events {
-                                    owner.fold(event, false);
-                                }
+                .follow(ctx, "HooksBranch", &FOLLOWED_EVENTS, move |delivery| {
+                    match delivery {
+                        Delivery::Replay(events) => {
+                            for event in &events {
+                                owner.fold(event, false);
                             }
-                            Delivery::Live(event) => owner.fold(&event, true),
                         }
-                        Box::pin(async { Ok(()) })
-                    },
-                )
+                        Delivery::Live(event) => owner.fold(&event, true),
+                    }
+                    Box::pin(async { Ok(()) })
+                })
                 .await?;
             let closing = tracker.clone();
             ctx.effect(move || async move {
@@ -1284,8 +1326,9 @@ mod tests {
     };
     use crate::host::HostFuture;
     use dim_agent_types::{
-        ApprovalCallData, ContentBlock, InputConsumedData, InputDeletedData, ToolCall,
-        ToolCallData, ToolResult, ToolResultData, TurnEndData, UserInput,
+        ApprovalCallData, ContentBlock, ContextConfiguredData, InputConsumedData, InputDeletedData,
+        InterruptScope, ModelConfiguration, StopInterruptData, ToolCall, ToolCallData, ToolResult,
+        ToolResultData, TurnEndData, TurnStartData, UserInput,
     };
     use std::path::PathBuf;
 
@@ -1313,6 +1356,76 @@ mod tests {
             panic!("a failure");
         };
         assert_eq!(stderr, "denied\n");
+    }
+
+    /// A.4's Exit 2 column: at `SessionStart` and `Notification`, exit 2 is a
+    /// failure, so the run is the one `report` logs, carrying the stderr
+    /// excerpt, and contributes no block.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_two_is_a_failure_at_session_start_and_notification() {
+        for event in [HookEvent::SessionStart, HookEvent::Notification] {
+            let dir =
+                std::env::temp_dir().join(format!("dim-hooks-exit2-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let runtime = test_runtime(
+                &dir,
+                Arc::new(DocumentSources {
+                    document: exit_two_document(event.name()),
+                }),
+            );
+            let snapshot = runtime.snapshot().await.expect("the sources");
+            let matching = handlers(&snapshot, event, None, None);
+            assert_eq!(matching.len(), 1, "{} matched no handler", event.name());
+            let run = HookRun {
+                result: runtime
+                    .run_one(&matching[0], Vec::new(), &runtime.cancel)
+                    .await,
+                on_failure: matching[0].on_failure,
+            };
+            assert!(
+                matches!(&run.result, HookResult::Failed { stderr, .. } if stderr.as_str() == "bad config\n"),
+                "exit 2 at {} was not a failure: {:?}",
+                event.name(),
+                run.result
+            );
+            assert_eq!(
+                contribution_of(event, &run),
+                None,
+                "{} wrote a block",
+                event.name()
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// A.4 gives `SessionStart` only `hookSpecificOutput.additionalContext`,
+    /// so a top-level `decision: "block"` with its `reason` is not that
+    /// event's protocol; the `PostToolUse` rows read both. Plain text stays a
+    /// `SessionStart` hook's context (A.3).
+    #[test]
+    fn a_session_start_hook_reads_only_its_context() {
+        let object = "{\"decision\":\"block\",\"reason\":\"blocking reason\",\
+                      \"hookSpecificOutput\":{\"additionalContext\":\"start context\"}}";
+        let run = |stdout: &str| HookRun {
+            result: HookResult::Success {
+                stdout: stdout.into(),
+            },
+            on_failure: OnFailure::Continue,
+        };
+        assert_eq!(
+            contribution_of(HookEvent::SessionStart, &run(object)).as_deref(),
+            Some("start context"),
+            "a SessionStart hook contributed its decision"
+        );
+        assert_eq!(
+            contribution_of(HookEvent::SessionStart, &run("plain text")).as_deref(),
+            Some("plain text"),
+            "plain text stopped being the SessionStart context"
+        );
+        let both = contribution_of(HookEvent::PostToolUse, &run(object)).expect("a contribution");
+        assert!(both.contains("blocking reason"), "{both}");
+        assert!(both.contains("start context"), "{both}");
     }
 
     /// F4: a result settles its call, and the call's input (whole file
@@ -1356,6 +1469,128 @@ mod tests {
         assert!(
             view.calls.is_empty(),
             "a settled call stayed in the folded view"
+        );
+    }
+
+    /// AGENTS rule 4: a live fold must see what a replay does. The dispatcher
+    /// matches a live event with `event.kind.key()`, and the subscription uses
+    /// `FOLLOWED_EVENTS` alone, so that list is exactly the keys of the kinds
+    /// `View::fold` and `Branch::fold` match: a kind the folds handle and the
+    /// list misses leaves a live Session's view behind a rebuilt one, and a
+    /// listed key no fold matches is dead weight.
+    #[test]
+    fn the_live_subscription_follows_exactly_the_kinds_the_folds_match() {
+        let folded = [
+            // The nine arms of `View::fold`.
+            event(
+                1,
+                EventKind::StopInterrupt(StopInterruptData {
+                    reason: "stop".into(),
+                    scope: InterruptScope::Branch,
+                }),
+            ),
+            event(2, EventKind::InputMessage(InputMessageData::default())),
+            event(
+                3,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "input".into(),
+                }),
+            ),
+            event(
+                4,
+                EventKind::InputDeleted(InputDeletedData {
+                    input_id: "input".into(),
+                }),
+            ),
+            event(
+                5,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            event(
+                6,
+                EventKind::TurnEnd(TurnEndData {
+                    turn_id: "turn".into(),
+                    outcome: TurnOutcome::Completed {
+                        reason: "stop".into(),
+                    },
+                }),
+            ),
+            event(
+                7,
+                EventKind::ToolCall(ToolCallData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    calls: Vec::new(),
+                }),
+            ),
+            event(
+                8,
+                EventKind::ToolResult(ToolResultData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_event_id: None,
+                    results: Vec::new(),
+                }),
+            ),
+            event(
+                9,
+                EventKind::ContextConfigured(ContextConfiguredData {
+                    timeline: "main".into(),
+                    revision: "configuration".into(),
+                    previous: None,
+                    prompt: None,
+                    settings: Box::new(ModelConfiguration {
+                        provider_id: "provider".into(),
+                        model_id: "model".into(),
+                        capability_snapshot: None,
+                        tools: None,
+                        tool_sources: Vec::new(),
+                        config: None,
+                        metadata: None,
+                    }),
+                    system: None,
+                    system_source: None,
+                }),
+            ),
+            // The three arms of `Branch::fold`.
+            event(
+                10,
+                EventKind::ApprovalRequest(ApprovalRequestData {
+                    approval_id: "approval".into(),
+                    source: BranchSource::Host {
+                        operation_id: "operation".into(),
+                    },
+                    call: ApprovalCallData {
+                        name: "exec".into(),
+                        input: JsonObject::new(),
+                    },
+                    reason: "needs permission".into(),
+                }),
+            ),
+            event(
+                11,
+                EventKind::ApprovalRespond(ApprovalRespondData {
+                    approval_id: "approval".into(),
+                    decision: ApprovalDecision::Allow,
+                }),
+            ),
+            event(
+                12,
+                EventKind::ApprovalCancelled(ApprovalCancelledData {
+                    approval_id: "approval".into(),
+                    reason: "cancelled".into(),
+                }),
+            ),
+        ];
+        let mut matched: Vec<&str> = folded.iter().map(|event| event.kind.key()).collect();
+        matched.sort_unstable();
+        let mut followed = FOLLOWED_EVENTS.to_vec();
+        followed.sort_unstable();
+        assert_eq!(
+            followed, matched,
+            "the live fold and the rebuilt fold disagree"
         );
     }
 
@@ -1489,6 +1724,23 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    /// A document with one handler at `event` that writes `bad config` to its
+    /// standard error and exits 2.
+    #[cfg(unix)]
+    fn exit_two_document(event: &str) -> HooksDocument {
+        let mut hooks = serde_json::Map::new();
+        hooks.insert(
+            event.to_owned(),
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": "printf 'bad config\\n' >&2; exit 2",
+                }],
+            }]),
+        );
+        serde_json::from_value(serde_json::json!({ "hooks": hooks })).unwrap()
     }
 
     #[cfg(unix)]
