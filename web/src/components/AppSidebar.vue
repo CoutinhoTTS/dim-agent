@@ -2,7 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { RouterLink, useRoute } from "vue-router"
 import { useI18n } from "vue-i18n"
-import { PanelLeftClose, Plus, Search } from "lucide-vue-next"
+import { PanelLeftClose, Plus, Search, Settings } from "lucide-vue-next"
+import { settingsMessages } from "../i18n/settings"
 import BrandMark from "./BrandMark.vue"
 import ConnectionBadge from "./ConnectionBadge.vue"
 import SidebarWorkspaceGroup from "./SidebarWorkspaceGroup.vue"
@@ -11,6 +12,7 @@ import { useUiStore } from "../stores/ui"
 
 defineEmits<{ navigate: [] }>()
 const { t } = useI18n()
+const { t: settingsText } = useI18n({ messages: settingsMessages })
 const route = useRoute()
 const sessions = useSessionsStore()
 const ui = useUiStore()
@@ -74,6 +76,9 @@ const visible = computed(() => sessions.workspaces.flatMap((workspace) => {
     </div>
 
     <footer class="sidebar-footer">
+      <RouterLink class="ui-button" data-variant="ghost" data-size="md" to="/settings" @click="$emit('navigate')">
+        <Settings aria-hidden="true" />{{ settingsText("settings") }}
+      </RouterLink>
       <ConnectionBadge />
     </footer>
   </aside>
