@@ -104,7 +104,7 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
     </li>
     <li>
       <strong>临时改版本号</strong>
-      编译前一次改齐 <code>Cargo.toml</code>、<code>Cargo.lock</code>、<code>npm/package.json</code>（含 6 个 optionalDependencies）、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code>，结束时（不论成功失败）全部还原。不提交，仓库里的版本号保持不变；包里记录的源提交就是当前 <code>HEAD</code>。
+      编译前一次改齐 <code>Cargo.toml</code>、<code>Cargo.lock</code>、<code>npm/package.json</code>（含 6 个 optionalDependencies）、<code>runtime/package.json</code>、<code>runtime/package-lock.json</code>，结束时（不论成功失败）全部还原。不提交，仓库里的版本号保持不变；包里记录的源提交就是当前 <code>HEAD</code>。构建时设置 <code>DIM_RELEASE_BUILD=1</code>，所以发布出来的二进制报的是这里设的版本；没有这个标记的构建（例如直接 <code>cargo build</code>）报的是仓库里提交的版本加 <code>-source</code>，如 <code>0.1.0-alpha.8-source</code>。
     </li>
     <li>
       <strong>编译 6 个平台</strong>

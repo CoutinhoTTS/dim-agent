@@ -39,6 +39,7 @@ struct Inputs {
     client: Client,
     io: Io,
     agent_id: Option<String>,
+    version: String,
     done: oneshot::Sender<dim_client::Result<()>>,
     login: Option<auth::Login>,
 }
@@ -47,10 +48,13 @@ struct Inputs {
 pub struct AcpGateway(Mutex<Option<Inputs>>);
 
 impl AcpGateway {
+    /// `version` is the identity `initialize` advertises for this build, the
+    /// label the native CLI reports.
     pub fn new(
         client: Client,
         io: Io,
         agent_id: Option<String>,
+        version: String,
     ) -> (Self, oneshot::Receiver<dim_client::Result<()>>) {
         let (done, finished) = oneshot::channel();
         (
@@ -58,6 +62,7 @@ impl AcpGateway {
                 client,
                 io,
                 agent_id,
+                version,
                 done,
                 login: None,
             }))),
@@ -98,10 +103,11 @@ impl Plugin for AcpGateway {
                 client,
                 io,
                 agent_id,
+                version,
                 done,
                 login,
             } = inputs;
-            let result = serve(client, io, agent_id, login, stop).await;
+            let result = serve(client, io, agent_id, version, login, stop).await;
             let _ = done.send(result);
         });
         Ok(())
@@ -112,6 +118,7 @@ async fn serve(
     client: Client,
     io: Io,
     agent_id: Option<String>,
+    version: String,
     login: Option<auth::Login>,
     stop: CancellationToken,
 ) -> dim_client::Result<()> {
@@ -205,6 +212,7 @@ async fn serve(
                     foreground_tasks,
                     foreground_stop,
                     agent_id,
+                    version,
                     login,
                     foreground_outbox,
                     gateway_mcp,

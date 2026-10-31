@@ -108,6 +108,7 @@ async fn browser_flow(cancel: bool, eof: bool) {
             writer: Box::new(writer),
         },
         None,
+        env!("CARGO_PKG_VERSION").to_owned(),
     );
     let gateway = gateway.login(Login {
         directory: "https://fixture.invalid".into(),
