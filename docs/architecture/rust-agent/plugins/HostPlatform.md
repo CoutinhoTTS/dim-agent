@@ -86,7 +86,9 @@ payload starts; it never runs unsandboxed. Sandbox on without a backend fails as
 or `Unavailable` with that reason. On Linux it uses the same captured-`PATH` bubblewrap resolution
 as preparation. The App Server's `ExecutionBackend` part exposes it as `host.execution.backend`;
 the `/settings` and Web Execution rows display the reason. The availability report does not replace
-the preparation failure.
+the preparation failure. The method is a separate part because `ExecutionSettings` provides the
+`ExecutionSettingsHost` port that `HostPlatform` reads; adding `HostPlatform` to
+`ExecutionSettings` would close a dependency cycle.
 There is no policy file, no tier and no fallback. Ordinary user ShellInput does not call this
 operation. No process, task, lock, watcher or Timeline fact is added by preparation.
 
