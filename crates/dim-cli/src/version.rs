@@ -1,5 +1,6 @@
 //! What this build reports as its version: the version the release flow set for
-//! it, or the committed version marked `-source`.
+//! it, or the committed version marked `-source`. The label is for display only
+//! and must never be ordered or compared as a version.
 
 /// The workspace version; the release flow sets it for the builds it produces.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
