@@ -255,7 +255,7 @@ Hook 命令因配置而运行，不是 agent 的决定，因此无需批准，�
 
 **`PreToolUse` 的 `allow` 会扩大权限，这是被接受的（决定 1）。** `allow` 准入 Permission 的策略本会询问的调用。这一权限来自用户启用的配置，而不是 agent：用户 Hook 是用户自己的规则，如同 allow 命令规则；项目 Hook 只有在用户为该工作区启用项目 Hook 之后才能这样做，按 ADR 003 D3/D4，这意味着信任该项目的配置。它从不推翻 Deny（策略、不允许的工具或命令规则），因为那时不会询问建议；并且任何 Hook 的 `deny` 或 `ask` 都优先于 `allow`。Approval 与 Permission 仍只管辖 agent 的决定：调用仍是 agent 的，准入仍是 Permission 根据它所请求的建议作出的决定。
 
-`PermissionRequest` 经与用户相同的路径回答 Approval 提出的问题，Approval 仍复核策略并把回答记录为 `approval/respond`。`UserPromptSubmit` 只阻止提交或加入带署名的块；从不编辑用户文本。没有 Hook 编辑工具输入（`updatedInput` 被忽略）。Hook 命令是配置命令（[ADR 003](../../adr/003-approval-scope.md) D2）：HostPlatform 在 Session 的资源节点上启动它，不施加 agent 沙箱，与启动 MCP stdio 服务器相同。沙箱设置管辖的是 agent 决定的命令，即 `exec` 与持久 shell，而不是配置（[ADR 010](../../adr/010-sandbox-opt-in.md) D1）。stdin 包含提示词与工具输入；诊断只保留来源、事件、退出状态、耗时与有界的 stderr 摘录。
+`PermissionRequest` 经与用户相同的路径回答 Approval 提出的问题，Approval 仍复核策略并把回答记录为 `approval/respond`。`UserPromptSubmit` 只阻止提交或加入带署名的块；从不编辑用户文本。没有 Hook 编辑工具输入（`updatedInput` 被忽略）。Hook 命令是配置命令（[ADR 003](../../adr/003-approval-scope.md) D2）：HostPlatform 在 Session 的资源节点上启动它，不施加 agent 沙箱，与启动 MCP stdio 服务器相同。沙箱设置管辖的是 agent 决定的命令，即 `exec` 与持久 shell，而不是配置（[ADR 010](../../../adr/010-sandbox-opt-in.md) D1）。stdin 包含提示词与工具输入；诊断只保留来源、事件、退出状态、耗时与有界的 stderr 摘录。
 
 ## 8. 规则检查
 
@@ -402,7 +402,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 
 `DIMCODE_HOME` 是运行该 Session 的 App Server 所配置的产品 home，不是守护进程继承的环境。App Server 没有产品 home 时，Hooks 不设置 `DIMCODE_HOME`。`DIM_PLUGIN_ROOT` 是插件来源登记时的 `dir`（A.2）；用户与项目来源没有。
 
-**归档。** 需要 Session 历史的 Hook 用 `dimcode export "$DIM_SESSION_ID"` 读取该 Session 的 Timeline（[Timeline 导出](../appserver/timeline-export.md)），它读取 `DIMCODE_HOME` 指定的 home（[ADR 005](../../adr/005-observability.md) D3）。没有 `transcript_path`（决定 8）。
+**归档。** 需要 Session 历史的 Hook 用 `dimcode export "$DIM_SESSION_ID"` 读取该 Session 的 Timeline（[Timeline 导出](../appserver/timeline-export.md)），它读取 `DIMCODE_HOME` 指定的 home（[ADR 005](../../../adr/005-observability.md) D3）。没有 `transcript_path`（决定 8）。
 
 ### A.4 结果
 
