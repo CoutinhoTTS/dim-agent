@@ -1770,6 +1770,29 @@
       ]
     },
     {
+      "id": "dim_app_server::hooks_settings",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/hooks_settings.rs",
+      "unexpandedMacros": [
+        "format",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::hooks_settings::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::hooks_settings",
+      "file": "crates/dim-app-server/src/hooks_settings.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::isolation_policy",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -14379,6 +14402,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::hooks_settings",
+      "references": [
+        "mod hooks_settings",
+        "path hooks_settings::HooksSettingsPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::isolation_policy",
       "references": [
         "mod isolation_policy",
@@ -15617,6 +15648,14 @@
       "references": [
         "path collaboration::install",
         "use crate::collaboration"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::hooks_settings",
+      "references": [
+        "path hooks_settings::install",
+        "use crate::hooks_settings"
       ]
     },
     {
@@ -17216,6 +17255,205 @@
       "references": [
         "path Empty",
         "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Io",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::hooks::document",
+      "references": [
+        "path HooksDocument",
+        "path dim_agent_capabilities::hooks::HookEntry",
+        "path entries",
+        "use dim_agent_capabilities::hooks::HooksDocument",
+        "use dim_agent_capabilities::hooks::entries"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::hooks::sources",
+      "references": [
+        "path HookSourceId::Project",
+        "path HookSourceId::User",
+        "path HookSourceSnapshot",
+        "path HookSourceState::Invalid",
+        "path HookSourceState::Missing",
+        "path HookSourceState::Ok",
+        "path HookSourcesHost",
+        "path HookSourcesSnapshot",
+        "path ReadHookSources",
+        "use dim_agent_capabilities::hooks::HookSourceId",
+        "use dim_agent_capabilities::hooks::HookSourceSnapshot",
+        "use dim_agent_capabilities::hooks::HookSourceState",
+        "use dim_agent_capabilities::hooks::HookSourcesHost",
+        "use dim_agent_capabilities::hooks::HookSourcesSnapshot",
+        "use dim_agent_capabilities::hooks::ReadHookSources"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::HostError",
+        "path dim_agent_capabilities::host::HostError::Cancelled",
+        "path dim_agent_capabilities::host::HostError::failed",
+        "path dim_agent_capabilities::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Interruption::Report",
+        "path MethodDecl::new",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::reloading",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path Feature::new",
+        "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_app_server",
+      "references": [
+        "path crate::register_names"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_app_server::hooks_settings::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "path SelectionScope",
+        "use crate::methods::ManagementMethods",
+        "use crate::methods::SelectionScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path canonical_cwd",
+        "use crate::protocol::canonical_cwd"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsService",
+        "path SettingsSnapshot",
+        "path crate::settings::Result",
+        "use crate::settings::BusinessDocument",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService",
+        "use crate::settings::SettingsSnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStoragePlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path wait_active",
+        "use dim_agent_runtime::wait_active"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_app_server",
+      "references": [
+        "path crate::catalog"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_app_server::hooks_settings",
+      "references": [
+        "path SettingsHookSources"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_app_server::methods",
+      "references": [
+        "use crate::methods::ManagementMethodsPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsPlugin"
       ]
     },
     {

@@ -8,6 +8,7 @@ mod collaboration_model_policy;
 mod connection;
 mod control;
 pub mod grok_oauth;
+pub mod hooks_settings;
 mod isolation_policy;
 mod managed_oauth;
 pub mod managed_provider;
@@ -730,6 +731,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 names,
             )?))
         })?);
+        let product_home = config.product_home.clone();
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                Ok(Box::new(hooks_settings::HooksSettingsPlugin::new(
+                    names,
+                    product_home.clone(),
+                )?))
+            },
+        )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(
                 collaboration_model_policy::CollaborationModelPolicyPlugin::new(names)?,
