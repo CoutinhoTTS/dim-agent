@@ -17,7 +17,7 @@ PluginManager 保存一个宿主的插件配置：装了哪些插件，它们从
 | 通过 Session 部件提供的 agent 工具（§6） | 是 | |
 | 默认 CLI 加载默认插件（goal、web、session-title、workflow、scheduler、plugin-authoring） | 是 | |
 | 每个插件在运行时自己登记 Settings 来源（§9 R1） | 是，内置插件和 TypeScript 插件一起 | |
-| 内容种类：skill、MCP 配置、hook（§3、§9 R2） | skill 和 MCP，前提是它们的所有者按时落地 | hook（Hooks 属于 M2） |
+| 内容种类：skill、MCP 配置、hook（§3、§9 R2） | skill 和 MCP，前提是它们的所有者按时落地；hook（Hooks 属于 M1） | |
 
 M1 的验收是：用户或 agent 写一个 TypeScript 插件，从本地路径安装它，使用它的工具，修改它并重新加载它，变更不重启就生效；默认 CLI 启动时已加载默认插件。插件代码需要运行时，运行时由 [#476](https://github.com/arcships/dim/issues/476) 提供。
 
@@ -312,7 +312,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | 对 sequence、批次、中断、重新加载的影响 | 对 Timeline 没有影响。重新加载时由新世代再次登记。 |
 | 所有者与 issue | Settings（App Server）；将随 #384 提交。 |
 
-**R2. SkillsCatalog、Mcp、Hooks：登记插件内容并保存它（SkillsCatalog 和 Mcp 若按时落地则为 M1；Hooks 为 M2）。**
+**R2. SkillsCatalog、Mcp、Hooks：登记插件内容并保存它（三者均为 M1；SkillsCatalog 和 Mcp 若按时落地）。**
 
 | 项 | 内容 |
 | --- | --- |

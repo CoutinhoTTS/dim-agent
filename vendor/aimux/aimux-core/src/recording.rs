@@ -1006,10 +1006,11 @@ fn write_ready_all(
 
 fn write_line(w: &mut impl Write, rec: Recording, write_error: &Mutex<Option<String>>) {
     match serde_json::to_string(&rec) {
-        Ok(line) => {
+        Ok(mut line) => {
             // 每行落盘,保证崩溃前已写行可见;失败记入粘性错误槽,
             // 由 try_flush 显式暴露。
-            if let Err(e) = writeln!(w, "{line}").and_then(|()| w.flush()) {
+            line.push('\n');
+            if let Err(e) = w.write_all(line.as_bytes()).and_then(|()| w.flush()) {
                 note_write_error(write_error, &e);
             }
         }

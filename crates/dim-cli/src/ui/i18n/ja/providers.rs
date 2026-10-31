@@ -51,15 +51,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Email" => "メール",
         "Continue" => "続行",
         "Browser login" => "ブラウザログイン",
-        "Print verification URL + pairing code again" => "認証 URL とペアリングコードを再表示",
         "Restart device login" => "デバイスログインをやり直し",
-        "Print OAuth URL again" => "OAuth URL を再表示",
+        "Select to copy · Enter opens link" => "選択してコピー · Enter でリンクを開く",
+        "Link shortened · Enter opens link" => "リンクを省略 · Enter で全体を開く",
         "Callback URL" => "コールバック URL",
         "Submit callback" => "コールバック送信",
         "The browser could not be opened. Open the link manually, then return here." => {
             "ブラウザを開けません。リンクを手動で開き、ここへ戻る"
         }
-        "Enter code {code} at {url}" => "{url} でコード {code} を入力",
         "Waiting for authorization" => "認可待ち",
         "{name} device login" => "{name} デバイスログイン",
         "Open this URL: {url}" => "この URL を開く：{url}",

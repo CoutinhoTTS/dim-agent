@@ -271,6 +271,9 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
         let requests = server.endpoint.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert!(!request.to_string().contains("cache_control"), "{request}");
+        }
         assert_eq!(requests[0]["model"], "test-model");
         assert_eq!(requests[0]["temperature"].as_f64(), Some(0.));
         let system = requests[0]["messages"][0]["content"]
@@ -511,7 +514,8 @@ impl Recording {
     fn lines(&self) -> Vec<Value> {
         std::fs::read_to_string(self.directory.join("recordings.jsonl"))
             .unwrap_or_default()
-            .lines()
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
@@ -550,6 +554,58 @@ impl Drop for Recording {
         let _ = dim_agent_aimux::recording::set_request_recording(None);
         let _ = std::fs::remove_dir_all(&self.directory);
     }
+}
+
+#[test]
+fn overlapping_recorders_append_complete_jsonl_lines() {
+    use aimux_core::recording::{JsonlRecorder, OutcomeRecord, OutcomeStatus, Recorder};
+
+    let directory =
+        std::env::temp_dir().join(format!("dim-recording-overlap-{}", uuid::Uuid::new_v4()));
+    let recorders: Vec<_> = (0..2)
+        .map(|_| JsonlRecorder::try_new(&directory).unwrap())
+        .collect();
+    let options = aimux_core::options::CallOptions::new(
+        aimux_core::language_model_message::convert_to_language_model_prompt(
+            &[aimux_core::message::ModelMessage::user("x".repeat(16_384))],
+            None,
+        ),
+    );
+    for index in 0..128 {
+        for (writer, recorder) in recorders.iter().enumerate() {
+            let id = format!("writer-{writer}-{index}");
+            recorder.record_input(&id, &options, "openai", "test-model");
+            recorder.record_outcome(
+                &id,
+                &OutcomeRecord {
+                    status: OutcomeStatus::Success,
+                    ..OutcomeRecord::default()
+                },
+            );
+            recorder.record_transport_closed(&id);
+        }
+    }
+    for recorder in &recorders {
+        recorder.try_flush().unwrap();
+    }
+    drop(recorders);
+    let content = std::fs::read_to_string(directory.join("recordings.jsonl")).unwrap();
+    assert!(content.ends_with('\n'));
+    let records: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 256);
+    let ids: std::collections::HashSet<_> = records
+        .iter()
+        .map(|record| record["call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 256);
+    for record in records {
+        assert_eq!(record["outcome"]["status"], "success");
+        assert_eq!(record["complete"], true);
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

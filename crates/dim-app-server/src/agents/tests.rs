@@ -188,7 +188,10 @@ async fn launch(index: &Arc<AgentIndex>, agent: Option<String>, cwd: &Path) -> S
 /// A new peer Agent. Closing it keeps its record: a stored Agent that is not
 /// running, which the next generation creates again.
 async fn peer(index: &AgentIndex) -> String {
-    let host = index.create(uuid::Uuid::new_v4(), None).await.unwrap();
+    let host = index
+        .create(uuid::Uuid::new_v4(), None, None)
+        .await
+        .unwrap();
     host.agent_id.clone()
 }
 

@@ -19,7 +19,7 @@ async fn catalog_pages_and_searches_a_large_dormant_store_without_reading_histor
     let tx = connection.transaction().unwrap();
     for index in 0..2300 {
         let id = format!("catalog-{index:04}");
-        tx.execute("INSERT INTO agent_sessions SELECT ?1, config, created_at_ms FROM agent_sessions WHERE session_id=?2", params![id,seed]).unwrap();
+        tx.execute("INSERT INTO agent_sessions (session_id, config, created_at_ms, leader_session_id) SELECT ?1, config, created_at_ms, leader_session_id FROM agent_sessions WHERE session_id=?2", params![id,seed]).unwrap();
         tx.execute("INSERT INTO session_owners SELECT ?1,agent_id,protocol_version FROM session_owners WHERE session_id=?2", params![id,seed]).unwrap();
         tx.execute(
             "INSERT INTO timeline_branches VALUES (?1,'main','{\"id\":\"main\"}',?2)",

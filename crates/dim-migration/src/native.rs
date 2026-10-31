@@ -435,7 +435,7 @@ impl Native {
                     model: None,
                 };
                 tx.execute(
-                    "INSERT INTO agents VALUES (?1,?2,1)",
+                    "INSERT INTO agents(agent_id, profile, is_default) VALUES (?1,?2,1)",
                     params![id, serde_json::to_string(&profile).map_err(failure)?],
                 )
                 .map_err(failure)?;
@@ -481,7 +481,7 @@ impl Native {
         }
         let now = dim_agent_runtime::core::unix_millis();
         tx.execute(
-            "INSERT INTO agent_sessions VALUES (?1,?2,?3)",
+            "INSERT INTO agent_sessions (session_id, config, created_at_ms) VALUES (?1,?2,?3)",
             params![
                 session,
                 serde_json::to_string(&config).map_err(failure)?,
