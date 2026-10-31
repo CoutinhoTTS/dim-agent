@@ -8288,9 +8288,12 @@
         "path HookEvent::SessionStart",
         "path HookEvent::Stop",
         "path HookHandler",
+        "path OnFailure",
+        "path OnFailure::Block",
         "path handlers",
         "use crate::hooks::HookEvent",
         "use crate::hooks::HookHandler",
+        "use crate::hooks::OnFailure",
         "use crate::hooks::handlers"
       ]
     },

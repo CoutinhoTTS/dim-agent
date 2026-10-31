@@ -9,7 +9,7 @@ use crate::{
     approval::Approval,
     branch_input::append_own,
     context_block::{element, raw},
-    hooks::{HookEvent, HookHandler, HookSourcesHost, HookSourcesSnapshot, handlers},
+    hooks::{HookEvent, HookHandler, HookSourcesHost, HookSourcesSnapshot, OnFailure, handlers},
     host_platform::{HostPlatform, Os},
 };
 use dim_agent_runtime::{
@@ -75,6 +75,9 @@ pub enum HookResult {
 #[derive(Clone, Debug)]
 pub struct HookRun {
     pub result: HookResult,
+    /// What the handler asks for when its command fails, times out or is
+    /// cancelled (A.5).
+    pub on_failure: OnFailure,
 }
 
 /// The Session service that reads the sources and runs commands.
@@ -147,6 +150,7 @@ impl HooksRuntime {
             waiting.push(async move {
                 HookRun {
                     result: self.run_one(&handler, stdin, cancel).await,
+                    on_failure: handler.on_failure,
                 }
             });
         }
@@ -431,14 +435,17 @@ fn report_ignored_fields(object: &serde_json::Map<String, Value>) {
     }
 }
 
-/// The decision a `PermissionRequest` run asks for (A.4).
+/// The decision a `PermissionRequest` run asks for (A.4, A.5).
 fn permission_decision(run: &HookRun) -> Option<ApprovalDecision> {
-    let HookRun {
-        result: HookResult::Success { stdout },
-        ..
-    } = run
-    else {
-        return None;
+    let stdout = match &run.result {
+        HookResult::Success { stdout } => stdout,
+        // Exit 2 is ignored for this event (A.4).
+        HookResult::Blocked { .. } => return None,
+        // A failure, timeout or cancellation is the handler's `onFailure`:
+        // `block` denies and `continue` has no opinion (A.5).
+        HookResult::Failed { .. } => {
+            return (run.on_failure == OnFailure::Block).then_some(ApprovalDecision::Deny);
+        }
     };
     let value: Value = serde_json::from_str(stdout.trim()).ok()?;
     if let Value::Object(object) = &value {
@@ -910,6 +917,11 @@ impl Branch {
         let Some(runs) = runs else {
             return;
         };
+        // A cancelled point responds nothing: the request was answered or
+        // `approval/cancelled` was consumed while its commands ran (A.5).
+        if cancel.is_cancelled() {
+            return;
+        }
         let decision = runs.iter().filter_map(permission_decision).fold(
             None,
             |acc: Option<ApprovalDecision>, next| match (acc, next) {

@@ -679,6 +679,106 @@ async fn permission_request_answers_through_approval() {
     env.close().await;
 }
 
+/// A5: a failed `PermissionRequest` handler follows its `onFailure`. `turn`
+/// returns only after the approval is answered and the turn ended, so the
+/// hook has finished and its decision is committed before the test reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_permission_request_with_block_denies_the_approval() {
+    let env = Env::new().await;
+    let failed = env.path("blocked-failure");
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [command(serde_json::json!({
+            "type": "command",
+            "command": format!("printf 'failed' > {}; exit 1", failed.display()),
+            "onFailure": "block",
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert!(failed.exists(), "the hook command did not run");
+    assert_eq!(
+        wait_event(&session, |kind| match kind {
+            EventKind::ApprovalRespond(data) => Some(data.decision),
+            _ => None,
+        })
+        .await,
+        ApprovalDecision::Deny
+    );
+    assert_eq!(last_result(&session).await.is_error, Some(true));
+    env.close().await;
+}
+
+/// A5: `onFailure: continue` leaves a failed `PermissionRequest` with no
+/// opinion. A second handler at the same point answers Allow, so the hook's
+/// own answer is what the test reads: A.5 turns no deny plus an allow into
+/// allow, and a failure counted as a deny would win the combination instead.
+/// `turn` returns only after the approval is answered and the turn ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_permission_request_with_continue_answers_allow() {
+    let env = Env::new().await;
+    let failed = env.path("continued-failure");
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [{
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": format!("printf 'failed' > {}; exit 1", failed.display()),
+                    "onFailure": "continue",
+                },
+                {
+                    "type": "command",
+                    "command": "printf '{\"hookSpecificOutput\":{\"decision\":{\"behavior\":\"allow\"}}}'",
+                },
+            ],
+        }],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert!(failed.exists(), "the failing handler did not run");
+    let answered: Vec<ApprovalDecision> = events(&session)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ApprovalRespond(data) => Some(data.decision),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, vec![ApprovalDecision::Allow]);
+    assert_eq!(last_result(&session).await.is_error, None);
+    env.close().await;
+}
+
+/// A5: a handler that times out with `onFailure: block` denies too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timed_out_permission_request_with_block_denies_the_approval() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [command(serde_json::json!({
+            "type": "command",
+            "command": "sleep 5",
+            "timeout": 1,
+            "onFailure": "block",
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    let started = std::time::Instant::now();
+    turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the hook was not cut off"
+    );
+    assert_eq!(
+        wait_event(&session, |kind| match kind {
+            EventKind::ApprovalRespond(data) => Some(data.decision),
+            _ => None,
+        })
+        .await,
+        ApprovalDecision::Deny
+    );
+    assert_eq!(last_result(&session).await.is_error, Some(true));
+    env.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_user_answer_cancels_the_hook_and_does_not_delay_the_next_point() {
     let env = Env::new().await;
