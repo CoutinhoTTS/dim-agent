@@ -373,13 +373,14 @@ async fn projected(timeline_session: &Session, branch: &str) -> Vec<Message> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     let strategy = Scripted::new(Mode::Cut);
-    let agent = builder_with_strategy(
+    let agent = MinimalHost::start(&builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         strategy.clone(),
         None,
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -474,7 +475,7 @@ async fn a_checkpointed_step_renders_its_context_once() {
         None,
     );
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -577,13 +578,14 @@ async fn a_manual_compaction_keeps_at_most_the_latest_turn() {
         (Arc::new(ShortReply), "y".repeat(1_500)),
     ] {
         let large = latest.len() > 100;
-        let agent = builder_with_strategy(
+        let agent = MinimalHost::start(&builder_with_strategy(
             model,
             HistoryRenderer::default(),
             Scripted::new(Mode::Cut),
             None,
-        )
-        .build();
+        ))
+        .await
+        .unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -626,13 +628,14 @@ async fn a_manual_compaction_keeps_at_most_the_latest_turn() {
 async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
     let model = Arc::new(ToolOnRequest::default());
     *model.text.lock().unwrap() = "tool output".into();
-    let agent = builder_with_strategy(
+    let agent = MinimalHost::start(&builder_with_strategy(
         model.clone(),
         HistoryRenderer::default(),
         Scripted::new(Mode::Cut),
         None,
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -831,7 +834,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         None,
     );
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -918,7 +921,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             )?))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let main_head = head("main").await;
     *store.fail_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
     let failed = agent.restore_session(id.clone()).await;
@@ -1064,13 +1067,14 @@ async fn an_interrupt_cancels_a_running_step_and_a_pending_command() {
     let strategy = Scripted::new(Mode::Cut);
     let model = Arc::new(ToolOnRequest::default());
     *model.text.lock().unwrap() = "tool output".into();
-    let agent = builder_with_strategy(
+    let agent = MinimalHost::start(&builder_with_strategy(
         model.clone(),
         HistoryRenderer::default(),
         strategy.clone(),
         None,
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1124,13 +1128,14 @@ async fn an_interrupt_cancels_a_running_step_and_a_pending_command() {
 async fn a_reload_during_a_step_settles_it_without_another_strategy_call() {
     let strategy = Scripted::new(Mode::Cut);
     let reload = StrategyReload::default();
-    let agent = builder_with_strategy(
+    let agent = MinimalHost::start(&builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         strategy.clone(),
         Some(&reload),
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1182,13 +1187,14 @@ async fn a_reload_during_a_step_settles_it_without_another_strategy_call() {
 async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts() {
     let model = Arc::new(ToolOnRequest::default());
     *model.text.lock().unwrap() = "t".repeat(1_500);
-    let agent = builder_with_strategy(
+    let agent = MinimalHost::start(&builder_with_strategy(
         model.clone(),
         HistoryRenderer::default(),
         Scripted::new(Mode::FailFirst),
         None,
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1288,13 +1294,14 @@ impl DynPlugin for RawTimeline {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeated_and_concurrent_requests_join_the_outstanding_command() {
     let strategy = Scripted::new(Mode::Cut);
-    let agent = builder_with_strategy(
+    let agent = MinimalHost::start(&builder_with_strategy(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         strategy.clone(),
         None,
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -1364,7 +1371,7 @@ async fn a_second_command_consumed_while_one_is_outstanding_is_skipped() {
             Ok(Box::new(RawTimeline::new(names, captured.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

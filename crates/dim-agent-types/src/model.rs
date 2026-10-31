@@ -2,6 +2,10 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// The adopted capabilities of a model: an exact value a Session carries and
+/// ContextCompaction reads. Both limits are required and positive; absence is
+/// a property of the catalog, which carries [`CatalogCapabilities`] and
+/// converts through [`CatalogCapabilities::declared`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCapabilities {
@@ -18,7 +22,47 @@ pub struct ModelCapabilities {
     pub provider_state: Option<JsonObject>,
 }
 
-impl Default for ModelCapabilities {
+impl ModelCapabilities {
+    /// A capability value that states both limits; there is no default one,
+    /// because a model's window is a declared fact.
+    pub fn with_limits(context_window: u64, max_output_tokens: u64) -> Self {
+        Self {
+            modalities: vec!["text".into()],
+            tool_calling: true,
+            streaming: true,
+            structured_output: true,
+            vision: false,
+            audio: false,
+            reasoning: false,
+            context_window,
+            max_output_tokens,
+            provider_state: None,
+        }
+    }
+}
+
+/// The capabilities of a catalog entry. It has the same fields as
+/// [`ModelCapabilities`], but either limit is absent until a source declares
+/// it (the provider descriptor, a bundled-catalog match, or a user override).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogCapabilities {
+    pub modalities: Vec<String>,
+    pub tool_calling: bool,
+    pub streaming: bool,
+    pub structured_output: bool,
+    pub vision: bool,
+    pub audio: bool,
+    pub reasoning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_state: Option<JsonObject>,
+}
+
+impl Default for CatalogCapabilities {
     fn default() -> Self {
         Self {
             modalities: vec!["text".into()],
@@ -28,10 +72,51 @@ impl Default for ModelCapabilities {
             vision: false,
             audio: false,
             reasoning: false,
-            context_window: 128_000,
-            max_output_tokens: 16_384,
+            context_window: None,
+            max_output_tokens: None,
             provider_state: None,
         }
+    }
+}
+
+impl CatalogCapabilities {
+    /// A catalog value with both limits declared.
+    pub fn with_limits(context_window: u64, max_output_tokens: u64) -> Self {
+        Self {
+            context_window: Some(context_window),
+            max_output_tokens: Some(max_output_tokens),
+            ..Self::default()
+        }
+    }
+
+    /// The wire names of the limits no source declares, in a stable order.
+    pub fn missing_limits(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        if self.context_window.is_none() {
+            missing.push("contextWindow".into());
+        }
+        if self.max_output_tokens.is_none() {
+            missing.push("maxOutputTokens".into());
+        }
+        missing
+    }
+
+    /// The adopted value, or `None` while a limit is undeclared. This is the
+    /// only conversion into [`ModelCapabilities`], so it is where adoption
+    /// refuses a model with no declared window.
+    pub fn declared(&self) -> Option<ModelCapabilities> {
+        Some(ModelCapabilities {
+            modalities: self.modalities.clone(),
+            tool_calling: self.tool_calling,
+            streaming: self.streaming,
+            structured_output: self.structured_output,
+            vision: self.vision,
+            audio: self.audio,
+            reasoning: self.reasoning,
+            context_window: self.context_window?,
+            max_output_tokens: self.max_output_tokens?,
+            provider_state: self.provider_state.clone(),
+        })
     }
 }
 
@@ -502,6 +587,27 @@ pub struct ProviderOptions {
         deserialize_with = "crate::optional_non_null"
     )]
     pub aihubmix: Option<EffortProviderOptions>,
+}
+
+/// The preferences an adoption applies on top of a model's base configuration,
+/// in the spelling a client requests them. Derived from an adopted
+/// configuration and its protocol when a client reads them back; absent when
+/// there are none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelPreferences {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub reasoning_effort: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

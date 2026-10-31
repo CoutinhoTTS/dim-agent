@@ -120,7 +120,7 @@ async function createBranch(prompt: string): Promise<void> {
       @quote="composer?.quote($event)"
     />
     <div v-if="approval" class="composer-panel">
-      <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
+      <ApprovalPrompt :key="JSON.stringify([approval.branchId, approval.requestId])" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
     </div>
     <ComposerPanel
       v-else

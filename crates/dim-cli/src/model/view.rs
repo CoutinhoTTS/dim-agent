@@ -61,7 +61,8 @@ pub struct ViewRow {
     /// The model request a tool call came from: the calls of one request are
     /// drawn as one group.
     pub batch: Option<String>,
-    /// A tool call that has not produced its result yet.
+    /// Work this row stands for that has not settled yet: a tool call
+    /// without its result, or a user message the model has not consumed.
     pub pending: bool,
     /// A call that waits on the user (an approval names it, or it is the
     /// question tool itself): it is part of the transcript at once, and the
@@ -199,6 +200,9 @@ pub enum LineState {
 /// A tool call that asks the user for permission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalView {
+    pub member: Option<
+        Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+    >,
     pub request_id: String,
     pub branch_id: String,
     pub reason: String,
@@ -209,7 +213,8 @@ pub struct ApprovalView {
     pub always: Option<String>,
 }
 
-/// A message submitted while a turn runs, not yet consumed.
+/// A message the queue strip shows: submitted while a turn runs, without its
+/// `input/applied` yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub id: String,

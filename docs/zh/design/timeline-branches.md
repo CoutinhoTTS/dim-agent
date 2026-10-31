@@ -369,20 +369,24 @@ WorkspaceTools 不变。
 
 ### 12.3 评估场景
 
-这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：七个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
 
-| 场景 | 关注什么 |
-| --- | --- |
-| 线把自己当成 main | 它开线、把名册当成自己的，或去协调其他线 |
-| 重复劳动 | `main` 重做一条线正在做的事，或者两条线做同一件事 |
-| 过时的认识 | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
-| 刷屏 | append 或 steer 消息重复接收方已经知道的内容 |
-| 过度拆分 | 为很短或必须按顺序做的步骤开线 |
-| 不结束 | 一条线已经做完，却不调用 `end` |
-| 兄弟中转 | 用 `main` 在本该合成一条线的几条线之间传话 |
-| 压缩后的身份 | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
-| 来回空转 | 不推进工作的 steer 往复 |
-| 问用户 | 该问用户时，线直接问用户，而不是绕道 `main` |
+`identity-after-compaction` 沿用 `redone-work` 的消息和 workspace，`flooding` 与 `never-ending` 共用同一个 workspace：这两对保持完全相同，改动其中一份而不同步另一份时，读取两个提交目录的无模型测试会失败。
+
+| 场景 | 场景目录 | 关注什么 |
+| --- | --- | --- |
+| 线把自己当成 main | — | 它开线、把名册当成自己的，或去协调其他线 |
+| 重复劳动 | `timeline-branches/redone-work` | `main` 重做一条线正在做的事，或者两条线做同一件事 |
+| 过时的认识 | — | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
+| 刷屏 | `timeline-branches/flooding` | append 或 steer 消息重复接收方已经知道的内容 |
+| 过度拆分 | `timeline-branches/over-splitting` | 为很短或必须按顺序做的步骤开线 |
+| 不结束 | `timeline-branches/never-ending` | 一条线已经做完，却不调用 `end` |
+| 兄弟中转 | `timeline-branches/sibling-relay` | 用 `main` 在本该合成一条线的几条线之间传话 |
+| 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
+| 来回空转 | `timeline-branches/ping-pong` | 不推进工作的 steer 往复 |
+| 问用户 | `timeline-branches/asking-the-user` | 该问用户时，线直接问用户，而不是绕道 `main` |
+
+场景目录为 `—` 的一行在这个场景集里没有对应场景。
 
 ### 12.4 文本及其类别
 

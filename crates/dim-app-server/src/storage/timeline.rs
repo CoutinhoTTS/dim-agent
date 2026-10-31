@@ -853,10 +853,11 @@ impl SessionStore {
         &self,
         agent: Option<String>,
         version: u32,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Vec<crate::protocol::SessionInfo>> {
         self.timeline
             .db
-            .run(move |connection| {
+            .run_cancellable(cancel, move |connection| {
                 let filter = if agent.is_some() {
                     " AND o.agent_id=?2"
                 } else {

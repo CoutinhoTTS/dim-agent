@@ -3,7 +3,7 @@ use axum::{
 };
 use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRenderer, host::*};
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use futures_util::StreamExt;
 use rutis::host::CtxHost;
@@ -80,7 +80,7 @@ async fn respond(
     let messages = request["messages"].as_array().unwrap();
     let last = messages.last().unwrap();
     let prompt = last["content"].as_str().unwrap_or("");
-    if prompt == "reject401" {
+    if prompt.starts_with("reject401") {
         return Response::builder()
             .status(401)
             .header("content-type", "application/json")
@@ -88,6 +88,9 @@ async fn respond(
                 r#"{"error":{"message":"Expired credential","code":"token_expired"}}"#,
             ))
             .unwrap();
+    }
+    if prompt == "slowheaders" {
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
     let (data, hold) = if last["role"] == "tool" {
         (
@@ -156,30 +159,13 @@ fn builder(models: Arc<AimuxModels>, tools: Arc<dyn ToolDriver>) -> AgentBuilder
     dim_agent_aimux::install(&mut builder);
     builder
 }
-struct ModelAgent {
-    agent: Agent,
-    root: rutis::Ctx,
-}
-impl std::ops::Deref for ModelAgent {
-    type Target = Agent;
-    fn deref(&self) -> &Agent {
-        &self.agent
-    }
-}
-impl ModelAgent {
-    async fn close(&self) -> dim_agent_runtime::Result<()> {
-        self.agent.close().await?;
-        self.root.shutdown().await.map_err(Into::into)
-    }
-}
-fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> ModelAgent {
-    let root = rutis::Ctx::root().unwrap();
-    root.plugin(AimuxPlugin);
-    root.plugin(ConfiguredModelsPlugin(models.clone()));
-    let agent = custom
-        .unwrap_or_else(|| builder(models, Arc::new(MockTools)))
-        .build_in(&root);
-    ModelAgent { agent, root }
+/// The host's model plugins are process rows of its loader.
+async fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> MinimalHost {
+    let mut builder = custom.unwrap_or_else(|| builder(models.clone(), Arc::new(MockTools)));
+    builder
+        .plugin(|_| Ok(Box::new(AimuxPlugin)))
+        .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
+    MinimalHost::start(&builder).await.unwrap()
 }
 fn session_config() -> SessionConfig {
     SessionConfig {
@@ -263,7 +249,7 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
 async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let server = TestServer::start().await;
-        let agent = model_agent(server.models(), None);
+        let agent = model_agent(server.models(), None).await;
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
@@ -331,7 +317,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let server = TestServer::start().await; let agent = model_agent(server.models(), None);
+        let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("wait".into(), InputMode::Queue, "main").await.unwrap();
         // Streaming text is progress until its block ends (agent-029).
@@ -352,7 +338,7 @@ async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let server = TestServer::start().await; let agent = model_agent(server.models(), None);
+        let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
         for prompt in ["unauthorized", "truncated", "length"] {
             let session = agent.create_session(session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
@@ -370,7 +356,7 @@ async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
 #[tokio::test]
 async fn model_configuration_rejects_unknown_models_before_session_start() {
     let server = TestServer::start().await;
-    let agent = model_agent(server.models(), None);
+    let agent = model_agent(server.models(), None).await;
     let mut config = session_config();
     config.model.model_id = "not-registered".into();
     assert!(agent.create_session(config).await.is_err());
@@ -465,7 +451,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         for remove_tools in [false, true] {
             let mut builder = builder(models.clone(), Arc::new(MockTools));
             builder.require_feature(Feature::new("test.final-model-request").branch("test.final-model-request", move |names| Ok(Box::new(OverrideRequest { remove_tools, timeline: names.key()? }))));
-            let agent = model_agent(models.clone(), Some(builder)); let session = agent.create_session(session_config()).await.unwrap();
+            let agent = model_agent(models.clone(), Some(builder)).await; let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = session.history("main", None).await.unwrap();
@@ -489,6 +475,248 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         assert!(original.endpoint.requests.lock().unwrap().is_empty());
         original.close().await; selected.close().await;
     }).await.unwrap();
+}
+
+static RECORDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Holds the process recorder for one test, resets it and removes the file
+/// afterwards.
+struct Recording {
+    directory: std::path::PathBuf,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Recording {
+    async fn start() -> Self {
+        let lock = RECORDING.lock().await;
+        let directory = std::env::temp_dir().join(format!(
+            "dim-recording-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        dim_agent_aimux::recording::set_request_recording(Some(&directory)).unwrap();
+        Self {
+            directory,
+            _lock: lock,
+        }
+    }
+
+    fn restart(&self) {
+        dim_agent_aimux::recording::set_request_recording(None).unwrap();
+        dim_agent_aimux::recording::set_request_recording(Some(&self.directory)).unwrap();
+    }
+
+    fn lines(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.directory.join("recordings.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    async fn wait(&self, count: usize, matches: impl Fn(&Value) -> bool) -> Vec<Value> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let lines: Vec<Value> = self
+                .lines()
+                .into_iter()
+                .filter(|line| matches(line))
+                .collect();
+            if lines.len() >= count {
+                return lines;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the recording was not written: {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_private(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::fs::metadata(&self.directory).unwrap();
+        assert_eq!(directory.permissions().mode() & 0o777, 0o700);
+        let file = std::fs::metadata(self.directory.join("recordings.jsonl")).unwrap();
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        let _ = dim_agent_aimux::recording::set_request_recording(None);
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_requests_write_their_wire_exchange() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let recording = Recording::start().await;
+        let server = TestServer::start().await;
+        let agent = model_agent(server.models(), None).await;
+        let session = agent.create_session(session_config()).await.unwrap();
+        session
+            .submit("text".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+
+        let url = format!("{}/chat/completions", server.url);
+        let lines = recording
+            .wait(1, |line| {
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+            })
+            .await;
+        let recorded = &lines[0];
+        let call_id = recorded["call_id"].as_str().unwrap();
+        assert_eq!(
+            recording
+                .lines()
+                .iter()
+                .filter(|line| line["call_id"] == call_id)
+                .count(),
+            1,
+            "one line per call, including the transport close"
+        );
+        let exchange = &recorded["exchanges"][0];
+        assert_eq!(exchange["response"]["status"].as_u64(), Some(200));
+        assert!(
+            exchange["request"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("\"messages\"")
+        );
+        assert!(exchange["timing"]["latency_ms"].is_number());
+        assert_eq!(recorded["provider"]["provider"], "openai");
+        assert_eq!(recorded["provider"]["model_id"], "test-model");
+        assert_eq!(recorded["outcome"]["status"], "success");
+        assert!(recorded["complete"].as_bool().unwrap());
+        assert!(recorded["input"]["prompt"].is_array());
+
+        recording.restart();
+        session
+            .submit("again".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let recorded = recording
+            .wait(2, |line| {
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+            })
+            .await;
+        assert_eq!(recorded.len(), 2, "the enable/disable cycle records again");
+        let calls: std::collections::HashSet<_> = recorded
+            .iter()
+            .map(|line| line["call_id"].as_str())
+            .collect();
+        assert_eq!(calls.len(), 2);
+        for call in &recorded {
+            assert_eq!(call["outcome"]["status"], "success");
+            assert!(call["complete"].as_bool().unwrap());
+        }
+        #[cfg(unix)]
+        recording.assert_private();
+
+        agent.close().await.unwrap();
+        server.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_failures_and_cancellations_close_their_record() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let recording = Recording::start().await;
+        let server = TestServer::start().await;
+        let url = format!("{}/chat/completions", server.url);
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let request = |text: &str| {
+            Arc::new(ModelRequest::new(
+                "logical-provider",
+                "test-model",
+                vec![Message::text(Role::User, text)],
+            ))
+        };
+        let connection = |key: &str| {
+            ModelConnection::Http(HttpModelConnection {
+                api_key: None,
+                network: Default::default(),
+                protocol: ModelProtocol::OpenaiCompatible,
+                base_url: server.url.clone(),
+                bearer: Some(key.to_owned()),
+                headers: Default::default(),
+                preset: None,
+            })
+        };
+
+        let failure = host
+            .0
+            .invoke(
+                request("reject401 recorded"),
+                connection("expired-secret"),
+                CancellationToken::new(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            failure,
+            HostError::Failed {
+                kind: HostErrorKind::Http {
+                    status: Some(401),
+                    ..
+                },
+                ..
+            }
+        ));
+        let lines = recording
+            .wait(1, |line| {
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+                    && line["input"]["prompt"]
+                        .to_string()
+                        .contains("reject401 recorded")
+            })
+            .await;
+        assert_eq!(lines.len(), 1, "one line for a failed call");
+        assert_eq!(lines[0]["outcome"]["status"], "error");
+        assert_eq!(lines[0]["exchanges"][0]["response"]["status"], 401);
+        assert!(lines[0]["complete"].as_bool().unwrap());
+
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stop.cancel();
+        });
+        let failure = host
+            .0
+            .invoke(request("slowheaders"), connection("key"), cancel)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(failure, HostError::Cancelled(_)), "{failure:?}");
+        let lines = recording
+            .wait(1, |line| {
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+                    && line["input"]["prompt"].to_string().contains("slowheaders")
+            })
+            .await;
+        assert_eq!(lines.len(), 1, "one line for a cancelled call");
+        assert_eq!(lines[0]["outcome"]["status"], "cancelled");
+        assert!(lines[0]["exchanges"][0]["response"].is_null());
+        assert!(lines[0]["complete"].as_bool().unwrap());
+
+        server.close().await;
+    })
+    .await
+    .unwrap();
 }
 
 #[path = "model_flow/native.rs"]

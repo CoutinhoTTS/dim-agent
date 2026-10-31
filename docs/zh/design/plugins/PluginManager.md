@@ -157,14 +157,14 @@ flowchart LR
 
 | 状态 | 所有者 | 读取方式 |
 | --- | --- | --- |
-| 有哪些行，以及它们的 `EntryStatus` | rutis-loader | `Loader::entries()`、`Loader::get(id)`、`Loader::waiting_for`；按附录 A.1 显示 |
+| 有哪些行，以及它们的 `EntryStatus` | rutis-loader | `Loader::entries()`、`Loader::get(id)`、`Loader::waits`；按附录 A.1 显示 |
 | 有哪些内置 rutis 插件 | App Server 的装配 | `Loader::entries()` 中 `assembly` 层的行；行 id 就是插件的名字 |
 | 从插件登记的 skill、MCP 服务器、hook | SkillsCatalog、Mcp、Hooks | 所有者自己的方法 |
 | 插件的业务配置 | 插件的 Settings 来源 | Settings |
 
 ### 2.5 运行时
 
-插件代码在 Node 或 Python 的 rutis 运行时里运行。提供运行时不归 PluginManager 管：运行时怎么获取、固定哪个版本、怎么校验，运行时就绪后插件的行怎么启动，都由 [RuntimeManager](RuntimeManager.md) 决定（[#476](https://github.com/arcships/dim/issues/476)，M1）。PluginManager 只负责建行；运行时还没有时，`plugin.list` 显示 rutis 给出的状态和原因。reload 只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
+插件代码在 Node 或 Python 的 rutis 运行时里运行。提供运行时不归 PluginManager 管：运行时怎么获取、固定哪个版本、怎么校验，运行时就绪后插件的行怎么启动，都由 [RuntimeManager](RuntimeManager.md) 决定（[#476](https://github.com/arcships/dim/issues/476)，M1）。PluginManager 只负责建行；运行时还没有时，该行在 `plugin.list` 里是 `pending`，等待运行时的连接行（`session-node` 或 `py`）。运行时本身进行到哪一步（获取中、失败、启动中、down）由 `runtime.list` 显示。reload 只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
 
 TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 PluginManager 维护的链接导入：`<home>/plugins/.python/<package>` 指向插件目录，`<package>` 是插件的 id（默认插件用名字），其中 `-` 换成 `_`；它的行名是 `py:<package>.<入口模块>`，插件在自己的包内使用相对导入。PluginManager 在打开插件时创建链接，更新后把它指向新目录，移除插件时删除它。Python 运行时从 `<home>/plugins/.python/` 导入（#476）。
 
@@ -216,7 +216,7 @@ TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 Plug
 `plugin.reload {name}` 重新加载该名字使用的插件。宿主不监视任何文件；这个调用就是表示有东西变了的信号。
 
 1. 再次读取清单。如果名字变了，拒绝（`name_changed`）；用户用新名字重新安装它。
-2. 代码：`Loader::reload("plugin:<name>")`。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager reconcile 推导出的层，层里的这一行带着新字段。
+2. 代码：只调用 `Loader::reload("plugin:<name>")`：没有要清的解析器缓存，运行时在每次解析时都重新描述模块。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager reconcile 推导出的层，层里的这一行带着新字段。
 3. 内容：把每种内容重新登记到存在的所有者；新文档替换旧文档。清单不再带有的种类被撤回。
 4. 如果 `kinds` 变了，更新 `plugins.json` 中的 `kinds`。
 
@@ -246,7 +246,7 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 ## 5. 上下文映射
 
-PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的文本。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。该工具的文本按[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)归类：命令名与每个命令的参数文法、声明携带的单行命令表、usage 文本中的 `Usage:` 行是 protocol，因为工具按原样解析它们；usage 行之后的句子以及 `help` 中说明命令做什么、不碰什么的句子是 policy。格式错误的命令，其错误结果携带命令表或该命令的 usage；被拒绝的调用，其错误携带错误码（A.2）——两者都是 protocol。完成的调用结果说明变更了什么、状态是什么，以及适用时的 `restartRequired`；这也是 protocol，因为模型据此决定下一步。
+PluginManager 除 `plugin` 工具外不向模型上下文加入任何自己的文本。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。该工具的文本按[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)归类。声明的 schema 是 protocol，“Manage Dim plugins.” 也是 protocol，因为它陈述工具的触及范围；它携带的单行命令表（连同命令名与每个命令的参数文法）同样是 protocol，因为工具按原样解析它们。“Run `help <command>` for a command's details.” 是 policy 指引，其中 `help <command>` 是 protocol，因为它点明要调用的命令；这句话还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。usage 文本中的 `Usage:` 行是 protocol，usage 行之后的句子以及 `help` 中说明命令做什么、不碰什么的句子是 policy。格式错误的命令，其错误结果携带命令表或该命令的 usage；被拒绝的调用，其错误携带错误码（A.2）——两者都是 protocol。完成的调用结果说明变更了什么、状态是什么，以及适用时的 `restartRequired`；这也是 protocol，因为模型据此决定下一步。
 
 ## 6. 接口（摘要）
 
@@ -300,7 +300,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 ## 9. 向机制所有者提出的需求
 
-没有向 rutis 提出的需求：用到的每个 loader 操作在 rutis-loader 0.17.1 中都已存在。
+没有向 rutis 提出的需求：用到的每个 loader 操作在 rutis-loader 0.19.1 中都已存在。
 
 **R1. Settings：在运行时登记来源（M1）。**
 
@@ -357,7 +357,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `Loader::waiting_for` 给出的 `waitingFor`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
+名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `waitingFor`，即 `Loader::waits` 给出的服务；等待运行时的行给出运行时的连接行 `session-node` 或 `py`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
 
 ### A.2 错误
 

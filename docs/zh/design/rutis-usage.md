@@ -20,7 +20,10 @@ TypeScript 的绑定。
 - 依赖门控、Pending 与重载传播；
 - 按类型和按名字的服务、实例化组，以及按实例解析名字；
 - loader 行与配置；
-- 语言运行时、跨语言调用、事件总线与诊断。
+- 作为 rutis session 远端的语言运行时、跨语言调用、事件总线与诊断。
+
+本地运行时是宿主的一个连接行：它的插件用 rutis-bridge 的公开部件启动运行时进程，并在其上挂载 session
+（附录 A.4）。这是 rutis 为宿主自己的连接写明的形式，不是包装。
 
 Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifest、role 字段、第二套服务目录、第二条总线，
 也不增加按语言的中继或适配器。
@@ -34,7 +37,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 | 行字段 | 含义 |
 | --- | --- |
 | `id` | 配置中稳定的行标识 |
-| `name` | 模块：内置名称、路径，或运行时前缀（`py:`、`bun:` …） |
+| `name` | 模块：内置名称；路径或 npm 名称，在 Node 运行时中运行；或 `<运行时行>:<模块>`，例如 Python 运行时的 `py:<module>` |
 | `config` | 结构性配置，由插件的 schema 校验 |
 | `inject` | 插件依赖的名称。外来插件自身的 `inject` 必须等于这个列表，或是它的子集 |
 | `isolate`、`disabled` | rutis 隔离标签；该行是否关闭 |
@@ -43,10 +46,11 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 一个 effect，和 Cordis 把 `ctx.on` 绑定到调用方一样：插件的这一代运行多久，登记就保持多久；这一代无论怎样结束，
 登记都会撤销。生成器的依赖在实例挂载它时按它的作用域检查，所以点名了作用域之外的组的部件在那时失败。
 
-**插件在哪里运行。** App Server 把插件作为它 loader 里的进程行放置，并以进程名字 `partRegistry` 把登记处交给它们。
-库宿主或测试把插件加到 Agent builder 上（`AgentBuilder::plugin`），自己放置的 Agent 把它们挂进自己的 loader。
-登记处属于一次放置：自己放置的 Agent 只挂它自己的插件登记的部件，所以同一个 builder 建出的两个 Agent 不会挂上
-彼此的部件。
+**插件在哪里运行。** 一个宿主只有一个 loader，它的 Agent 就建在这个 loader 里（`AgentBuilder::build(loader, anchor)`）。
+App Server 把插件作为它 loader 里的进程行放置，并以进程名字 `partRegistry` 把登记处交给它们。测试、示例和 `xtask`
+也是宿主，和 App Server 一样：最小宿主（`dim_agent_runtime::testing::MinimalHost`）用同样的方式装配一个根和它的
+loader，把加到 Agent builder 上的插件（`AgentBuilder::plugin`）放成进程行。每个最小宿主有自己的登记处，所以同一个
+builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
 
 **挂载。** 每个 Session 实例和分支实例里都有两个挂载器行，除了作用域自己的机制，它们是该组仅有的行。
 
@@ -83,12 +87,12 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - capabilities 各 crate 的每个功能、App Server 的每个 Session 部件，都是一个登记自己部件的插件：
   `Feature`（不持有进程状态的插件）用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加。
   安装函数就是 profile，它按名字要求自己安装的部件（`require_feature`、`require_part`）。App Server 把 builder
-  的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；自己放置的
-  Agent 在自己的 loader 里挂载它们，用自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
+  的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；最小宿主也这样
+  做，用它自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
   持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
   WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
-  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
-  第一个 Session 或 `Agent::start` 时启动自己的插件。
+  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。最小宿主在启动时
+  启动它的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - `partRegistry` 可以跨语言调用：TypeScript 或 Python 插件是进程里的一行，用 `registerDefinition` 登记自己的部件（附录 B，[#403](https://github.com/arcships/dim/issues/403)）；声明了组的行会被 App Server 拒绝。
 
@@ -124,7 +128,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 ### 3.4 服务目录
 
 每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
-或由外来部件提供的名称，注册在宿主的 loader 服务目录中。服务目录只共享这些名称（`share_registered_only`）。
+或由外来部件提供的名称，注册在宿主的 loader 服务目录中。
 `xtask graph` 从真实装配写出权威的表，即[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，
 表过期时 `xtask check` 失败（R4）。Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
 
@@ -147,7 +151,12 @@ loader 为每个副本解析每个名字，各运行时落实结果。部件代�
 | Python 和其他运行时 | `inject`、`use`、`provide` | 同上，通过该运行时的隔离表 |
 | Rust | 在 `injects` 中列出名字的 key，在 `apply` 中用 `require_at` 读取；在同一个 key 上提供 `T` | 绑定按名字和副本的实例链从目录取得 key（附录 A） |
 
-- **私有名字。** 部件用自己行上的 `isolate` 把一个服务留给自己或一组部件。目录不共享这样的名字。
+- **私有名字。** 部件用自己行上的 `isolate` 把一个服务留给自己或一组部件，运行时行和 Rust 行都一样。目录不共享
+  这样的名字。其他语言的 Session 部件或分支部件是定义副本，没有自己的行，因此不带 `isolate`：它的名字就是所在实例的。
+- **运行时行。** TypeScript 或 Python 插件的行经它所在运行时的 session（`session-node` 或 `py`，附录 A.4）解析。
+  session 不在时，该行等它；session 结束时，它的行重新等待。Dim 不在运行时行上写 `isolate`。
+- **session 导出。** 每个 rutis session 都把非平台插件提供的每个进程级共享名字导出给远端，并宣告每个监听名。
+  语言运行时和 UI leaf 都同样能拿到这些名字；它们是受信任的本地代码（AGENTS 第 11 条）。
 - **Rust 的 key。** 用 Rust 类型登记的名字位于该类型的 key；跨语言的名字位于它的分发器的 key（`host_key`）。
   两者都用组的实例限定。Rust 部件在分发器的 key 上读取任何语言的提供方。导出的 Rust 服务两者都有。
 - **提供的名字。** 行没有声明、在运行时才宣告的服务，rutis 以其普通名字在整个进程内发布。在 Session 或分支内，
@@ -186,7 +195,8 @@ Dim 在此之上增加发布与关闭两个阶段（[插件契约 §7](plugin-co
 
 Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线事件，见[插件契约 §5.3](plugin-contract.md#53-总线事件)。
 
-*现状：*Dim 已在 rutis 0.17.1 上，本节成立。
+*现状：*Dim 已在 rutis 0.19.2 上，本节成立。总线跨越每个 rutis session：两端各自宣告自己的监听名，事件到达任一端
+该名称的监听器，语言运行时的每次 emit 都经过宿主。
 
 ## 6. 向机制所有者提出的需求
 
@@ -352,9 +362,9 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 ```
 
 必需挂载器挂载 profile 要求的部件（`AgentBuilder::require_part`），把它们和必需行一起交给实例的发布；
-必需部件尚未有人登记时，创建在自己的时限内等它登记。builder 的登记处（`AgentBuilder::parts`）服务于宿主放置的
-Agent（`build_at`），宿主以 `partRegistry` 把它提供给自己的进程插件（`AgentBuilder::plugin_rows`）；自己放置的
-Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `ctx` 的一个 effect。
+必需部件尚未有人登记时，创建在自己的时限内等它登记。builder 的登记处（`AgentBuilder::parts`）服务于宿主建出的
+Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自己的进程插件（`AgentBuilder::plugin_rows`）；
+最小宿主建一个自己的登记处。登记是调用方 `ctx` 的一个 effect。
 挂载器在 rutis 自己的级联清理之前先卸下自己挂的副本，所以已经失败的副本在实例关闭时不会再报一次错；
 `SessionLoader` 从所在实例的 Session scope 行创建实例，因为 loader 只能从行的上下文放置实例。
 
@@ -363,8 +373,7 @@ Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `
 
 宿主为进程名称配置的值（例如脚本化的 `ModelHost`）用 `AgentBuilder::process_value`。Agent 组行
 （`AgentBuilder::agent_row`）包含它的提供方，并按 Agent 实例隔离该名称，因此共享宿主的其他 Agent、宿主自己
-对该名称的提供方都不会与它冲突。自行托管的 Agent 放置这一行；使用 `build_at` 的宿主把它放进自己的 loader，
-该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
+对该名称的提供方都不会与它冲突。宿主把这一行放进自己的 loader，该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
 
 ### A.3 已定的问题
 
@@ -379,6 +388,32 @@ Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `
   Session、分支、进程启动和 restart 使用同一规则。分支等待父分支时跟随父分支自身受限的打开过程，
   不另加总时限。没有进展时列出未 Active 的行及缺少的依赖并失败；组合错误或必需提供者失败立即返回。
   回滚取消各行，rutis 从不中止 `apply`，而是等待它在 `ctx.cancelled()` 完成后返回。
+
+### A.4 运行时与 session
+
+App Server 的根提供 `rutis_bridge::LocalId("dim-daemon")`，它与每个 session 握手时都用这个 id。它不挂载
+`Session::service()`，因为那个服务的名字 `sessions` 是 Dim 的 `AgentDirectory`。
+
+每个本地运行时是一个进程级连接行，Node 是 `session-node`，Python 是 `py`。它的插件 `RuntimeConnection`
+（`dim-app-server/src/session_typescript.rs`）：
+
+- 注入一个携带启动命令的仅限 Rust 的进程服务（`nodeRuntime`、`pythonRuntime`），所以命令提供之后该行才启动。
+  配置了运行时路径时由 App Server 在启动时提供；否则由 RuntimeManager 在取得运行时之后提供
+  （[RuntimeManager](plugins/RuntimeManager.md)）；再次提供会重启该行；
+- 用 `rutis_bridge::runtime::Launcher`（`--id <row>`）启动进程，记在自己的 `pipe::Processes` 中，等它的问候
+  （`pipe::greeted`），再挂载 `Session::new(channel)`。卸载时杀掉尚未结束的进程并等它结束。标准错误逐行写到 `tracing`；
+- 用 Dim 自己的值 `RuntimeStatus`（`starting`、`ready`，或带原因的 `down`）在 `RuntimeStatus::key(row)` 记录运行时的
+  状态。运行时启动失败或进程结束时，该行仍是 Active，状态因此仍可读取；运行时的各行重新等待。
+
+一个 `rutis_loader::runtime::SessionResolver::npm(catalog, "session-node")` 放在解析链末尾，解析两个运行时的行：
+`py:<module>` 在 `py` 的 session 上，其他外来名字在 `session-node` 上，由 Node 运行时解析 npm 名称。它在 loader
+挂载之前接到 loader 上（`attach`），loader 运行后跟随每个运行时行（`follow_row`）。Dim 的 `SnapshotResolver`
+包住它，只做 rutis 不做的事：按 `provides` 快照检查每一行，并把各自的包交给使用 `workflowFiles` 的行。配置了运行时
+路径时，准入等待每个运行时的行（`SessionRows::key(row)`）；RuntimeManager 取得的运行时是可选的，所以启动从不等下载。
+`plugin.reload` 就是 `Loader::reload(row)`；没有解析器缓存。
+
+rutis-loader 的 `LoaderPlugin` 还提供带标记的服务 `loader`。注入它的外来行可以 `reload` 一行、读取 `status`；
+`create` 和 `remove` 会被拒绝，因为 Dim 不配置可编辑的层，所以 PluginManager 仍是行的唯一写入者。
 
 ## 附录 B. TypeScript 与 Python 绑定
 
@@ -407,8 +442,8 @@ export default definePlugin({
 })
 ```
 
-Python 行的名字以运行时为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，从配置的
-项目目录导入该模块。
+Python 行的名字以运行时的行为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，从配置的
+项目目录导入该模块。Python 运行时需要 Python 3.12 或更高版本。
 
 ```json
 { "id": "python", "name": "py:python_plugin", "provides": {}, "config": {} }

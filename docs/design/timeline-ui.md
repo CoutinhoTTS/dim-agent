@@ -154,6 +154,31 @@ The new line answers in a panel while the screen stays on the parent. In fullscr
 4. In fullscreen the panel pushes the transcript up, and closing it brings the transcript back down onto the composer. Scrollback never lifts the composer, so there the panel opens below it, where menus open, and closing it leaves no gap above the composer.
 5. `/branch` that cannot open a line (no finished turn yet, the shown line ended) keeps its draft in the composer and says why.
 
+### 4.8 A message the model has not read yet
+
+A user message is written, applied and then consumed. The client draws the row from `input/applied`, and the row shows whether the model has read it yet:
+
+| State | Fact | The model has read it | Drawn as |
+| --- | --- | --- | --- |
+| queued | `input/message`, InputQueue holds it | no | the queue strip above the composer, while the line runs |
+| applied | `input/applied`, waiting for Loop's next request | no | a pending message row |
+| consumed | `input/consumed`, in the request that carries it | yes | a user message row |
+
+A pending row keeps its text and its cut, and draws in the muted colour without the band. In fullscreen the row is committed where the message was said, and `input/consumed` redraws that block in place; leaving fullscreen settles a committed pending row first, because scrollback cannot take the hint back. Scrollback is append-only, so there a row that can still change stays in the live tail (as a streaming answer and a running tool group do) and enters scrollback once it settles, in the user colour. The tail is drawn after everything committed, so a pending row stays there only while it is the newest: when a later row settles first — an applied input that outlives a stop — the message is committed in Timeline order in the user colour, and scrollback cannot take the hint back. A message waiting for the next request therefore reads as unanswered wherever the drawing can still change it:
+
+```
+ › how do we fix this deadlock                       the model has read this
+ › add the missing test too                          still muted: not read yet
+```
+
+An applied input can stay pending across a stop, which is the state the next turn consumes ([interrupt](../architecture/rust-agent/interrupt.md)).
+
+A row the interface commits itself, outside the transcript rows — a notice, a `!!` run, the failure line, the boundary of a resume — is not part of that ordering, and can stand above a pending message.
+
+The pending style is the terminal UI's: Web's v1 `session.event` filters `input/consumed` ([event-driven flows](../architecture/rust-agent/event-driven-flows.md)), so a Web message still reads as sent.
+
+The row is keyed by input id from the `input/message` that wrote it to the `input/consumed` that settles it, so a reattached client that folds the same events draws the state it reached, not the state at the time of the write.
+
 ## 5. Switching lines
 
 Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the shown line's transcript, laid out once that line's history has loaded, which holds its own events only (each branch numbers its own sequences, [sessions service D11](appserver/sessions-service.md)). Its inherited history is its parent's, one marker away.
@@ -178,7 +203,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 | # | Need | Owner | Notes |
 | --- | --- | --- | --- |
 | R1 | `LineView.cut`: the parent sequence and the message count at it | CLI projection | Folded from `branch/create.at` and the parent's user inputs; no format change |
-| R2 | A user message row's cut (`ViewRow.cut`) and a marker row's line (`ViewRow.line`) | CLI projection | From sequences the client already has |
+| R2 | A user message row's cut (`ViewRow.cut`), whether the model has consumed it (`ViewRow.pending`), and a marker row's line (`ViewRow.line`) | CLI projection | From sequences and input state the client already has |
 | R3 | `session.branch_create` and `session.fork` calls | CLI session host | Existing methods; a request made from a stale attachment is refused locally |
 | R4 | Later, optional: show a fork's origin (`↗ forked` on the source, `forked from S` in the fork) | App Server, needs a format decision | `session/forked` carries no data and the fork design adds no provenance column |
 
@@ -194,6 +219,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 - New interaction: `b`/`f` on a pick, the composer's line draft and fork question, the path border, `/branch` and `/fork`. Each serves one rule of §2.
 - The side panel (§4.7) is the one new surface: following a line without leaving the parent needs a view of the line that the parent's Timeline cannot hold. It folds nothing new; the CLI already keeps a transcript per opened line. Its collapsed form is the existing `⑂` marker, so dismissal writes nothing.
 - Considered and dropped: a `b` key in the lines panel (needs each line's head; `/branch` on the shown line covers it), greyed hints per point (a notice on the key says the same with less state), end markers (§4.4), a one-row summary of the inherited prefix and `Esc Esc` back to the parent (§5 and the marker already lead there).
+- The pending message (§4.8) adds no list of its own: it is the same row, keyed by input id, and the queue strip is that row's earlier state. Scrollback's live tail and fullscreen's in-place redraw are the rules a streaming answer, a running tool group and a delegation card already follow, and the three states come from events the client already receives — no timer, no new event, no second transcript.
 
 ## 10. Decisions
 

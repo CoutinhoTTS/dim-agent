@@ -319,3 +319,101 @@ async fn node_a_second_provider_of_a_name_in_one_instance_fails() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// A row that injects `loader` (rutis 0.19 upgrade M5) reads the rows'
+/// status and reloads a row, but cannot add or remove one: Dim configures no
+/// editable layer, so PluginManager stays the only writer of rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE, DIM_TEST_JS_RUNTIME and DIM_TEST_PYTHON"]
+async fn node_a_row_injecting_loader_reloads_and_reads_but_cannot_add_or_remove_rows() {
+    let project = home("dm-loader");
+    std::fs::create_dir_all(&project).unwrap();
+    let (applied, outcome) = (project.join("applied"), project.join("outcome.json"));
+    std::fs::write(
+        project.join("target.py"),
+        format!(
+            "def apply(ctx, config):\n    with open({:?}, 'a') as applied:\n        applied.write('x')\n",
+            applied.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("loader_probe.py"),
+        format!(
+            r#"import asyncio
+import json
+import pathlib
+
+inject = ["loader"]
+tasks = []
+
+
+async def script(loader):
+    outcome = {{}}
+
+    async def attempt(label, call):
+        try:
+            await call
+            outcome[label] = "ok"
+        except Exception:
+            outcome[label] = "refused"
+
+    status = await loader.status()
+    outcome["rows"] = sorted(row["id"] for row in status["rows"])
+    await attempt("reload", loader.reload("target"))
+    await attempt("create", loader.create({{"id": "added", "name": "py:target"}}))
+    await attempt("remove", loader.remove("target"))
+    pathlib.Path({:?}).write_text(json.dumps(outcome))
+
+
+def apply(ctx, config):
+    tasks.append(asyncio.get_running_loop().create_task(script(ctx.use("loader"))))
+"#,
+            outcome.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut parts = fixture();
+    parts.python = Some(PythonConfig {
+        interpreter: std::env::var_os("DIM_TEST_PYTHON")
+            .expect("DIM_TEST_PYTHON")
+            .into(),
+        project: project.clone(),
+        packages: None,
+    });
+    parts.rows = vec![
+        json!({"id": "target", "name": "py:target", "provides": {}}),
+        json!({"id": "probe", "name": "py:loader_probe", "provides": {}}),
+    ];
+    let (server, _, _) = super::session_typescript::start(ServerConfig {
+        session_typescript: Some(parts),
+        ..Default::default()
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !outcome.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the probe's script ends");
+    let outcome: Value = serde_json::from_slice(&std::fs::read(&outcome).unwrap()).unwrap();
+    assert!(
+        outcome["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row == "target"),
+        "{outcome}"
+    );
+    assert_eq!(outcome["reload"], "ok", "{outcome}");
+    assert_eq!(outcome["create"], "refused", "{outcome}");
+    assert_eq!(outcome["remove"], "refused", "{outcome}");
+    assert_eq!(std::fs::read_to_string(&applied).unwrap(), "xx");
+    let loader = server.service::<rutis_loader::Loader>().unwrap();
+    assert!(loader.get("target").is_some());
+    assert!(loader.get("added").is_none());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(project).unwrap();
+}

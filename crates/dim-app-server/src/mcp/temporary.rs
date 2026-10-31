@@ -2,7 +2,7 @@
 use super::{
     McpConnection,
     config::McpServerSettings,
-    server::{McpServer, McpServerPlugin},
+    server::{McpServer, McpServerError, McpServerPlugin},
     session::contribution,
 };
 use dim_agent_capabilities::{
@@ -59,6 +59,14 @@ fn failed() -> RpcError {
     RpcError::service(
         "mcp_binding_failed",
         "Temporary MCP server initialization or connection failed",
+    )
+}
+/// The same refusal with the server's cause appended, so a refused tool list
+/// names the tool and the schema path.
+fn failed_because(error: &McpServerError) -> RpcError {
+    RpcError::service(
+        "mcp_binding_failed",
+        format!("Temporary MCP server initialization or connection failed: {error}"),
     )
 }
 fn missing() -> RpcError {
@@ -289,7 +297,7 @@ impl DynPlugin for BindingPlugin {
                     let mut previous = None;
                     loop {
                         for (state, tools) in &mut watches { state.borrow_and_update(); tools.borrow_and_update(); }
-                        let lists = try_join_all(connections.iter().map(|(_,connection)| connection.tools(&stop))).await.map_err(|_| failed())?;
+                        let lists = try_join_all(connections.iter().map(|(_,connection)| connection.tools(&stop))).await.map_err(|error| failed_because(&error))?;
                         if previous.as_ref() != Some(&lists) {
                         let next = connections.iter().zip(&lists).map(|((id,connection),tools)| Arc::new(ToolSourceSet {
                             key: format!("{prefix}:{id}"), version: uuid::Uuid::new_v4().to_string(),

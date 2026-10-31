@@ -68,11 +68,7 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
         "local_transport_required"
     );
 
-    let caps = dim_agent_types::ModelCapabilities {
-        context_window: 32000,
-        max_output_tokens: 2048,
-        ..Default::default()
-    };
+    let caps = dim_agent_types::CatalogCapabilities::with_limits(32000, 2048);
     let entry =
         json!({"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps});
     assert_ok(&client.rpc("provider.create",json!({"providerId":"018ec73f-0000-7000-8000-000000000001","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},"models":[entry],"enabled":true})).await);

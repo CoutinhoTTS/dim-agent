@@ -298,7 +298,7 @@ fn capability_snapshot_validates_identity_limits_and_wire_absence() {
             provider_id: "p".into(),
             model_id: "m".into(),
         },
-        capabilities: ModelCapabilities::default(),
+        capabilities: ModelCapabilities::with_limits(128_000, 16_384),
         reasoning: None,
         service_tier: None,
     };
@@ -450,6 +450,31 @@ fn a_v1_connection_receives_a_tool_result_without_its_effects() {
     assert!(result.get("effects").is_none(), "{value}");
     assert_eq!(result["content"], "Wrote /work/dim/src/lib.rs");
     assert!(result.get("isError").is_none(), "{value}");
+}
+
+#[test]
+fn an_adopted_configuration_stores_no_derived_preferences() {
+    let settings = ModelConfiguration {
+        provider_id: "provider".into(),
+        model_id: "model".into(),
+        capability_snapshot: None,
+        tools: Some(Vec::new()),
+        tool_sources: Vec::new(),
+        config: Some(ModelConfig::default()),
+        metadata: Some(RequestMetadata::default()),
+    };
+    let value = serde_json::to_value(&settings).unwrap();
+    let keys: BTreeSet<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["providerId", "modelId", "tools", "config", "metadata"]),
+        "{value}"
+    );
 }
 
 #[test]

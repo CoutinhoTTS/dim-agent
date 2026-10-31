@@ -208,6 +208,11 @@ impl DynPlugin for ConfiguredModelPlugin {
         })
     }
 }
+
+/// The request metadata member carrying the Timeline request id, so a recording
+/// of the wire exchange names the request it belongs to.
+pub(crate) const REQUEST_ID_EXTENSION: &str = "requestId";
+
 struct Prepare {
     config: Arc<SessionConfig>,
     identity: Arc<SessionIdentity>,
@@ -240,7 +245,7 @@ impl PrepareModel for Prepare {
         metadata.turn_id = Some(turn_id.into());
         metadata
             .extensions
-            .insert("requestId".into(), request_id.into());
+            .insert(REQUEST_ID_EXTENSION.into(), request_id.into());
         settings.metadata = Some(metadata);
         Ok(settings)
     }

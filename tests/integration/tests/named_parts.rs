@@ -1,5 +1,6 @@
 //! Rust parts that depend on names only (plugin contract P2): no layer type,
 //! no scope, no group in the part. Where the row is placed decides.
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, Feature, Modules, Names, SessionConfig, SessionIdentity, Timeline,
     TimelineIdentity, names, register_part,
@@ -299,7 +300,7 @@ async fn a_part_without_layer_types_mounts_in_every_group() {
                 Ok(Box::new(BranchPart::new(names, branch_log.clone())?))
             }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -381,7 +382,7 @@ async fn a_part_provides_by_name_and_each_instance_sees_its_own_copy() {
                 Ok(Box::new(GreetedPart::new(names, greeted.clone())?))
             }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let mut ids = Vec::new();
     for _ in 0..2 {
         let session = agent
@@ -415,7 +416,7 @@ async fn a_rust_part_reads_a_crossing_name_at_its_catalog_key() {
                 Ok(Box::new(GreeterReader::new(names, read.clone())?))
             }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let mut ids = Vec::new();
     for _ in 0..2 {
         let session = agent
@@ -448,7 +449,7 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
             Ok(Box::new(BranchPart::new(names, log.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let error = agent
         .create_session(SessionConfig::default())
         .await
@@ -549,7 +550,7 @@ async fn a_session_and_its_main_branch_keep_opening_while_rows_become_active() {
         });
     }
     builder.require_feature(feature);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = tokio::time::timeout(
         Duration::from_secs(20),
         agent.create_session(SessionConfig::default()),
@@ -594,7 +595,7 @@ async fn a_row_blocking_in_apply_fails_creation_after_no_progress() {
             Feature::new("test.stuck")
                 .session("test.stuck", |names| Ok(Box::new(Stuck::new(names)?))),
         );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let started = std::time::Instant::now();
     let error = tokio::time::timeout(
         Duration::from_secs(20),
@@ -615,7 +616,6 @@ async fn a_row_blocking_in_apply_fails_creation_after_no_progress() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activity_outside_an_opening_cannot_keep_a_stuck_session_alive() {
-    let root = Ctx::root().unwrap();
     let mut builder = builder();
     builder
         .startup_timeout(Duration::from_millis(100))
@@ -623,7 +623,8 @@ async fn activity_outside_an_opening_cannot_keep_a_stuck_session_alive() {
             Feature::new("test.stuck")
                 .session("test.stuck", |names| Ok(Box::new(Stuck::new(names)?))),
         );
-    let agent = builder.build_in(&root);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let root = agent.root().clone();
     let unrelated = async {
         for _ in 0..8 {
             let view = root.plugin(ClockPart);
@@ -638,12 +639,10 @@ async fn activity_outside_an_opening_cannot_keep_a_stuck_session_alive() {
     };
     assert!(error.to_string().contains("test.stuck"), "{error}");
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restarting_an_optional_row_cannot_keep_a_stuck_opening_alive() {
-    let root = Ctx::root().unwrap();
     let mut builder = builder();
     builder
         .startup_timeout(Duration::from_millis(500))
@@ -654,9 +653,9 @@ async fn restarting_an_optional_row_cannot_keep_a_stuck_opening_alive() {
     builder.feature(Feature::new("test.churn").session("test.churn", |names| {
         Ok(Box::new(SessionPart::new(names, Arc::default())?))
     }));
-    let agent = builder.build_in(&root);
-    let opening = agent.create_session(SessionConfig::default());
-    tokio::pin!(opening);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let root = agent.root().clone();
+    let mut opening = Box::pin(agent.create_session(SessionConfig::default()));
     let churn = async {
         let view = loop {
             if let Some(view) = root
@@ -683,14 +682,13 @@ async fn restarting_an_optional_row_cannot_keep_a_stuck_opening_alive() {
         () = churn => panic!("repeated activation of one row kept startup alive"),
     };
     assert!(error.to_string().contains("test.stuck"), "{error}");
+    drop(opening);
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_rows_extend_a_session_or_branch_opening_until_required_rows_are_ready() {
     for branch in [false, true] {
-        let root = Ctx::root().unwrap();
         let mut builder = builder();
         builder.startup_timeout(Duration::from_millis(500));
         names::register::<Clock>(builder.catalog_mut(), None);
@@ -724,9 +722,9 @@ async fn optional_rows_extend_a_session_or_branch_opening_until_required_rows_ar
                 builder.feature(feature);
             }
         }
-        let agent = builder.build_in(&root);
-        let opening = agent.create_session(SessionConfig::default());
-        tokio::pin!(opening);
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let root = agent.root().clone();
+        let mut opening = Box::pin(agent.create_session(SessionConfig::default()));
         tokio::select! {
             result = &mut opening => panic!("gated opening finished before publication: {:?}", result.err()),
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
@@ -740,6 +738,5 @@ async fn optional_rows_extend_a_session_or_branch_opening_until_required_rows_ar
         assert_eq!(*completed.borrow(), 4);
         assert!(session.state("main").is_ok());
         agent.close().await.unwrap();
-        root.shutdown().await.unwrap();
     }
 }

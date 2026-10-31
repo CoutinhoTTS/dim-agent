@@ -54,8 +54,8 @@ pub enum McpServerError {
     Configuration(&'static str),
     #[error("MCP connection or request failed; the operation was not replayed")]
     RequestFailed,
-    #[error("invalid MCP server response")]
-    InvalidResponse,
+    #[error("invalid MCP server response: {0}")]
+    InvalidResponse(String),
     #[error("MCP cleanup failed")]
     Cleanup,
     #[error("MCP server authorization required")]
@@ -66,14 +66,16 @@ pub enum McpServerError {
 }
 pub type Result<T> = std::result::Result<T, McpServerError>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpTool {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: JsonSchema,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum McpServerState {
     Disconnected,
     Connecting,
@@ -85,6 +87,12 @@ pub enum McpServerState {
     AuthRequired {
         expired: bool,
     },
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct McpRuntime {
+    state: McpServerState,
+    tools: Option<Vec<McpTool>>,
 }
 
 struct Notifications(StateCell<u64>);
@@ -378,12 +386,20 @@ pub struct McpServer {
     authorization: Option<Authorization>,
     state: StateCell<McpServerState>,
     tool_changes: StateCell<u64>,
+    discovered_tools: Mutex<Option<Vec<McpTool>>>,
     connection: AsyncMutex<Option<Connection>>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     tasks: TaskTracker,
 }
 impl McpServer {
+    pub(super) fn snapshot(&self) -> McpRuntime {
+        McpRuntime {
+            state: self.state(),
+            tools: self.discovered_tools.lock().unwrap().clone(),
+        }
+    }
+
     pub fn state(&self) -> McpServerState {
         self.state.get()
     }
@@ -414,30 +430,50 @@ impl McpServer {
                 let request = ClientRequest::ListToolsRequest(ListToolsRequest::with_param(params));
                 let ServerResult::ListToolsResult(page) = owner.request(request, &cancel).await?
                 else {
-                    return Err(McpServerError::InvalidResponse);
+                    return Err(McpServerError::InvalidResponse(
+                        "tools/list returned an unexpected result".into(),
+                    ));
                 };
                 for tool in page.tools {
-                    if tool.name.is_empty()
-                        || !names.insert(tool.name.to_string())
-                        || tool.input_schema.get("type").and_then(|v| v.as_str()) != Some("object")
-                    {
-                        return Err(McpServerError::InvalidResponse);
+                    if tool.name.is_empty() {
+                        return Err(McpServerError::InvalidResponse(
+                            "a tool name must not be empty".into(),
+                        ));
                     }
+                    if !names.insert(tool.name.to_string()) {
+                        return Err(McpServerError::InvalidResponse(format!(
+                            "tool {}: the tool name repeats an earlier page",
+                            tool.name
+                        )));
+                    }
+                    if tool.input_schema.get("type").and_then(|v| v.as_str()) != Some("object") {
+                        return Err(McpServerError::InvalidResponse(format!(
+                            "tool {}: inputSchema.type must be \"object\"",
+                            tool.name
+                        )));
+                    }
+                    let name = tool.name.into_owned();
+                    let input_schema = serde_json::from_value(serde_json::Value::Object(
+                        (*tool.input_schema).clone(),
+                    ))
+                    .map_err(|error| {
+                        McpServerError::InvalidResponse(format!("tool {name}: {error}"))
+                    })?;
                     tools.push(McpTool {
-                        name: tool.name.into_owned(),
+                        name,
                         description: tool.description.map(|s| s.into_owned()),
-                        input_schema: serde_json::from_value(serde_json::Value::Object(
-                            (*tool.input_schema).clone(),
-                        ))
-                        .map_err(|_| McpServerError::InvalidResponse)?,
+                        input_schema,
                     });
                 }
                 cursor = page.next_cursor;
                 let Some(next) = cursor.as_ref() else {
+                    *owner.discovered_tools.lock().unwrap() = Some(tools.clone());
                     return Ok(tools);
                 };
                 if !cursors.insert(next.clone()) {
-                    return Err(McpServerError::InvalidResponse);
+                    return Err(McpServerError::InvalidResponse(
+                        "tools/list returned a cursor that repeats an earlier page".into(),
+                    ));
                 }
             }
         })
@@ -458,7 +494,9 @@ impl McpServer {
             let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
             let ServerResult::CallToolResult(result) = owner.request(request, &cancel).await?
             else {
-                return Err(McpServerError::InvalidResponse);
+                return Err(McpServerError::InvalidResponse(
+                    "tools/call returned an unexpected result".into(),
+                ));
             };
             let mut content = Vec::new();
             for block in result.content {
@@ -473,8 +511,11 @@ impl McpServer {
                         },
                     },
                     other => ContentBlock::Text {
-                        text: serde_json::to_string(&other)
-                            .map_err(|_| McpServerError::InvalidResponse)?,
+                        text: serde_json::to_string(&other).map_err(|error| {
+                            McpServerError::InvalidResponse(format!(
+                                "a tool result content block is not JSON: {error}"
+                            ))
+                        })?,
                     },
                 });
             }
@@ -814,6 +855,7 @@ impl Plugin for McpServerPlugin {
             }),
             state,
             tool_changes: StateCell::new(0),
+            discovered_tools: Mutex::new(None),
             connection: AsyncMutex::new(None),
             stopping: ctx.cancellation_token(),
             gate: Mutex::new(()),

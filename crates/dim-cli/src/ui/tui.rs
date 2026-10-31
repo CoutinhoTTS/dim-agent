@@ -62,6 +62,7 @@ use crate::ui::transcript::tool_group::{
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
+use crate::wire::Configuration;
 
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
@@ -85,6 +86,7 @@ const REWRITE_LOG: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
+const GIT_BRANCH_POLL: Duration = Duration::from_secs(10);
 /// One blank column of margin before every document row (L's content pad).
 const MARGIN: usize = 1;
 /// Revision of the transcript the planner is tracking; a session switch bumps it.
@@ -600,11 +602,7 @@ fn run_terminal(
                     } else {
                         screen = Screen::new(terminal.size(), synchronized);
                     }
-                    app.fullscreen = entering;
-                    if entering {
-                        app.redraw_window();
-                    }
-                    app.request_reflow();
+                    app.set_fullscreen(entering);
                     dirty = true;
                 }
                 Outcome::Suspend => {
@@ -682,6 +680,45 @@ enum Outcome {
     Exit(i32),
 }
 
+/// The adopted model as the label draws it: `provider / model`, and the
+/// reasoning effort the configuration sends when it carries one.
+struct ModelLabel {
+    model: String,
+    effort: Option<String>,
+}
+
+impl ModelLabel {
+    fn new(configuration: &Configuration) -> Self {
+        Self {
+            model: format!("{} / {}", configuration.provider_id, configuration.model_id),
+            effort: configuration
+                .model_preferences
+                .as_ref()
+                .and_then(|preferences| preferences.reasoning_effort.clone()),
+        }
+    }
+
+    fn full(&self) -> String {
+        match &self.effort {
+            Some(effort) => format!("{} · {effort}", self.model),
+            None => self.model.clone(),
+        }
+    }
+
+    /// The first shape of the label that `fits`, whole before whole minus the
+    /// effort; `None` when even the model alone does not fit.
+    fn fitted(&self, fits: impl Fn(&str) -> bool) -> Option<String> {
+        let full = self.full();
+        if fits(&full) {
+            return Some(full);
+        }
+        if self.effort.is_some() && fits(&self.model) {
+            return Some(self.model.clone());
+        }
+        None
+    }
+}
+
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -701,8 +738,8 @@ struct App {
     reports: Vec<(String, Tone)>,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
-    /// `provider / model` once the session exists.
-    label: Option<String>,
+    /// The adopted model and its reasoning effort, once the session exists.
+    label: Option<ModelLabel>,
     failure: Option<String>,
     /// The App Server asked this interface to leave: one more frame shows
     /// why, then the interface exits and the Session carries on.
@@ -720,7 +757,7 @@ struct App {
     question_stash: Option<AskUserPrompt>,
     /// Requests already answered here: the projection keeps listing them
     /// until the daemon's confirmation arrives.
-    answered: HashSet<String>,
+    answered: HashSet<(String, String)>,
     notice: Option<(String, Instant)>,
     exit_armed_until: Option<Instant>,
     run_started: Option<Instant>,
@@ -749,6 +786,9 @@ struct App {
     /// Committed groups (history ids) whose delegation cards still change:
     /// fullscreen redraws them from the snapshot.
     card_blocks: Vec<usize>,
+    /// Committed user rows (history ids) the model had not consumed yet:
+    /// fullscreen redraws them once it does.
+    message_blocks: Vec<usize>,
     /// The second their running time was last drawn for.
     card_second: u64,
     session_id: String,
@@ -819,8 +859,10 @@ struct App {
     /// from the palette through the command's argument until it runs
     /// ([`Self::command_entry_open`]).
     command_entry: bool,
-    /// The workspace's git branch for the banner, read once.
+    /// The workspace's git branch for the banner and composer.
     branch: String,
+    git_head: Option<PathBuf>,
+    git_checked: Instant,
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
     /// A Ctrl+V clipboard read in progress.
@@ -926,6 +968,8 @@ impl App {
             .is_none_or(|v| v != false);
         let mut composer = Composer::new(past);
         composer.set_root(PathBuf::from(&cwd_key));
+        let git_head = git_head(&cwd_key);
+        let branch = git_head.as_deref().and_then(git_branch);
         Self {
             host,
             composer,
@@ -961,6 +1005,7 @@ impl App {
             rewrites: 0,
             rewrite_log: Default::default(),
             card_blocks: Vec::new(),
+            message_blocks: Vec::new(),
             card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
@@ -991,7 +1036,9 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch: git_branch().unwrap_or_else(|| t("Not available").into()),
+            branch: branch.unwrap_or_else(|| t("Not available").into()),
+            git_head,
+            git_checked: Instant::now(),
             shell: None,
             clipboard: None,
             image_read: None,
@@ -1177,10 +1224,11 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let approval = snapshot
-            .approvals
-            .iter()
-            .find(|a| !self.answered.contains(&a.request_id));
+        let approval = snapshot.approvals.iter().find(|a| {
+            !self
+                .answered
+                .contains(&(a.branch_id.clone(), a.request_id.clone()))
+        });
         let question = snapshot.questions.first();
         match &self.prompt {
             Some(Prompt::Exit(_))
@@ -1199,21 +1247,25 @@ impl App {
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
-                if approval.is_some_and(|a| a.request_id == p.request_id) => {}
+                if approval.is_some_and(|a| {
+                    a.request_id == p.request_id && a.branch_id == p.branch_id
+                }) => {}
             Some(Prompt::Ask(p)) if question.is_some_and(|q| q == &p.call) => {}
             _ => {
                 if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
                     self.upgrade = Some(dialog);
                 }
                 self.prompt = if let Some(a) = approval {
-                    Some(Prompt::Permission(PermissionPrompt::new(
+                    let mut prompt = PermissionPrompt::new(
                         a.request_id.clone(),
                         a.branch_id.clone(),
                         a.reason.clone(),
                         a.tool_name.clone(),
                         a.tool_input.clone(),
                         a.always.is_some(),
-                    )))
+                    );
+                    prompt.set_member(a.member.clone());
+                    Some(Prompt::Permission(prompt))
                 } else {
                     question.map(|q| {
                         let held = self.question_stash.take().filter(|held| held.call == *q);
@@ -1221,6 +1273,11 @@ impl App {
                     })
                 };
             }
+        }
+        if let Some(Prompt::Permission(prompt)) = &mut self.prompt
+            && let Some(approval) = approval
+        {
+            prompt.set_member(approval.member.clone());
         }
         self.reopen_upgrade();
     }
@@ -1242,6 +1299,15 @@ impl App {
         self.sync_task_details();
         let now = Instant::now();
         let mut changed = false;
+        if now.duration_since(self.git_checked) >= GIT_BRANCH_POLL {
+            self.git_checked = now;
+            if let Some(branch) = self.git_head.as_deref().and_then(git_branch)
+                && branch != self.branch
+            {
+                self.branch = branch;
+                changed = true;
+            }
+        }
         if let Some(Prompt::Tasks(panel)) = &mut self.prompt
             && let Some(snapshot) = &self.snapshot
             && panel.tick(snapshot)
@@ -1321,7 +1387,7 @@ impl App {
     }
 
     /// Queued inputs, oldest first: submitted while a turn was already
-    /// running, not yet consumed.
+    /// running, without their `input/applied` yet.
     fn queued(&self) -> Vec<(String, String)> {
         self.snapshot
             .as_ref()
@@ -1337,8 +1403,8 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Ready { provider, model } => {
-                self.label = Some(format!("{provider} / {model}"));
+            Update::Ready(configuration) => {
+                self.label = Some(ModelLabel::new(&configuration));
             }
             Update::ModelFeatures {
                 images,
@@ -1483,6 +1549,9 @@ impl App {
                                 &[("title", title)],
                             )),
                         }
+                        if !self.session_id.is_empty() {
+                            self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        }
                     }
                     self.approvals = mode;
                 }
@@ -1610,6 +1679,13 @@ impl App {
                     }
                     _ => self.notices.push(UpgradeDialog::outcome(&version, &result)),
                 }
+            }
+            Update::ApprovalPending {
+                branch_id,
+                request_id,
+            } => {
+                self.answered
+                    .remove(&(branch_id.clone(), request_id.clone()));
             }
             Update::Failed(message) => {
                 self.failure = Some(message);
@@ -2255,13 +2331,25 @@ impl App {
                     Err(error) => self.notices.push(error.to_string()),
                 }
             }
+            Effect::RetryApproval {
+                request_id,
+                branch_id,
+            } => {
+                self.answered
+                    .remove(&(branch_id.clone(), request_id.clone()));
+                self.host.send(Command::RetryApproval {
+                    request_id,
+                    branch_id,
+                });
+            }
             Effect::Approval {
                 request_id,
                 branch_id,
                 allow,
                 remember,
             } => {
-                self.answered.insert(request_id.clone());
+                self.answered
+                    .insert((branch_id.clone(), request_id.clone()));
                 self.host.send(Command::Approval {
                     request_id,
                     branch_id,
@@ -2339,12 +2427,20 @@ impl App {
                         snapshot
                             .approvals
                             .iter()
-                            .filter(|a| !self.answered.contains(&a.request_id))
+                            .filter(|a| {
+                                a.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW
+                                    && !self
+                                        .answered
+                                        .contains(&(a.branch_id.clone(), a.request_id.clone()))
+                            })
                             .map(|a| (a.request_id.clone(), a.branch_id.clone())),
                     );
                 }
                 for (request_id, branch_id) in pending {
-                    if !self.answered.insert(request_id.clone()) {
+                    if !self
+                        .answered
+                        .insert((branch_id.clone(), request_id.clone()))
+                    {
                         continue;
                     }
                     self.host.send(Command::Approval {
@@ -2558,7 +2654,11 @@ impl App {
         let pending = snapshot
             .approvals
             .iter()
-            .find(|a| !self.answered.contains(&a.request_id))
+            .find(|a| {
+                !self
+                    .answered
+                    .contains(&(a.branch_id.clone(), a.request_id.clone()))
+            })
             .map(|a| (a.request_id.clone(), Event::Permission(a.tool_name.clone())))
             .or_else(|| {
                 snapshot.questions.first().map(|q| {
@@ -2597,6 +2697,21 @@ impl App {
         crate::ui::title::topic(snapshot.main_topic.as_deref()?)
     }
 
+    /// Opens `/settings`: the panel, or a second-level switch it carries.
+    fn settings(&mut self, args: &str) {
+        let mut words = args.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (None, _, _) => self.open_settings(Setting::Theme),
+            (Some("recording"), None, None) => {
+                self.host.send(Command::Recording(String::new()));
+            }
+            (Some("recording"), Some(on @ ("on" | "off")), None) => {
+                self.host.send(Command::Recording(on.to_owned()));
+            }
+            _ => self.set_notice("Usage: /settings [recording [on|off]]".to_owned()),
+        }
+    }
+
     /// Opens `/settings` with `select` picked, showing the current values.
     fn open_settings(&mut self, select: Setting) {
         let theme = self
@@ -2619,7 +2734,7 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
-            model: self.label.clone(),
+            model: self.label.as_ref().map(ModelLabel::full),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -2897,7 +3012,7 @@ impl App {
                 Outcome::Continue
             }
             "settings" => {
-                self.open_settings(Setting::Theme);
+                self.settings(args);
                 Outcome::Continue
             }
             "language" => {
@@ -3001,6 +3116,7 @@ impl App {
                 frame.commits.push(text);
             }
         }
+        self.refresh_messages();
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
             if let Block::ToolGroup(group) = &source
@@ -3008,6 +3124,11 @@ impl App {
                 && self.fullscreen
             {
                 self.card_blocks.push(self.dropped + self.history.len());
+            }
+            if let Block::User { pending: true, .. } = &source
+                && self.fullscreen
+            {
+                self.message_blocks.push(self.dropped + self.history.len());
             }
             match placement {
                 Placement::New => self.record(source),
@@ -3291,8 +3412,14 @@ impl App {
         if self.fullscreen {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
+            let room = outer.saturating_sub(2);
+            let left = title.as_ref().map_or(0, |(text, _)| width_of(text) + 3);
+            let model = self
+                .label
+                .as_ref()
+                .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
+                .map(|label| fg(&label, &p.highlight));
             let title = title.map(|(text, label)| label(text));
-            let model = self.label.as_deref().map(|label| fg(label, &p.highlight));
             let docked = self.dock_status(status.as_deref());
             let place = fg(
                 &fit_place(self.place_label(), docked.as_deref(), outer),
@@ -3411,7 +3538,7 @@ impl App {
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self
                 .composer
@@ -3489,12 +3616,13 @@ impl App {
             Text(String),
             Thinking(String),
             Tool(usize),
-            Compaction(usize),
+            Row(usize),
         }
         let mut live_text: Vec<TextBlock> = Vec::new();
         let mut live_items: Vec<LiveItem> = Vec::new();
         let mut settled_assistant: Vec<TextBlock> = Vec::new();
-        let mut settled_ids: Vec<String> = Vec::new();
+        let mut settled: Vec<(usize, String)> = Vec::new();
+        let mut pending_messages: Vec<(usize, String)> = Vec::new();
         let mut held = false;
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < floor || held {
@@ -3528,7 +3656,11 @@ impl App {
                         .as_ref()
                         .is_some_and(|c| c.state == CompactionState::Running) =>
                 {
-                    live_items.push(LiveItem::Compaction(index));
+                    live_items.push(LiveItem::Row(index));
+                }
+                RowKind::UserMessage if row.pending && !self.fullscreen => {
+                    live_items.push(LiveItem::Row(index));
+                    pending_messages.push((index, row.row_id.clone()));
                 }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
@@ -3544,12 +3676,27 @@ impl App {
                             id: &row.row_id,
                             text,
                         });
-                        settled_ids.push(row.row_id.clone());
+                        settled.push((index, row.row_id.clone()));
                     }
                 },
-                _ => settled_ids.push(row.row_id.clone()),
+                _ => settled.push((index, row.row_id.clone())),
             }
         }
+
+        // The live tail is drawn after everything committed, so it can hold
+        // only the newest rows. A pending message with a settled row after it
+        // is committed in Timeline order instead, in its final colour: a
+        // committed row cannot take the hint back (timeline UI §4.8).
+        let mut forced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        if let Some(last) = settled.last().map(|(index, _)| *index) {
+            for (index, id) in pending_messages.iter().filter(|(index, _)| *index < last) {
+                live_items.retain(|item| !matches!(item, LiveItem::Row(at) if at == index));
+                settled.push((*index, id.clone()));
+                forced.insert(*index);
+            }
+        }
+        settled.sort_by_key(|(index, _)| *index);
+        let settled_ids: Vec<String> = settled.into_iter().map(|(_, id)| id).collect();
 
         let markdown = &self.markdown;
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
@@ -3596,7 +3743,12 @@ impl App {
                 }
                 (RowKind::AssistantMessage, Some(batch)) => streamed(batch),
                 _ => {
-                    let block = project_row(&snapshot.rows, index, detail_of(index));
+                    let mut block = project_row(&snapshot.rows, index, detail_of(index));
+                    if forced.contains(&index)
+                        && let Block::User { pending, .. } = &mut block
+                    {
+                        *pending = false;
+                    }
                     let lines = render_block(&block, width, p, markdown);
                     if lines.is_empty() {
                         return (String::new(), None);
@@ -3699,7 +3851,7 @@ impl App {
                         RUNNING_MARK,
                     )
                 }
-                LiveItem::Compaction(index) => render_block(
+                LiveItem::Row(index) => render_block(
                     &project_row(&snapshot.rows, *index, detail_of(*index)),
                     width,
                     p,
@@ -3732,6 +3884,7 @@ impl App {
         self.line_draft = None;
         self.fork_confirm = None;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3783,6 +3936,7 @@ impl App {
             self.composer.set_draft(&text);
         }
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3889,6 +4043,7 @@ impl App {
         self.history_request = None;
         self.load_more = true;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         self.dropped += self.history.len();
         self.history.clear();
         self.stream_block = None;
@@ -3953,6 +4108,89 @@ impl App {
         if self.rewrite_log.len() > REWRITE_LOG {
             self.rewrite_log.pop_front();
         }
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        if on {
+            self.redraw_window();
+        } else {
+            self.settle_committed_messages();
+        }
+        self.request_reflow();
+    }
+
+    /// Scrollback cannot recolour a row it printed, so a pending message
+    /// committed in fullscreen is settled before the history goes there
+    /// (timeline UI §4.8).
+    fn settle_committed_messages(&mut self) {
+        for index in std::mem::take(&mut self.message_blocks) {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            let Some(Block::User {
+                text, display, cut, ..
+            }) = self.history.get(at).cloned()
+            else {
+                continue;
+            };
+            self.history[at] = Block::User {
+                text,
+                display,
+                cut,
+                pending: false,
+            };
+        }
+    }
+
+    /// Fullscreen redraws a committed user row the model has consumed since;
+    /// scrollback keeps what it printed (timeline UI §4.8).
+    fn refresh_messages(&mut self) {
+        if !self.fullscreen || self.message_blocks.is_empty() {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let settled: Vec<usize> = self
+            .message_blocks
+            .iter()
+            .copied()
+            .filter(|index| {
+                let Some(Block::User {
+                    text,
+                    cut,
+                    pending: true,
+                    ..
+                }) = index
+                    .checked_sub(self.dropped)
+                    .and_then(|at| self.history.get(at))
+                else {
+                    return false;
+                };
+                snapshot.rows.iter().any(|row| {
+                    row.kind == RowKind::UserMessage
+                        && row.cut == *cut
+                        && row.text == *text
+                        && !row.pending
+                })
+            })
+            .collect();
+        for index in settled {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            if let Some(Block::User { pending, .. }) = self.history.get_mut(at) {
+                *pending = false;
+                self.mark_rewritten(index);
+            }
+        }
+        self.message_blocks.retain(|index| {
+            index
+                .checked_sub(self.dropped)
+                .and_then(|at| self.history.get(at))
+                .is_some_and(|block| matches!(block, Block::User { pending: true, .. }))
+        });
     }
 
     /// Fullscreen redraws committed delegation cards as their facts and
@@ -4187,12 +4425,16 @@ impl App {
             left.push_str(&slot);
         }
         let total = cols.saturating_sub(2);
-        let line = match &self.label {
-            Some(label) if width_of(&left) + 2 + width_of(label) <= total => {
-                let gap = total - width_of(&left) - width_of(label);
+        let label = self
+            .label
+            .as_ref()
+            .and_then(|label| label.fitted(|text| width_of(&left) + 2 + width_of(text) <= total));
+        let line = match label {
+            Some(label) => {
+                let gap = total - width_of(&left) - width_of(&label);
                 format!("{left}{}{label}", " ".repeat(gap))
             }
-            _ => clip(&left, total).0,
+            None => clip(&left, total).0,
         };
         if let Some((text, _)) = &self.notice
             && let Some(at) = line.find(text.as_str())
@@ -4471,14 +4713,17 @@ fn pad_block(rows: &[String]) -> String {
 }
 
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::version::current();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| t("Not available").into());
     let branch = branch.to_owned();
     let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
     let greeting = [
-        tf("Welcome to DIM {version}!", &[("version", version)]),
+        tf(
+            "Welcome to DIM {version}!",
+            &[("version", version.as_str())],
+        ),
         t("Type / for commands · Ctrl+O for the palette").to_owned(),
     ];
     let header = startup_header(&greeting, body_width);
@@ -4653,17 +4898,31 @@ fn workspace_label(branch: &str) -> String {
     format!("{cwd} ({branch})")
 }
 
-fn git_branch() -> Option<String> {
+fn git_head(cwd: &str) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .args(["rev-parse", "--git-path", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!name.is_empty()).then_some(name)
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!path.is_empty()).then(|| std::path::Path::new(cwd).join(path))
+}
+
+fn git_branch(head: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(head).ok()?;
+    let head = head.trim();
+    if head.is_empty() {
+        return None;
+    }
+    Some(
+        head.strip_prefix("ref: refs/heads/")
+            .unwrap_or("HEAD")
+            .to_owned(),
+    )
 }
 
 /// The box printed under the transcript on exit, with the command that
@@ -4851,6 +5110,140 @@ fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_tracks_git_switches_in_repositories_and_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let linked = root.path().join("linked");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-q", "-b", "original"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked-original",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let nested = repo.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let theme = test_theme();
+        let mut apps = Vec::new();
+        for (cwd, expected) in [(&nested, "original"), (&linked, "linked-original")] {
+            for fullscreen in [false, true] {
+                let mut app = App::new(
+                    Box::new(Idle),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette.clone(),
+                    root.path().join("home"),
+                    cwd.to_string_lossy().into_owned(),
+                );
+                app.fullscreen = fullscreen;
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})")))
+                );
+                apps.push(app);
+            }
+        }
+        git(&repo, &["switch", "-q", "-c", "feature/updated"]);
+        git(&linked, &["switch", "-q", "-c", "feature/linked-updated"]);
+        for (expected, linked_expected) in [
+            ("feature/updated", "feature/linked-updated"),
+            ("HEAD", "HEAD"),
+            ("feature/updated", "feature/linked-updated"),
+        ] {
+            if expected == "HEAD" {
+                git(&repo, &["switch", "-q", "--detach"]);
+                git(&linked, &["switch", "-q", "--detach"]);
+            } else {
+                git(&repo, &["switch", "-q", expected]);
+                git(&linked, &["switch", "-q", linked_expected]);
+            }
+            for (index, app) in apps.iter_mut().enumerate() {
+                app.git_checked = Instant::now();
+                assert!(!app.tick(), "a Git switch must wait for the next check");
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(app.tick(), "a Git switch must request a repaint");
+                let expected = if index < 2 { expected } else { linked_expected };
+                let frame = app.frame((160, 30));
+                let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
+                let bytes = if app.fullscreen {
+                    FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, app)
+                } else {
+                    Screen::new((160, 30), true).render(&frame, (160, 30))
+                };
+                emu.feed(&bytes);
+                assert!(
+                    emu.rows_text()
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "composer must show {expected}"
+                );
+            }
+        }
+        for (index, app) in apps.iter_mut().enumerate() {
+            app.git_checked -= GIT_BRANCH_POLL;
+            assert!(!app.tick(), "an unchanged HEAD must not request a repaint");
+            let expected = if index < 2 {
+                "feature/updated"
+            } else {
+                "feature/linked-updated"
+            };
+            let head = app.git_head.clone().unwrap();
+            let saved = std::fs::read(&head).unwrap();
+            std::fs::remove_file(&head).unwrap();
+            for missing in [true, false] {
+                if !missing {
+                    std::fs::write(&head, "").unwrap();
+                }
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(!app.tick(), "a failed HEAD read must not request a repaint");
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "a missing or empty HEAD must preserve the last branch label"
+                );
+            }
+            std::fs::write(&head, saved).unwrap();
+        }
+    }
 
     #[test]
     fn pending_clipboard_allows_file_selection_but_waits_before_submission() {
@@ -5820,6 +6213,226 @@ mod tests {
         drawn.draw();
     }
 
+    /// The user message the transcript tests draw, in the state `pending`
+    /// gives it.
+    fn message(pending: bool) -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            display: None,
+            row_id: "u1".into(),
+            kind: RowKind::UserMessage,
+            text: "find the leak".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    /// The status row a cancelled turn settles after a stop.
+    fn stopped() -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            display: None,
+            row_id: "stopped-1".into(),
+            kind: RowKind::Status,
+            text: "stopped".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending: false,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    fn show(drawn: &mut Drawn, rows: Vec<std::sync::Arc<ViewRow>>) {
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+    }
+
+    fn attached() -> Drawn {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        drawn
+    }
+
+    #[test]
+    fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.transcript().contains("find the leak"),
+            "a pending message is drawn"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { .. })),
+            "scrollback prints a message only once it has settled"
+        );
+        show(&mut drawn, vec![message(false)]);
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { text, .. } if text == "find the leak")),
+            "a consumed message settles into scrollback"
+        );
+    }
+
+    #[test]
+    fn scrollback_settles_a_pending_message_before_rows_that_came_after_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true), stopped()]);
+        let text = drawn.transcript();
+        assert!(
+            text.find("find the leak") < text.find("stopped"),
+            "the message stays where it was said, above the stop: {text}"
+        );
+        let user = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .expect("the message is committed");
+        let stop = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::Status { text, .. } if text == "stopped"))
+            .expect("the stop is committed");
+        assert!(user < stop, "the message is committed before the stop");
+        assert!(
+            matches!(drawn.app.history[user], Block::User { pending: false, .. }),
+            "a committed row cannot keep the pending hint"
+        );
+        show(&mut drawn, vec![message(false), stopped()]);
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "consuming the message does not commit a second copy"
+        );
+    }
+
+    #[test]
+    fn fullscreen_settles_a_committed_message_in_place() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        let size = (80, 40);
+        let mut full = FullScreen::new(size, false);
+        let paint = |drawn: &mut Drawn, full: &mut FullScreen| {
+            let frame = drawn.app.frame(size);
+            full.render(&frame, size, &drawn.app.palette, &drawn.app)
+        };
+        let displayed = |pending| {
+            let mut row = message(pending);
+            std::sync::Arc::make_mut(&mut row).display = Some("find the leak [Image #1]".into());
+            row
+        };
+        show(&mut drawn, vec![displayed(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, display, pending: true, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
+            )),
+            "fullscreen commits the message where it was said"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the pending row is painted"
+        );
+        show(&mut drawn, vec![displayed(false)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, display, pending: false, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
+            )),
+            "fullscreen rewrites the same row once the model reads it"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the settled row is painted again"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { pending: true, .. })),
+            "no pending copy is left behind"
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_prints_a_pending_message_settled() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: true, .. } if text == "find the leak"
+            )),
+            "fullscreen commits the pending row"
+        );
+        drawn.app.set_fullscreen(false);
+        drawn.draw();
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: false, .. } if text == "find the leak"
+            )),
+            "scrollback prints the row it cannot recolour"
+        );
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "the hint is dropped, not printed a second time"
+        );
+    }
+
     #[test]
     fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
         let mut drawn = Drawn::new((80, 40), None, true);
@@ -5921,6 +6534,14 @@ mod tests {
             ]}, "mode": "queue"},
         })).unwrap();
         projection.apply("main", &input);
+        for (sequence, name) in [(2, "applied"), (3, "consumed")] {
+            let control = serde_json::from_value(serde_json::json!({
+                "id": format!("image-{name}"), "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": name, "data": {"input_id": "image"},
+            }))
+            .unwrap();
+            projection.apply("main", &control);
+        }
         let mut snapshot = projection.snapshot();
         snapshot.session_id = "s1".into();
         snapshot.focus = "main".into();
@@ -6696,6 +7317,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn settings_recording_sends_its_words() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.run_command("settings", "recording on");
+        assert!(matches!(sent.borrow().last(), Some(Command::Recording(words)) if words == "on"));
+        app.run_command("settings", "recording");
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Recording(words)) if words.is_empty())
+        );
+    }
+
     fn image_app(work: &std::path::Path) -> (App, tempfile::TempDir) {
         let home = tempfile::tempdir().unwrap();
         let theme = test_theme();
@@ -6741,8 +7382,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(
-            app.composer.text(),
-            format!("[wide.png · {width}×2 → {MAX_EDGE}×1]")
+            app.composer.display_text(),
+            format!("[Image #1 · {width}×2 → {MAX_EDGE}×1]")
         );
         assert!(app.notice.is_none());
     }

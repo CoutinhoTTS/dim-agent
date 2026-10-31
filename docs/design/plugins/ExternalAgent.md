@@ -365,7 +365,8 @@ Collaboration's members are dim Sessions today: every operation goes through the
 
 ### 9.3 Member-approval route accepts provider asks
 
-#19 decided that member approvals go to the leader's model through a Collaboration tool that passes the leader's Approval and Permission ([overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins); not yet designed in detail). For provider members the route takes asks from the provider's `run` events (`ask`, `askEnded`) and returns decisions through the provider's `answer`, addressed by `extSessionId`. Constraint for its design: the allow decision must carry a Permission risk that ReadOnly denies and WorkspaceWrite asks (a tool's risk is static, so allow and reject are separate tools or the decision tool is classified at the allow level).
+The leader-side route, decision tools and user-review requirements are defined by
+[Collaboration member approval](../subagent-tool-approval.md). For provider members the route takes asks from the provider's `run` events (`ask`, `askEnded`) and returns decisions through the provider's `answer`, addressed by `extSessionId`. Its allow/reject decisions use that route's tools and risk classification; this document defines only how provider asks and answers enter it.
 
 ### 9.4 Imported services stay registered while a link is down (#5)
 
@@ -387,7 +388,7 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. O
 | --- | --- |
 | Accept §9.2: member providers, provider-side relation, cancel by `requestId`, configured kinds; no provider cleanup on leader close | Collaboration owner |
 | Accept §9.5: project `collaborationMembers:*` from TypeScript process rows natively and pass the configured kinds to Collaboration | App Server assembly owner (#4 bindings) |
-| Accept §9.3 and design the member-approval route (#19), which this design uses | Collaboration owner |
+| Integrate provider asks under §9.3 with the [member-approval route](../subagent-tool-approval.md) (#19); native permission inheritance does not configure the provider | Collaboration owner |
 | Accept §9.1 (TypeScript `notify` binding) | Session notices owner (dim runtime) |
 | Clients recognize external members by `agentId` and use `extSessionId` only for the provider view, never as a dim Session ([§6](#6-interfaces-summary), "Clients") | Client owners |
 | All supported integrations implement ACP `session/load` or CLI resume; no runtime capability check | ExternalAgent integration owners |

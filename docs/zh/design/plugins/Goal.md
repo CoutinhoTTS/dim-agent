@@ -402,7 +402,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 标记名 `dim-goal`；它的 `kind` 值 `goal`、`status`、`continuation`，以及 Pursuit 的 `evaluate`、`evaluate-again`、`report`（[Pursuit](Pursuit.md) §5）；它的 key `goal:objective` 与 `goal:status` | 协议 | 折叠、客户端与指南条目都要读它们。改动与行为和断言它的流程测试同批落地，并让按旧形式记录的历史仍可理解 |
 | 折叠与客户端读取的属性名与值——`op` 及其 `set`、`edit`、`pause`、`resume`、`clear`、`completed`、`blocked`；`status` 及其 `active`、`cleared`；`reason` 及其 `user`、`new_branch`、`interrupted`、`limit`、`turn_failed` 和 Pursuit 的 `evaluation_failed`；`branch`、`count`、`limit`、`after`、`judge`、`evaluation`、`evaluator`、`result`、`by`——以及标签行 `Objective:`、`Result:`、`Blocker:`、`Evaluator report:` | 协议 | 属性与标签命名一种机制（[model-facing prompts §4](../model-prompts.md#4-协议与策略)）；上面的编码规则与它们同属协议 |
 | 本页措辞改动涉及的三句话：目标块的、续跑块的，以及 §3.4 与 §5 那一行陈述的子分支规则 | 策略 | 它们说的是怎么工作，不是运行时做什么：目标仍属于一条线，另一条线既不续跑它，也不为它调用 `goal_update` |
-| 上表其余块中的句子，以及 `goal_update` 的声明描述 | 策略 | 关于怎么工作的指引；与它并列的 schema 和结果格式是协议 |
+| 上表其余块中的句子 | 策略 | 关于怎么工作的指引。与它们并列的 `goal_update` 声明是协议——它的 schema、结果格式，以及陈述调用做什么的描述 “Report that the current goal is completed or blocked.” |
 
 协议行只随行为与它的流程测试一起改动；策略行可替换，每次改动都按 §A.5.2 评估。
 
@@ -414,7 +414,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 ### A.5.2 评估
 
-目标块的句子与续跑块的句子是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。Goal 的插件清单（`runtime/plugins/goal/dim-plugin.json`）承载它们，位置是 `code.config.texts.objective` 与 `code.config.texts.continuation`，分支处写为 `{branch}` 由代码替换。两句话分别判定，各一个 `--text` id，因为运行器一次只替换一个文本。
+目标块的句子与续跑块的句子是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。Goal 的插件清单（`runtime/plugins/goal/dim-plugin.json`）承载它们，位置是 `code.config.texts.objective` 与 `code.config.texts.continuation`，分支处写为 `{branch}` 由代码替换。两句话分别判定，各一个 `--text` id；一次评估可以同时带上这两对 `--text`/`--candidate`，因此它们按本节所说的同一次改动来判定。
 
 ### A.6 Timeline 机制
 

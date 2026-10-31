@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
-dim-agent-runtime.workspace = true
+dim-agent-runtime = { workspace = true, features = ["testing"] }
 dim-agent-capabilities.workspace = true
 dim-agent-aimux.workspace = true
 dim-agent-attachments.workspace = true
@@ -14,7 +14,8 @@ dim-app-server.workspace = true
 dim-agent-types.workspace = true
 dim-client.workspace = true
 rutis.workspace = true
-rutis-bridge = { workspace = true, features = ["exports"] }
+rutis-bridge.workspace = true
+rutis-types = "0.19.2"
 rutis-loader.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

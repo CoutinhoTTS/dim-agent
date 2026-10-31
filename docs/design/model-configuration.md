@@ -85,8 +85,18 @@ saved preferences.
 Values come from declared `effortOptions` and the existing reasoning-off declaration.
 The CLI reads the adopted provider/model identity from the public
 `context/configured` view, then reads choices from the existing `provider.catalog`
-response. The public event does not expose internal model settings or capability
-snapshots. Catalog choices are display data; Provider validates each update.
+response. The same view carries `model_preferences` (`reasoningEffort`,
+`serviceTier`): the effective values the adopted configuration sends, derived
+from the event's stored config and the `providerProtocol` recorded with it when
+the view is read. The field is absent when the configuration carries neither
+value, and when the recorded protocol is missing or unreadable; no protocol is
+guessed. Nothing new is stored and the storage format is unchanged. The
+`session.create` and `session.attach` replies name the same derived preferences
+beside their model, so a Session shows its effort before publishing its first
+`context/configured` fact. The CLI draws the effort from that field and keeps no
+preference state of its own. The view does not expose the rest of the internal
+model settings or capability snapshots. Catalog choices are display data; Provider
+validates each update.
 `none` needs that declaration or an advertised native `none`. Unsupported values
 fail without adoption; no value is guessed from a model name.
 
@@ -96,7 +106,10 @@ protocol supporting this preference. Other tier names do not implicitly mean fas
 mode. Effort, token limits and other settings from the captured base are retained.
 There is no persisted `fast` flag.
 
-The snapshot field uses the existing `ModelConfiguration` type. Prompt's
+The snapshot field uses the existing `ModelConfiguration` type.
+`ModelConfiguration` keeps the fields it already had; the preferences are not
+stored beside it, and a replayed fact derives the same values a live one does
+from the same config and protocol. Prompt's
 projection updates it from adopted `context/configured` facts, and initializes it
 from the existing context/checkpoint reconstruction when a branch opens or
 restores. `Branch::get::<PromptSnapshot>()` supplies the latest published value;

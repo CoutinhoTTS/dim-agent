@@ -239,6 +239,7 @@ impl Config {
                 self.model = Some(Configuration {
                     provider_id: result.model.provider_id,
                     model_id: result.model.model_id,
+                    model_preferences: None,
                 });
                 self.models = models(rpc).await?;
             }

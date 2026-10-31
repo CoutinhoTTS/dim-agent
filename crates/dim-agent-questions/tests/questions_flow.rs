@@ -11,7 +11,7 @@ use dim_agent_capabilities::{
     methods::{RpcError, SessionMethods},
     tool_registry::{ToolContribution, ToolRegistry},
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -120,14 +120,12 @@ impl DynPlugin for ProbePlugin {
 }
 
 struct Fixture {
-    root: Ctx,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Script>,
     probe: Probe,
 }
 impl Fixture {
-    fn new() -> Self {
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
+    async fn new() -> Self {
         let model = Arc::new(Script::default());
         let probe = Probe::default();
         let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -156,9 +154,8 @@ impl Fixture {
                 }))
             },
         ));
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start(&builder).await.unwrap();
         Self {
-            root,
             agent,
             model,
             probe,
@@ -182,11 +179,10 @@ impl Fixture {
             .find(|plugin| plugin.name == name)
             .unwrap()
             .id;
-        self.root.view(id).unwrap().restart().await.unwrap();
+        self.agent.root().view(id).unwrap().restart().await.unwrap();
     }
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
-        self.root.shutdown().await.unwrap();
     }
 }
 
@@ -307,7 +303,7 @@ async fn turn(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
 /// wins; the Timeline holds no Questions event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn answers_and_declines_become_the_results_the_model_reads() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let session = fixture.session(true).await;
     fixture.model.push(&[(
         "ask_user",
@@ -464,7 +460,7 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
 /// answers at once; a second waiting call with the same id is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let session = fixture.session(true).await;
     let two = |options: Value| json!({"questions":[{"question":"Pick","options":options}]});
     fixture.model.push(&[
@@ -619,7 +615,7 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
 /// a Questions reload the next request asks through the new generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn interrupt_reload_and_close_settle_a_waiting_call() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let session = fixture.session(true).await;
     let ask = || json!({"questions":[today()]});
     let yes = || json!([{"questionId":"ship","selected":["Yes"]}]);
@@ -781,7 +777,7 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
 /// same call id on two branches names two independent waiting calls.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn branches_answer_their_own_questions_by_branch_id() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let session = fixture.session(true).await;
     session
         .submit("start".into(), InputMode::Queue, "main")
@@ -854,7 +850,7 @@ async fn branches_answer_their_own_questions_by_branch_id() {
 /// leave turn 2's call waiting; its own answer is the result the model reads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_late_answer_never_reaches_a_later_call_that_reuses_its_id() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let session = fixture.session(true).await;
     let ask = |question: &str| {
         json!({"questions":[{"id":"decision","question":question,"allowCustom":false,

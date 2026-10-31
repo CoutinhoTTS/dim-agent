@@ -226,7 +226,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 ### 5.4 面向模型的文本
 
-声明的标注属于 [#549](https://github.com/arcships/dim/issues/549)。工具结果是 protocol（[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)）：
+`recall` 的声明是 protocol（[面向模型的提示词 §4](../model-prompts.md#4-协议与策略)）：其 schema，以及描述中的句子——它们说明一页返回什么、用哪些参数打开或搜索，以及打开被缩短输入的 `[input <id>]` 句柄。工具结果同样是 protocol：
 
 | 文本 | 类别 |
 | --- | --- |

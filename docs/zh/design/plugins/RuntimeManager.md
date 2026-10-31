@@ -1,6 +1,6 @@
 # RuntimeManager
 
-RuntimeManager 提供插件代码运行所需的 Node 与 Python rutis 运行时（[#476](https://github.com/arcships/dim/issues/476)）。它是 App Server 的一个进程插件，占一行 loader 行。它获取每个开启的运行时（下载固定版本到 home，按官方校验文件校验，或使用机器上已安装的），把装了什么记在自己的文件里，然后启动运行时进程。插件行按 rutis 的规则等待自己运行时的名字，RuntimeManager 提供这个名字后，插件行自己启动。
+RuntimeManager 提供插件代码运行所需的 Node 与 Python rutis 运行时（[#476](https://github.com/arcships/dim/issues/476)）。它是 App Server 的一个进程插件，占一行 loader 行。它获取每个开启的运行时（下载固定版本到 home，按官方校验文件校验，或使用机器上已安装的），把装了什么记在自己的文件里，然后提供运行时的启动命令。命令一到，运行时的连接行就启动进程；插件行按 rutis 的规则等待这个运行时的会话。
 
 发布包带可执行文件、默认配置文件和默认插件，不带运行时（[发布打包](../../../release/README.md#local-packaging)）。
 
@@ -21,22 +21,25 @@ RuntimeManager 提供插件代码运行所需的 Node 与 Python rutis 运行时
 
 ```text
 App Server 启动
-  Parts::new：用固定路径建 LocalRuntime 对象和行解析器（§2.3）
-  行：RuntimeManager（必需）、SessionNodeRows、SessionPythonRows（非必需）、插件行
+  Parts::new：用固定路径建启动命令和行解析器（§2.3）
+  行：RuntimeManager（必需）、session-node、py（非必需）、插件行
         │
         ▼
 RuntimeManager apply：登记 `runtime` 方法和 RuntimeService，然后为每个开启的运行时起一个任务
         │  获取（§3）：已安装且与固定版本一致？否则 下载 → 校验 → 解压 → 改名
         ▼
-ctx.plugin(LocalRuntime)  ──提供──▶  Runtime#session-node / Runtime#py
-                                         │ rutis 依赖等待
-                                         ▼
-                SessionNodeRows / SessionPythonRows → 插件行：Pending → Active
+ctx.provide_at(nodeRuntime / pythonRuntime, 启动命令)
+        │ rutis 依赖等待：连接行注入它
+        ▼
+session-node / py：启动进程、握手、挂载会话、维护 RuntimeStatus
+        │ 会话放行自己的行
+        ▼
+插件行 session-node:… / py:…：Pending → Active
 ```
 
-- **RuntimeManager**（进程行 `RuntimeManager`，必需）：`apply` 只做登记；获取在它自己的任务里进行，所以它立刻 Active，启动从不等待下载。获取到的运行时作为它的子插件挂载，RuntimeManager 卸载时运行时进程随之结束。
-- **运行时的名字就是接口**。`Runtime#session-node` 和 `Runtime#py` 由挂载的 `LocalRuntime` 提供；没有别的"已就绪"通知。需要运行时的行像等待任何注入的服务一样等待它，`Loader::waiting_for` 给出等待的名字，`plugin.list` 显示的就是这个（[PluginManager §2.5](PluginManager.md#25-运行时)）。
-- **可替换**：RuntimeManager 是插件。另一个提供相同运行时名字的插件可以替换它。
+- **RuntimeManager**（进程行 `RuntimeManager`，必需）：`apply` 只做登记；获取在它自己的任务里进行，所以它立刻 Active，启动从不等待下载。获取到的运行时，其启动命令从 RuntimeManager 的上下文提供，所以 RuntimeManager 卸载时命令撤回，运行时进程随之结束。它不挂子插件，也不持有句柄。
+- **连接行** `session-node` 和 `py` 就是运行时。每一行注入自己的启动命令（只在 Rust 里的进程服务 `nodeRuntime`、`pythonRuntime`），所以命令提供后 rutis 才启动它。它启动进程，在进程的通道上挂载会话，并在以行名命名的只在 Rust 里的进程键上维护运行时的 `RuntimeStatus`（`starting`、`ready`，或带原因的 `down`）。插件行运行在这个会话上，像等待任何运行时一样等它；`Loader::waits` 给出的是连接行，`plugin.list` 显示的就是这个（[PluginManager §2.5](PluginManager.md#25-运行时)）。
+- **可替换**：RuntimeManager 是插件。另一个提供相同启动命令的插件可以替换它。
 
 ## 2. 数据
 
@@ -77,7 +80,7 @@ ctx.plugin(LocalRuntime)  ──提供──▶  Runtime#session-node / Runtime#
 }
 ```
 
-- `source`：`download` 用上面的压缩包；`system` 用 `PATH` 上的解释器（`node`；`python3`，Windows 上是 `python`），获取时检查：Node 22.19 或更高（`@arcships/rutis-runtime` 的 `engines`）且带自己的 npm（`npm-cli.js` 在官方压缩包和安装程序放的位置；没有它的 Node 会失败，原因里写出这个路径），Python 3.10 或更高且有 pip。检查不通过就是这个运行时的失败（§3.3）。
+- `source`：`download` 用上面的压缩包；`system` 用 `PATH` 上的解释器（`node`；`python3`，Windows 上是 `python`），获取时检查：Node 22.19 或更高（`@arcships/rutis-runtime` 的 `engines`）且带自己的 npm（`npm-cli.js` 在官方压缩包和安装程序放的位置；没有它的 Node 会失败，原因里写出这个路径），Python 3.12 或更高且有 pip。检查不通过就是这个运行时的失败（§3.3）。
 - `auto`：`true` 每次启动都获取。`false` 在 `runtime.install`（§5）之前不动；装好后会被记录（§2.4），之后每次启动都像 `auto` 一样获取。
 - 用户在 `<home>/runtimes/config.json` 里覆盖预置，形状相同，按运行时、按字段覆盖。它在 home 里，所以只有用户本地配置能改，项目配置不能。
 
@@ -93,7 +96,9 @@ ctx.plugin(LocalRuntime)  ──提供──▶  Runtime#session-node / Runtime#
 | `config.json` | 用户的覆盖（§2.2），可选 |
 | `*.partial/`、`*.download` | 进行中的内容；每次尝试前删除 |
 
-每个路径都由固定版本、配置和 home 算出，所以 App Server 在 reconcile 之前就能用它们建好 `LocalRuntime` 对象和行解析器，就像现在用配置的路径一样；运行时进程要等 RuntimeManager 挂载运行时才启动。`source: system` 时，解释器路径在 App Server 建对象时从 `PATH` 查找。
+每个路径都由固定版本、配置和 home 算出，所以 App Server 在 reconcile 之前就能用它们建好启动命令和行解析器，和使用配置的路径时一样；运行时进程要等 RuntimeManager 提供命令才启动。`source: system` 时，解释器路径在 App Server 建命令时从 `PATH` 查找。
+
+启动命令就是 rutis-host 自己的启动器对这两个包用的命令：Node 在 `@arcships/rutis-runtime` 包里运行 `node --import tsx src/runner.mjs`；Python 在它的 project 里运行 `python -m rutis`，`PYTHONPATH` 上有 `rutis` 包和 project，并设 `PYTHONUNBUFFERED=1` 和 `PYTHONDONTWRITEBYTECODE=1`。每个进程的最后几个参数是它的通道、`--id <行>` 和它的 anchor。
 
 Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginManager（§4）。Node 运行时的 anchor 是它的包目录里的 `package.json`。
 
@@ -104,15 +109,15 @@ Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginMana
   "python": { "source": "download", "version": "3.12.15+20261003", "sha256": "…", "packages": "python-packages-…" } }
 ```
 
-只由 RuntimeManager 在运行时和它的包装好之后写。`version` 对 `download` 是固定的版本；对 `system` 是解释器的版本，每次启动都检查，`runtime.list` 报告的也是它。`sha256` 是压缩包校验时用的官方 SHA-256。某一项的 source、version、packages 与固定版本和配置算出的一致、且对应目录存在，就是已安装：下次启动直接用，不再下载。`auto: false` 的运行时有记录，表示用户装过它。别的都不存；运行时是否在运行是 rutis 的状态（`RuntimeHandle::state`）。
+只由 RuntimeManager 在运行时和它的包装好之后写。`version` 对 `download` 是固定的版本；对 `system` 是解释器的版本，每次启动都检查，`runtime.list` 报告的也是它。`sha256` 是压缩包校验时用的官方 SHA-256。某一项的 source、version、packages 与固定版本和配置算出的一致、且对应目录存在，就是已安装：下次启动直接用，不再下载。`auto: false` 的运行时有记录，表示用户装过它。别的都不存；运行时是否在运行是它的连接的 `RuntimeStatus`。
 
 ## 3. 流程
 
 ### 3.1 启动
 
-1. App Server 读固定版本和配置，用固定路径（§2.3）建 `LocalRuntime` 对象，加入这些行：`RuntimeManager`（必需）、`SessionNodeRows` 和 `SessionPythonRows`（非必需）、插件行。
+1. App Server 读固定版本和配置，用固定路径（§2.3）建启动命令，加入这些行：`RuntimeManager`（必需）、`session-node` 和 `py`（非必需）、插件行。
 2. RuntimeManager 的 `apply` 在 `managementMethods` 上登记 `runtime`，提供 `RuntimeService`，然后为每个开启的运行时（`auto`，或在 `runtimes.json` 里有记录）起一个任务。
-3. 每个任务获取自己的运行时（§3.2）并挂载。运行时的行、以及等待它的插件行随后自己启动。两个运行时互不影响：一个失败不影响另一个。
+3. 每个任务获取自己的运行时（§3.2）并提供它的启动命令。连接行、以及等待它的会话的插件行随后自己启动。两个运行时互不影响：一个失败不影响另一个。
 
 启动不等待任何运行时：没有网络的首次启动也能到达用户，插件行处于 Pending。
 
@@ -124,15 +129,15 @@ Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginMana
 2. `download`：先从官方校验文件读取压缩包的 SHA-256（校验文件里没有列出的文件不下载），再按顺序从每个下载源取压缩包，写到 `<home>/runtimes/<目录>.download`，边写边算 SHA-256，用第一个一致的。一致之后才解压，解压到 `<目录>.partial/`，拒绝离开该目录的条目和指向目录外的链接。解压完成后改名为最终路径，不替换任何已校验过的内容。`system`：查找并检查解释器（§2.2）。
 3. 包，先装到 `<目录>.partial/` 再改名：Node 用已校验的（或 system 的）Node 自带的 npm，对固定的 `package.json` 和 lock 执行 `npm ci --ignore-scripts --omit=dev --no-audit --no-fund --registry <r>`，按顺序尝试每个 registry；npm 按 lock 的 `integrity` 校验每个包。Python 执行 `python -m pip install --require-hashes --no-deps --only-binary :all: --target <目录> --index-url <i> -r requirements`，按顺序尝试每个 index。
 4. 写 `runtimes.json`。
-5. 把 `LocalRuntime` 挂为 RuntimeManager 的子插件。
+5. 从 RuntimeManager 的上下文提供启动命令。
 
 不执行任何未校验的东西：运行 npm 或 pip 的解释器是已校验的压缩包里的（或用户用 `system` 选的那个），npm 关闭脚本安装并按固定 lock 校验每个包，pip 拒绝任何没有固定 hash 的文件。
 
 ### 3.3 失败与离线
 
-获取失败的运行时在 `runtime.list` 里是 `failed`，原因列出每个下载源和它的错误。没有东西被替换：半成品目录在下次尝试时删除，之前已安装的版本（如果有）保留。需要它的插件行保持 Pending，等待它的名字。下一次尝试是下次启动或 `runtime.install`（§5）；没有自动重试。
+获取失败的运行时在 `runtime.list` 里是 `failed`，原因列出每个下载源和它的错误。没有东西被替换：半成品目录在下次尝试时删除，之前已安装的版本（如果有）保留。需要它的插件行保持 Pending，等待它的连接行的会话。下一次尝试是下次启动或 `runtime.install`（§5）；没有自动重试。
 
-运行时进程自己结束时，rutis 撤回运行时的名字，等待它的行回到 Pending；`runtime.list` 显示 rutis 的运行时状态和原因。对进程已结束的运行时执行 `runtime.install` 会重新启动它。
+运行时进程自己结束时，它的会话结束，会话上的行回到 Pending。连接行保持 Active，它的 `RuntimeStatus` 是 `down`，原因是进程如何结束（例如 `exited with exit status: 1`）；启动或握手失败时是带那个错误的 `down`。`runtime.list` 显示这个状态和原因。对 `down` 的运行时执行 `runtime.install` 会撤回它的启动命令再重新提供，rutis 于是用新进程重新启动连接行。
 
 ### 3.4 升级与回退
 
@@ -151,9 +156,10 @@ rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.imp
 
 | 接口 | 内容 |
 | --- | --- |
-| 运行时名字 | `Runtime#session-node`、`Runtime#py`：运行时运行期间提供。 |
-| `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeStatus]`；`install(name)`：开启运行时并开始获取；正在获取或正在运行时什么都不做；失败后或进程结束后再试一次。用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
-| `runtime.list`（管理方法） | `[{name, source, version, status, reason?}]`；`status` 是 `off`、`acquiring`、`failed`，或挂载后 rutis 的运行时状态（`idle`、`starting`、`ready`、`down`，带原因）。 |
+| 启动命令 | `nodeRuntime`、`pythonRuntime`：连接行 `session-node` 和 `py` 注入的只在 Rust 里的进程服务；运行时获取后提供。 |
+| `RuntimeStatus` | 每个连接行在以行名命名的只在 Rust 里的进程键上维护：`starting`、`ready`，或带原因的 `down`。RuntimeManager 读取它。 |
+| `RuntimeService`（Rust 进程服务） | `list() -> [RuntimeEntry]`；`install(name)`：开启运行时并开始获取；正在获取或正在运行时什么都不做；获取失败后再获取一次；连接 `down` 后重新提供启动命令。用可选依赖读取，所以 RuntimeManager reload 不会让调用方 reload。 |
+| `runtime.list`（管理方法） | `[{name, source, version, status, reason?}]`；`status` 是 `off`、`acquiring`、`failed`，或提供启动命令后连接的 `RuntimeStatus`：`starting`（连接行还没启动时也是）、`ready`，或带原因的 `down`。 |
 | `runtime.install {name}`（管理方法，有修改） | `RuntimeService::install`；立即回复当前状态。 |
 | `dimcode runtime list`、`dimcode runtime install <node|python>` | 上面的方法。 |
 
@@ -184,24 +190,24 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 | 规则 | 本文如何满足 |
 | --- | --- |
-| 原则 §4 第 1 条（别人的状态用命令） | RuntimeManager 拥有自己的记录和目录。PluginManager 用 `install` 请求；插件行的状态是 rutis 的。 |
+| 原则 §4 第 1 条（别人的状态用命令） | RuntimeManager 拥有自己的记录和目录。PluginManager 用 `install` 请求；插件行的状态是 rutis 的，运行时的 `RuntimeStatus` 是它的连接行的，RuntimeManager 只读取。 |
 | 原则 §4 第 2 条（移交） | 不适用。 |
 | 原则 §4 第 3 条（只有 before 回调） | 写入前没有干预。 |
-| 原则 §4 第 4 条（核心不带业务含义） | 运行时名字是 rutis 自己的；rutis 的依赖等待不带 Dim 的含义。 |
+| 原则 §4 第 4 条（核心不带业务含义） | 连接行是 rutis 给宿主自己的连接用的形式；rutis 的依赖等待不带 Dim 的含义。 |
 | 原则 §4 第 5、6 条 | 不适用：没有 Timeline 批次，也没有内容进入模型上下文。 |
-| 原则 §4 第 7 条（只用公开事件和服务） | rutis-bridge 的 `LocalRuntime`、rutis-loader 的依赖等待和 `RuntimeResolver`，不改也不包装。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | rutis-bridge 的 `Launcher`、`pipe::greeted`、`pipe::Processes` 和 `Session`，rutis-loader 的依赖等待和 `SessionResolver`，不改也不包装。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | §9：对 rutis 没有；对 PluginManager 一条。 |
 | 原则 §4 第 9 条（只记后续决策要用的事实） | `runtimes.json` 只记下次启动要用的：装了什么。 |
 | 原则 §1 | App Server 的进程插件。 |
 | ADR 002 D1（范围跟随状态） | 进程：运行时按宿主。 |
-| ADR 002 D2（没有接线模块） | 没有接线：插件行通过运行时的名字与它相连。 |
+| ADR 002 D2（没有接线模块） | 没有接线：插件行通过连接行的会话与运行时相连。 |
 | ADR 002 D3（依赖跟随范围） | 只有进程依赖（`managementMethods`）。 |
 | ADR 002 D4（结构配置与业务配置） | `runtimes` 是默认配置文件里的产品配置；用户覆盖在 home 里。 |
-| ADR 002 D5（与语言无关的接口） | 运行时名字和 JSON 方法。 |
+| ADR 002 D5（与语言无关的接口） | 连接行和 JSON 方法。 |
 
 ## 9. 向机制所有者提出的需求
 
-对 rutis 没有：用固定路径建的 `LocalRuntime` 只在挂载时才启动进程，行按 rutis-loader 0.17.1 已有的依赖等待来等 `Runtime#<名字>`。
+对 rutis 没有：连接行要等启动命令提供后才启动进程，行按 rutis-loader 0.19.1 已有的依赖等待来等它的会话。
 
 **R1. PluginManager：Python 链接和运行时请求（M1）。**
 

@@ -376,6 +376,78 @@ pub fn reasoning_config(
     }
     Ok(config)
 }
+/// The inverse of [`reasoning_config`], and of a model's own declared
+/// configuration: the preferences a configuration sends, in the spelling a
+/// client requests them. It names the value the configuration carries for this
+/// protocol — a native effort, a protocol option, or the reasoning-off
+/// declaration — and nothing when it carries none.
+pub fn adopted_preferences(
+    config: &ModelConfig,
+    protocol: ModelProtocol,
+) -> Option<ModelPreferences> {
+    let options = config.provider_options.as_ref();
+    let effort = config
+        .reasoning
+        .as_ref()
+        .and_then(|reasoning| reasoning.effort.clone())
+        .filter(|effort| !effort.is_empty() && effort != "provider-default")
+        .or_else(|| match protocol {
+            ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => options
+                .and_then(|options| options.openai.as_ref())
+                .and_then(|options| options.reasoning_effort.clone()),
+            ModelProtocol::OpenaiCompatible => options
+                .and_then(|options| options.openai_compatible.as_ref())
+                .and_then(|options| options.reasoning_effort.clone()),
+            ModelProtocol::Anthropic => options
+                .and_then(|options| options.anthropic.as_ref())
+                .and_then(|options| options.effort.clone()),
+            ModelProtocol::Xai | ModelProtocol::XaiResponses => options
+                .and_then(|options| options.xai.as_ref())
+                .and_then(|options| options.reasoning_effort.clone()),
+            ModelProtocol::Gemini | ModelProtocol::Bedrock => None,
+        })
+        .or_else(|| reasoning_off(options, protocol).then(|| "none".to_owned()));
+    let service_tier = match protocol {
+        ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => options
+            .and_then(|options| options.openai.as_ref())
+            .and_then(|options| options.service_tier.clone()),
+        ModelProtocol::OpenaiCompatible => options
+            .and_then(|options| options.openai_compatible.as_ref())
+            .and_then(|options| options.service_tier.clone()),
+        _ => None,
+    };
+    (effort.is_some() || service_tier.is_some()).then_some(ModelPreferences {
+        reasoning_effort: effort,
+        service_tier,
+    })
+}
+/// Whether the configuration carries the protocol's own reasoning-off
+/// declaration.
+fn reasoning_off(options: Option<&ProviderOptions>, protocol: ModelProtocol) -> bool {
+    match protocol {
+        ModelProtocol::Anthropic => options
+            .and_then(|options| options.anthropic.as_ref())
+            .and_then(|options| options.thinking.as_ref())
+            .is_some_and(|thinking| {
+                thinking.thinking_type == Some(AnthropicThinkingType::Disabled)
+            }),
+        ModelProtocol::OpenaiCompatible => options
+            .and_then(|options| options.openai_compatible.as_ref())
+            .is_some_and(|options| {
+                options.enable_thinking == Some(false)
+                    || options
+                        .thinking
+                        .as_ref()
+                        .and_then(|thinking| thinking.thinking_type)
+                        == Some(ThinkingType::Disabled)
+            }),
+        ModelProtocol::Gemini => options
+            .and_then(|options| options.gemini.as_ref())
+            .and_then(|options| options.thinking_config.as_ref())
+            .is_some_and(|config| config.thinking_budget.is_some_and(|budget| budget == 0.)),
+        _ => false,
+    }
+}
 /// Request-local transport facts. Providers validate these at their input
 /// boundary; the model host owns clients, not persisted provider records.
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]

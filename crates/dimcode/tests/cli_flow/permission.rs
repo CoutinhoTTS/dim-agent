@@ -28,6 +28,120 @@ fn quiet_turn(wire: &mut Wire) {
 }
 
 #[test]
+fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_message() {
+    for initial_setup in [false, true] {
+        for fullscreen in [false, true] {
+            let home = Home::new();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(if initial_setup { &[] } else { &PRESET_METHODS });
+                if initial_setup {
+                    let create = wire.read("session.create");
+                    fail(wire, &create, "provider_failed");
+                } else {
+                    wire.created();
+                    let attach = wire.read("session.attach");
+                    wire.reply(&attach, attach_record(&attach));
+                    let history = wire.read("session.history");
+                    wire.reply(
+                        &history,
+                        json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                    );
+                    let read = wire.read("session.permission.get");
+                    wire.reply(
+                        &read,
+                        json!({"version":1,"policy":policy("workspace-write", &[], &[])}),
+                    );
+                    wire.no_context();
+                }
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                let create = wire.read("session.create");
+                assert_eq!(
+                    create["params"]["permissionPolicy"],
+                    json!({"preset":"read-only"})
+                );
+                wire.reply(
+                    &create,
+                    json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                );
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                );
+                if !initial_setup {
+                    let read = wire.read("session.permission.get");
+                    wire.reply(
+                        &read,
+                        json!({"version":1,"policy":policy("read-only", &[], &[])}),
+                    );
+                }
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["text"], "first message");
+                wire.reply(&submit, json!({}));
+                wire.notice(
+                    "session.event",
+                    json!({"sessionId":"session","branchId":"main","event":{"id":"input-9","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"accepted first message"}]},"mode":"queue"}}}),
+                );
+                for (sequence, name) in [(10, "applied"), (11, "consumed")] {
+                    wire.notice(
+                        "session.event",
+                        json!({"sessionId":"session","branchId":"main","event":{"id":format!("input-{sequence}"),"sequence":sequence,"create_at":1,"type":"input","name":name,"data":{"input_id":"input-9"}}}),
+                    );
+                }
+                wire.no_context();
+                let mut line = String::new();
+                while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                    line.clear();
+                }
+            });
+            let mut command = home.command();
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            if initial_setup {
+                terminal.until("Sign in with /login");
+            } else {
+                terminal.until("test / model");
+                terminal.write(b"/new\r");
+                terminal.until("new session");
+            }
+            let mark = terminal.transcript.len();
+            terminal.write(b"/approvals\r");
+            terminal.until("Workspace write");
+            terminal.write(b"\x1b[A\r");
+            terminal.until("Confirm Full Access");
+            terminal.write(b"y");
+            terminal.until("Tool approvals: Full access");
+            terminal.write(b"/approvals\r");
+            terminal.until("Workspace write");
+            terminal.write(b"\x1b[B\r");
+            terminal.until("Tool approvals: Ask");
+            terminal.write(b"/approvals\r");
+            terminal.until("Read only");
+            terminal.write(b"\x1b[B\r");
+            terminal.until("Tool approvals: Read only");
+            let config: Value =
+                serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap())
+                    .unwrap();
+            assert_eq!(config["permissionPreset"], "read-only");
+            if !initial_setup {
+                assert!(!terminal.transcript[mark..].contains("Sign in with /login"));
+            }
+            assert!(!terminal.transcript[mark..].contains("New members from main"));
+            terminal.write(b"first message\r");
+            terminal.until("accepted first message");
+            terminal.signal(libc::SIGKILL);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -419,7 +533,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("Preset (main branch) is already read-only");
     terminal.until("\n> ");
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("Preset (main branch): workspace-write. Child branches created later inherit it; agent members keep the Session's starting preset.");
+    terminal.until("Preset (main branch): workspace-write. Child branches and members created later from main inherit it; existing branches and members keep their policies.");
     terminal.until("\n> ");
     terminal.write(b"/approvals remove 1\n");
     terminal.until("Rule removed: allow exact `cargo test`");
@@ -763,4 +877,50 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     assert!(terminal.wait().success());
     let (code, _, stderr) = daemon.run(&["exec", "-p", "exec: printf always-ran"]);
     assert_eq!(code, Some(3), "{stderr}");
+}
+
+#[test]
+fn member_approval_in_line_mode_allows_rejection_during_loading_and_rechecks_an_allow() {
+    for reject_loading in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.start(false);
+            let submit = wire.read("session.submit"); wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Leader permission"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            let original = json!({"state":"pending","approvalId":"route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"cargo test line action"}},"reason":"Member process request"}});
+            if !reject_loading {
+                wire.reply(&detail, original.clone());
+                let refresh = wire.read("session.collaboration.approval.get");
+                wire.reply(&refresh, json!({"state":"ended"}));
+            }
+            let response = wire.read("approval.respond");
+            assert_eq!(response["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"deny"}));
+            wire.reply(&response, json!({}));
+            if reject_loading { wire.reply(&detail, original); }
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"end_turn"}));
+            wire.reply(&idle, json!({"sequence":9}));
+            wire.detach();
+        });
+        let mut terminal = Terminal::launch(home.command());
+        terminal.until("\n> ");
+        terminal.write(b"work\n");
+        if reject_loading {
+            terminal.until("Loading member action");
+            terminal.write(b"y\n");
+            terminal.until("Loading member action");
+            terminal.write(b"n\n");
+        } else {
+            terminal.until("Leader reason: Leader permission");
+            terminal.until("cargo test line action");
+            terminal.until("Allow this member action once?");
+            terminal.write(b"y\n");
+            terminal.until("Member request ended");
+        }
+        terminal.until("\n> ");
+        terminal.write(b"/exit\n");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
 }

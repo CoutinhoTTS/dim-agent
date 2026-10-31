@@ -221,8 +221,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Tunggu clipboard disisipkan sebelum kirim"
         }
         "A submission accepts at most 20 images" => "Maks. 20 gambar per kiriman",
-        "[Image #{index}]" => "[Gambar #{index}]",
-        "[Image #{index}{details}]" => "[Gambar #{index}{details}]",
         "first frame" => "hanya frame pertama",
         "re-encoded" => "dikodekan ulang",
         "The current model does not accept images; remove {label} to send" => {
@@ -413,6 +411,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} model tak tersedia · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 1 model membutuhkan jendela · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: {count} model membutuhkan jendela · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: tanpa model · dimcode models {id} --refresh"
         }
@@ -424,6 +428,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: katalog tidak terbaca · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Model yang batasnya belum dideklarasikan tidak dapat dipilih; deklarasikan dengan dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Deklarasikan dengan dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "Tidak ada katalog tersimpan. Masuk dan jalankan models PROVIDER --refresh."

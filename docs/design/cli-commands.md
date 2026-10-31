@@ -434,6 +434,16 @@ The terminal UI remembers the preset chosen in `/approval` or its `/approvals` p
 `permissionPreset` in the product home's `config.json`: without the flag, the sessions it creates
 get it in `session.create`, and a resumed one has `main` switched to it before attach. The flag
 wins for one run; choosing another preset in either menu replaces the remembered one.
+On the home screen without an active Session, either menu saves the preset without requiring
+account sign-in or creating a Session. The first message creates the Session with that selection,
+including within the same client process. With an active Session, the selection is remembered
+only after its permission update succeeds. Full access still requires confirmation in either case.
+
+```text
+Home > /approvals > select preset
+  -> confirm if full access -> remember preset (no Session or login required)
+  -> first message -> session.create {permissionPolicy: selected preset}
+```
 
 ```text
 $ dimcode exec --permission full-access -p 'Run the tests'
@@ -451,8 +461,9 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
 ```
 
 A new Session receives the whole policy `{preset}` in `session.create`: no tool lists, which is
-the product profile's form. Agent members copy this creation policy (see branch semantics). On
-resume the flag replaces only the preset; the stored `allowedTools`/`disallowedTools` are kept.
+the product profile's form. New members inherit the requesting branch's current policy
+(see branch semantics). On resume the flag replaces only the preset; the stored
+`allowedTools`/`disallowedTools` are kept.
 The update happens before attach, so no turn submitted by this invocation runs under the old
 preset. Without the flag, `session.create` omits the policy and a resumed Session keeps its own.
 A resume flag against a daemon that does not advertise `session.permission.update` fails before
@@ -492,26 +503,107 @@ no automatic approval. The flag is the explicit choice, so `exec` asks for no co
 
 Permission's state for a branch is `SessionConfig.permissionPolicy` folded with the
 `permission/changed` events of its ancestor prefix and then its own. The CLI writes only `main`,
-the branch it submits to, idles on and exports.
+the branch its permission controls target. Branch-scoped interaction follows
+[Timeline branches](timeline-branches.md).
 
 ```text
-session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
-        |                                         |
-        v                                         v  copied when a member is created
- main: permission/changed (CAS on version)    agent member Sessions (Collaboration)
-   ^  written by --permission on resume
-   |  and /approval or /approvals
-   +-- branch point --> child branch (branch tool): main's policy at the branch point,
-                         then its own changes
+session.create {permissionPolicy} --> SessionConfig.permissionPolicy
+                                       |
+                                       v
+ main: permission/changed --> current branch policy
+        |                      |
+        | branch point         | sample when consuming a new member request
+        v                      v
+ child branch policy      new member Session policy
+        |
+        +-- its own member request --> sample child policy, not main's
+
+Later updates do not reconfigure existing child branches or members.
 ```
 
 - Child branches that the branch tool creates after a change inherit it. Existing child branches
   keep their policy; the CLI does not enumerate or update them. Their approval requests are
   still answered on their own branch id, as today.
-- Agent members copy the leader Session's creation policy. `--permission` on a new Session
-  reaches them; a later change on `main` does not. The confirmation of a switch says so, and
-  requirement R2 below asks Collaboration to copy the leader branch's current policy.
+- New Agent members copy the requesting branch's dispatched policy at the sampling point defined
+  by [member permission inheritance](subagent-tool-approval.md#2-permission-inheritance). Existing
+  members retain their policy, including on reuse. Permission-switch confirmation says that it
+  affects future members created from this branch, not existing members. This is the target
+  contract; delivery is tracked in #257.
 - A fork copies the source's facts, so it starts with the source's current `main` policy (#26).
+
+### Subagent tool approval
+
+This section specifies the client interaction for [Collaboration's member-approval
+route](subagent-tool-approval.md). It is a design requirement, not a claim that the route is
+implemented. Member observation remains read-only ([member conversation](member-conversation.md));
+answering uses the leader's approval surface and never submits directly to a member Session.
+
+When the leader receives `approval.request` for `member_approval_allow`, the CLI queues it like
+any other leader-Session approval, keyed by `(sessionId, branchId, requestId)`. Before enabling
+Allow, call `session.collaboration.approval.get` with that leader request identity. Display the
+returned server-owned member descriptor, not a command or explanation supplied by the leader
+model. A non-main requesting branch is shown even if the user is currently viewing another line.
+
+Scrollback and fullscreen use the same modal prompt and keyboard behavior:
+
+```text
++-- Subagent tool approval ----------------------------------------+
+| Requested by leader branch: research                             |
+| Member: reviewer  Session: <member-session-id>                    |
+| Member branch: main                                             |
+| Tool: exec                                                      |
+| Command: cargo test --workspace                                  |
+| Member reason: Starting processes requires approval              |
+| Leader reason: Allowing a member action requires approval        |
+|                                                                |
+| [Allow once]  [Reject]                                           |
+| y allow once / n reject / Tab move / Enter confirm               |
++-----------------------------------------------------------------+
+```
+
+The line client presents the same fields followed by `Allow this member action once? [y/N]`.
+Enter, another answer or EOF rejects under its normal approval rules. It does not offer `a`.
+`Allow once` answers the **leader** request with `approval.respond allow`; Reject answers that
+request with deny. Collaboration settles the original member request. Do not use the member id
+from the displayed descriptor as the RPC answer target.
+
+For original calls other than `exec`, show the original tool and its full input, prominently the
+resolved `path`, URL or boundary (`sandbox`) where present. Commands, paths and ids remain verbatim;
+localize labels only and sanitize terminal control characters. Wrap/scroll long detail and expose
+all arguments before confirmation; do not silently truncate the action to a title or summary.
+If the original command is simple, this wrapper still has no Always action: it is not that command
+and must not create a command rule. No Full Access button or implicit policy update is offered in
+this prompt; permission settings remain a separate user action.
+
+| Client state | Display and action |
+| --- | --- |
+| Detail loading | Show `Loading member action...`; disable Allow; Reject remains available |
+| Query failure/reloading | Show the error with Retry and Reject; keep Allow disabled and preserve the prompt |
+| Method absent | Explain that this client/server combination cannot review the member action; offer Reject, never fall back to approving an opaque route id |
+| Query returns `ended` | Close as `Member request ended`; deny the still-pending leader wrapper if necessary; no success message |
+| Another leader request arrives | Queue it; do not replace the focused approval or reuse its loaded descriptor |
+| `approval.resolved` / `approval.cancelled` from another client | Retire only the matching full request identity; a resolved answer is not evidence the member tool ran |
+| Member cancellation while open | `session.notice` from Collaboration with kind `memberApprovalEnded` retires the matching branch/route prompt and denies the still-pending wrapper. Recheck detail on focus/accept as well |
+| Leader stop / closing | Use normal stop/settlement; discard local detail state after its request ends |
+
+Accepting Allow performs a fresh detail check before sending the answer. A request ending after
+that check remains safe through server admission and route checks. The prompt's descriptor is
+immutable; focus changes never change its target. A pending member request that ends between
+checks is removed by the terminal notice, and cannot be approved onto another call. A terminal
+notice racing a detail reply wins; an old pending reply never reopens that prompt. Reattachment rebuilds
+from replayed leader approval requests and queries details again; cached pre-disconnect snapshots
+are not grants.
+
+An approval takes existing modal priority over member detail and task panels in both TUI modes;
+closing the panel preserves the leader draft, selected model, selected line and transcript position.
+Incoming requests do not move the user into the member Session. An adopted member ask awaiting the
+leader model may be represented by its normal input/tool activity; it is not yet a user permission
+prompt. Do not label the tool as approved merely because the user allowed the wrapper.
+
+Headless `exec` keeps its existing deny/stop/exit-3 contract for a leader approval. `exec --json`
+may emit the raw notifications, but adds no stdin approval protocol. Non-interactive leader Sessions
+are settled by Collaboration without prompting. A terminal that loses its connection neither
+approves nor cancels work by that fact alone.
 
 ### `/approval`
 
@@ -561,7 +653,7 @@ Switch the main branch to full-access? [y/N]
 Preset unchanged: workspace-write
 
 > /approvals read-only
-Preset (main branch): read-only. Child branches created later inherit it; agent members keep the Session's starting preset.
+Preset (main branch): read-only. Child branches and members created later from main inherit it; existing branches and members keep their policies.
 
 > /approvals deny prefix git push
 Rule already present: deny prefix `git push`
@@ -707,16 +799,11 @@ filter.
   [#257](https://github.com/arcships/dim/issues/257).
 
 **R2. Agent members follow the leader branch's current policy.**
-- Blocked: "a member works under the leader's policy" holds only until the leader changes its
-  preset. Collaboration copies the leader Session's `SessionConfig.permissionPolicy`, so after
-  `/approvals read-only` new members still start with the creation preset.
-- Considered: the CLI updating each member (it cannot see members' creation and would race it);
-  creating Sessions only through the flag (does not cover later changes).
-- Needed: when Collaboration creates a member, it copies the leader branch's dispatched
-  `PermissionState.policy` (Permission's public state) instead of the creation configuration.
-- Ordering: the member takes the policy dispatched when it is created; later leader changes do
-  not reach existing members, as for child branches.
-- Owner: Collaboration (App Server); tracked in [#257](https://github.com/arcships/dim/issues/257).
+- Owner: Collaboration; tracked in [#257](https://github.com/arcships/dim/issues/257).
+- Contract, sampling order, failure and reuse behavior are owned by
+  [member permission inheritance](subagent-tool-approval.md#2-permission-inheritance).
+- CLI permission controls update their target branch only. They do not enumerate members or
+  propagate policy. Their confirmation explains the consequence stated under Branch semantics.
 
 ## Questions
 

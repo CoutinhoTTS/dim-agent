@@ -13,20 +13,20 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::{
-    mcp::{self, McpChange, McpPlugin, McpService, McpSession, McpSourceState},
+    mcp::{self, McpChange, McpPlugin, McpPublication, McpService, McpSession, McpSourceState},
     settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::Ctx;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     convert::Infallible,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -47,6 +47,8 @@ struct Remote {
     revision: AtomicUsize,
     events: broadcast::Sender<String>,
     images: AtomicBool,
+    nullable: AtomicBool,
+    broken: AtomicBool,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -61,6 +63,8 @@ impl Remote {
             revision: AtomicUsize::new(0),
             events: broadcast::channel(16).0,
             images: AtomicBool::new(false),
+            nullable: AtomicBool::new(false),
+            broken: AtomicBool::new(false),
         })
     }
 }
@@ -94,6 +98,12 @@ async fn rpc(
             if remote.images.load(Ordering::SeqCst) {
                 tools.push(json!({"name":"screenshot","description":"Capture the screen and return the PNG.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}));
             }
+            if remote.nullable.load(Ordering::SeqCst) {
+                tools.push(json!({"name":"spaces","description":"List spaces","inputSchema":{"type":"object","properties":{"space_id":{"type":["string","null"]}},"required":["space_id"]}}));
+            }
+            if remote.broken.load(Ordering::SeqCst) {
+                tools.push(json!({"name":"broken","inputSchema":{"type":"object","properties":{"x":{"type":["string","file"]}}}}));
+            }
             json!({"tools":tools})
         }
         "tools/call" => {
@@ -102,7 +112,9 @@ async fn rpc(
                 .lock()
                 .unwrap()
                 .push(body["params"]["name"].as_str().unwrap().into());
-            if body["params"]["name"] == "screenshot" {
+            if body["params"]["name"] == "spaces" {
+                json!({"content":[{"type":"text","text":"spaces-ok"}]})
+            } else if body["params"]["name"] == "screenshot" {
                 json!({"content":[
                     {"type":"text","text":"screenshot captured"},
                     {"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=","mimeType":"image/png"}
@@ -234,10 +246,8 @@ impl ModelDriver for Model {
 }
 
 struct Env {
-    root: Ctx,
-    publication: mcp_host::Host,
     home: PathBuf,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Model>,
     directory: Arc<McpService>,
     remote: Arc<Remote>,
@@ -245,8 +255,35 @@ struct Env {
     stop: CancellationToken,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
-#[path = "fixtures/mcp_host.rs"]
-mod mcp_host;
+/// The host plugins MCP Sessions need, as process rows of the minimal host:
+/// management methods, the MCP publication, FileStorage with `home` as root
+/// 0, Settings and Mcp.
+fn mcp_host_rows(builder: &mut AgentBuilder, home: &Path) {
+    builder.plugin(|names| {
+        Ok(Box::new(
+            dim_app_server::methods::ManagementMethodsPlugin::new(names)?,
+        ))
+    });
+    builder.plugin(|names| Ok(Box::new(McpPublication::new(names)?)));
+    let files = dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.into()]);
+    builder.plugin(move |_| Ok(Box::new(files.clone())));
+    let settings = {
+        let catalog = dim_app_server::catalog();
+        let build = Build::default();
+        SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
+    };
+    builder.plugin(move |_| Ok(Box::new(settings.clone())));
+    builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
+}
+/// Authorizes `home`'s project in the host's Settings.
+async fn authorize_project(host: &MinimalHost, home: &Path) {
+    host.root()
+        .get::<SettingsService>()
+        .unwrap()
+        .authorize_project(home.join("project"), &CancellationToken::new())
+        .await
+        .unwrap();
+}
 impl Env {
     async fn new() -> Self {
         Self::with(|_, _| {}).await
@@ -275,35 +312,6 @@ impl Env {
             json!({"mcpServers":{"docs":configuration(&url, "one")}}).to_string(),
         )
         .unwrap();
-        let root = Ctx::root().unwrap();
-        root.plugin(
-            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-                .unwrap(),
-        );
-        let (publication, _) = mcp_host::Host::start(&root).await;
-        let views = vec![
-            root.plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            ),
-            root.plugin({
-                let catalog = dim_app_server::catalog();
-                let build = Build::default();
-                SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
-            }),
-        ];
-        wait_active(
-            &root,
-            &views,
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.get::<SettingsService>()
-            .unwrap()
-            .authorize_project(home.join("project"), &CancellationToken::new())
-            .await
-            .unwrap();
         let model = Arc::new(Model::default());
         let mut builder = AgentBuilder::new(Default::default());
         builder
@@ -327,14 +335,12 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
-        builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
+        mcp_host_rows(&mut builder, &home);
         configure(&mut builder, &remote);
-        let agent = builder.build_in(&root);
-        agent.start().await.unwrap();
-        let directory = root.get::<McpService>().unwrap();
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        authorize_project(&agent, &home).await;
+        let directory = agent.root().get::<McpService>().unwrap();
         Self {
-            root,
-            publication,
             home,
             agent,
             model,
@@ -389,8 +395,6 @@ impl Env {
     }
     async fn close(self) {
         self.agent.close().await.unwrap();
-        self.publication.close().await;
-        self.root.shutdown().await.unwrap();
         self.stop.cancel();
         self.server.await.unwrap().unwrap();
         std::fs::remove_dir_all(self.home).unwrap();
@@ -500,6 +504,37 @@ async fn results(session: &Session) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// The failure message the Session reports for the `docs` source.
+async fn failure(session: &Session) -> String {
+    let mcp = session.session_service::<McpSession>().unwrap();
+    let mut changed = mcp.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(McpSourceState::Failed { message }) =
+                changed.borrow_and_update().servers.get("docs")
+            {
+                return message.clone();
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap()
+}
+
+fn declared(tools: &[ToolDefinition], original: &str) -> ToolDefinition {
+    tools
+        .iter()
+        .find(|tool| {
+            tool.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.mcp_original_tool_name.as_deref())
+                == Some(original)
+        })
+        .unwrap_or_else(|| panic!("{original} was not declared"))
+        .clone()
 }
 
 async fn temporary(
@@ -905,6 +940,99 @@ async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_sess
     );
     assert!(results(&session).await.last().unwrap().contains("isError"));
     state(&session, McpSourceState::Disabled).await;
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_type_array_tool_registers_calls_and_stores_the_canonical_form() {
+    let env = Env::new().await;
+    env.remote.nullable.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let canonical = json!({
+        "type": "object",
+        "properties": {"space_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+        "required": ["space_id"]
+    });
+    env.turn(&session, Action::Text).await;
+    let sent = env.model.requests.lock().unwrap()[0].clone();
+    let spaces = declared(sent.tools.as_ref().unwrap(), "spaces");
+    assert_eq!(
+        serde_json::to_value(&spaces.input_schema).unwrap(),
+        canonical
+    );
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: Some(spaces.name.clone()),
+        },
+    )
+    .await;
+    assert!(
+        results(&session)
+            .await
+            .last()
+            .unwrap()
+            .contains("spaces-ok")
+    );
+    let history = session.history("main", None).await.unwrap();
+    let called = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&declared(called.tools.as_ref().unwrap(), "spaces").input_schema)
+            .unwrap(),
+        canonical,
+        "the stored request carries the canonical form"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_refused_tool_schema_names_the_tool_and_the_path_and_publishes_no_tool() {
+    let env = Env::new().await;
+    env.remote.broken.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    assert_eq!(
+        failure(&session).await,
+        "invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
+    );
+    env.turn(&session, Action::Text).await;
+    let request = env.model.requests.lock().unwrap()[0].clone();
+    assert!(
+        request.tools.as_ref().unwrap().iter().all(|tool| {
+            tool.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.mcp_original_tool_name.as_deref())
+                != Some("broken")
+        }),
+        "a refused page must publish no tool"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_temporary_binding_refusal_names_the_tool_and_the_path() {
+    let env = Env::new().await;
+    env.remote.broken.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    let binding = uuid::Uuid::new_v4().to_string();
+    let input =
+        json!({"bindingId":binding,"servers":{"client":configuration(&env.url,"temporary")}});
+    let error = temporary(&session, "session.mcp_temporary.attach", input)
+        .await
+        .unwrap_err();
+    assert_eq!(error.data.as_ref().unwrap().app_error, "mcp_binding_failed");
+    assert_eq!(
+        error.message,
+        "Temporary MCP server initialization or connection failed: invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
+    );
     env.close().await;
 }
 
@@ -1621,36 +1749,6 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             json!({"mcpServers":{"docs":configuration(&mcp_url, "one")}}).to_string(),
         )
         .unwrap();
-        let root = Ctx::root().unwrap();
-        root.plugin(
-            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-                .unwrap(),
-        );
-        let (publication, _) = mcp_host::Host::start(&root).await;
-        let views = vec![
-            root.plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            ),
-            root.plugin({
-                let catalog = dim_app_server::catalog();
-                let build = Build::default();
-                SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
-            }),
-        ];
-        wait_active(
-            &root,
-            &views,
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.get::<SettingsService>()
-            .unwrap()
-            .authorize_project(home.join("project"), &CancellationToken::new())
-            .await
-            .unwrap();
-
         let models = Arc::new(
             AimuxModels::from_config(
                 serde_json::from_value(json!({
@@ -1663,8 +1761,6 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             )
             .unwrap(),
         );
-        root.plugin(AimuxPlugin);
-        root.plugin(ConfiguredModelsPlugin(models.clone()));
         let mut builder = AgentBuilder::new(AgentConfig {
             model: models.default_model().clone(),
             ..Default::default()
@@ -1700,9 +1796,12 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             )));
         dim_agent_aimux::install(&mut builder);
         mcp::install(&mut builder);
-        builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
-        let agent = builder.build_in(&root);
-        agent.start().await.unwrap();
+        mcp_host_rows(&mut builder, &home);
+        builder
+            .plugin(|_| Ok(Box::new(AimuxPlugin)))
+            .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        authorize_project(&agent, &home).await;
 
         let session = agent
             .create_session(SessionConfig {
@@ -1780,8 +1879,6 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             "a later turn also completes"
         );
         agent.close().await.unwrap();
-        publication.close().await;
-        root.shutdown().await.unwrap();
         stop.cancel();
         http.await.unwrap();
         mcp_stop.cancel();

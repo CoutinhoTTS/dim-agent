@@ -50,13 +50,38 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 | --- | --- |
 | Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 5); [App Server README](../../crates/dim-app-server/README.md) |
 | Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
-| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo` as `session.list` gives it, so a client that opens a known Session takes the model from it and reads no catalog; a reload leaves the title fields absent and `running` false, and the notices that follow correct them | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
+| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo` as `session.list` gives it, so a client that opens a known Session takes the model from it and reads no catalog; a reload leaves the title fields absent and `running` false, and the notices that follow correct them. The `session.create` and `session.attach` replies also carry `modelPreferences`, the preferences the Session's adopted configuration sends, derived from it and absent when it carries none; `session.list` items do not carry it | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
 | Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
 | Approvals and questions: `approval.request` / `cancelled` / `resolved`; a question is a pending `ask_user` call answered by `session.question.respond` | [ADR 003](../adr/003-approval-scope.md), [Questions](plugins/Questions.md) |
 | Interfaces viewing a Session: the UI registry, terminal UIs as UI leaves (`ui.open`, `ui.attach`, `ui.status`) | [Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves) |
 | Provider management for every client | [Provider management](appserver/provider-management.md) |
 
 The CLI requires protocol v3 and the `session.create` and `session.history` features; the web client and its assets require an exact protocol match ([web workspace §2.4](web-workspace.md)).
+
+### Member tool approval
+
+[Collaboration](subagent-tool-approval.md) owns member approval routing and its detail query.
+Clients receive the leader's ordinary approval request for `member_approval_allow`, fetch the
+server-owned original action with `session.collaboration.approval.get`, then answer that leader
+request. No client merges member pending approvals into the leader's raw approval queue.
+
+Every supporting client shows both the requesting leader branch and original member identity,
+member branch, tool, complete arguments/target and original reason. It offers allow once or reject;
+no remembered decision or policy escalation. Detail loading, failure or an unsupported query must
+not enable allow. Collaboration's `memberApprovalEnded` Session notice retires the matching route prompt (and
+clients query live status again after reconnect); the final server checks remain
+authoritative. [CLI commands](cli-commands.md#subagent-tool-approval) owns terminal rendering.
+
+Web applies this contract to the leader's normal approval card, even when a member detail is open;
+it retains the full original arguments in an accessible detail view. ACP maps the trusted original
+action into its permission request information and exposes only allow-once/reject-once options;
+if the detail read fails, it shows the error with Reject only and waits for the user before
+answering. An error during the final recheck also shows this rejection prompt. Ended requests
+close without an allow. If its client cannot convey a permission prompt, it rejects rather than
+silently approving an opaque id.
+These are requirements for member-route support, separate from existing ordinary approvals.
+Older clients can continue ordinary tools; rich member-approval review requires the new query and
+corresponding client support. No frozen v1/v2 notification set or Approval envelope is extended.
 
 ### Timeline block identity
 
@@ -109,6 +134,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Streaming output, run status, terminal status and progress | done | done | |
 | File change feedback | done | done | |
 | Tool approvals | done (`/approval` chooses ask or full access; `/approvals` also edits command rules) | done | [ADR 003](../adr/003-approval-scope.md) |
+| Member tool-approval forwarding and original-action review | done | done | [Member approval](subagent-tool-approval.md), [shared client requirements](#member-tool-approval) |
 | User questions (`ask_user`) | done (line client and terminal UIs) | none | [Questions](plugins/Questions.md) (implemented in #269, #336, #351) |
 | Todo status | out | out | [overview](overview.md) §1 |
 | Background tasks: commands and members (detail, stop one, stop all) | done | — | [Background-task list](background-task-list.md), [output](background-task-output.md), [member conversation](member-conversation.md) |

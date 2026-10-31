@@ -82,24 +82,38 @@ impl SseTransport {
                 .next()
                 .await
                 .ok_or(McpServerError::RequestFailed)?
-                .map_err(|_| McpServerError::InvalidResponse)?;
+                .map_err(|_| {
+                    McpServerError::InvalidResponse(
+                        "the event stream failed before the endpoint event".into(),
+                    )
+                })?;
             match event.event.as_deref() {
                 Some("endpoint") => {
-                    let value = event.data.ok_or(McpServerError::InvalidResponse)?;
-                    let endpoint = base
-                        .join(&value)
-                        .map_err(|_| McpServerError::InvalidResponse)?;
+                    let value = event.data.ok_or(McpServerError::InvalidResponse(
+                        "the endpoint event carried no endpoint".into(),
+                    ))?;
+                    let endpoint = base.join(&value).map_err(|_| {
+                        McpServerError::InvalidResponse(
+                            "the endpoint event carried an invalid endpoint".into(),
+                        )
+                    })?;
                     if value.trim().is_empty()
                         || endpoint.origin() != base.origin()
                         || !endpoint.username().is_empty()
                         || endpoint.password().is_some()
                         || endpoint.fragment().is_some()
                     {
-                        return Err(McpServerError::InvalidResponse);
+                        return Err(McpServerError::InvalidResponse(
+                            "the endpoint must be a same-origin absolute URL".into(),
+                        ));
                     }
                     break endpoint;
                 }
-                Some("message") => return Err(McpServerError::InvalidResponse),
+                Some("message") => {
+                    return Err(McpServerError::InvalidResponse(
+                        "the endpoint event must come first".into(),
+                    ));
+                }
                 _ => {}
             }
         };

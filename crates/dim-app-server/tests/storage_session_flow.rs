@@ -2,7 +2,7 @@ use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BranchOptions, Dispatcher, Feature, SessionConfig,
-    Timeline, TimelineIdentity, TimelineKey, TimelineStore,
+    Timeline, TimelineIdentity, TimelineKey, TimelineStore, testing::MinimalHost,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
@@ -148,7 +148,7 @@ async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
                 "storage-session.generic-cleanup",
                 move |names| Ok(Box::new(GenericCleanupFault::new(names, captured_tree.clone())?)),
             ));
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let idle = session.branch("main".into(), 0, BranchOptions {
             prompt: "idle sibling".into(), source: BranchSource::Host { operation_id: "idle sibling".into() },
@@ -195,7 +195,7 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
                 "storage-session.capture-timeline",
                 move |names| Ok(Box::new(CaptureTimeline::new(names, captured.clone())?)),
             ));
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let mut siblings = Vec::new();
         for name in ["failed sibling", "idle sibling"] {
@@ -232,7 +232,6 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
         let _ = agent.close().await;
         drop(connection);
         drop(session);
-        drop(agent);
         drop(builder);
         timelines.lock().unwrap().clear();
         store.close().await.unwrap();
@@ -296,7 +295,7 @@ async fn session_close_and_idle_unload_persist_finalizer_events() {
                         Ok(Box::new(RecordCleanup::new(names)?))
                     }),
             );
-            let agent = builder.build();
+            let agent = MinimalHost::start(&builder).await.unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
                 .await
@@ -331,7 +330,6 @@ async fn session_close_and_idle_unload_persist_finalizer_events() {
             store.close().await.unwrap();
             db.close().await.unwrap();
             drop(session);
-            drop(agent);
             drop(builder);
             drop(store);
             drop(db);

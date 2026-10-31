@@ -222,7 +222,7 @@ fn cjk(count: usize) -> String {
 async fn product_session(
     driver: Arc<dyn ModelDriver>,
     output: u64,
-) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+) -> (MinimalHost, dim_agent_runtime::Session) {
     product_session_with(driver, output, ProductSummaryStrategyConfig::default()).await
 }
 
@@ -232,7 +232,7 @@ async fn product_session_with(
     driver: Arc<dyn ModelDriver>,
     output: u64,
     config: ProductSummaryStrategyConfig,
-) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+) -> (MinimalHost, dim_agent_runtime::Session) {
     product_session_on(
         WINDOW,
         Arc::new(MockTools),
@@ -256,11 +256,7 @@ async fn product_session_on(
     config_session: SessionConfig,
     connection: Arc<dyn ResolveModelConnection>,
     reasoning: Option<serde_json::Value>,
-) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
-    let root = Ctx::root().unwrap();
-    root.provide(ModelHost(driver.clone())).unwrap();
-    root.provide(ProviderConnectionResolver(connection))
-        .unwrap();
+) -> (MinimalHost, dim_agent_runtime::Session) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .session_value(Arc::new(ToolHost(tools)))
@@ -308,15 +304,21 @@ async fn product_session_on(
             }),
         }),
     );
-    let agent = builder.build_in(&root);
+    let agent = MinimalHost::start_with(&builder, |root, _| {
+        root.provide(ModelHost(driver.clone()))?;
+        root.provide(ProviderConnectionResolver(connection))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     let session = agent.create_session(config_session).await.unwrap();
-    (root, agent, session)
+    (agent, session)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_summary_request_fits_the_window_for_cjk_history() {
     let recorder = Arc::new(Recorder::default());
-    let (root, agent, session) = product_session(recorder.clone(), OUTPUT).await;
+    let (agent, session) = product_session(recorder.clone(), OUTPUT).await;
     for text in [cjk(6_000), cjk(1_800), cjk(1_800), cjk(1_800)] {
         session
             .submit(text, InputMode::Queue, "main")
@@ -362,7 +364,6 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
             outcome: ContextCompactionResult::Completed { diagnostics, .. }, ..
         }) if diagnostics.strategy.details["compactedToolPayloadCount"] == 1)));
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 /// A prompt much longer than `SYSTEM` and a length sentence, configured on
@@ -382,7 +383,7 @@ async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() 
         prefix: prompt.clone(),
         ..Default::default()
     });
-    let (root, agent, session) = product_session_with(
+    let (agent, session) = product_session_with(
         recorder.clone(),
         output,
         ProductSummaryStrategyConfig {
@@ -436,7 +437,6 @@ async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() 
         );
     }
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 /// Answers a summarizer request whose transcript is longer than `limit`
@@ -526,7 +526,7 @@ async fn a_summary_cut_off_at_max_tokens_is_retried_in_halves() {
         limit: 3_000,
         transcripts: Default::default(),
     });
-    let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
+    let (agent, session) = product_session(driver.clone(), OUTPUT).await;
     let events = compact_first_turn(&session).await;
     let transcripts = driver.transcripts.lock().unwrap().clone();
     let [whole, first, rest @ ..] = transcripts.as_slice() else {
@@ -542,7 +542,6 @@ async fn a_summary_cut_off_at_max_tokens_is_retried_in_halves() {
             outcome: ContextCompactionResult::Completed { replacement, .. }, ..
         }) if *replacement == [dim_agent_capabilities::history::summary_message("摘要")])));
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -553,7 +552,7 @@ async fn a_summary_still_cut_off_at_the_smallest_chunk_fails_the_compaction() {
         limit: 0,
         transcripts: Default::default(),
     });
-    let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
+    let (agent, session) = product_session(driver.clone(), OUTPUT).await;
     let events = compact_first_turn(&session).await;
     assert!(!events.iter().any(|event| matches!(
         &event.kind,
@@ -585,7 +584,6 @@ async fn a_summary_still_cut_off_at_the_smallest_chunk_fails_the_compaction() {
     assert_eq!(usage.cache_read_tokens, Some(600. * replies));
     assert_eq!(usage.cache_write_tokens, None);
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -593,7 +591,7 @@ async fn a_completed_compaction_reports_its_usage_and_cost() {
     // One short turn stays under the trigger, so the manual compaction is
     // the only one: one chunk, one reply, and its usage sums to one reply's.
     let recorder = Arc::new(Recorder::default());
-    let (root, agent, session) = product_session(recorder.clone(), OUTPUT).await;
+    let (agent, session) = product_session(recorder.clone(), OUTPUT).await;
     session
         .submit(cjk(1_500), InputMode::Queue, "main")
         .await
@@ -623,7 +621,6 @@ async fn a_completed_compaction_reports_its_usage_and_cost() {
     assert!(fact["modelCallCount"].as_u64() == Some(1), "{fact}");
     assert!(fact["durationMs"].as_u64().is_some(), "{fact}");
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 /// Cuts off the first `cut_off` summarizer replies at `max_tokens`, then
@@ -677,7 +674,7 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
         summary: "s".repeat(4_800),
         requests: Default::default(),
     });
-    let (root, agent, session) = product_session(driver.clone(), output).await;
+    let (agent, session) = product_session(driver.clone(), output).await;
     let events = compact_first_turn(&session).await;
     let requests = driver.requests.lock().unwrap().clone();
     assert!(requests.len() > 3, "{}", requests.len());
@@ -697,7 +694,6 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
             outcome: ContextCompactionResult::Failed { error, .. }, ..
         }) if error.contains("does not fit") || error.contains("cut off"))));
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -754,7 +750,7 @@ fn transcript(request: &ModelRequest) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
     let recorder = Arc::new(Recorder::default());
-    let (root, agent, session) = product_session(recorder.clone(), OUTPUT).await;
+    let (agent, session) = product_session(recorder.clone(), OUTPUT).await;
     // The first turn alone passes the threshold: it is compacted inside
     // itself, so its own input is pinned, truncated around its middle.
     let old = format!(
@@ -858,7 +854,6 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
         "no entry placed before the previous cut is sent"
     );
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 /// Fails summarizer requests before any stream: every one while `blocked`,
@@ -926,7 +921,7 @@ async fn a_retryable_failure_before_a_stream_spends_the_request_budget() {
         blocked: AtomicBool::new(true),
         seen: AtomicUsize::new(0),
     });
-    let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
+    let (agent, session) = product_session(driver.clone(), OUTPUT).await;
     // Six over-budget turns whose compactions cannot apply, so the history
     // accumulates six entries, one chunk each.
     for _ in 0..6 {
@@ -974,7 +969,6 @@ async fn a_retryable_failure_before_a_stream_spends_the_request_budget() {
     );
     assert_eq!(projected(&session, "main").await, before, "not applied");
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -987,7 +981,7 @@ async fn a_blank_summary_fails_the_compaction_without_applying_it() {
         summary: "   ".into(),
         requests: Default::default(),
     });
-    let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
+    let (agent, session) = product_session(driver.clone(), OUTPUT).await;
     for text in [cjk(1_500), "next".into(), "third".into()] {
         session
             .submit(text, InputMode::Queue, "main")
@@ -1019,7 +1013,6 @@ async fn a_blank_summary_fails_the_compaction_without_applying_it() {
     assert_eq!(diagnostics.strategy.kind, "summary");
     assert_eq!(projected(&session, "main").await, before, "not applied");
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }
 
 /// The summarizer's factory value reaches its request through Provider's
@@ -1040,7 +1033,7 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
     ];
     for (declared, expected, mapped) in cases {
         let recorder = Arc::new(Recorder::default());
-        let (root, agent, session) = product_session_on(
+        let (agent, session) = product_session_on(
             WINDOW,
             Arc::new(MockTools),
             recorder.clone(),
@@ -1095,7 +1088,6 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
             );
         }
         agent.close().await.unwrap();
-        root.shutdown().await.unwrap();
     }
 }
 
@@ -1105,7 +1097,7 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_previous_digest_never_reaches_the_summarizer() {
     let recorder = Arc::new(Recorder::default());
-    let (root, agent, session) = product_session_on(
+    let (agent, session) = product_session_on(
         40_960,
         Arc::new(Declares),
         recorder.clone(),
@@ -1198,5 +1190,4 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
         "no digest entry reaches the summarizer"
     );
     agent.close().await.unwrap();
-    root.shutdown().await.unwrap();
 }

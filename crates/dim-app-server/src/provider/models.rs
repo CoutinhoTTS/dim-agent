@@ -25,9 +25,8 @@ impl PreferencesPatch {
                     provider_id: provider_id.to_owned(),
                     model_id: model.id.clone(),
                 },
-            );
-            requested
-                .configure(&snapshot, protocol, &model.config)
+            )?;
+            super::preferences::configure(&requested, &snapshot, protocol, &model.config)
                 .map_err(|message| ProviderError::InvalidConfig(message.into()))?;
         }
         Ok(())
@@ -155,6 +154,7 @@ impl ProviderService {
         let owner = self.clone();
         let current = account.clone();
         let bundled = self.bundled.clone();
+        let catalog_bundled = bundled.clone();
         let record = self
             .owned(cancel, move |_| {
                 Box::pin(async move {
@@ -173,7 +173,7 @@ impl ProviderService {
                                     ));
                                 }
                                 let model = record
-                                    .catalog(&bundled)
+                                    .catalog(&catalog_bundled)
                                     .models
                                     .into_iter()
                                     .find(|model| model.id == model_id)
@@ -201,14 +201,19 @@ impl ProviderService {
                 })
             })
             .await?;
-        Ok(Self::managed_management(descriptor, account, Some(record)))
+        Ok(Self::managed_management(
+            descriptor,
+            account,
+            Some(record),
+            &bundled,
+        ))
     }
 
     pub async fn create_model(
         self: &Arc<Self>,
         provider_id: String,
         expected_version: u32,
-        model: ModelEntry,
+        mut model: ModelEntry,
         cancel: &CancellationToken,
     ) -> Result<ProviderCatalog, ProviderError> {
         if self.oauth.contains(&provider_id, cancel).await? {
@@ -226,6 +231,14 @@ impl ProviderService {
                         return Err(ProviderError::Unsupported(
                             "Account catalogs do not accept user models".into(),
                         ));
+                    }
+                    // A user model states its own limits, so what it declares
+                    // is what the bundle must not override.
+                    if model.capabilities.context_window.is_some() {
+                        declare(&mut model, "contextWindow");
+                    }
+                    if model.capabilities.max_output_tokens.is_some() {
+                        declare(&mut model, "maxOutputTokens");
                     }
                     if record
                         .models

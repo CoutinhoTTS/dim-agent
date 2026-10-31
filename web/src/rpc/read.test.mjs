@@ -15,7 +15,7 @@ registerHooks({
   },
 })
 
-const { ProtocolError, readAccountProviders, readBranchCreate, readHistory, readProviderCatalog } = await import("./read.ts")
+const { ProtocolError, readAccountProviders, readBranchCreate, readHistory, readMemberApproval, readNotification, readProviderCatalog } = await import("./read.ts")
 
 test("model discovery reads managed providers and distinguishes missing catalogs from failures", () => {
   assert.deepEqual(readAccountProviders([
@@ -110,4 +110,23 @@ test("branch_create replies and malformed branch facts are read strictly", () =>
     })),
     ProtocolError,
   )
+})
+
+
+test("member approvals preserve the original action and retire by branch and route", () => {
+  const detail = { state: "pending", approvalId: "route", descriptor: {
+    delegationId: "delegation", member: { agentId: "reviewer", sessionId: "member", branchId: "main" },
+    requestId: "original", call: { name: "exec", input: { command: "cargo test", nested: { literal: "</script>" } } }, reason: "Member action",
+  } }
+  assert.deepEqual(readMemberApproval(detail), detail)
+  assert.deepEqual(readMemberApproval({ state: "ended" }), { state: "ended" })
+  assert.throws(() => readMemberApproval({ state: "pending", approvalId: "route" }), ProtocolError)
+  assert.throws(() => readMemberApproval({ ...detail, descriptor: { ...detail.descriptor, call: { name: "exec", input: null } } }), ProtocolError)
+  assert.deepEqual(readNotification("session.notice", { sessionId: "leader", source: "Collaboration", kind: "memberApprovalEnded", data: { branchId: "review", approvalId: "route" } }), {
+    method: "memberApprovalEnded", sessionId: "leader", branchId: "review", approvalId: "route",
+  })
+  assert.deepEqual(readNotification("approval.resolved", { sessionId: "leader", branchId: "review", requestId: "outer", decision: "deny" }), {
+    method: "approval.resolved", sessionId: "leader", branchId: "review", requestId: "outer",
+  })
+  assert.equal(readNotification("session.notice", { sessionId: "leader", source: "AnotherOwner", kind: "memberApprovalEnded", data: {} }), undefined)
 })
