@@ -22,6 +22,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod exec_shell_settings;
 #[cfg(unix)]
 mod isolation;
 mod isolation_policy;
@@ -29,6 +30,7 @@ pub use dim_agent_types::{
     IsolationEscalation, IsolationPolicy, IsolationPolicyEffective, IsolationPolicySnapshot,
     IsolationPolicySource, Sandbox,
 };
+pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellChoice};
 pub use isolation_policy::IsolationPolicyError;
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";

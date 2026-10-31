@@ -246,7 +246,7 @@ An owner validates what it is given. Content it refuses (an MCP document that fa
 
 ## 5. Context mapping
 
-PluginManager adds no text of its own to model context beyond the `plugin` tool. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). The tool's texts are marked by [model-facing prompts §4](../model-prompts.md#4-protocol-and-policy): the command names and each command's argument grammar, the one-line command list the declaration carries, and the `Usage:` line of a usage text are protocol, because the tool parses them exactly; the sentences after the usage line, and in `help`, that say what a command does or does not touch are policy. A malformed command's error result carries the command list or that command's usage, and a refused call's error carries its code (A.2) — both protocol. A completed call's result says what changed, the status, and `restartRequired` when it applies; that is protocol too, because the model decides its next step by it.
+PluginManager adds no text of its own to model context beyond the `plugin` tool. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). The tool's texts are marked by [model-facing prompts §4](../model-prompts.md#4-protocol-and-policy). The declaration's schema is protocol, and so is "Manage Dim plugins.", which states the tool's reach; the one-line command list it carries, with the command names and each command's argument grammar, is protocol too, because the tool parses them exactly. "Run `help <command>` for a command's details." is policy guidance, with `help <command>` protocol because it names the command to call; that sentence has no factory member yet, and gets one in the change that first evaluates a candidate for it. In a usage text the `Usage:` line is protocol, and the sentences after it, and in `help`, that say what a command does or does not touch are policy. A malformed command's error result carries the command list or that command's usage, and a refused call's error carries its code (A.2) — both protocol. A completed call's result says what changed, the status, and `restartRequired` when it applies; that is protocol too, because the model decides its next step by it.
 
 ## 6. Interfaces (summary)
 
@@ -358,9 +358,22 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 
+The client RPC boundary omits Git source userinfo, query and fragment, preserving
+the repository path, ref and commit. The persisted source is unchanged and remains
+available to update. Only catalog candidate sources, top-level status errors and
+direct content-refusal errors are projected; plugin-owned settings are not traversed.
+Status and content-refusal errors carry a generic message at this boundary, including
+in mutation replies: arbitrary Git, loader, manifest and content-error text can contain
+credentials.
+
 ### A.2 Errors
 
 `plugin_exists`, `plugin_not_found`, `invalid_id`, `path_outside_plugins` (both before any file system change, §7), `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
+
+The codes are stable across clients. Client RPC errors identify their code with a
+stable, actionable description without including the owner's raw diagnostic message
+or echoing request fields; the descriptions above identify the owner's error, not a
+permission to publish secrets.
 
 ## Appendix B. Conflict table
 

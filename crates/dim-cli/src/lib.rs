@@ -13,6 +13,7 @@ mod leaf;
 mod login;
 mod mcp;
 mod mcp_command;
+mod member_approval;
 mod migration_command;
 mod model;
 mod permission;

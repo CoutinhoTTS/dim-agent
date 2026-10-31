@@ -34,6 +34,10 @@ pub enum Command {
         allow: bool,
         remember: bool,
     },
+    RetryApproval {
+        request_id: String,
+        branch_id: String,
+    },
     AskAnswers {
         session_id: String,
         call: crate::question::Call,
@@ -533,6 +537,10 @@ pub enum Update {
         service_tiers: bool,
     },
     Snapshot(Box<ViewSnapshot>),
+    ApprovalPending {
+        branch_id: String,
+        request_id: String,
+    },
     QuestionReply {
         session_id: String,
         call: crate::question::Call,

@@ -91,8 +91,13 @@ the instructions are mixed.
 The list arrives in a `<dim-state>` block, so its guide entry is Prompt's
 ([Prompt §4](../../../design/plugins/Prompt.md#4-the-built-in-entries-and-their-writers)):
 Skills writes no marker of its own and contributes no entry. The `skill` tool's
-declaration is a built-in declaration and its marks are [#549](https://github.com/arcships/dim/issues/549)'s;
-its result is Skills' own: the `Skill:`, `Description:`, `File:`, `Allowed tools:`
+declaration is built-in and mixed: its schema is protocol, and so is "Load and
+apply a named skill's full SKILL.md instructions." because it states what the
+tool loads; the rest is policy — the `BLOCKING REQUIREMENT` rule, what makes a
+request match a skill, and invoking the tool before answering. Those policy
+sentences have no factory member yet, and get one in the change that first
+evaluates a candidate for them. Its result is
+Skills' own: the `Skill:`, `Description:`, `File:`, `Allowed tools:`
 and `Instructions:` layout and the refusals "Invalid input: skill_name must be a
 string", "Skills unavailable: …", "Skill is disabled: …" and "Unknown skill: …" are
 protocol, and the loaded body is the skill author's own text.

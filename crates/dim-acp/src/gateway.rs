@@ -198,6 +198,16 @@ fn prompt_outcome(
         }
     }
 }
+struct Interaction {
+    session: String,
+    token: CancellationToken,
+    member: Option<MemberInteraction>,
+}
+struct MemberInteraction {
+    branch: String,
+    route: String,
+    request: String,
+}
 struct Session {
     cwd: String,
     projection: Projection,
@@ -230,7 +240,7 @@ pub(crate) struct Gateway {
     initializing: bool,
     creating: usize,
     sessions: HashMap<String, Slot>,
-    interactions: HashMap<String, (String, CancellationToken)>,
+    interactions: HashMap<String, Interaction>,
     form: bool,
     login: Option<crate::auth::Login>,
     auth_methods: Vec<crate::auth::Method>,
@@ -1425,11 +1435,11 @@ impl Gateway {
                 }
             }
             Work::Answer { key, method, args } => {
-                if let Some((_, token)) = self.interactions.get(&key)
-                    && !token.is_cancelled()
+                if let Some(interaction) = self.interactions.get(&key)
+                    && !interaction.token.is_cancelled()
                     && let Some(args) = args
                 {
-                    token.cancel();
+                    interaction.token.cancel();
                     let rpc = self.rpc.clone();
                     self.tasks.spawn(async move {
                         let _ = rpc.call(method, args).await;
@@ -1706,15 +1716,36 @@ impl Gateway {
                     return Ok(());
                 }
                 let token = self.stop.child_token();
-                self.interactions
-                    .insert(key.clone(), (approval.session_id.clone(), token.clone()));
+                let member = if approval.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW {
+                    approval
+                        .call
+                        .input
+                        .get("approvalId")
+                        .and_then(Value::as_str)
+                        .map(|route| MemberInteraction {
+                            branch: approval.branch_id.clone(),
+                            route: route.into(),
+                            request: approval.request_id.clone(),
+                        })
+                } else {
+                    None
+                };
+                self.interactions.insert(
+                    key.clone(),
+                    Interaction {
+                        session: approval.session_id.clone(),
+                        token: token.clone(),
+                        member,
+                    },
+                );
                 let cx = self.cx.clone();
                 let outbox = self.outbox.clone();
+                let rpc = self.rpc.clone();
                 self.spawn(async move {
                     Work::Answer {
                         key,
                         method: "approval.respond",
-                        args: crate::interaction::approval(cx, outbox, token, approval).await,
+                        args: crate::interaction::approval(cx, outbox, token, approval, rpc).await,
                     }
                 });
             }
@@ -1734,8 +1765,8 @@ impl Gateway {
                     &settled.request_id,
                     "",
                 );
-                if let Some((_, token)) = self.interactions.remove(&key) {
-                    token.cancel();
+                if let Some(interaction) = self.interactions.remove(&key) {
+                    interaction.token.cancel();
                 }
             }
             "session.notice" => {
@@ -1754,7 +1785,31 @@ impl Gateway {
                     title_revision: u64,
                 }
                 let notice: Notice = decode_native(params)?;
-                if notice.source == "SessionStore" && notice.kind == "title" {
+                if notice.source == "Collaboration" && notice.kind == "memberApprovalEnded" {
+                    let ended: dim_agent_types::MemberApprovalEnded = decode_native(notice.data)?;
+                    let keys: Vec<_> = self
+                        .interactions
+                        .iter()
+                        .filter(|(_, interaction)| {
+                            interaction.session == notice.session_id
+                                && interaction.member.as_ref().is_some_and(|member| {
+                                    member.branch == ended.branch_id
+                                        && member.route == ended.approval_id
+                                })
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    for key in keys {
+                        if let Some(interaction) = self.interactions.remove(&key) {
+                            interaction.token.cancel();
+                            if let Some(member) = interaction.member {
+                                let rpc = self.rpc.clone();
+                                let session = notice.session_id.clone();
+                                self.tasks.spawn(async move { let _ = rpc.call("approval.respond", json!({"sessionId":session,"branchId":member.branch,"requestId":member.request,"decision":"deny"})).await; });
+                            }
+                        }
+                    }
+                } else if notice.source == "SessionStore" && notice.kind == "title" {
                     let title: Title = decode_native(notice.data)?;
                     self.title(&notice.session_id, title.title, title.title_revision)?;
                 }
@@ -1766,8 +1821,8 @@ impl Gateway {
 
     async fn fail_connection(&mut self) -> Result<(), Error> {
         self.recovering = true;
-        for (_, (_, token)) in self.interactions.drain() {
-            token.cancel();
+        for (_, interaction) in self.interactions.drain() {
+            interaction.token.cancel();
         }
         for (id, slot) in &mut self.sessions {
             match slot {
@@ -1816,9 +1871,9 @@ impl Gateway {
     }
 
     fn release_interactions(&mut self, id: &str) {
-        self.interactions.retain(|_, (session, token)| {
-            if session == id {
-                token.cancel();
+        self.interactions.retain(|_, interaction| {
+            if interaction.session == id {
+                interaction.token.cancel();
                 false
             } else {
                 true
@@ -1829,7 +1884,11 @@ impl Gateway {
     fn lost(&mut self) -> Result<(), Error> {
         self.recovering = true;
         self.recovering_sessions = 0;
-        for token in self.interactions.drain().map(|(_, (_, token))| token) {
+        for token in self
+            .interactions
+            .drain()
+            .map(|(_, interaction)| interaction.token)
+        {
             token.cancel();
         }
         let slots = std::mem::take(&mut self.sessions);
@@ -1935,8 +1994,8 @@ impl Gateway {
                     &call.request_id,
                     &call.call_id,
                 );
-                if let Some((_, token)) = self.interactions.remove(&key) {
-                    token.cancel();
+                if let Some(interaction) = self.interactions.remove(&key) {
+                    interaction.token.cancel();
                 }
             }
             self.questions(&notice.session_id);
@@ -2105,8 +2164,14 @@ impl Gateway {
                 continue;
             }
             let token = self.stop.child_token();
-            self.interactions
-                .insert(key.clone(), (id.to_owned(), token.clone()));
+            self.interactions.insert(
+                key.clone(),
+                Interaction {
+                    session: id.to_owned(),
+                    token: token.clone(),
+                    member: None,
+                },
+            );
             let cx = self.cx.clone();
             let outbox = self.outbox.clone();
             let id = id.to_owned();

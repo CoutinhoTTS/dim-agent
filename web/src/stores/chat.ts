@@ -4,7 +4,7 @@ import { Projection, type TimelineRow } from "../projection"
 import { Lines, type LineView } from "../lines"
 import { ConnectionLost, RpcError } from "../rpc/client"
 import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type ModelId, type Notification, type SessionEvent } from "../rpc/protocol"
-import { ProtocolError, readAck, readBranchCreate, readHistory, readModelUpdate } from "../rpc/read"
+import { ProtocolError, readAck, readBranchCreate, readHistory, readModelUpdate, readMemberApproval } from "../rpc/read"
 import { useConnectionStore } from "./connection"
 import { useSessionsStore } from "./sessions"
 import { useUiStore } from "./ui"
@@ -236,13 +236,22 @@ export const useChatStore = defineStore("chat", () => {
         break
       }
       case "approval.request":
-        if (!view.approvals.some((approval) => approval.requestId === notification.request.requestId)) {
+        if (!view.approvals.some((approval) => approval.requestId === notification.request.requestId && approval.branchId === notification.request.branchId)) {
           view.approvals = [...view.approvals, notification.request]
         }
         break
+      case "approval.resolved":
       case "approval.cancelled":
-        removeApproval(view, notification.requestId)
+        if (view.approvals.some((approval) => approval.branchId === notification.branchId && approval.requestId === notification.requestId)) removeApproval(view, notification.branchId, notification.requestId)
         break
+      case "memberApprovalEnded": {
+        const ended = view.approvals.filter((approval) => approval.branchId === notification.branchId && approval.call.name === "member_approval_allow" && approval.call.input.approvalId === notification.approvalId)
+        for (const approval of ended) {
+          removeApproval(view, approval.branchId, approval.requestId)
+          void respond(view.sessionId, approval, "deny").catch(() => {})
+        }
+        break
+      }
       case "session.closed":
         view.status = "closed"
         view.running = false
@@ -419,8 +428,8 @@ export const useChatStore = defineStore("chat", () => {
     refreshTimer = setTimeout(() => void useSessionsStore().refresh(), 500)
   }
 
-  function removeApproval(view: SessionView, requestId: string): void {
-    view.approvals = view.approvals.filter((approval) => approval.requestId !== requestId)
+  function removeApproval(view: SessionView, branchId: string, requestId: string): void {
+    view.approvals = view.approvals.filter((approval) => approval.branchId !== branchId || approval.requestId !== requestId)
   }
 
   function ensureLine(sessionId: string, branchId: string): void {
@@ -459,6 +468,10 @@ export const useChatStore = defineStore("chat", () => {
     await client().call("session.branch_end", { sessionId, branchId }, readAck)
   }
 
+  async function memberApproval(sessionId: string, approval: ApprovalRequest) {
+    return client().call("session.collaboration.approval.get", { sessionId, branchId: approval.branchId, requestId: approval.requestId }, readMemberApproval)
+  }
+
   async function respond(sessionId: string, approval: ApprovalRequest, decision: ApprovalDecision): Promise<void> {
     await client().call("approval.respond", {
       sessionId,
@@ -467,7 +480,7 @@ export const useChatStore = defineStore("chat", () => {
       decision,
     }, readAck)
     const view = views[sessionId]
-    if (view !== undefined) removeApproval(view, approval.requestId)
+    if (view !== undefined) removeApproval(view, approval.branchId, approval.requestId)
   }
 
   async function setModel(sessionId: string, model: ModelId): Promise<void> {
@@ -483,5 +496,5 @@ export const useChatStore = defineStore("chat", () => {
     publish(channel)
   }
 
-  return { views, open, resync, receive, ensureLine, retryLine, submit, stop, createLine, endLine, respond, setModel }
+  return { views, open, resync, receive, ensureLine, retryLine, submit, stop, createLine, endLine, respond, memberApproval, setModel }
 })
