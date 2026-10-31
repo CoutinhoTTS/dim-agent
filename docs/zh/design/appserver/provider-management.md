@@ -325,6 +325,12 @@ Session 保留已采用的能力快照。模型变为未声明的 Session 仍可
 无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。这次读取是进程
 host 端口，不是管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
 
+**为什么是端口而不是 `ProviderService` 上的方法。** 消费方插件在自己的 crate 中，
+`xtask check` 拒绝依赖装配层 `dim-app-server`，因此消费方无法命名 `ProviderService`。
+端口及其数据类型放在 Provider 与消费方都依赖的 `dim-agent-capabilities`；注册为进程名后，
+消费方声明 `Keyed<SelectableModelsHost>`，由 catalog 解析。依赖从扩展指向 core，符合
+[ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在 Provider。
+
 **合同（语言中立）。** 进程 host 端口，无实例键，由 Provider 提供：操作 `selectableModels`，
 异步，请求 `{}`，回复 `{models: ModelCapabilitySnapshot[]}`。元素就是既有
 `ModelCapabilitySnapshot`——`{target: {providerId, modelId}, capabilities:
@@ -373,10 +379,8 @@ provider，读取也不返回逐项错误列表。需要该 provider 诊断的�
 Dispatcher、before 回调、Session 与分支部件；driver、路由和非 chat 规则。读取不增加状态、
 缓存、通知、crate 或模块。
 
-**Rust 绑定。** 端口及其数据类型放在 core host 合同
-（`crates/dim-agent-capabilities/src/host.rs`，`ModelSelectionHost` 旁），消费方 crate 依赖
-`dim-agent-capabilities`：这个方向允许，而 `xtask check` 拒绝依赖 `dim-app-server`。Provider
-在 `ProviderPlugin::apply` 中提供该端口，App Server 的 catalog 以 Rust-only 名字
+**Rust 绑定。** 端口定义在 `crates/dim-agent-capabilities/src/host.rs`，`ModelSelectionHost`
+旁。Provider 在 `ProviderPlugin::apply` 中提供该端口，App Server 的 catalog 以 Rust-only 名字
 `selectableModelsHost` 注册它（[#4](https://github.com/arcships/dim/issues/4) 之前没有跨语言绑定）：
 
 ```rust

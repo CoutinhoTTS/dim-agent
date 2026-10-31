@@ -440,6 +440,15 @@ decision needs. This read is a process host port, not a management method: it is
 not on the `provider` namespace, is not served over RPC, and does not change
 `provider.catalog`.
 
+**Why a port rather than a method on `ProviderService`.** A consumer plugin lives
+in its own crate, and `xtask check` rejects a dependency on `dim-app-server`, the
+composition layer, so the consumer cannot name `ProviderService`. The port and its
+data type live in `dim-agent-capabilities`, which Provider and the consumer both
+depend on; registering it as a process name lets the consumer declare
+`Keyed<SelectableModelsHost>` and the catalog resolve it. The dependency points
+from the extension to the core, as [ADR 002 D3](../../adr/002-plugin-scope.md)
+requires, and Provider keeps the implementation, the catalog and the rules.
+
 **Contract (language-neutral).** A process host port, no instance key, provided
 by Provider: operation `selectableModels`, asynchronous, request `{}`, reply
 `{models: ModelCapabilitySnapshot[]}`. The element is the existing
@@ -507,12 +516,10 @@ client protocol and `PROTOCOL_VERSION`; persistence and its format; Timeline,
 Dispatcher, callbacks, Session and branch parts; and the driver, route and
 non-chat rules. The read adds no state, cache, notification, crate or module.
 
-**Rust binding.** The port and its data type live in the core host contract
-(`crates/dim-agent-capabilities/src/host.rs`, beside `ModelSelectionHost`), so a
-consumer crate depends on `dim-agent-capabilities`: that direction is allowed,
-while `xtask check` rejects a dependency on `dim-app-server`. Provider provides
-the port in `ProviderPlugin::apply`, and the App Server catalog registers it as
-the Rust-only name `selectableModelsHost` (no cross-language binding before
+**Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
+beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
+the App Server catalog registers it as the Rust-only name `selectableModelsHost`
+(no cross-language binding before
 [#4](https://github.com/arcships/dim/issues/4)):
 
 ```rust
