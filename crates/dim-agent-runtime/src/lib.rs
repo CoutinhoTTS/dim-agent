@@ -6,6 +6,7 @@ mod contracts;
 pub mod core;
 mod error;
 mod lifecycle;
+mod memory;
 mod memory_timeline_store;
 pub mod names;
 mod parts;
