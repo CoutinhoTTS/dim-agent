@@ -218,7 +218,7 @@ the event and byte limits like any other window.
 - `latestTurn` with `limit` at or above the window size is one reply and folds
   like today's read of that turn.
 
-### 4.5 Validation
+### 4.5 Errors
 
 Validation runs in this order; the first failure decides the reply. `invalid` is
 the existing `-32602 invalid_params`.
@@ -231,7 +231,7 @@ the existing `-32602 invalid_params`.
 | 4 | `limit` is 0 | `invalid` (unchanged) |
 | 5 | `latestTurn` is `true` and `limit` is above 4096 | `invalid`: the window's page limit |
 | 6 | `latestTurn` or `before` is present and the host has no native Session store | `invalid`: the window requires the store; the feature is advertised only with one (§7) |
-| 7 | Session or branch resolution | `session_closed`, `branch_missing` (unchanged) |
+| 7 | Session or branch resolution | `session_closed` for a missing or closed Session; `session_invalid_input` for a branch the line does not have (both unchanged) |
 | 8 | `through` is above the dispatched position | `invalid` (unchanged); otherwise the call waits for dispatch up to `through` |
 | 9 | `through` is inside a batch | storage error (unchanged) |
 | 10 | `after` is above `through`, or `after` is inside a batch | `invalid` (unchanged) |
@@ -243,6 +243,21 @@ Every other combination is accepted: `latestTurn` with or without `through`;
 `limit` absent (256 forward, 4096 window); `through` absent (pinned at the
 published head). `latestTurn: false` is the same as absent. Protocol v1 and v2
 never reach the method (unchanged).
+
+The method's error contract, including the new `history_too_large`:
+
+| `appError` | Code | When | Client action |
+| --- | --- | --- | --- |
+| `invalid_params` | -32602 | the request shape, or any validation row above marked `invalid` | correct the request; a page limit or a cursor inside a batch is not retried unchanged |
+| `session_closed` | -32000 | the Session does not exist or is closed | stop reading it |
+| `session_invalid_input` | -32000 | the branch does not exist | correct the branch |
+| `history_too_large` | -32000 | the newest batch of a window page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read that turn with forward paging (§1.1); no retry of the same window helps |
+| none | -32603 | a storage failure or a reply encoding failure; opaque, with a server message | retry, and report if it repeats |
+
+`session.history` returns no other `appError`. The existing `session.submit`
+guarantee set and the `sessions` service error table
+([session access A.6](../contracts/session-access.md#a6-errors)) do not apply:
+those name other methods' outcomes.
 
 ## 5. Storage
 
