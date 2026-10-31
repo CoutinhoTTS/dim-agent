@@ -215,7 +215,7 @@ When a content owner itself is turned on (Hooks, for example), PluginManager reg
 
 `plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
 
-1. Read the manifest again. If its name changed, refuse (`name_changed`); the user installs it again under the new name.
+1. Read the manifest again. A read that fails refuses the reload (`invalid_manifest`) before changing anything: the plugin keeps its last good row and content until the next change of the record, from any command, or a restart. Both read the manifest again and run none of the plugin's content while it cannot be read (§3.1). If its name changed, refuse (`name_changed`); the user installs it again under the new name.
 2. Code: `Loader::reload("plugin:<name>")`, and nothing else: there is no resolver cache to clear, since the runtime describes the module again at every resolution. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
 3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
 4. Update `kinds` in `plugins.json` if they changed.

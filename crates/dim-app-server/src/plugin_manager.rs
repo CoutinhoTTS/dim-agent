@@ -220,7 +220,9 @@ impl State {
         let _ = self.builtins.set(builtins);
         let _ = self.catalog.set(catalog);
         let record = self.record.lock().unwrap().clone();
-        let (patches, off) = self.derive(&record);
+        // The content startup that follows reads every manifest again and
+        // withdraws there (§3.1), so the unreadable ids are not needed here.
+        let (patches, off, _) = self.derive(&record);
         Ok(StartupLayer {
             patches,
             off,
@@ -242,13 +244,15 @@ impl State {
     /// The `plugins` layer `record` implies (§3): a row for each name that
     /// uses a default or installed plugin with code, and each built-in row
     /// whose name is off or uses another plugin turned off; with those
-    /// built-in names.
-    fn derive(&self, record: &Record) -> (Vec<Patch>, Vec<String>) {
+    /// built-in names and the ids of the used plugins whose manifest cannot
+    /// be read.
+    fn derive(&self, record: &Record) -> (Vec<Patch>, Vec<String>, Vec<String>) {
         let builtins = self.builtins.get().expect("set at startup");
         let catalog = self.catalog.get().expect("set at startup");
         let mut rows = Vec::new();
         let mut patches = Vec::new();
         let mut off = Vec::new();
+        let mut unreadable = Vec::new();
         for name in names(record, &self.defaults, builtins) {
             let used = using(record, &self.defaults, builtins, &name);
             if builtins.contains(&name) && used != Some(Use::Builtin) {
@@ -283,7 +287,12 @@ impl State {
                     rows.push(row_value(&name, id, &dir, &code, config));
                 }
                 Ok(_) => {}
-                Err(error) => tracing::warn!(%name, %error, "plugin manifest unreadable"),
+                Err(error) => {
+                    tracing::warn!(%name, %error, "plugin manifest unreadable");
+                    if let Some(plugin) = used.as_ref().and_then(|used| own_id(&name, used)) {
+                        unreadable.push(plugin.to_owned());
+                    }
+                }
             }
         }
         patches.insert(
@@ -293,7 +302,7 @@ impl State {
                 ..Default::default()
             },
         );
-        (patches, off)
+        (patches, off, unreadable)
     }
 }
 impl State {
@@ -1369,11 +1378,13 @@ impl Manager {
 
     /// Brings the loader to the record (§3): derives the `plugins` layer
     /// from `plugins.json` and reconciles it. A row rutis refuses stays in
-    /// the loader with its reason, as after a restart.
+    /// the loader with its reason, as after a restart. A used plugin whose
+    /// manifest cannot be read gets no row, so it runs none of its content
+    /// either (§3.1).
     async fn apply(&self) {
         let _applying = self.state.applying.lock().await;
         let record = self.state.record.lock().unwrap().clone();
-        let (patches, _) = self.state.derive(&record);
+        let (patches, _, unreadable) = self.state.derive(&record);
         let mut layers = self.loader.layers();
         match layers.iter_mut().find(|layer| layer.name == LAYER) {
             Some(layer) => layer.patches = patches,
@@ -1381,6 +1392,9 @@ impl Manager {
         }
         if let Err(error) = self.loader.reconcile(layers, None).await {
             tracing::warn!(%error, "plugin layer reconcile refused");
+        }
+        for plugin in unreadable {
+            self.owners.withdraw(&plugin, &CONTENT).await;
         }
     }
 
@@ -1413,9 +1427,9 @@ impl Manager {
         };
         let manifest = match dir.as_deref().map(Manifest::read) {
             Some(Ok(manifest)) => manifest,
+            // `apply` above already withdrew a plugin whose manifest it could
+            // not read.
             Some(Err(error)) => {
-                let plugin = own_id(name, used).expect("not a built-in");
-                self.owners.withdraw(plugin, &CONTENT).await;
                 return Outcome {
                     status: Some(json!({"status": "failed", "error": error.to_string()})),
                     ..Default::default()

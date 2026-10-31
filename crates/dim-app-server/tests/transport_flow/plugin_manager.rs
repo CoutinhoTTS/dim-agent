@@ -1892,3 +1892,64 @@ async fn plugin_refusal_is_dropped_while_its_owner_is_off() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// §3.1 and §3.4: a reload refused for its manifest changes nothing, and the
+/// next change of the record, from any command, reads the manifest again and
+/// runs none of the plugin's content while it cannot be read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_broken_manifest_content_stops_on_the_next_change() {
+    let home = home();
+    let config = config(&home);
+    let source = home.join("src/kit");
+    let absent = json!({"tool": {"command": "dim-test-absent-mcp-server"}});
+    write_content_plugin(&source, "kit", &["kit"], absent.clone());
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    assert_eq!(mcp_ids(&mut client).await, ["kit:tool"]);
+    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:kit"]);
+
+    std::fs::write(source.join("dim-plugin.json"), r#"{"name": "kit",}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(app_error(&reloaded), "invalid_manifest", "{reloaded}");
+    assert_eq!(mcp_ids(&mut client).await, ["kit:tool"]);
+    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:kit"]);
+
+    let other = home.join("src/extra");
+    write_content_plugin(&other, "extra", &["extra"], absent.clone());
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":other}}),
+        )
+        .await,
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "kit")["status"], "failed", "{list}");
+    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
+    assert_eq!(mcp_ids(&mut client).await, ["extra:tool"]);
+    let mut skills = plugin_skill_ids(&mut client).await;
+    skills.sort();
+    assert_eq!(skills, ["plugin:extra:extra"]);
+
+    write_content_plugin(&source, "kit", &["kit"], absent);
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+    let mut ids = mcp_ids(&mut client).await;
+    ids.sort();
+    assert_eq!(ids, ["extra:tool", "kit:tool"]);
+    let mut skills = plugin_skill_ids(&mut client).await;
+    skills.sort();
+    assert_eq!(skills, ["plugin:extra:extra", "plugin:kit:kit"]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
