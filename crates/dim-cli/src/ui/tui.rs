@@ -734,8 +734,7 @@ struct App {
     /// call's row id.
     tail_groups: Vec<(usize, String)>,
     notices: Vec<String>,
-    /// Multi-line status blocks to commit (reports), with their tone.
-    reports: Vec<(String, Tone)>,
+    reports: Vec<Block>,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
     /// The adopted model and its reasoning effort, once the session exists.
@@ -1519,15 +1518,17 @@ impl App {
                 }
             }
             Update::Toast(text) => self.set_notice(text),
-            Update::Report { text, warning } => self
-                .reports
-                .push((text, if warning { Tone::Warning } else { Tone::Muted })),
+            Update::Report { text, warning } => self.reports.push(Block::Status {
+                text,
+                tone: if warning { Tone::Warning } else { Tone::Muted },
+            }),
             Update::Web { enabled, open, url } => {
                 if enabled && open {
                     match url {
-                        Some(url) => self
-                            .reports
-                            .push((format!("Web interface on: {url}"), Tone::Muted)),
+                        Some(url) => self.reports.push(Block::Status {
+                            text: format!("Web interface on: {url}"),
+                            tone: Tone::Muted,
+                        }),
                         None => self.notices.push("Web interface is on".to_owned()),
                     }
                 } else if open {
@@ -1591,6 +1592,17 @@ impl App {
                     view.set_usage(usage);
                 }
             }
+            Update::UsageReport(usage) => self.reports.push(match usage {
+                Ok(usage) => Block::AccountUsage(usage),
+                Err(reason) => Block::Status {
+                    text: format!(
+                        "{} · {}",
+                        t("DimAgent OAuth"),
+                        tf("Usage: {reason}", &[("reason", &reason)])
+                    ),
+                    tone: Tone::Warning,
+                },
+            }),
             Update::Context(context) => self.context = context,
             Update::Compacted(reply) => {
                 let (text, tone) = match reply {
@@ -1612,7 +1624,7 @@ impl App {
                         Tone::Warning,
                     ),
                 };
-                self.reports.push((text, tone));
+                self.reports.push(Block::Status { text, tone });
             }
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
@@ -2537,7 +2549,10 @@ impl App {
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
             Effect::OauthBack => {}
             Effect::OauthPaste(url) => self.host.send(Command::OauthPaste(url)),
-            Effect::Print(text) => self.reports.push((text, Tone::Muted)),
+            Effect::Print(text) => self.reports.push(Block::Status {
+                text,
+                tone: Tone::Muted,
+            }),
             Effect::Connected(provider_id) => {
                 self.set_notice(tf("Connected {provider}", &[("provider", &provider_id)]));
                 if provider_id == DIM_OAUTH_ID {
@@ -3008,7 +3023,10 @@ impl App {
             }
             "keys" => {
                 let rows = crate::ui::keys::report(self.fullscreen, self.mouse);
-                self.reports.push((rows.join("\n"), Tone::Muted));
+                self.reports.push(Block::Status {
+                    text: rows.join("\n"),
+                    tone: Tone::Muted,
+                });
                 Outcome::Continue
             }
             "settings" => {
@@ -3190,16 +3208,10 @@ impl App {
             self.record(Block::Status { text: notice, tone });
             frame.commits.push(text);
         }
-        for (text, tone) in std::mem::take(&mut self.reports) {
-            let color = match tone {
-                Tone::Muted => &self.palette.muted,
-                Tone::Warning => &self.palette.warning,
-                Tone::Danger => &self.palette.danger,
-            };
-            let rows = gutter_text(STATUS_MARK, &text, width, color);
-            let chunk_text = chunk(&rows);
-            self.record(Block::Status { text, tone });
-            frame.commits.push(chunk_text);
+        for block in std::mem::take(&mut self.reports) {
+            let text = chunk(&render_block(&block, width, &self.palette, &self.markdown));
+            self.record(block);
+            frame.commits.push(text);
         }
         for run in std::mem::take(&mut self.shell_runs) {
             let block = Block::Shell(run);

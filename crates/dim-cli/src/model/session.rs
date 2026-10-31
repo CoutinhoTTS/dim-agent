@@ -610,6 +610,8 @@ pub enum Update {
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.
     Usage(Result<Usage, String>),
+    /// The Dim account usage requested by `/usage`.
+    UsageReport(Result<Usage, String>),
     /// The main branch's context use; none while the session's usage is
     /// unknown.
     Context(Option<ContextReading>),

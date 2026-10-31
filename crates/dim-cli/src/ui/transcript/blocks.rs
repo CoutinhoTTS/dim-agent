@@ -600,6 +600,15 @@ pub(crate) fn render_block(
             };
             gutter_text(STATUS_MARK, &crate::sanitize::safe(text), width, color)
         }
+        Block::AccountUsage(usage) => {
+            let mut rows = vec![t("DimAgent OAuth").to_owned()];
+            rows.extend(crate::ui::oauth_view::OauthView::render_usage(
+                usage,
+                width.saturating_sub(gutter_width(width)),
+                p,
+            ));
+            gutter_text(STATUS_MARK, &rows.join("\n"), width, &p.muted)
+        }
         Block::Failure(message) => vec![tf("Error: {message}", &[("message", message)])],
         Block::Boundary(label) => vec![fg(&boundary_line(label, width), &p.muted)],
         Block::Note(text) => vec![fg(&truncate_cells(text, width), &p.muted)],

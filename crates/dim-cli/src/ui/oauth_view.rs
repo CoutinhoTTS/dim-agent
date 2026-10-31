@@ -302,6 +302,16 @@ impl OauthView {
             }
             (None, false) => return rows,
         };
+        rows.extend(
+            Self::render_usage(usage, width, p)
+                .into_iter()
+                .map(|text| (Row::Styled, text)),
+        );
+        rows
+    }
+
+    pub(super) fn render_usage(usage: &Usage, width: usize, p: &Palette) -> Vec<String> {
+        let mut rows = Vec::new();
         if let Some(plan) = &usage.plan {
             let mut parts: Vec<String> = Vec::new();
             parts.extend(plan.name.clone());
@@ -330,7 +340,7 @@ impl OauthView {
                 parts.push(tf("expires {date}", &[("date", short_date(date))]));
             }
             if !parts.is_empty() {
-                rows.push((Row::Section, parts.join(" · ")));
+                rows.push(fg(&parts.join(" · "), &p.muted));
             }
         }
         let mut meters: Vec<Meter> = Vec::new();
@@ -398,12 +408,13 @@ impl OauthView {
             .max()
             .unwrap_or(0);
         for (label, amount, unlimited, when) in meters {
-            rows.push((Row::Section, String::new()));
+            rows.push(String::new());
             let label = format!("{label}{}", " ".repeat(label_width - width_of(&label)));
             let Some((used, total)) = amount.filter(|_| !unlimited) else {
-                rows.push((
-                    Row::Styled,
-                    format!("{}  {}", fg(&label, &p.text), fg(t("unlimited"), &p.muted)),
+                rows.push(format!(
+                    "{}  {}",
+                    fg(&label, &p.text),
+                    fg(t("unlimited"), &p.muted)
                 ));
                 continue;
             };
@@ -418,24 +429,18 @@ impl OauthView {
                 tail.push_str(&when);
             }
             let room = width.saturating_sub(label_width + 2);
-            rows.push((
-                Row::Styled,
-                format!(
-                    "{}  {}",
-                    fg(&label, &p.text),
-                    fg(&truncate_cells(&tail, room), &p.muted)
-                ),
+            rows.push(format!(
+                "{}  {}",
+                fg(&label, &p.text),
+                fg(&truncate_cells(&tail, room), &p.muted)
             ));
             let bar_width = width.clamp(6, 40);
             let filled = (ratio * bar_width as f64).round() as usize;
             let tone = if ratio >= 0.9 { &p.danger } else { &p.accent };
-            rows.push((
-                Row::Styled,
-                format!(
-                    "{}{}",
-                    fg(&"█".repeat(filled), tone),
-                    fg(&"░".repeat(bar_width - filled), &p.faint)
-                ),
+            rows.push(format!(
+                "{}{}",
+                fg(&"█".repeat(filled), tone),
+                fg(&"░".repeat(bar_width - filled), &p.faint)
             ));
         }
         rows

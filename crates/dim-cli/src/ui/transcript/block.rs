@@ -60,6 +60,7 @@ pub enum Block {
         text: String,
         tone: Tone,
     },
+    AccountUsage(crate::model::session::Usage),
     Failure(String),
     /// A centred rule with a label (session switches).
     Boundary(String),

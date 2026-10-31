@@ -725,3 +725,103 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
     assert!(terminal.wait().success());
     daemon.join().unwrap();
 }
+
+#[test]
+fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
+    for fullscreen in [false, true] {
+        for provider in ["dimcode-api-oauth", "test"] {
+            let home = Home::new();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let create = wire.read("session.create");
+                wire.reply(&create, json!({
+                    "sessionId":"session", "sequence":8,
+                    "model":{"providerId":provider,"modelId":"model"}
+                }));
+                let attach = wire.read("session.attach");
+                let mut record = attach_record(&attach);
+                record["model"]["providerId"] = json!(provider);
+                wire.reply(&attach, record);
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+                let mut context_reads = 0;
+                let mut account_reads = 0;
+                let mut line = String::new();
+                while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    line.clear();
+                    match request["method"].as_str().unwrap() {
+                        "account.providers" => wire.reply(&request, json!([{"providerId":"dimcode-api-oauth"}])),
+                        "account.status" => wire.reply(&request, json!({
+                            "account":{"issuer":"fixture","subject":"signed-in","grantedScopes":[]}
+                        })),
+                        "session.context.usage" => {
+                            context_reads += 1;
+                            if context_reads == 3 {
+                                failed(wire, &request);
+                            } else {
+                                wire.reply(&request, usage(1849.0));
+                            }
+                        }
+                        "account.usage" => {
+                            assert_eq!(provider, "dimcode-api-oauth");
+                            assert_eq!(request["params"], json!({"providerId":"dimcode-api-oauth"}));
+                            account_reads += 1;
+                            match account_reads {
+                                1 => wire.reply(&request, json!({
+                                    "plan":{"name":"Pro","status":"active","expiresAt":"2026-11-30T00:00:00Z"},
+                                    "credits":{"usedUnits":25000,"totalUnits":300000,"resetsAt":"2026-11-30T00:00:00Z"},
+                                    "windows":[{"durationHours":5,"tokenUsed":9500,"tokenCap":10000}],
+                                    "features":[{"key":"web_search","used":211,"allowance":1500}]
+                                })),
+                                2 => wire.reply(&request, json!({"credits":{"unlimited":true}})),
+                                3 => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                                    "code":-32000,"message":"Account usage temporarily unavailable"
+                                }})),
+                                _ => panic!("unexpected account usage refresh"),
+                            }
+                        }
+                        method => panic!("unexpected request {method}"),
+                    }
+                }
+                assert_eq!(context_reads, if provider == "test" { 2 } else { 4 });
+                assert_eq!(account_reads, if provider == "test" { 0 } else { 3 });
+            });
+            let mut command = home.command();
+            command.arg(if fullscreen {
+                "--fullscreen"
+            } else {
+                "--scrollback"
+            });
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until(&format!("{provider} / model"));
+            terminal.write(b"/usage\r");
+            terminal.until("Context: 1,849 / 256,000 tokens");
+            if provider == "dimcode-api-oauth" {
+                for expected in [
+                    "DimAgent OAuth",
+                    "Pro · active · expires 2026-11-30",
+                    "25,000 / 300,000  8%",
+                    "9,500 / 10,000  95%",
+                    "211 / 1,500  14%",
+                ] {
+                    terminal.until(expected);
+                }
+                terminal.write(b"/usage\r");
+                terminal.until("This daemon does not track context usage");
+                terminal.until("unlimited");
+                terminal.write(b"/usage\r");
+                terminal.until("Context: 1,849 / 256,000 tokens");
+                terminal.until("Account usage temporarily unavailable");
+            }
+            terminal.write(b"/exit\r");
+            terminal.until("Bye!");
+            assert!(terminal.wait().success());
+            daemon.join().unwrap();
+            if provider == "test" {
+                assert!(!terminal.transcript.contains("DimAgent OAuth"));
+                assert!(!terminal.transcript.contains("Credits"));
+            }
+        }
+    }
+}
