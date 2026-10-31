@@ -150,6 +150,13 @@ impl SessionFilesService for TestFiles {
             })
         })
     }
+    fn register(
+        &self,
+        _: String,
+        _: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), SessionFileError>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
     fn owns(
         &self,
         _: String,
@@ -167,6 +174,15 @@ impl SessionFilesService for TestFiles {
             }
             Ok(owned.iter().any(|root| path.starts_with(root)))
         })
+    }
+    fn owned_paths(
+        &self,
+        _: String,
+    ) -> Pin<
+        Box<dyn Future<Output = std::result::Result<Vec<PathBuf>, SessionFileError>> + Send + '_>,
+    > {
+        let owned = self.owned.lock().unwrap().clone();
+        Box::pin(async move { Ok(owned) })
     }
 }
 fn grant(path: impl Into<PathBuf>, kind: GrantKind, mode: GrantMode) -> SessionGrant {

@@ -7,6 +7,7 @@
 use super::*;
 use crate::storage::{SessionStore, SqliteTimelineStore};
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
+use dim_agent_capabilities::host_platform::{HostPlatform, ShellStatus};
 use dim_agent_runtime::{SessionConfig, TimelineStore};
 use rutis::host::CtxHost;
 use std::path::PathBuf;
@@ -326,6 +327,43 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
     assert_eq!(fixture.rows(), [format!("{}|-|1", kept.file_id)]);
     assert_eq!(fixture.entries(), [kept.file_id]);
     next.close().await;
+    drop(store);
+    fixture.close().await;
+}
+
+/// ADR 013 D4: a shell output directory goes through HostPlatform, is kept
+/// while another Session names a path under it, and is removed by the last
+/// owner's delete.
+#[tokio::test]
+async fn a_delete_removes_shell_output_of_its_last_owner() {
+    let fixture = Fixture::new().await;
+    let mut platform = HostPlatform::current(ShellStatus::Unavailable {
+        code: "DELETE_FLOW",
+        reason: "Deleting output runs no command".into(),
+    })
+    .unwrap();
+    platform.home = fixture.home.clone();
+    fixture
+        .root
+        .provide_as::<HostPlatform>(Arc::new(platform))
+        .unwrap();
+    let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
+    fixture.session("source").await;
+    let log = fixture.home.join(".dim/exec/source/main/exec-1.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"output").unwrap();
+    fixture
+        .files
+        .register("source".into(), log.clone())
+        .await
+        .unwrap();
+    store.fork_session("source", "fork", 0).await.unwrap();
+
+    assert!(store.delete_session("source").await.unwrap());
+    assert!(log.exists());
+    assert!(store.delete_session("fork").await.unwrap());
+    assert!(!log.exists());
+
     drop(store);
     fixture.close().await;
 }

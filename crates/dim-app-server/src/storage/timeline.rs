@@ -742,6 +742,7 @@ impl SqliteTimelineStore {
             "timeline_branches",
             "timeline_content",
             "session_grants",
+            "session_output_owners",
             "session_metadata",
             "session_catalog",
             "session_owners",
@@ -931,6 +932,31 @@ impl SessionStore {
                 Ok(grants)
             })
             .await
+    }
+    /// ADR 013 D2: records `path` as output owned by `session_id` before the
+    /// tool result hands it to the model. A repeated path is a no-op; a
+    /// missing Session fails.
+    pub async fn register(&self, session_id: &str, path: PathBuf) -> Result<()> {
+        self.files
+            .register(session_id.to_owned(), path)
+            .await
+            .map_err(error)
+    }
+    /// ADR 013 D3: whether `session_id` owns the resolved `path` through
+    /// either ownership table.
+    pub async fn owns(&self, session_id: &str, path: PathBuf) -> Result<bool> {
+        self.files
+            .owns(session_id.to_owned(), path)
+            .await
+            .map_err(error)
+    }
+    /// ADR 013 D3: the Session file directories and output paths the Session
+    /// owns.
+    pub async fn owned_paths(&self, session_id: &str) -> Result<Vec<PathBuf>> {
+        self.files
+            .owned_paths(session_id.to_owned())
+            .await
+            .map_err(error)
     }
     /// Directory-only reads never validate or decode Timeline events. Each
     /// record carries its title metadata, read in the same query.
@@ -1155,21 +1181,20 @@ impl SessionStore {
             .await
     }
     /// The storage steps of `session.delete` ([S5c §3.2](../../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)),
-    /// once Agents has closed the Session: its command output directory goes
-    /// first, durably, then every row of it in one transaction on the
+    /// once Agents has closed the Session: its output directories go first,
+    /// durably (ADR 013 D4), then every row of it in one transaction on the
     /// Timeline writer, the operation a creation rollback runs, then the
     /// Session-file sweep is scheduled for the files it released. Nothing of
     /// the Session is read, so a damaged one goes too, and an unknown id has
-    /// nothing to remove. A failure before the commit leaves every row.
-    /// Every database in the directory shares `command-output/`, so the
-    /// directory is removed only while this database has rows of the id
-    /// (§4): a directory of an id without rows here belongs to another
-    /// database, or to none. `id` is one path component, as Agents checked
-    /// (D3). Returns whether this database had rows of the id.
+    /// nothing to remove. A failure before the commit leaves every row. The
+    /// output removal's last-owner guard is scoped to this database: a
+    /// directory another database's Session uses belongs to that database.
+    /// `id` is one path component, as Agents checked (D3). Returns whether
+    /// this database had rows of the id.
     pub async fn delete_session(&self, id: &str) -> Result<bool> {
         let stored = self.has_records(id).await?;
         if stored {
-            self.files.remove_command_output(id).await?;
+            self.files.remove_output(id).await?;
         }
         self.timeline.rollback_session(id).await?;
         self.timeline.sweep_files.notify_one();
@@ -1180,11 +1205,11 @@ impl SessionStore {
     /// source's `SessionConfig` text and owner, the source's `main` through
     /// `at` with the content rows its events reference and the snapshots
     /// anchored on them, a directory without events for every branch `main`
-    /// created by then, and an owner row for every Session file the source
-    /// owns. Rows are copied as stored, except grants: a fork is a new
-    /// Session and does not inherit them. A source whose delete committed
-    /// first is `Closed`. The runtime validates the copy when it builds the
-    /// fork.
+    /// created by then, and an owner row for every Session file and every
+    /// output path the source owns (ADR 013 D4). Rows are copied as stored,
+    /// except grants: a fork is a new Session and does not inherit them. A
+    /// source whose delete committed first is `Closed`. The runtime
+    /// validates the copy when it builds the fork.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
         let (source, fork) = (source.to_owned(), fork.to_owned());
         self.timeline
@@ -1327,6 +1352,7 @@ impl SessionStore {
                 }
                 super::catalog::initialize_session_catalog(&tx, &fork)?;
                 files::share(&tx, &source, &fork).map_err(error)?;
+                files::share_output(&tx, &source, &fork).map_err(error)?;
                 // A fork is a new Session and does not inherit grants
                 // (ADR 012 D1).
                 tx.commit().map_err(error)
