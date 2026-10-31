@@ -12,8 +12,9 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
     host_platform::{
-        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, HostPlatformConfig,
-        HostPlatformPlugin, ShellStatus, resolve_shell,
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, ExecShellRuntime, HostPlatform,
+        HostPlatformConfig, HostPlatformPlugin, OutputEncoding, ShellEdition, ShellSource,
+        ShellStatus, resolve_shell,
     },
     timeline_tree::TreeCommands,
     wait,
@@ -775,7 +776,7 @@ fn exit_drains_output_even_when_offload_is_slow() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unavailable_shell_or_backend_refuses_the_payload() {
+async fn an_unavailable_shell_or_a_missing_execution_port_refuses_the_payload() {
     let unavailable = HostPlatform::current(ShellStatus::Unavailable {
         code: EXEC_SHELL_UNAVAILABLE,
         reason: "Selected command shell is unavailable: /opt/zsh".into(),
@@ -798,6 +799,37 @@ async fn an_unavailable_shell_or_backend_refuses_the_payload() {
     assert_eq!(code(result), Some("exec_shell_unavailable"));
     assert!(text(result).contains(EXEC_SHELL_UNAVAILABLE));
     assert!(text(result).contains("/opt/zsh"));
+    assert!(!marker.exists());
+    session.close().await.unwrap();
+    harness.shutdown().await;
+
+    let without_port = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+        executable_path: "/bin/sh".into(),
+        edition: ShellEdition::Sh,
+        source: ShellSource::Fallback,
+        output_encoding: OutputEncoding::Utf8,
+    }))
+    .unwrap();
+    let harness = Harness::new(without_port, Hook::None).await;
+    let session = harness.session().await;
+    let marker = harness.cwd.join("b");
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": format!("touch {}", marker.display())}),
+            )],
+        )
+        .await;
+    let events = until(&session, "result", |events| tool_results(events) == 1).await;
+    let result = &results(&events)[0];
+    assert_eq!(code(result), Some("isolation_config_invalid"));
+    assert!(
+        text(result).contains("no execution settings port"),
+        "{}",
+        text(result)
+    );
     assert!(!marker.exists());
     session.close().await.unwrap();
     harness.shutdown().await;

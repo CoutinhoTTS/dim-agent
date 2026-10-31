@@ -79,9 +79,11 @@ including a persistent shell, keeps the boundary it started with. A platform wit
 backend is reported by the next process start as `isolation_unavailable`; showing that state on
 the row is [#691](https://github.com/arcships/dim/issues/691)'s item.
 
-Verification exercises the panel against a real daemon: read, toggle, save, reset, reload after an
-external edit, revision conflict and an unsupported daemon. A save followed by `exec` shows the
-boundary it changed; an already running persistent shell keeps the one it started with.
+Verification covers what the row shows and what the daemon does with it: the read, the toggle that
+keeps the stored Network value visible while Sandbox is off, the CAS conflict, and a save followed
+by `exec` under the new boundary, where a write outside the workspace fails while the sandbox is on
+and succeeds once it is off. Reset, reload after an external edit, the unsupported-daemon branch
+and a persistent shell started before the change have no flow coverage yet.
 
 ## Commands
 
