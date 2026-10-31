@@ -16,7 +16,7 @@
 //! │   Notify when agent ...  on                  │
 //! │   Permissions                                │
 //! │   Tool approvals         default ›           │
-//! │   Command isolation      ›                  │
+//! │   Execution              ›                  │
 //! │ 1 / 8 · ↑↓ move · enter select · ←→/space change · esc close │
 //! ╰──────────────────────────────────────────────╯
 //! ```
@@ -136,7 +136,7 @@ impl SettingsPanel {
                 "Tool approvals",
                 link(&values.approvals),
             ),
-            row(Setting::Isolation, "Command isolation", link("")),
+            row(Setting::Isolation, "Execution", link("")),
             Item::heading(t("Models")),
             row(
                 Setting::Model,

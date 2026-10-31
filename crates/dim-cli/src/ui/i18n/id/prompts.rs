@@ -165,8 +165,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Edit" => "Edit",
         "Write" => "Tulis",
         "Create" => "Buat",
-        "boundary: {sandbox}" => "batas: {sandbox}",
-        " (boundary: {sandbox})" => " (batas: {sandbox})",
         " (detached)" => " (latar)",
         "Checked on background task" => "Memeriksa tugas latar",
         "Waiting…" => "Menunggu…",

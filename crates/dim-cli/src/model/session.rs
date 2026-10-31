@@ -26,6 +26,13 @@ pub enum DraftPart {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionSnapshot {
+    pub revision: String,
+    pub sandbox: bool,
+    pub network: bool,
+}
+
 pub enum Command {
     Submit(String),
     /// A draft with pastes to store or content blocks to send.
@@ -140,7 +147,8 @@ pub enum Command {
     ReadIsolation,
     SaveIsolation {
         expected_revision: String,
-        policy: dim_agent_types::isolation::IsolationPolicy,
+        sandbox: bool,
+        network: bool,
     },
     ResetIsolation(String),
     ClearModelPreferences {
@@ -591,7 +599,7 @@ pub enum Update {
     ModelsRefilled,
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
-    Isolation(Result<dim_agent_types::isolation::IsolationPolicySnapshot, String>),
+    Isolation(Result<ExecutionSnapshot, String>),
     /// A transient status-line message.
     Toast(String),
     /// The default tool-approval mode (wire name).

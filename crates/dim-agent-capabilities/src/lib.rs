@@ -9,6 +9,7 @@ mod context_policy;
 pub mod context_preparation;
 pub mod defaults;
 pub mod exec_stop;
+pub mod execution_settings;
 pub mod file_storage;
 pub mod history;
 pub mod host;
@@ -102,6 +103,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::ModelSelectionHost>(catalog, None);
     register::<host::SessionFilesHost>(catalog, None);
     register::<skill_settings::SkillSettingsHost>(catalog, None);
+    register::<execution_settings::ExecutionSettingsHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
 }
 impl PublicService for approval::Approval {}

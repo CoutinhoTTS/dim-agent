@@ -9,6 +9,7 @@ mod compaction_support;
 mod process_support;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
@@ -21,7 +22,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use process_support::{alive, gone, pid_in};
+use process_support::{gone, pid_in};
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
 use std::{
@@ -116,16 +117,21 @@ fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
         builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
     }
 }
-/// FileStorage over `home` and the HostPlatform plugin reading `config`
-/// there, rows of the harness's host.
-fn configured_platform(
-    home: PathBuf,
-    config: HostPlatformConfig,
-) -> impl FnOnce(&mut AgentBuilder) {
+/// FileStorage over `home` and the HostPlatform plugin reading
+/// `exec-shell.json` there, rows of the harness's host.
+fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
     move |builder| {
         let files = FileStoragePlugin::new(vec![home]);
         builder.plugin(move |_| Ok(Box::new(files.clone())));
-        builder.plugin(move |names| Ok(Box::new(HostPlatformPlugin::new(names, config.clone())?)));
+        builder.plugin(|names| {
+            Ok(Box::new(HostPlatformPlugin::new(
+                names,
+                HostPlatformConfig {
+                    execution: names.key()?,
+                    exec_shell_file: Some((0, "exec-shell.json".into())),
+                },
+            )?))
+        });
     }
 }
 
@@ -144,7 +150,9 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
     let mut env: Vec<_> = std::env::vars_os().collect();
     env.retain(|(key, _)| key != "SHELL");
     env.push(("SHELL".into(), "/bin/bash".into()));
-    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await)
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.env.extend(
         extra
             .iter()
@@ -215,6 +223,9 @@ impl Harness {
             root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
                 MemorySkillSettings::default(),
             ))))?;
+            root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
+                ExecutionSettings::default(),
+            )))?;
             Ok(())
         })
         .await
@@ -483,354 +494,6 @@ async fn a_line_carries_the_identity_entry_without_the_branch_tool() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn persistent_isolation_preserves_policy_and_job_control() {
-    let Some(home) = std::env::var_os("DIM_TEST_ISOLATED_SHELL_HOME") else {
-        for mode in [
-            "default",
-            "configured",
-            "read-only",
-            "workspace-only",
-            "disabled",
-        ] {
-            let home = scratch("isolated-node");
-            let policy = match mode {
-                "default" => None,
-                "configured" => Some(json!({
-                    "version": 1,
-                    "writablePaths": [home.join("workspace"), home.join(".dim/exec")]
-                })),
-                "read-only" => {
-                    let read_only: Vec<_> = [
-                        "/usr",
-                        "/bin",
-                        "/sbin",
-                        "/lib",
-                        "/lib64",
-                        "/etc",
-                        "/System",
-                        "/Library/Apple",
-                        "/private/etc",
-                    ]
-                    .into_iter()
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_dir())
-                    .chain([home.clone()])
-                    .collect();
-                    Some(json!({"version":1,"readOnlyPaths":read_only,"writablePaths":[]}))
-                }
-                "workspace-only" => {
-                    Some(json!({"version":1,"writablePaths":[home.join("workspace")]}))
-                }
-                "disabled" => Some(json!({"version":1,"enabled":false})),
-                _ => unreachable!(),
-            };
-            if let Some(policy) = policy {
-                std::fs::write(home.join("host-isolation.json"), policy.to_string()).unwrap();
-            }
-            let output = tokio::time::timeout(
-                Duration::from_secs(45),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "persistent_isolation_preserves_policy_and_job_control",
-                        "--nocapture",
-                    ])
-                    .env("DIM_TEST_ISOLATED_SHELL_HOME", &home)
-                    .env("DIM_TEST_SHELL_POLICY", mode)
-                    .env("HOME", &home)
-                    .current_dir(&home)
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            std::fs::remove_dir_all(home).unwrap();
-            assert!(
-                output.status.success(),
-                "policy={mode}: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        return;
-    };
-    let home = PathBuf::from(home);
-    let policy = home.join("host-isolation.json");
-    let mode = std::env::var("DIM_TEST_SHELL_POLICY").unwrap();
-    let initially_enabled = mode != "disabled";
-    let cwd = home.join("workspace");
-    let output_root = home.join(".dim/exec");
-    let private_file = home.join("private-note");
-    std::fs::write(&private_file, "owner-home-value").unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    std::fs::create_dir_all(&output_root).unwrap();
-    std::fs::write(
-        home.join("exec-shell.json"),
-        r#"{"version":1,"executablePath":"/bin/bash"}"#,
-    )
-    .unwrap();
-    let harness = Harness::with_platform(
-        configured_platform(
-            home.clone(),
-            HostPlatformConfig {
-                exec_shell_file: Some((0, "exec-shell.json".into())),
-                isolation_file: Some((0, "host-isolation.json".into())),
-            },
-        ),
-        cwd,
-    )
-    .await;
-    let session = harness.session().await;
-    let stop = session
-        .service::<dyn dim_agent_capabilities::exec_stop::ExecStop>("main")
-        .unwrap();
-    if matches!(mode.as_str(), "read-only" | "workspace-only") {
-        let marker = harness.cwd.join("write-attempt");
-        for background in [false, true] {
-            harness
-                .run(
-                    &session,
-                    &[(
-                        "execute",
-                        json!({
-                            "command":format!("printf executed > {}", marker.display()),
-                            "runInBackground":background
-                        }),
-                    )],
-                )
-                .await;
-            session.idle("main").await.unwrap();
-            let result = results(&local_events(&session).await).pop().unwrap();
-            if background {
-                let task = task_of(&result);
-                let events = until(&session, "denied background redirection", |events| {
-                    ended(events).iter().any(|(_, end)| end.task_id == task)
-                })
-                .await;
-                let (_, end) = ended(&events)
-                    .into_iter()
-                    .find(|(_, end)| end.task_id == task)
-                    .unwrap();
-                assert_eq!(end.status, ExecStatus::Failed);
-                assert!(!marker.exists());
-            } else if mode == "read-only" {
-                assert_eq!(result.is_error, Some(true), "{}", text(&result));
-                assert!(!marker.exists());
-            } else {
-                assert_ne!(result.is_error, Some(true), "{}", text(&result));
-                assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed");
-                std::fs::remove_file(&marker).unwrap();
-            }
-        }
-        session.close().await.unwrap();
-        harness.shutdown().await;
-        return;
-    }
-    let mut shell_temporary = None;
-    if mode == "default" {
-        let (content, path) = (
-            harness.cwd.join("shell-temporary"),
-            harness.cwd.join("tmpdir"),
-        );
-        harness
-            .run(
-                &session,
-                &[(
-                    "execute",
-                    json!({"command": format!(
-                        "f=$(mktemp) && printf shell-temporary > \"$f\" && cp \"$f\" {} \
-                         && printf %s \"$TMPDIR\" > {}",
-                        content.display(),
-                        path.display()
-                    )}),
-                )],
-            )
-            .await;
-        session.idle("main").await.unwrap();
-        let result = results(&local_events(&session).await).pop().unwrap();
-        assert_ne!(result.is_error, Some(true), "{}", text(&result));
-        assert_eq!(std::fs::read_to_string(content).unwrap(), "shell-temporary");
-        let directory = PathBuf::from(std::fs::read_to_string(path).unwrap());
-        assert!(directory.is_dir());
-        shell_temporary = Some(directory);
-        let sibling = output_root.join(session.id()).join("sibling");
-        std::fs::create_dir_all(&sibling).unwrap();
-        let sibling_file = sibling.join("output.log");
-        std::fs::write(&sibling_file, "sibling-output").unwrap();
-        for command in [
-            format!("cat {}", sibling_file.display()),
-            format!("printf overwritten > {}", sibling_file.display()),
-        ] {
-            harness
-                .run(&session, &[("execute", json!({"command":command}))])
-                .await;
-            session.idle("main").await.unwrap();
-            let result = results(&local_events(&session).await).pop().unwrap();
-            assert_eq!(result.is_error, Some(true), "{}", text(&result));
-            assert!(!text(&result).contains("sibling-output"));
-        }
-        assert_eq!(
-            std::fs::read_to_string(sibling_file).unwrap(),
-            "sibling-output"
-        );
-    }
-    harness
-        .run(
-            &session,
-            &[(
-                "execute",
-                json!({"command":"test -t 0 && test -t 1 && stty rows 41 cols 132 && stty size"}),
-            )],
-        )
-        .await;
-    session.idle("main").await.unwrap();
-    let terminal_result = results(&local_events(&session).await).pop().unwrap();
-    let foreground_pid_file = harness.cwd.join("foreground.pid");
-    harness
-        .run(
-            &session,
-            &[(
-                "execute",
-                json!({
-                    "command":format!("sh -c 'echo $$ > {}; sleep 100'", foreground_pid_file.display()),
-                    "timeoutMs":20
-                }),
-            )],
-        )
-        .await;
-    session.idle("main").await.unwrap();
-    let foreground = task_of(results(&local_events(&session).await).last().unwrap());
-    let foreground_pid = pid_in(&foreground_pid_file).await;
-    let foreground_stopped = stop.clone().stop(foreground.clone()).await;
-    let foreground_gone = gone(&foreground_pid).await;
-    harness
-        .run(
-            &session,
-            &[(
-                "execute",
-                json!({"command":"test -t 0 && test -t 1 && stty rows 41 cols 132 && stty size && printf terminal-alive"}),
-            )],
-        )
-        .await;
-    session.idle("main").await.unwrap();
-    let terminal_after_stop = results(&local_events(&session).await).pop().unwrap();
-    let cleanup = harness.cwd.join("first-released");
-    let mut jobs = Vec::new();
-    let mut snapshot_result = None;
-    for name in ["first", "second"] {
-        let pid_file = harness.cwd.join(format!("{name}.pid"));
-        let command = if name == "first" {
-            format!(
-                "printf first-output; sh -c 'trap \"sleep 0.1; printf released > {}; exit 0\" TERM; echo $$ > {}; while :; do sleep 1; done'",
-                cleanup.display(),
-                pid_file.display()
-            )
-        } else {
-            format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display())
-        };
-        harness
-            .run(
-                &session,
-                &[(
-                    "execute",
-                    json!({
-                        "command":command,
-                        "runInBackground":true
-                    }),
-                )],
-            )
-            .await;
-        session.idle("main").await.unwrap();
-        let events = local_events(&session).await;
-        let task = task_of(results(&events).last().unwrap());
-        let pid = pid_in(&pid_file).await;
-        assert!(alive(&pid));
-        jobs.push((task, pid));
-        if name == "first" {
-            std::fs::write(&policy, r#"{"version":1,"enabled":false}"#).unwrap();
-            harness
-                .run(
-                    &session,
-                    &[(
-                        "execute",
-                        json!({"command": format!("cat {}", private_file.display())}),
-                    )],
-                )
-                .await;
-            session.idle("main").await.unwrap();
-            snapshot_result = results(&local_events(&session).await).pop();
-        }
-    }
-    let stopped = stop.stop(jobs[0].0.clone()).await;
-    let cleanup_completed = cleanup.exists();
-    let selected_gone = gone(&jobs[0].1).await;
-    let sibling_alive = alive(&jobs[1].1);
-    assert!(
-        std::fs::read_to_string(
-            output_root
-                .join(session.id())
-                .join("main")
-                .join(format!("{}.log", jobs[0].0))
-        )
-        .unwrap()
-        .contains("first-output")
-    );
-    let closed = session.close().await;
-    let sibling_gone = gone(&jobs[1].1).await;
-    let events = local_events(&session).await;
-    harness.shutdown().await;
-    for result in [terminal_result, terminal_after_stop] {
-        assert_ne!(result.is_error, Some(true), "{}", text(&result));
-        assert!(text(&result).contains("41 132"), "{}", text(&result));
-    }
-    assert!(
-        foreground_stopped
-            .as_ref()
-            .is_ok_and(|end| end.status == ExecStatus::Cancelled)
-            && foreground_gone,
-        "foreground_stop={foreground_stopped:?}, foreground_gone={foreground_gone}"
-    );
-    let snapshot_result = snapshot_result.unwrap();
-    assert_eq!(snapshot_result.is_error == Some(true), initially_enabled);
-    assert_eq!(
-        text(&snapshot_result).contains("owner-home-value"),
-        !initially_enabled,
-        "{}",
-        text(&snapshot_result)
-    );
-    assert!(
-        stopped
-            .as_ref()
-            .is_ok_and(|end| end.status == ExecStatus::Cancelled)
-            && cleanup_completed
-            && selected_gone
-            && sibling_alive
-            && sibling_gone
-            && closed.is_ok(),
-        "stop={stopped:?}, cleanup_completed={cleanup_completed}, selected_gone={selected_gone}, sibling_alive={sibling_alive}, sibling_gone={sibling_gone}, close={closed:?}"
-    );
-    for task in std::iter::once(foreground).chain(jobs.into_iter().map(|(task, _)| task)) {
-        assert_eq!(
-            ended(&events)
-                .iter()
-                .filter(|(_, end)| end.task_id == task)
-                .count(),
-            1
-        );
-    }
-    if let Some(directory) = shell_temporary {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while directory.exists() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the shell's TMPDIR is removed with its PTY");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_settles_every_admitted_shell_task() {
     let harness = Harness::new(platform(&[]).await).await;
     let session = harness.session().await;
@@ -888,17 +551,7 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
         .unwrap()
     };
     set_shell("/bin/bash");
-    let harness = Harness::with_platform(
-        configured_platform(
-            home.clone(),
-            HostPlatformConfig {
-                exec_shell_file: Some((0, "exec-shell.json".into())),
-                ..HostPlatformConfig::default()
-            },
-        ),
-        scratch("cwd"),
-    )
-    .await;
+    let harness = Harness::with_platform(configured_platform(home.clone()), scratch("cwd")).await;
     let session = harness.session().await;
     let alternate = if Path::new("/bin/zsh").is_file() {
         "/bin/zsh"
@@ -994,8 +647,8 @@ async fn foreground_echo_returns_output() {
         })
         .unwrap();
     assert!(
-        declared.contains("Isolation: unless the user disabled it")
-            && declared.contains("host-isolation.json"),
+        declared.contains("Isolation: the user decides")
+            && !declared.contains("host-isolation.json"),
         "{declared}"
     );
     session.close().await.unwrap();

@@ -144,6 +144,6 @@ ledger 并推送到 `eval-ledger`。
   `verifier_proxy` 和 `verifier_no_proxy` 记入 `run.json`，baseline 同时记入 params；任一项
   不一致，或旧 baseline 没有该字段（未知）时，comparison 判为不可比，需要在同一代理条件下
   重采 baseline。
-- 命令沙箱设为 `host`（`host-isolation.json`）。dimcode 的沙箱依赖 bubblewrap，题目镜像里没有，
-  默认配置下每个 trial 的第一条命令都以 `isolation_unavailable` 失败，agent 还会自己去改这个
-  文件。容器本身就是隔离边界。
+- 命令沙箱默认关闭（`/settings > Execution` 的 Sandbox），不再写也不再读 `host-isolation.json`；
+  容器本身就是隔离边界。dimcode 的沙箱依赖 bubblewrap，题目镜像里没有，打开 Sandbox 后每个
+  trial 的第一条命令会以 `isolation_unavailable` 失败。

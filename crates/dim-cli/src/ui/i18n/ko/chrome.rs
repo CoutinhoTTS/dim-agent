@@ -334,7 +334,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "마우스 (전체 화면)",
         "Permissions" => "권한",
         "Tool approvals" => "도구 승인",
-        "Command isolation" => "명령 격리",
+        "Execution" => "실행",
         "Models" => "모델",
         "Model" => "모델",
         "not set" => "미설정",

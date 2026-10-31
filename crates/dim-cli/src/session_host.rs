@@ -22,9 +22,9 @@ use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
     Account, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, EmptyProvider,
-    EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent,
-    OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
-    SubagentModelPolicy, SwitchKind, Update, Usage,
+    EmptyReason, ExecutionSnapshot, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
+    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem,
+    SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -1228,41 +1228,60 @@ impl Worker {
                 self.read_model_policy(false).await;
             }
             Command::ReadIsolation => {
-                if !self.client.supports(&[
-                    "host.isolation.get",
-                    "host.isolation.update",
-                    "host.isolation.reset",
-                ]) {
+                if !self.client.supports(&["settings.read", "settings.update"]) {
                     self.send(Update::Isolation(Err(
-                        "This daemon does not support Command isolation settings".into(),
+                        "This daemon does not support execution settings".into(),
                     )));
                 } else {
-                    let result = self.client.typed("host.isolation.get", json!({})).await;
-                    self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    let result = self
+                        .client
+                        .typed(
+                            "settings.read",
+                            json!({"source": "execution", "scope": "user"}),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(execution_snapshot);
+                    self.send(Update::Isolation(result));
                 }
             }
             Command::SaveIsolation {
                 expected_revision,
-                policy,
+                sandbox,
+                network,
             } => {
                 let result = self
                     .client
                     .typed(
-                        "host.isolation.update",
-                        json!({"expectedRevision": expected_revision, "policy": policy}),
+                        "settings.update",
+                        json!({
+                            "source": "execution",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"sandbox": sandbox, "network": network},
+                        }),
                     )
-                    .await;
-                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(execution_snapshot);
+                self.send(Update::Isolation(result));
             }
             Command::ResetIsolation(expected_revision) => {
                 let result = self
                     .client
                     .typed(
-                        "host.isolation.reset",
-                        json!({"expectedRevision": expected_revision}),
+                        "settings.update",
+                        json!({
+                            "source": "execution",
+                            "scope": "user",
+                            "expectedRevision": expected_revision,
+                            "document": {"sandbox": false, "network": false},
+                        }),
                     )
-                    .await;
-                self.send(Update::Isolation(result.map_err(|error| error.to_string())));
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(execution_snapshot);
+                self.send(Update::Isolation(result));
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
@@ -3854,6 +3873,26 @@ struct SessionSummary {
     #[serde(default)]
     preview: Option<String>,
     title: Option<String>,
+}
+
+fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
+    let revision = value
+        .get("revision")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "execution settings response has no revision".to_string())?
+        .to_owned();
+    let document = value.get("document").cloned().unwrap_or_else(|| json!({}));
+    Ok(ExecutionSnapshot {
+        revision,
+        sandbox: document
+            .get("sandbox")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        network: document
+            .get("network")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 #[cfg(test)]
