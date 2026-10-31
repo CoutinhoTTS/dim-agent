@@ -150,11 +150,19 @@ control distinguishes network from executable access without using real credenti
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
+| `dimcode hooks list [--cwd DIR]` | List the effective hook catalog over `hooks.catalog` ([Hooks](plugins/Hooks.md#a7-management-methods)): each source with its path, enablement and state, and each handler with its event, matcher, command and state. |
+| `dimcode hooks enable\|disable [--cwd DIR]` | Enable or disable the project hooks of the workspace at `DIR` (the current directory by default) over `hooks.set_enabled`, recorded against the project root Settings authorizes for it. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
 | `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
+
+`dimcode hooks` never writes a hook document. The user's document is the Settings source `hooks`
+of the home the daemon serves (`user/hooks` in native storage, `hooks.json` in a standalone home),
+written by `hooks.save`; the project document is `.dimcode/hooks.json` in the repository, edited
+there. `dimcode hooks enable|disable` records the workspace in the user-local `hooks-projects`, so a
+project file cannot enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
 
 Global home, workspace, server and model-profile options retain their current
 meanings and work before or after the command. Existing login/account/logout,

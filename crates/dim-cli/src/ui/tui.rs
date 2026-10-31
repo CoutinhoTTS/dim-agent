@@ -3402,7 +3402,7 @@ impl App {
             rows.resize(FULLSCREEN_COMPOSER_ROWS, String::new());
         }
         let box_top = live.len();
-        let muted = |label: &str| fg(label, &p.muted);
+        let activity = |label: &str| fg(label, &p.activity);
         let shell_title = shell.map(|shell| match shell {
             Shell::Recorded => t("! shell mode"),
             Shell::Private => t("!! shell mode · not sent to the model"),
@@ -3410,7 +3410,7 @@ impl App {
         let tinted = |label: &str| fg(label, shell_color);
         let top_status = status.as_deref().filter(|_| !self.fullscreen);
         let title = match (top_status, shell_title) {
-            (Some(text), _) => Some((text, &muted as &dyn Fn(&str) -> String)),
+            (Some(text), _) => Some((text, &activity as &dyn Fn(&str) -> String)),
             (None, Some(title)) => Some((title, &tinted as &dyn Fn(&str) -> String)),
             (None, None) => None,
         };
@@ -4396,7 +4396,7 @@ impl App {
         let p = &self.palette;
         let mut parts: Vec<String> = Vec::new();
         if let Some(run) = run {
-            parts.push(fg(run, &p.muted));
+            parts.push(fg(run, &p.activity));
         }
         if let Some(slot) = self.slot() {
             let color = if self.notice.is_some() {
@@ -5344,6 +5344,88 @@ mod tests {
     fn test_theme() -> Theme {
         use crate::ui::theme::{Appearance, ColorMode};
         Theme::system(ColorMode::TrueColor, Appearance::Dark, None)
+    }
+
+    #[test]
+    fn model_activity_stays_blue_across_themes_and_terminal_modes() {
+        use crate::ui::theme::{Appearance, ColorMode};
+
+        for (mode, appearance, sgr) in [
+            (
+                ColorMode::TrueColor,
+                Appearance::Dark,
+                "\x1b[38;2;56;189;248m",
+            ),
+            (ColorMode::Ansi256, Appearance::Dark, "\x1b[38;5;75m"),
+            (ColorMode::Ansi16, Appearance::Dark, "\x1b[94m"),
+            (
+                ColorMode::TrueColor,
+                Appearance::Light,
+                "\x1b[38;2;3;105;161m",
+            ),
+            (
+                ColorMode::Ansi256,
+                Appearance::Light,
+                "\x1b[38;2;3;105;161m",
+            ),
+            (ColorMode::Ansi16, Appearance::Light, "\x1b[94m"),
+        ] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.theme_context = Some(ThemeContext {
+                mode,
+                appearance,
+                background: None,
+                active: "system".into(),
+            });
+            let named = match appearance {
+                Appearance::Dark => "monokai-dark",
+                Appearance::Light => "monokai-light",
+            };
+            for id in ["system", named] {
+                drawn.app.paint_theme(id);
+                for initialized in [true, false] {
+                    let context = (!initialized).then(|| drawn.app.theme_context.take());
+                    for fullscreen in [false, true] {
+                        drawn.app.fullscreen = fullscreen;
+                        for name in ["text", "thinking"] {
+                            let mut projection = crate::projection::Projection::default();
+                            let event = serde_json::from_value(serde_json::json!({
+                                "sequence": 1, "create_at": 1, "type": "step", "name": name,
+                                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Checking the parser."}
+                            }))
+                            .unwrap();
+                            projection.apply("main", &event);
+                            projection.set_running(true);
+                            drawn
+                                .app
+                                .apply(Update::Snapshot(Box::new(projection.snapshot())));
+                            drawn.app.run_started = Some(Instant::now() - Duration::from_secs(42));
+                            let frame = drawn.app.frame((80, 24));
+                            let label = if name == "thinking" {
+                                "thinking…"
+                            } else {
+                                "working…"
+                            };
+                            let row = frame.live.iter().find(|row| row.contains(label)).unwrap();
+                            let start = row
+                                .find(sgr)
+                                .expect("the activity uses the terminal's blue");
+                            let colored = row[start + sgr.len()..].split("\x1b[0m").next().unwrap();
+                            let (pulse, status) = colored.split_once(' ').unwrap();
+                            assert!(["·", "•", "●"].contains(&pulse));
+                            assert_eq!(
+                                status,
+                                format!("{label}  42s"),
+                                "{mode:?}, {appearance:?}, {id}, fullscreen={fullscreen}, initialized={initialized}: {row:?}"
+                            );
+                        }
+                    }
+                    if let Some(context) = context {
+                        drawn.app.theme_context = context;
+                    }
+                }
+            }
+        }
     }
 
     /// A thought only grows while it runs and never shrinks when it
