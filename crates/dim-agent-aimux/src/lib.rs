@@ -3,6 +3,7 @@ pub mod config;
 mod driver;
 mod models;
 mod plugin;
+pub mod recording;
 mod request;
 mod stream;
 

@@ -175,10 +175,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "未記錄 Shell 輸出：{reason}",
         "Shell: {reason}" => "Shell：{reason}",
         "Reading clipboard…" => "正在讀取剪貼簿…",
+        "Reading image…" => "正在讀取圖片…",
+        "Wait for the image insertion before sending" => "請等待圖片插入後再傳送",
+        "The image could not be read" => "無法讀取該圖片",
+        "An image is still being inserted; paste again when it is in" => {
+            "圖片正在插入，請稍後再貼上"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "剪貼簿內容正在插入，請稍後再貼上"
+        }
         "Clipboard: {reason}" => "剪貼簿：{reason}",
         "Wait for clipboard insertion before sending" => "請等剪貼簿內容插入後再傳送",
         "A submission accepts at most 20 images" => "每次送出最多 20 張圖片",
-        "[Image #{index}]" => "[圖片 #{index}]",
+        "first frame" => "僅首幀",
+        "re-encoded" => "已重新編碼",
         "The current model does not accept images; remove {label} to send" => {
             "目前的模型不支援圖片；請移除 {label} 再傳送"
         }
@@ -353,6 +363,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} 個模型無法使用 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：1 個模型需要視窗 · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：{count} 個模型需要視窗 · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}：沒有模型 · dimcode models {id} --refresh"
         }
@@ -364,6 +380,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}：無法讀取 catalog · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限未宣告的模型無法選擇；用 dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N 宣告。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "用 dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N 宣告。"
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "沒有快取的 catalog。請登入並執行 models PROVIDER --refresh。"
@@ -414,8 +436,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清除，按兩次離開 · 草稿為空時 Ctrl+D 離開"
         }
         "Fullscreen" => "全螢幕",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown 捲動 · Home/End 至頂端或底端 · Tab 選擇訊息，e 編輯，q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 捲動 · Home/End 至頂端或底端 (草稿為空時) · Tab 選擇訊息，e 編輯，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滾輪捲動 · 拖曳選取並複製 · 點擊連結開啟，點擊工具群組展開"

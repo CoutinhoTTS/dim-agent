@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue"
+import { computed, nextTick, onMounted, ref, useId, watch } from "vue"
+import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import { ArrowUp, Square } from "lucide-vue-next"
 import type { ModelId } from "../../rpc/protocol"
+import { useModelsStore } from "../../stores/models"
+import { useSessionsStore } from "../../stores/sessions"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
 import { quoteInto } from "./quote"
 
@@ -24,13 +27,44 @@ const props = defineProps<{
   /** The narrower line panel: no model menu, less vertical chrome. */
   variant?: "main" | "panel"
   placeholder?: string
+  createBranch?: (prompt: string) => Promise<void>
+  openLines?: () => void
 }>()
 const { t } = useI18n()
+const route = useRoute()
+const router = useRouter()
+const models = useModelsStore()
+const sessions = useSessionsStore()
 const field = ref<HTMLTextAreaElement>()
+const modelMenu = ref<InstanceType<typeof ComposerModelMenu>>()
+const menuId = useId()
 const text = ref("")
 const sending = ref(false)
 const changingModel = ref(false)
 const error = ref("")
+const composing = ref(false)
+const focused = ref(false)
+const dismissed = ref(false)
+const activeIndex = ref(0)
+
+const availableCommands = computed(() => ([
+  { category: "model", name: "models", available: props.modelSelectable && models.available && !changingModel.value },
+  { category: "session", name: "branch", available: props.createBranch !== undefined },
+  { category: "session", name: "lines", available: props.openLines !== undefined },
+  { category: "session", name: "new", available: true },
+] as const).filter((command) => command.available))
+const commandPrefix = computed(() => /^\/[a-z]*$/i.test(text.value) ? text.value.slice(1).toLowerCase() : undefined)
+const matches = computed(() => {
+  const prefix = commandPrefix.value
+  return prefix === undefined ? [] : availableCommands.value.filter((command) => command.name.startsWith(prefix))
+})
+const commandMode = computed(() => !composing.value && !dismissed.value && matches.value.length > 0)
+const menuOpen = computed(() => focused.value && commandMode.value)
+
+watch(text, () => {
+  if (!text.value.startsWith("/")) dismissed.value = false
+}, { flush: "sync" })
+watch(matches, () => { activeIndex.value = 0 }, { flush: "sync" })
 
 const showStop = computed(() => props.running && props.stop !== undefined && text.value.trim() === "")
 const canSend = computed(() => text.value.trim() !== "" && !sending.value)
@@ -43,12 +77,27 @@ function resize(): void {
 }
 
 async function submit(): Promise<void> {
-  if (!canSend.value) return
+  if (!canSend.value || composing.value) return
+  if (commandMode.value) {
+    const command = matches.value[activeIndex.value]
+    if (command !== undefined) await runCommand(command.name)
+    return
+  }
   const message = text.value
+  const branchCommand = !dismissed.value && /^\/branch(?:\s+([\s\S]*))?$/i.exec(message)
+  if (branchCommand && !branchCommand[1]?.trim()) {
+    await runCommand("branch")
+    return
+  }
   sending.value = true
   error.value = ""
   try {
-    await props.send(message)
+    if (branchCommand) {
+      if (!props.createBranch) throw new Error(t("composer.branchUnavailable"))
+      await props.createBranch(branchCommand[1]!.trim())
+    } else {
+      await props.send(message)
+    }
     if (text.value === message) text.value = ""
     await nextTick()
     resize()
@@ -80,8 +129,39 @@ async function onModel(model: ModelId): Promise<void> {
   }
 }
 
+async function runCommand(name: typeof availableCommands.value[number]["name"]): Promise<void> {
+  if (composing.value) return
+  error.value = ""
+  text.value = name === "branch" ? "/branch " : ""
+  await nextTick()
+  resize()
+  if (name === "branch") field.value?.focus()
+  else if (name === "models") modelMenu.value?.open()
+  else if (name === "lines") props.openLines?.()
+  else {
+    try {
+      const cwd = typeof route.params.sessionId === "string" ? sessions.byId.get(route.params.sessionId)?.cwd : undefined
+      await router.push({ name: "chat-new", ...(cwd === undefined ? {} : { query: { cwd } }) })
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+}
+
 function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.isComposing) {
+  if (event.isComposing || composing.value || event.keyCode === 229) return
+  if (event.key === "Escape" && text.value.startsWith("/") && !dismissed.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    dismissed.value = true
+    return
+  }
+  if (menuOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    event.preventDefault()
+    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + matches.value.length) % matches.value.length
+    return
+  }
+  if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
     event.preventDefault()
     void submit()
   }
@@ -104,7 +184,27 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 <template>
   <section class="composer-panel" :data-variant="variant ?? 'main'" :aria-label="t('chat.composer')">
     <p v-if="error" class="inline-error" role="alert">{{ error }}</p>
-    <div class="composer-surface" @click="field?.focus()">
+    <div class="composer-surface" @click.self="field?.focus()">
+      <div v-if="menuOpen" :id="menuId" class="command-menu ui-popover" role="listbox" :aria-label="t('composer.commands')">
+        <button
+          v-for="(command, index) in matches"
+          :id="`${menuId}-${index}`"
+          :key="command.name"
+          type="button"
+          role="option"
+          class="ui-menu-item command-item"
+          :aria-selected="index === activeIndex"
+          :data-highlighted="index === activeIndex ? '' : undefined"
+          @mousedown.prevent
+          @mouseenter="activeIndex = index"
+          @click.stop="runCommand(command.name)"
+        >
+          <span class="command-category">{{ index === 0 || matches[index - 1]?.category !== command.category ? t(`composer.category.${command.category}`) : '' }}</span>
+          <span class="command-name">/{{ command.name }}<span v-if="command.name === 'branch'" class="command-argument"> &lt;prompt&gt;</span></span>
+          <span class="command-description">{{ t(`composer.command.${command.name}`) }}</span>
+        </button>
+        <p class="command-keys">{{ t("composer.commandKeys") }}</p>
+      </div>
       <textarea
         ref="field"
         v-model="text"
@@ -112,13 +212,20 @@ defineExpose({ focus: () => field.value?.focus(), quote })
         rows="2"
         :placeholder="placeholder ?? t('composer.sendMessage')"
         :aria-label="placeholder ?? t('composer.sendMessage')"
+        :aria-controls="menuOpen ? menuId : undefined"
+        :aria-expanded="menuOpen"
+        :aria-activedescendant="menuOpen ? `${menuId}-${activeIndex}` : undefined"
         @input="resize"
         @keydown="onKeydown"
+        @focus="focused = true"
+        @blur="focused = false"
+        @compositionstart="composing = true"
+        @compositionend="composing = false"
       />
       <footer class="composer-toolbar">
         <div class="composer-tool-group" />
         <div class="composer-run-group">
-          <ComposerModelMenu v-if="variant !== 'panel'" :model="model" :selectable="modelSelectable" :disabled="changingModel" @select="onModel" />
+          <ComposerModelMenu v-if="variant !== 'panel'" ref="modelMenu" :model="model" :selectable="modelSelectable" :disabled="changingModel" @select="onModel" />
           <button
             class="ui-icon-button"
             :data-variant="showStop ? 'contrast' : 'primary'"
@@ -146,5 +253,12 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 .composer-input::placeholder { color: var(--muted-foreground); }
 .composer-panel[data-variant="panel"] { padding: var(--space-2) var(--space-3) var(--space-3); }
 .composer-panel[data-variant="panel"] .composer-input { min-height: 48px; }
+.command-menu { position: absolute; bottom: calc(100% + var(--space-2)); left: 0; width: 100%; max-width: none; max-height: min(320px, 50dvh); overflow-y: auto; transform-origin: bottom left; --popover-enter-y: 4px; }
+.command-item { display: grid; grid-template-columns: 48px 128px minmax(0, 1fr); }
+.command-category, .command-description { color: var(--muted-foreground); }
+.command-category { font-size: var(--text-xs); }
+.command-name { font-family: var(--font-mono); }
+.command-argument { color: var(--muted-foreground); font-size: var(--text-xs); }
+.command-keys { margin: var(--space-1) 0 0; padding: var(--space-2); border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: var(--text-xs); }
 
 </style>

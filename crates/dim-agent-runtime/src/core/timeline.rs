@@ -25,7 +25,7 @@ use uuid::Uuid;
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
 /// The steps stay local: the event is dispatched only by its own branch's
-/// `waterfall_sync`, in process, so listeners borrow this value.
+/// synchronous waterfall, in process, so listeners borrow this value.
 #[derive(Serialize, Deserialize)]
 struct BeforeCommit {
     /// The branch's private name it is dispatched under (`before_name`).
@@ -315,7 +315,8 @@ impl Timeline {
             let result = self
                 .0
                 .ctx
-                .waterfall_sync(offered.clone(), |offered| Ok(Some(offered.draft.clone())));
+                .waterfall(offered.clone())
+                .sync(|offered| Ok(Some(offered.draft.clone())));
             let (original, draft, steps) = match result {
                 Ok(Some(draft)) => {
                     let steps = std::mem::take(&mut *offered.steps.lock().unwrap());
@@ -500,6 +501,26 @@ impl Timeline {
                 )
                 .await?,
         ))
+    }
+    /// The event a context checkpoint is anchored at, out of the events of
+    /// `branch` up to `cut`. The point read decodes one row. A row inside an
+    /// atomic batch cannot end a range, so an invalid point read falls back to
+    /// the segment read this check made before the point read existed.
+    async fn anchor(
+        &self,
+        branch: &str,
+        sequence: u64,
+        cut: u64,
+    ) -> Result<Option<Arc<AgentEvent>>> {
+        match self.records(branch, sequence, sequence).await {
+            Ok(records) => Ok(records.into_iter().next()),
+            Err(AgentError::InvalidInput(_)) => Ok(self
+                .records(branch, sequence, cut)
+                .await?
+                .into_iter()
+                .next()),
+            Err(error) => Err(error),
+        }
     }
     /// This branch's stored events in `start..=end`, `end` at most the
     /// published sequence. While the branch opens, the part up to the head
@@ -757,12 +778,9 @@ impl Timeline {
             {
                 continue;
             }
-            let anchor = self
-                .records(branch, snapshot.sequence, *cut)
-                .await?
-                .into_iter()
-                .next();
-            let Some(anchor) = anchor else { continue };
+            let Some(anchor) = self.anchor(branch, snapshot.sequence, *cut).await? else {
+                continue;
+            };
             if anchor.id != snapshot.event_id || anchor.sequence != snapshot.sequence {
                 continue;
             }

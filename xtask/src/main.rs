@@ -8,7 +8,7 @@ mod summary_eval;
 mod types;
 #[global_allocator]
 static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use rutis::host::CtxHost;
 use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::{Value, json};
@@ -36,11 +36,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-fn agent() -> Agent {
+async fn agent() -> dim_agent_runtime::Result<MinimalHost> {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.build()
+    MinimalHost::start(&builder).await
 }
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -79,8 +79,10 @@ fn diagnostics(mut d: RuntimeDiagnostics, scopes: &[(rutis::host::InstanceId, &s
         "reads":p.accesses.into_iter().map(|r|json!({"service":describe(&r.key),"provider":r.provider.map(|id|id.0),"declared":r.declared,"external":r.external})).collect::<Vec<_>>()
     })).collect::<Vec<_>>(),"bindings":d.bindings.into_iter().map(|b|json!({"service":describe(&b.key),"provider":b.provider.0,"generation":b.generation,"removing":b.removing})).collect::<Vec<_>>()})
 }
-fn configured_agent()
--> std::result::Result<(Agent, SessionConfig, Option<rutis::Ctx>), Box<dyn std::error::Error>> {
+/// The Agent the graphs and measurements run on, in a minimal host, its
+/// Session configuration, and whether it runs native models.
+async fn configured_agent()
+-> std::result::Result<(MinimalHost, SessionConfig, bool), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(2);
     let model_config = match args.next().as_deref() {
         None => None,
@@ -90,7 +92,7 @@ fn configured_agent()
     if args.next().is_some() {
         return Err("unexpected argument".into());
     }
-    let (agent, config, process) = if let Some(path) = &model_config {
+    let (agent, config, native) = if let Some(path) = &model_config {
         use dim_agent_aimux::{
             AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile,
         };
@@ -115,11 +117,10 @@ fn configured_agent()
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))));
         dim_agent_aimux::install(&mut builder);
-        let process = rutis::Ctx::root()?;
-        process.plugin(AimuxPlugin);
-        process.plugin(ConfiguredModelsPlugin(models));
+        builder.plugin(|_| Ok(Box::new(AimuxPlugin)));
+        builder.plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
         (
-            builder.build_in(&process),
+            MinimalHost::start(&builder).await?,
             SessionConfig {
                 model: dim_agent_types::ModelSelection {
                     provider_id: model.provider_id,
@@ -130,12 +131,40 @@ fn configured_agent()
                 },
                 ..Default::default()
             },
-            Some(process),
+            true,
         )
     } else {
-        (agent(), SessionConfig::default(), None)
+        (agent().await?, SessionConfig::default(), false)
     };
-    Ok((agent, config, process))
+    Ok((agent, config, native))
+}
+/// The host's process plugins in `root`'s snapshot: the root's own children
+/// and the loader's rows that provide a service, without the part registry.
+fn process_rows(root: &rutis::Ctx) -> RuntimeDiagnostics {
+    let mut snapshot = root.diagnostics();
+    let id = root.root_view().expect("process root").id;
+    let loader = snapshot
+        .plugins
+        .iter()
+        .find(|plugin| plugin.parent == Some(id) && plugin.name == "rutis-loader")
+        .map(|plugin| plugin.id);
+    let providers: std::collections::BTreeSet<_> = snapshot
+        .bindings
+        .iter()
+        .map(|binding| binding.provider)
+        .collect();
+    snapshot.plugins.retain(|plugin| {
+        plugin.parent == Some(id)
+            || (plugin.parent.is_some()
+                && plugin.parent == loader
+                && providers.contains(&plugin.id)
+                && plugin.name != "PartRegistry")
+    });
+    let members: Vec<_> = snapshot.plugins.iter().map(|plugin| plugin.id).collect();
+    snapshot
+        .bindings
+        .retain(|binding| members.contains(&binding.provider));
+    snapshot
 }
 /// One tree: branch capabilities resolve Session services across the subgraphs.
 fn mermaid(graphs: &BTreeMap<&str, Value>) -> String {
@@ -171,8 +200,7 @@ fn mermaid(graphs: &BTreeMap<&str, Value>) -> String {
     mermaid
 }
 async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (agent, config, process) = configured_agent()?;
-    let native = process.is_some();
+    let (agent, config, native) = configured_agent().await?;
     let session = agent.create_session(config).await?;
     let session_diagnostics = session.diagnostics()?;
     let main_diagnostics = session.branch_diagnostics("main")?;
@@ -196,17 +224,8 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ("session", diagnostics(session_diagnostics, &scopes)),
         ("main", diagnostics(main_diagnostics, &scopes)),
     ]);
-    if let Some(process) = &process {
-        let mut snapshot = process.diagnostics();
-        let root = process.root_view().expect("process root").id;
-        snapshot
-            .plugins
-            .retain(|plugin| plugin.parent == Some(root) && plugin.instance != scopes[0].0);
-        let members: Vec<_> = snapshot.plugins.iter().map(|plugin| plugin.id).collect();
-        snapshot
-            .bindings
-            .retain(|binding| members.contains(&binding.provider));
-        graphs.insert("process", diagnostics(snapshot, &scopes));
+    if native {
+        graphs.insert("process", diagnostics(process_rows(agent.root()), &scopes));
     }
     let mermaid = mermaid(&graphs);
     let mut out = root().join("docs/architecture/rust-agent/generated");
@@ -247,9 +266,6 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     instances(&session, &out)?;
     agent.close().await?;
-    if let Some(process) = process {
-        process.shutdown().await?;
-    }
     if !native {
         plugins::write(&root(), &plugins::local_graph().await?)?;
         app_server::write(&root(), app_server::graph().await?)?;
@@ -331,8 +347,7 @@ async fn measure() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let before = tokio::runtime::Handle::current()
         .metrics()
         .num_alive_tasks();
-    let (agent, config, process) = configured_agent()?;
-    let native = process.is_some();
+    let (agent, config, native) = configured_agent().await?;
     let mut runs = vec![];
     for count in [1usize, 10, 100, 1000] {
         let bytes_before = allocation::live();
@@ -405,10 +420,6 @@ async fn measure() -> std::result::Result<(), Box<dyn std::error::Error>> {
         session.close().await?;
     }
     agent.close().await?;
-    drop(agent);
-    if let Some(process) = process {
-        process.shutdown().await?;
-    }
     let settling = Instant::now();
     while tokio::runtime::Handle::current()
         .metrics()

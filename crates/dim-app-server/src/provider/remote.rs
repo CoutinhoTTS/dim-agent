@@ -179,17 +179,8 @@ impl ProviderService {
                 }
                 let expected = serde_json::to_value(&record).map_err(ProviderError::from)?;
                 let models = owner.discover(&provider_id, &record, &cancel).await?;
+                reject_user_model_conflicts(&record, &models)?;
                 let version = record.version;
-                if models.iter().any(|model| {
-                    record
-                        .user_models
-                        .iter()
-                        .any(|user| user.model_id == model.model_id)
-                }) {
-                    return Err(ProviderError::Conflict(
-                        "Discovered models conflict with user-added model IDs".into(),
-                    ));
-                }
                 record.models = models;
                 record.remote_models = true;
                 record.version = version
@@ -283,10 +274,10 @@ fn project(
     driver: &str,
     item: &Value,
 ) -> Result<ModelEntry, HostError> {
-    let mut descriptor = item
+    let source = item
         .as_object()
-        .cloned()
         .ok_or_else(|| failure("Invalid remote model descriptor"))?;
+    let mut descriptor = source.clone();
     let id = ["id", "modelId", "name"]
         .into_iter()
         .find_map(|key| item.get(key).and_then(Value::as_str))
@@ -315,31 +306,14 @@ fn project(
     descriptor.insert("raw".into(), Value::Object(raw));
     for (target, sources) in [
         ("displayName", &["display_name", "displayName", "name"][..]),
-        (
-            "contextWindow",
-            &["context_window", "contextWindow", "inputTokenLimit"][..],
-        ),
-        (
-            "maxOutputTokens",
-            &["max_output_tokens", "maxOutputTokens", "outputTokenLimit"][..],
-        ),
         ("toolCalling", &["toolCalling", "toolCall", "tool_call"][..]),
     ] {
         if let Some(value) = sources.iter().find_map(|key| item.get(key)) {
             descriptor.insert(target.into(), value.clone());
         }
     }
-    for value in [
-        descriptor.get("contextWindow"),
-        descriptor.get("maxOutputTokens"),
-        item.pointer("/limit/context"),
-        item.pointer("/limit/output"),
-        item.pointer("/capabilities/contextWindow"),
-        item.pointer("/capabilities/maxOutputTokens"),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    let (context, output) = declared_limit_values(source);
+    for value in context.iter().chain(output.iter()) {
         if !value
             .as_u64()
             .is_some_and(|n| (1..=MAX_MODEL_TOKENS).contains(&n))
@@ -348,6 +322,12 @@ fn project(
                 "Remote model limits must be positive safe JSON integers",
             ));
         }
+    }
+    if let Some(value) = context.first() {
+        descriptor.insert("contextWindow".into(), (*value).clone());
+    }
+    if let Some(value) = output.first() {
+        descriptor.insert("maxOutputTokens".into(), (*value).clone());
     }
     if let Some(modalities) = item.get("modalities").and_then(|value| value.get("input")) {
         descriptor.insert("modalities".into(), modalities.clone());

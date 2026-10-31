@@ -18,7 +18,7 @@ Every part lives in Mcp, the owner of MCP configuration and connections:
 
 - a process-scope credential authority with its own 0600 store;
 - the existing Session discovery and connection instances, which attach the bearer token;
-- three new management methods, `mcp.auth.start`, `mcp.auth.complete` and `mcp.auth.logout`.
+- management methods `mcp.auth.start`, `mcp.auth.complete`, `mcp.auth.cancel` and `mcp.auth.logout`.
 
 F4 adds no plugin and no Timeline event, changes no infrastructure and no shared contract, and
 does not depend on S8b. Done when an OAuth-protected MCP server connects and refreshes its tokens
@@ -43,7 +43,7 @@ flow, and the gaps rmcp leaves, three of them MUSTs of the specification (Append
 | Part | Scope | Change | Depends on |
 | --- | --- | --- | --- |
 | `McpAuth`, the credential authority inside `McpPlugin` | Process | New, Mcp-internal | `FileStorage` (home root, file `mcp-oauth.json`), rmcp `AuthorizationManager` |
-| Mcp management (`mcp.*`) | Process | Adds `mcp.auth.start/complete/logout`; `mcp.catalog` entries gain `auth` | `McpAuth`, Settings (existing) |
+| Mcp management (`mcp.*`) | Process | Adds `mcp.auth.start/complete/cancel/logout`; `mcp.catalog` entries gain `auth` | `McpAuth`, Settings (existing) |
 | `McpSession` | Session | Reports `auth_required`; re-runs discovery of such entries when their credential changes | `McpService` (existing), `McpAuth` |
 | `McpServer` connection instance | Session loader instance | Attaches the bearer per request; reports `401` and `403` to `McpAuth`; may reconnect after `auth_required` | `McpAuth` replaces the ordering-only `Gate<McpService>` (same plugin, so the same reload propagation) |
 
@@ -392,7 +392,8 @@ in another daemon sharing the home after a sign-out is a later sign-in.
 
 **One order.** The attempts lock (§4.2) is the single linearization point of attempt state.
 `start` holds it to make its attempt current, `logout` to close attempts when it is accepted and
-when it completes, `complete` to validate a callback, and the exchange for both currency checks.
+when it completes, `cancel` to close its named current attempt, `complete` to validate a callback,
+and the exchange for both currency checks.
 The exchange holds it from its final check until its outcome is published. Its holders never
 wait for the store lock or a network request, so waiting for it takes at most one local store
 write, never a token request or a refresh. Every `start` and `logout` is therefore ordered either
@@ -408,6 +409,10 @@ after a newer `start` has returned.
 - **`logout`** closes the current attempt when it is accepted, before it waits for the store lock.
   It closes the attempt again once it has deleted the record, which ends an attempt started in
   the meantime.
+- **`cancel`** closes only the named current attempt. It leaves an existing grant intact and
+  does not interrupt a token request already sent; that exchange settles and revokes any tokens
+  it can no longer publish. If publication already completed, cancellation reports the attempt
+  closed without undoing the published grant.
 - **`complete`** ends the attempt when its exchange settles, except after a transport error
   (§5.4). An authorization server error in the callback, or expiry, ends it too.
 - **The exchange** checks that its attempt is still current twice: after it takes the store lock,
@@ -469,9 +474,11 @@ secret, and the text has no URL, token, code or issuer.
 
 ### 9.1 Management methods (namespace `mcp`, local transports only)
 
-All three are `report` like the rest of `mcp.*`, which keeps the
+All four are `report` like the rest of `mcp.*`, which keeps the
 [migration table](../contracts/session-boundary.md#a4-migration-and-compatibility) true. After
-`operation_interrupted`, read `mcp.catalog` to see the outcome. All three are mutating. Targets use
+`operation_interrupted`, read `mcp.catalog` to see the credential outcome. Cancellation can be
+retried with the same attempt ID; `mcp_auth_attempt_closed` means it is no longer pending.
+All four are mutating. Targets use
 the existing `{source, id, cwd?}` form. `source` is `"user"`, `"project"` or `"plugin"`; a plugin
 entry's `id` is `<plugin id>:<server>`, as `mcp.catalog` lists it
 ([PluginManager §3.7](../plugins/PluginManager.md#37-content-registration)).
@@ -480,6 +487,7 @@ entry's `id` is `<plugin id>:<server>`, as `mcp.catalog` lists it
 | --- | --- | --- | --- |
 | `mcp.auth.start` | `{source: "user" \| "project" \| "plugin", id, cwd?, clientSecret?}` | `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}` | The entry must be a remote, enabled entry without static credentials. `clientSecret` is accepted only with `oauth.clientId`. `expiresAt` is Unix ms, 10 min ahead. Replaces a pending attempt of the same key |
 | `mcp.auth.complete` | `{attemptId, callbackUrl}` | `{}` | §5.4. Returns after the record is persisted |
+| `mcp.auth.cancel` | `{attemptId}` | `{}` | Closes only the named current attempt; it does not sign out an existing grant. A sent exchange still settles under §7, revoking any tokens it can no longer publish. An already published grant is not undone |
 | `mcp.auth.logout` | `{source, id, cwd?}` | `{revoked: boolean}` | Allowed for disabled entries and for remote entries that no longer use OAuth. No record: `{revoked: false}` |
 
 Per-call progress (C1, PR [#83](https://github.com/arcships/dim/pull/83)) is not needed:
@@ -502,7 +510,7 @@ Per-call progress (C1, PR [#83](https://github.com/arcships/dim/pull/83)) is not
 | `mcp_auth_unsupported` | stdio entry; `auth` or `Authorization` header configured; plain `http` server off loopback; a store in an unknown format version | Stop: fix the entry, or run the Dim version that wrote the store |
 | `mcp_auth_discovery_failed` | No PRM and no `authServerMetadataUrl`; `resource` or `issuer` mismatch; no `S256`; non-HTTPS endpoint | Fix the server or set `authServerMetadataUrl` |
 | `mcp_auth_client_required` | No client ID, no usable CIMD, no `registration_endpoint`; or a configured `clientId` recorded with another issuer | Set `oauth.clientId`; after an issuer change, sign out first |
-| `mcp_auth_attempt_closed` | Unknown, expired, completed or replaced attempt, or one closed by sign-out; a `start` overtaken by a sign-out | Start again |
+| `mcp_auth_attempt_closed` | Unknown, expired, completed, cancelled or replaced attempt, or one closed by sign-out; a `start` overtaken by a sign-out | Start again |
 | `mcp_auth_callback_invalid` | Redirect URI, `state` or `iss` mismatch; no `code` | Paste the right URL; the attempt stays pending |
 | `mcp_auth_failed` | The authorization server refused: `error` in the callback, a token error, a registration rejected | Start again after fixing the cause |
 | `mcp_auth_unavailable` | Network failure, timeout or 5xx at the authorization server; store I/O | Retry |
@@ -521,7 +529,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
 | D4 | Registration: `clientId`, then CIMD (product URL, once published), then DCR, then `mcp_auth_client_required`. A confidential client's secret is entered at sign-in and kept in the record | A secret in configuration (`clientSecretRef`): `.mcp.json` is shared with the project, and a project entry could point the secret at its own token endpoint; it would also wait for S8b |
 | D5 | Redirect URI `http://localhost:{callbackPort}/callback`, default port 1456 (1455 is the account login's) | `127.0.0.1` breaks registrations made for Claude Code's `localhost` form (its v2.1.229 regression); a random port per attempt breaks stable DCR registrations and a fixed CIMD document |
 | D6 | The callback always returns through `mcp.auth.complete {attemptId, callbackUrl}`; the CLI captures it with a loopback listener, or the user pastes it | A loopback listener in the daemon is a new external entry inside a business owner and is unreachable over SSH anyway; one long call with progress would hold an RPC open for minutes and still need a listener; the device flow is not in the MCP specification |
-| D7 | Three methods, all `report`; no cancel and no attempt-status polling | `drain` would hold Mcp's unload behind authorization-server calls and break the uniform `mcp.*` rule. A cancel method would undo nothing, since a pending attempt has no effect and expires; polling has nothing to poll, because no background party completes an attempt |
+| D7 | Four methods, all `report`; explicit cancellation closes a pending attempt without undoing a published grant; no attempt-status polling | `drain` would hold Mcp's unload behind authorization-server calls and break the uniform `mcp.*` rule. Leaving the UI must not cancel a submitted exchange, but an explicit cancel must prevent a still-pending attempt from later publishing. Polling has nothing to poll, because no background party completes an attempt |
 | D8 | Credential key = server `id` + canonical URL, process-wide; the record binds `resource` and `issuer` | A URL-only key allows one account per server; `(source, id)` lets a token follow a name to a new URL; per-Session keys contradict process ownership (ADR 002 D1) |
 | D9 | Store `mcp-oauth.json` under the home root through FileStorage, atomic 0600 replace, versioned; token requests hold the store lock and settle once sent. S8b adds no credential service, so nothing migrates: tokens are owner state that each refresh rewrites, and every owner handles its own secrets ([settings-service §1.2](settings-service.md#12-decision-secrets-belong-to-their-owner)); every other OAuth holder follows the same rule | The Settings rows in SQLite hold business documents, not secrets; `pluginFiles` is FileStorage's bridge API for non-Rust plugins, while a Rust owner uses FileStorage directly, as the managed OAuth host does; an OS keychain needs a host-wide secret-store decision that covers every OAuth owner; waiting for S8b blocks on an API that cannot hold rotating secrets |
 | D10 | Refresh on use with a 30 s margin, plus refresh and one retry on `401`; single flight per key; persist rotation before use | Background refresh timers wake the daemon for idle servers and rotate tokens nobody uses |
@@ -597,7 +605,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
 | ADR 002 D2 (no wiring modules) | No new plugin, port or adapter. |
 | ADR 002 D3 (dependencies point to the core) | Mcp gains a dependency on FileStorage, core to core; nothing new depends on an optional plugin. |
 | ADR 002 D4 (structural vs business configuration) | `oauth` is business configuration in the `mcp` source, read at use; the token store is the owner's own store. Editing reloads nothing. |
-| ADR 002 D5 (language-neutral contracts) | Methods, replies and errors are JSON data; cancellation is the caller leaving, and a pending attempt expires. |
+| ADR 002 D5 (language-neutral contracts) | Methods, replies and errors are JSON data; an explicit method closes a named attempt, while a caller leaving does not cancel submitted work. A pending attempt expires. |
 
 ## 13. Requirements raised to mechanism owners
 
@@ -645,7 +653,8 @@ Ctrl+C or expiry releases the listeners and hidden-input guard. Cancellation exi
 exits 1 with an expiry message. A submitted operation that completes successfully exits 0 even
 when its waiter was interrupted. Unknown-server errors do not echo unverified command text. An already-submitted RPC is
 drained before the interactive prompt returns, preserving the existing response identity.
-No attempt cancellation method, token state, background poller or daemon endpoint is added.
+The CLI does not call the explicit attempt cancellation method. No token state, background
+poller or daemon endpoint is added to the CLI.
 The CLI's current configuration surface enables and disables entries; entry removal through
 the configuration API retains the sign-out-first requirement above. The CLI interaction is
 illustrated in [its README](../../../crates/dim-cli/README.md#mcp-servers).

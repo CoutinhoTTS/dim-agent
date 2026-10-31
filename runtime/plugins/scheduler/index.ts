@@ -10,6 +10,15 @@ import { settings } from './settings.ts'
 import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
 
+/// The plugin's factory configuration: the tool description and the
+/// report's guidance line, each one whole text. `report_guidance` is one
+/// line: the entry names the report's last line as guidance, not part of
+/// the scheduler's account, so a value with a line break is refused.
+const guidance = z.string().min(1).refine(value => !/[\r\n]/.test(value), {
+  message: 'report_guidance must be one line: the entry names the report\'s last line as guidance',
+})
+const options = z.strictObject({ description: z.string().min(1).optional(), report_guidance: guidance.optional() })
+
 function jobPreview(job: Job) {
   return { ...job, name: bounded(job.name, 256), prompt: bounded(job.prompt, 4 * 1024),
     prompt_truncated: Buffer.byteLength(job.prompt) > 4 * 1024 }
@@ -18,14 +27,18 @@ function jobPreview(job: Job) {
 function runPreview(run: Run) { return { ...run, detail: bounded(run.detail, 512) } }
 
 export default definePlugin({
-  name: 'Scheduler', config: z.toJSONSchema(z.strictObject({})),
+  name: 'Scheduler',
+  // A plain JSON Schema: zod's result also carries `~standard`, which
+  // rutis refuses as a Standard Schema.
+  config: JSON.parse(JSON.stringify(z.toJSONSchema(options))),
   inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods', 'partRegistry'],
   provides: { scheduleJobs: { call: 'async' } },
-  async apply(ctx) {
+  async apply(ctx, config: z.infer<typeof options>) {
+    config = options.parse(config)
     await ctx.use<Settings>('settings').register(settings)
     const jobs = new Jobs(ctx.use<Settings>('settings'), ctx.use<SessionPermissions>('sessionPermissions'))
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
-    const scheduler = new Scheduler(jobs, ctx.use<Sessions>('sessions'), new RunStore(scope))
+    const scheduler = new Scheduler(jobs, ctx.use<Sessions>('sessions'), new RunStore(scope), config.report_guidance)
     ctx.effect(() => scheduler.close())
 
     async function list() {
@@ -144,7 +157,7 @@ export default definePlugin({
     )
     if (scheduler.fault) throw scheduler.fault
     ctx.provide('scheduleJobs', owner)
-    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SchedulerSession', session)
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SchedulerSession', session(config.description))
     ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()
   },

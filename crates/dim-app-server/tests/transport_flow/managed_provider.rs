@@ -17,8 +17,9 @@ use dim_app_server::{
         ManagedFuture, ManagedModel, ManagedProvider, ManagedProviderRow, ProviderDescriptor,
         WebSearchRequest, WebSearchResponse,
         management::{
-            BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
-            ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
+            ApplyReset, BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
+            ManagedBrowserLoginComplete, ManagedLoginAttempt, Referral, ResetApplied, ResetBatches,
+            Usage,
         },
     },
     model_catalog::ModelEntry,
@@ -63,6 +64,7 @@ impl ManagedProvider for Provider {
             provider_id: "managed-fixture".into(),
             display_name: "Managed fixture".into(),
             login_methods: vec!["browser".into()],
+            default_directory: Some("https://accounts.example".into()),
         }]
     }
     fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
@@ -104,6 +106,30 @@ impl ManagedProvider for Provider {
             _ => Err(ManagedError::TokenMissing),
         })
     }
+    fn referral(&self, _: &str) -> ManagedFuture<Referral> {
+        ready(Ok(serde_json::from_value(
+            json!({"enabled":true,"eligible":false,
+            "invitedCount":5,"paidCount":2,"rewardGrantedUnits":12000,
+            "inviterRebateBp":2000,"inviteeRebateBp":1000}),
+        )
+        .unwrap()))
+    }
+    fn reset_batches(&self, _: &str) -> ManagedFuture<ResetBatches> {
+        ready(Ok(serde_json::from_value(
+            json!({"window":[],"monthlyFull":[]}),
+        )
+        .unwrap()))
+    }
+    fn apply_reset(&self, request: ApplyReset) -> ManagedFuture<ResetApplied> {
+        assert_eq!(request.subscription_id, 42);
+        assert_eq!(request.idempotency_key, "confirmed-action");
+        ready(Ok(serde_json::from_value(
+            json!({"credits":{"usedUnits":0},"windows":[],
+            "resets":{"window":{"availableCount":0},"monthlyFull":{"availableCount":0}},
+            "replayed":false,"appliedAt":"2026-10-30T00:00:00Z"}),
+        )
+        .unwrap()))
+    }
     fn web_search(
         &self,
         _: WebSearchRequest,
@@ -115,8 +141,8 @@ impl ManagedProvider for Provider {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
             "displayName":"Fixture model","status":"active",
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
-            "capabilities":dim_agent_types::ModelCapabilities {
-                context_window: 32_000, max_output_tokens: 128, reasoning: true, ..Default::default() }}))
+            "capabilities":dim_agent_types::CatalogCapabilities {
+                reasoning: true, ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128) }}))
         .unwrap();
         ready(Ok(ManagedCatalog {
             account: self.0.account.lock().unwrap().clone(),
@@ -222,10 +248,12 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
+    let assets = web_entry::frontend_fixture();
     let config = ServerConfig {
         unix_path: Some(home.join("daemon.sock")),
         product_home: Some(home.clone()),
         target_home: Some(home.join("rust")),
+        web_assets: Some(assets.clone()),
         managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
             let provider = provider.clone();
             builtins
@@ -243,6 +271,98 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
     };
     let server = serve(builder, config).await.unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
+    let opened = client.rpc("web.open", json!({"port":0})).await;
+    assert_ok(&opened);
+    let address = opened["result"]["address"].as_str().unwrap();
+    let token = opened["result"]["url"]
+        .as_str()
+        .unwrap()
+        .split_once("#bootstrap=")
+        .unwrap()
+        .1;
+    let (status, head, _) = web_entry::http(
+        address,
+        web_entry::post(
+            address,
+            "/api/auth/exchange",
+            &format!("http://{address}"),
+            &json!({"token":token}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let cookie = head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let mut web = web_entry::web_client(address, cookie).await;
+    for method in [
+        "account.providers",
+        "account.status",
+        "account.usage",
+        "account.referral",
+        "account.reset_batches",
+        "account.apply_reset",
+        "account.recover",
+        "account.login.status",
+        "provider.management",
+    ] {
+        assert!(web.features.as_array().unwrap().contains(&json!(method)));
+        let params = match method {
+            "account.providers" => json!({}),
+            "account.login.status" => {
+                json!({"providerId":"managed-fixture","attemptId":"failed-attempt"})
+            }
+            "account.apply_reset" => json!({"providerId":"managed-fixture","subscriptionId":42,
+                "resetType":"window","idempotencyKey":"confirmed-action"}),
+            _ => json!({"providerId":"managed-fixture"}),
+        };
+        let reply = web.rpc(method, params).await;
+        assert_ok(&reply);
+        for secret in [
+            "initial-fixture-secret",
+            "private-error-secret",
+            "refresh_token",
+        ] {
+            assert!(!reply.to_string().contains(secret), "{method}");
+        }
+        if method == "account.providers" {
+            assert_eq!(
+                reply["result"][0]["defaultDirectory"],
+                "https://accounts.example"
+            );
+        }
+    }
+    assert_eq!(
+        web.rpc(
+            "account.login.begin",
+            json!({"providerId":"managed-fixture",
+        "directory":"https://accounts.example"})
+        )
+        .await["error"]["data"]["appError"],
+        "account_invalid_input"
+    );
+    assert_eq!(
+        web.rpc("account.logout", json!({"providerId":"managed-fixture"}))
+            .await["result"]["generation"],
+        1
+    );
+    assert_eq!(
+        web.rpc("daemon.shutdown", json!({})).await["error"]["data"]["appError"],
+        "unknown_method"
+    );
+    assert_eq!(
+        web.rpc(
+            "account.referral",
+            json!({"providerId":"managed-fixture",
+        "issuer":"https://attacker.invalid"})
+        )
+        .await["error"]["code"],
+        -32602
+    );
     assert_eq!(
         client.rpc("account.providers", json!({})).await["result"][0]["providerId"],
         "managed-fixture"
@@ -436,5 +556,6 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
     released.sort();
     assert_eq!(released, ["initial", "recovered"]);
     http.abort();
+    std::fs::remove_dir_all(assets).unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

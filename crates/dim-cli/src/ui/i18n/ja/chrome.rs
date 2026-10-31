@@ -195,10 +195,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell 出力は未記録：{reason}",
         "Shell: {reason}" => "Shell：{reason}",
         "Reading clipboard…" => "クリップボード読込中…",
+        "Reading image…" => "画像を読み込み中…",
+        "Wait for the image insertion before sending" => "画像の挿入完了後に送信",
+        "The image could not be read" => "画像を読み込めませんでした",
+        "An image is still being inserted; paste again when it is in" => {
+            "画像を挿入中です。完了後にもう一度貼り付けてください"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "クリップボードを挿入中です。完了後にもう一度貼り付けてください"
+        }
         "Clipboard: {reason}" => "クリップボード：{reason}",
         "Wait for clipboard insertion before sending" => "クリップボード挿入の完了後に送信",
         "A submission accepts at most 20 images" => "送信できる画像は最大 20 枚",
-        "[Image #{index}]" => "[画像 #{index}]",
+        "first frame" => "先頭フレームのみ",
+        "re-encoded" => "再エンコード",
         "The current model does not accept images; remove {label} to send" => {
             "このモデルは画像非対応。{label} を削除して送信"
         }
@@ -381,6 +391,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} モデル利用不可 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：1 モデルにウィンドウが必要です · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：{count} モデルにウィンドウが必要です · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}：モデルなし · dimcode models {id} --refresh"
         }
@@ -392,6 +408,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}：カタログを読み取れません · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限が未宣言のモデルは選択できません。dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N で宣言してください。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N で宣言してください。"
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "キャッシュされたカタログがありません。サインインして models PROVIDER --refresh を実行してください。"
@@ -446,8 +468,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"
         }
         "Fullscreen" => "全画面",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown スクロール · Home/End 先頭/末尾 · Tab メッセージ選択、e 編集、q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown スクロール · Home/End 先頭/末尾 (下書きが空の場合) · Tab メッセージ選択、e 編集、q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "ホイール スクロール · ドラッグ 選択・コピー · クリック リンクを開く/ツールグループ展開"

@@ -9,10 +9,12 @@ use futures_util::FutureExt;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
 use rutis_bridge::{
-    runtime::{LocalRuntime, Runtime, Stdio},
+    LocalId, PeerId, Session,
+    pipe::Processes,
+    runtime::{Launcher, Stdio},
     session::{HostDispatch, Reply, Value, arg, host_key_in, settle},
 };
-use rutis_loader::runtime::RuntimeResolver;
+use rutis_loader::runtime::{SessionResolver, SessionRows};
 use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin};
 use serde_json::{Value as Json, json};
 use std::{
@@ -27,40 +29,36 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-struct Node(Arc<LocalRuntime>);
+/// The Node runtime's connection row: its process, greeted, as a session.
+struct Node {
+    launcher: Launcher,
+    anchor: PathBuf,
+}
 impl DynPlugin for Node {
     fn name(&self) -> &str {
-        "C4Node"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
-        DynPlugin::apply(self.0.as_ref(), ctx)
-    }
-}
-
-/// The Node runtime's rows, given the runtime at its own key.
-struct NodeRows {
-    resolver: Arc<RuntimeResolver>,
-    runtime: Key<Runtime>,
-}
-impl NodeRows {
-    fn new(_: &Names<'_>, resolver: Arc<RuntimeResolver>) -> rutis::Result<Self> {
-        Ok(Self {
-            resolver,
-            runtime: Key::dynamic("node"),
-        })
-    }
-}
-impl DynPlugin for NodeRows {
-    fn name(&self) -> &str {
-        "C4NodeRows"
-    }
-    fn injects(&self) -> Vec<TypeKey> {
-        vec![self.runtime.erase(), TypeKey::of::<rutis_loader::Loader>()]
+        "node"
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let rows = rutis_loader::runtime::RuntimeRowsPlugin::new(self.resolver.clone());
-            DynPlugin::apply(&rows, ctx).await
+            let failed = |error: String| rutis::Error::from(ErrorKind::PluginFailed(error.into()));
+            let processes = Processes::default();
+            let ended = processes.clone();
+            ctx.effect(move || async move {
+                ended.kill();
+                ended.ended().await;
+                Ok(())
+            })?;
+            let id = PeerId::new("node").map_err(|error| failed(error.to_string()))?;
+            let channel = self
+                .launcher
+                .start(&id, &self.anchor, &processes)
+                .await
+                .map_err(|error| failed(error.to_string()))?;
+            let channel = rutis_bridge::pipe::greeted(channel, Duration::from_secs(30))
+                .await
+                .map_err(failed)?;
+            ctx.plugin(Session::new(channel));
+            Ok(Effect::Done)
         })
     }
 }
@@ -68,13 +66,13 @@ impl DynPlugin for NodeRows {
 /// Sends its context once the Node rows are up.
 struct Anchor {
     contexts: mpsc::UnboundedSender<Ctx>,
-    rows: Key<rutis_loader::runtime::RuntimeRows>,
+    rows: Key<SessionRows>,
 }
 impl Anchor {
     fn new(_: &Names<'_>, contexts: mpsc::UnboundedSender<Ctx>) -> rutis::Result<Self> {
         Ok(Self {
             contexts,
-            rows: Key::dynamic("node"),
+            rows: SessionRows::key("node"),
         })
     }
 }
@@ -295,22 +293,22 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let runtime = Arc::new(
-        LocalRuntime::node(
-            workspace.join("runtime/node_modules/@arcships/rutis-runtime"),
-            workspace.join("runtime/package.json"),
-        )
+    let package = workspace.join("runtime/node_modules/@arcships/rutis-runtime");
+    let launcher = Launcher::new("node")
+        .arg("--import")
+        .arg("tsx")
+        .arg(package.join("src/runner.mjs"))
+        .cwd(&package)
+        .inherit_fd()
         .stdin(Stdio::Null)
-        .stdout(Stdio::Null),
-    );
+        .stdout(Stdio::Null);
+    let anchor = workspace.join("runtime/package.json");
     let mut builder = AgentBuilder::new(AgentConfig::default());
     for name in ["c4Session", "c4Tool", "c4Probe"] {
         builder
             .catalog_mut()
             .register_shared_instance(name, SESSION_GROUP);
     }
-    let resolver =
-        Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(builder.catalog()));
     let (loaded_send, mut loaded) = mpsc::unbounded_channel();
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
@@ -325,13 +323,11 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
         },
     ));
     let mut builtins = Modules::new();
-    let node = register_part(&mut builtins, builder.catalog(), {
-        let runtime = runtime.clone();
-        move |_| Ok(Box::new(Node(runtime.clone())))
-    })?;
-    let rows = register_part(&mut builtins, builder.catalog(), {
-        let resolver = resolver.clone();
-        move |names| Ok(Box::new(NodeRows::new(names, resolver.clone())?))
+    let node = register_part(&mut builtins, builder.catalog(), move |_| {
+        Ok(Box::new(Node {
+            launcher: launcher.clone(),
+            anchor: anchor.clone(),
+        }))
     })?;
     let (anchor_send, mut anchors) = mpsc::unbounded_channel();
     let anchor = register_part(&mut builtins, builder.catalog(), move |names| {
@@ -345,21 +341,21 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
         .push(
             json!({"id":"C4SessionPart","name":workspace.join("runtime/spikes/session-part.ts")}),
         );
+    let resolver = SessionResolver::npm(builder.catalog(), "node");
     let plugin = LoaderPlugin::new(
-        Chain::new().with(builtins).with_shared(resolver),
+        Chain::new().with(builtins).with(resolver.clone()),
         LoaderOptions {
             catalog: builder.catalog().clone(),
             ..Default::default()
         },
     );
     let loader = plugin.handle();
+    resolver.attach(&loader);
     (&root.plugin(plugin)).await?;
+    resolver.follow_row("node");
     let started = Instant::now();
     let agent_row = builder.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
-    let mut inserted = vec![
-        json!({"id":node,"name":node}),
-        json!({"id":rows,"name":rows}),
-    ];
+    let mut inserted = vec![json!({"id":node,"name":node})];
     inserted.extend(plugins);
     inserted.push(agent_row);
     let report = loader
@@ -378,7 +374,7 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let runtime_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let agent_instance = loader.create_instance(root, AGENT_GROUP).await?;
     let anchor = anchors.recv().await.expect("Agent anchor");
-    let agent = builder.build_at(loader.clone(), &anchor);
+    let agent = builder.build(loader.clone(), &anchor);
     let started = Instant::now();
     let one = agent.create_session(SessionConfig::default()).await?;
     let session_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -476,6 +472,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::runtime::Handle::current(),
         Arc::new(|error| eprintln!("{error}")),
     );
+    root.provide(LocalId(PeerId::new("c4-spike")?))?;
     let result = AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(60), run(&root)))
         .catch_unwind()
         .await;

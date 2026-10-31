@@ -18,10 +18,10 @@ use dim_agent_capabilities::{
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{alive, gone, pid_in};
-use rutis::host::CtxHost;
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
 use std::{
@@ -109,6 +109,25 @@ impl Plugin for PlatformPlugin {
         Ok(())
     }
 }
+/// `platform` provided by [`PlatformPlugin`], a row of the harness's host.
+fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
+    let platform = Arc::new(platform);
+    move |builder| {
+        builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
+    }
+}
+/// FileStorage over `home` and the HostPlatform plugin reading `config`
+/// there, rows of the harness's host.
+fn configured_platform(
+    home: PathBuf,
+    config: HostPlatformConfig,
+) -> impl FnOnce(&mut AgentBuilder) {
+    move |builder| {
+        let files = FileStoragePlugin::new(vec![home]);
+        builder.plugin(move |_| Ok(Box::new(files.clone())));
+        builder.plugin(move |names| Ok(Box::new(HostPlatformPlugin::new(names, config.clone())?)));
+    }
+}
 
 fn scratch(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -135,8 +154,7 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
 }
 
 struct Harness {
-    root: Ctx,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Script>,
     cwd: PathBuf,
     compacting: bool,
@@ -156,33 +174,21 @@ impl Harness {
         let cwd = scratch("cwd");
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        Self::with_platform_context(root, view, cwd, compacting).await
+        Self::with_platform_context(test_platform(platform), cwd, compacting).await
     }
-    async fn with_platform(root: Ctx, view: rutis::host::FiberView, cwd: PathBuf) -> Self {
-        Self::with_platform_context(root, view, cwd, false).await
+    async fn with_platform(platform: impl FnOnce(&mut AgentBuilder), cwd: PathBuf) -> Self {
+        Self::with_platform_context(platform, cwd, false).await
     }
+    /// A host whose `platform` rows provide HostPlatform, Active before the
+    /// harness runs.
     async fn with_platform_context(
-        root: Ctx,
-        view: rutis::host::FiberView,
+        platform: impl FnOnce(&mut AgentBuilder),
         cwd: PathBuf,
         compacting: bool,
     ) -> Self {
-        wait_active(
-            &root,
-            &[view],
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
-            MemorySkillSettings::default(),
-        ))))
-        .unwrap();
         let model = Arc::new(Script::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
+        platform(&mut builder);
         builder
             .timeline_store(Arc::new(MemoryTimelineStore::default()))
             .session_value(Arc::new(HistoryRenderer::default()))
@@ -205,9 +211,30 @@ impl Harness {
             ModelProviderPlugin::new,
         );
         builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+                MemorySkillSettings::default(),
+            ))))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let process: Vec<_> = agent
+            .loader()
+            .entries()
+            .into_iter()
+            .filter(|row| row.instance.is_none())
+            .filter_map(|row| row.view)
+            .collect();
+        wait_active(
+            agent.root(),
+            &process,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         Self {
-            root,
             agent,
             model,
             cwd,
@@ -247,7 +274,6 @@ impl Harness {
     }
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
-        self.root.shutdown().await.unwrap();
     }
 }
 
@@ -374,6 +400,30 @@ async fn last_system(session: &Session, branch: &str) -> String {
             _ => None,
         })
         .expect("a model call carries the system")
+}
+
+/// The minimal execution profile is sound once its Session and a branch are
+/// live: the assembly check reports nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_minimal_execution_assembly_passes_the_assembly_check() {
+    let harness = Harness::new(platform(&[]).await).await;
+    let session = harness.session().await;
+    session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "check".into(),
+                source: BranchSource::Host {
+                    operation_id: "check".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = harness.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    harness.shutdown().await;
 }
 
 /// #552: this profile installs no branch tool, so nothing writes the roster
@@ -520,23 +570,17 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
         r#"{"version":1,"executablePath":"/bin/bash"}"#,
     )
     .unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 isolation_file: Some((0, "host-isolation.json".into())),
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, cwd).await;
+        ),
+        cwd,
+    )
+    .await;
     let session = harness.session().await;
     let stop = session
         .service::<dyn dim_agent_capabilities::exec_stop::ExecStop>("main")
@@ -844,23 +888,17 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
         .unwrap()
     };
     set_shell("/bin/bash");
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 ..HostPlatformConfig::default()
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, scratch("cwd")).await;
+        ),
+        scratch("cwd"),
+    )
+    .await;
     let session = harness.session().await;
     let alternate = if Path::new("/bin/zsh").is_file() {
         "/bin/zsh"

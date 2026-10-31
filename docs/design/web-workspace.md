@@ -1,6 +1,6 @@
-# Web workspace (phase 1)
+# Web workspace
 
-Status: Accepted for phase 1. Related: [RemoteGateway](plugins/RemoteGateway.md) (the target design), [overview §6.3 multiple nodes](overview.md#63-multiple-nodes), [App Server README](../../crates/dim-app-server/README.md).
+Status: Accepted. Related: [RemoteGateway](plugins/RemoteGateway.md) (the target design), [overview §6.3 multiple nodes](overview.md#63-multiple-nodes), [App Server README](../../crates/dim-app-server/README.md).
 
 The Web workspace is a browser frontend for the App Server, started by `dimcode web` or toggled from `/web` in the TUI. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v3. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
 
@@ -12,7 +12,7 @@ flowchart LR
   subgraph P["App Server process"]
     WE["WebEntry<br/>loopback listener, bootstrap token,<br/>cookies, static assets"]:::new
     CONN["Connection<br/>entry: web"]
-    RPC["Rpc<br/>Session methods only"]
+    RPC["Rpc<br/>Session methods + local settings allowlist"]
   end
   B["Browser<br/>web/ (Vue)"] -->|"HTTP, GET /ws"| WE
   WE --> CONN --> RPC
@@ -22,7 +22,7 @@ flowchart LR
 | Part | Where | Purpose |
 | --- | --- | --- |
 | `WebEntry` | `crates/dim-app-server/src/web_entry.rs`, process scope | Owns the loopback listener, the bootstrap and access tokens (memory only), static assets and the `web.*` management methods |
-| `Connection` change | `connection.rs` | A connection accepted by WebEntry carries `entry: Web`; Rpc serves it Session methods (including the execution Session methods, decision E3 of RemoteGateway) and never management methods or `daemon.shutdown` |
+| `Connection` change | `connection.rs` | A connection accepted by WebEntry carries `entry: Web`; Rpc serves it Session methods (including the execution Session methods, decision E3 of RemoteGateway) and the explicit local settings allowlist (§4.3), never daemon or Web-entry controls |
 | `dimcode web` | `crates/dim-cli` | Holder client: calls `web.open` over the local socket and keeps the connection; no HTTP stack in the CLI |
 | TUI `/web` | `crates/dim-cli` | Calls `web.toggle`; the daemon owns the on/off state, so the TUI stays open |
 | Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v3 |
@@ -91,9 +91,9 @@ The App Server takes the directory with `--web-assets DIR`. The CLI finds it, in
 
 A directory counts when it holds `index.html`. One carrying `dimcode-web.json` with another `protocolVersion` is refused when the entry opens (`web_assets_incompatible`); without any directory, or without `index.html`, `web.open` fails with `web_assets_missing`. A daemon started without `--web-assets` but with `--product-home` looks at `<product home>/web` each time the entry opens, so a frontend installed there while it runs is used without a restart.
 
-`dimcode web install` installs the frontend of the CLI's own version into `<product home>/web`, without a daemon: the Web workspace and the App Server protocol move together for now, so it never installs another version. It reads `dimcode-web@VERSION` from the npm registry (`https://registry.npmjs.org`, or `DIMCODE_NPM_REGISTRY` for a mirror), downloads `dist.tarball`, verifies it against `dist.integrity` (`sha512-…`), unpacks the package's `web/` beside the target and replaces the previous directory only once `index.html` is there. Running it again repairs or, after the CLI was upgraded, upgrades the frontend in the product home; when `DIMCODE_WEB_ASSETS` or `web/` beside `bin/` holds a frontend, that one comes first, and the command names it. It is the one place the CLI downloads the frontend; nothing installs it implicitly.
+`dimcode web install` installs the frontend of the CLI's own version into `<product home>/web`, without a daemon: the Web workspace and the App Server protocol move together for now, so it never installs another version. A build the release flow did not produce has no published frontend to install and refuses before reading the registry; `DIMCODE_WEB_ASSETS` or the embedded-web build provide one built from the same source. It reads `dimcode-web@VERSION` from the npm registry (`https://registry.npmjs.org`, or `DIMCODE_NPM_REGISTRY` for a mirror), downloads `dist.tarball`, verifies it against `dist.integrity` (`sha512-…`), unpacks the package's `web/` beside the target and replaces the previous directory only once `index.html` is there. Running it again repairs or, after the CLI was upgraded, upgrades the frontend in the product home; in a build the release flow produced, when `DIMCODE_WEB_ASSETS` or `web/` beside `bin/` holds a frontend, that one comes first, and the command names it. It is the one place the CLI downloads the frontend; nothing installs it implicitly.
 
-When the entry fails, the CLI says what to do instead of reporting an error. For `web_assets_missing` and `web_assets_incompatible` it is `dimcode web install`; when the CLI itself finds a directory that the daemon lacks, the daemon was started with another source before the frontend was installed, and the CLI says to restart it with `dimcode daemon stop`. `dimcode web` exits 1 after the hint; TUI `/web` shows it as a notice.
+When the entry fails, the CLI says what to do instead of reporting an error. For `web_assets_missing` and `web_assets_incompatible` it is `dimcode web install` in a build the release flow produced, and `DIMCODE_WEB_ASSETS` or the embedded-web build in a build from source, which has nothing published to install; when the CLI itself finds a directory that the daemon lacks, the daemon was started with another source before the frontend was installed, and the CLI says to restart it with `dimcode daemon stop`. The incompatible-version hint names the build with the same label as `--version`. `dimcode web` exits 1 after the hint; TUI `/web` shows it as a notice.
 
 For development against the repository checkout, and for a build that must carry the frontend (a single file to copy around), the Cargo feature `embedded-web` of `dim-app-server` (forwarded by `dimcode`) compiles the build in: `build.rs` then runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it, and the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. With the feature, a build host without npm fails the build; without it, the build never touches `web/` or npm. A directory, when found, replaces the embedded build either way.
 
@@ -102,8 +102,8 @@ For development against the repository checkout, and for a build that must carry
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
-| Methods | Rpc Session built-ins and the execution Session methods (`session.permission.*`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp*`), on every Session of the host. All other management methods and `daemon.shutdown` → `-32601 unknown_method` |
-| Model list | The read-only management methods `provider.list`, `provider.catalog` and `provider.selection` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Switching uses the Session method `session.model.update` |
+| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
+| Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -156,7 +156,7 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
 
-Features of the TypeScript UI with no v3 backend yet are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, fork, archive, rename, goal, workflows, subagent panes, settings pages, directory picker, git branch menu. Each returns when its backend method exists (Attachments, SessionTitle, Goal, Workflow, ShellInput and so on).
+Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, goal, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
 
 ### 4.1 Lines and branch
 
@@ -184,6 +184,194 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 **Not in this phase:** session fork, a drawn DAG, compare/adopt, per-line model selection and questions (`ask_user`). Each needs its own client design.
 
+### 4.2 Model discovery and slash commands
+
+Model discovery uses `account.providers`. Its
+descriptors identify managed Providers without account identity or
+credentials. The client combines these descriptors with enabled entries from
+`provider.list`, merging by Provider ID with the managed descriptor taking
+precedence, then reads each Provider through `provider.catalog`. The catalog
+owner determines account availability; a missing catalog contributes no models.
+Account status, login and settings methods are admitted separately under §4.3.
+Static Providers are not excluded merely because
+`credentialConfigured` is false: anonymous Providers require no credential, and
+the catalog already marks unavailable models. Disabled and unavailable models
+remain unselectable. Discovery and catalog reads settle independently: a failed
+read must offer retry without discarding successfully loaded Providers or being
+presented as a successful empty list.
+
+Each editable composer opens a command menu for a leading `/` followed by an optional
+command-name prefix, not for a slash inside ordinary prose. Search filters the
+available commands; categories and canonical English command names follow the
+repository menu ordering convention. Arrow keys move selection, Enter executes,
+and Escape dismisses without sending or deleting the draft. Mouse selection has
+the same behavior. Command handling does not run during IME composition. Known
+commands are handled locally rather than submitted as model input.
+
+| Category | Command | Action and availability |
+| --- | --- | --- |
+| `model` | `/models` | Open the existing model picker when model selection is available |
+| `session` | `/branch <prompt>` | Create a line from the shown line's newest finished turn and use the inline prompt as its opening input |
+| `session` | `/lines` | Open the existing Session lines panel |
+| `session` | `/new` | Navigate to the existing new-Session page, seeded with the current Session's working directory |
+
+Commands whose action is unavailable are omitted. Native-only commands are not
+advertised. Shared actions follow the TUI's canonical names and argument flow,
+not terminal-specific shortcuts. `/keys` and a separate `/help` are unnecessary;
+the menu footer displays its keyboard controls.
+
+Choosing `/branch` fills `/branch ` and focuses the composer without opening a
+dialog. Submitting a nonempty prompt creates the line and opens it in the side
+panel. In a line-panel composer its parent is that line, not `main`. With no
+finished turn or after a creation error, show the reason and preserve the draft;
+never submit a recognized branch command as model input unless explicitly escaped.
+Only successful creation clears the submitted draft. The existing transcript
+actions and new-child buttons retain their point-based dialogs. `/btw` is not an
+alternate command name.
+Unknown slash-prefixed text remains ordinary input. Escape marks the current
+slash-prefixed draft as literal and preserves its text, including after the
+menu closes while typing `/branch <prompt>`; Enter then sends it as a message.
+
+```text
+┌──────────────────────────────────────────────────┐
+│ model     /models             Choose a model      │
+│ session   /branch <prompt>    Open a line here    │
+│           /lines             Show Session lines  │
+│           /new               New Session         │
+│ ↑↓ select · Enter confirm · Esc close            │
+├──────────────────────────────────────────────────┤
+│ /branch review the patch                         │
+│                                 [model] [send]   │
+└──────────────────────────────────────────────────┘
+```
+
+This reuses existing catalog reads, the model picker, routing and branch methods;
+it introduces no command RPC, catalog cache or general management access.
+
+### 4.3 Settings and account management on the local Web entry
+
+This section defines the explicitly allowed settings methods for the
+bootstrap-authenticated, loopback Web entry only; it does not change the
+paired-device boundary of [RemoteGateway](plugins/RemoteGateway.md).
+
+The reference is the TypeScript repository's `packages/cli-web`, especially its
+`features/settings` components and `docs/packages/cli-web/settings-layout.md`.
+Reuse its layout, labels and interaction patterns with the current Web tokens;
+replace its `web.*` management bridge with the existing protocol v3 owners, not
+a second settings store or a compatibility implementation of the old protocol.
+
+#### Navigation and layout
+
+Settings occupies the full shell instead of retaining the chat sidebar. On wide
+screens, a 256 px category navigation sits beside independently scrolling page
+content. On compact screens, `/settings` lists categories and each page has one
+sticky parent/back bar. Back returns to chat without losing the selected Session.
+Provider creation and detail use route-addressable dialogs over the provider list,
+matching the reference implementation. Unsaved changes require confirmation when
+leaving. English and Chinese labels follow the existing locale choice.
+
+```text
+┌──────────────────────┬────────────────────────────────────────────┐
+│ ← Back               │ Providers                    [+ Add]       │
+│ Account              │ ┌────────────────────────────────────────┐ │
+│ Appearance           │ │ Dim account        OAuth     Connected │ │
+│ Agent defaults       │ │ Custom provider    API key   3 models  │ │
+│ Providers          ● │ └────────────────────────────────────────┘ │
+│ Modality             │                                            │
+│ MCP                  │ Provider detail opens in a dialog:         │
+│ Plugins              │ connection / login / models / preferences  │
+│ Skills               │                                            │
+│ Permissions          │                                            │
+│ Archived sessions    │                                            │
+│ Diagnostics          │                                            │
+└──────────────────────┴────────────────────────────────────────────┘
+```
+
+Keep the reference category order and align the functional scope with the legacy
+CLI Web. Missing host capabilities require owner implementations, not permanent
+placeholder pages. Actual runtime unavailability is shown as an actionable error,
+never as a successful empty list or save.
+Session-specific model, effort and approval decisions stay in chat. Browser theme
+and text size remain browser-owned; persistent host defaults use their existing
+Settings owner. Do not expose a generic configuration-file or JSON editor.
+
+#### Account, Provider and model priorities
+
+| Surface | Existing owner and required behavior |
+| --- | --- |
+| Dim account | `account.providers`, `account.status` and `account.usage`: signed-out, signing-in, signed-in and failure states; identity, available plan, credit, rolling-window and feature usage; refresh and confirmed sign-out |
+| Dim login | Existing `account.login.*` browser and device attempts, including enterprise email; explicit open/copy, pending status, expiry, cancellation and manual browser callback completion |
+| Provider management | `provider.management` is the edit snapshot, including drivers, actions and record version; list configured providers, offer known providers and custom creation, edit connection fields, enable/disable, refresh and confirmed deletion |
+| Models | Existing `provider.models.*` and `provider.preferences.update`: search, enable/disable, create, edit, reset and delete where declared; expose supported limits, endpoint, reasoning and service-tier preferences without inventing defaults |
+| Other OAuth providers | Follow the returned account namespace and declared login methods; reuse the existing Codex/Grok account owners rather than treating their credentials as static API keys |
+| Chat integration | After a successful account, Provider or model mutation, reload authoritative discovery and reconcile the picker; preserve existing Session model-selection semantics |
+
+Provider writes use the snapshot's expected version and the owner's field-operation
+contract ([Provider management](appserver/provider-management.md)); a conflict
+preserves the form and offers reload. Partial list failures retain healthy entries.
+Render unavailable actions and reasons from owner data rather than guessing from
+Provider names. A missing account build is an explicit unavailable state, not an
+empty account or a request for users to enter private OAuth client IDs.
+
+Account parity includes referral links and reward information, usage-reset credit
+batches and confirmed application of those credits, and issuer-owned subscription
+and pricing links. The account owner must supply typed projections and operations
+for these features; the browser never calls the issuer directly. An unavailable
+optional account feature must not prevent identity or usage from loading.
+
+| Other settings category | Required legacy functionality |
+| --- | --- |
+| Appearance | Language, system/light/dark theme and text size, applied immediately |
+| Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
+| Modality | Default model selection for image generation, editing and understanding |
+| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out and confirmed removal, preserving secret fields omitted from edits |
+| Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
+| Skills | List, enable/disable, source installation, update and confirmed removal |
+| Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases |
+| Archived sessions | Search, restore/open and confirmed permanent deletion |
+| Diagnostics | Safe version, protocol, connection and logging information with refresh and supported logging controls |
+
+Use the current owner's semantics when old terminology no longer describes the
+system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
+Skills and Session owners rather than adding parallel browser-only state.
+
+#### Admission and sensitive data
+
+Replace the read-only exception with an explicit, reviewed method allowlist for
+the settings surfaces above and each supported additional category. Do not expose
+whole management namespaces. Daemon shutdown, Web-entry management, UI-host
+control and arbitrary file access remain unavailable. Unauthenticated and bare
+WebSocket clients gain no management access. Advertised methods must use the same
+filter as dispatch so the UI cannot mistake a blocked method for an available one.
+
+Audit every added read for secret-bearing fields before enabling it. Return only
+owner-provided safe projections; any missing safe projection is a requirement for
+that owner. API keys and secret headers are write-only password inputs, never
+prefilled from storage. Tokens, PKCE verifiers and OAuth state stay on the host;
+callback input and submitted keys stay in transient form memory and are cleared
+after completion or cancellation. Never store them in browser persistence, route
+URLs, logs, diagnostics or toast messages. Reconnect never resubmits a mutation.
+
+Browser OAuth must also work when the browser is on a different machine from the
+CLI: opening authorization happens in that browser, and manual completion reaches
+the existing host attempt that validates the callback. Do not depend exclusively
+on a callback listener on the CLI machine. Leaving a login flow explicitly cancels
+its pending attempt; a terminal attempt cannot reopen after a late status reply.
+
+#### Verification and ablation
+
+Exercise authenticated Web dispatch and its negative controls through the real
+App Server with a disposable home. Verify browser and device login against local
+account fixtures, cancellation/expiry, safe account replies, Provider lifecycle,
+version conflicts, model edits and chat-picker refresh. Render wide and compact
+settings, Provider dialogs and login/error states, and inspect screenshots. Check
+that reads and browser persistence contain no supplied fixture credentials.
+
+Keep business validation, persistence and credential handling in their existing
+owners. No new plugin, catalog, event format or generic form framework is needed;
+shared login presentation serves account and Provider pages. Additional helpers
+must justify a responsibility beyond translating an already typed owner reply.
+
 ## 5. Build and release
 
 `cargo build`, `./dev` and the CI workspace build need neither Node nor npm: the frontend is not part of the App Server crate unless `--features embedded-web` is given. The PR check builds the frontend once with `scripts/stage-web.mjs` (which type-checks `web/` through `vue-tsc`), and the release workflow runs the same script in its assembly job, so the frontend is built once per release, not once per platform. `collect-release.mjs` takes its `release-web` directory beside the six platform directories, adds `dimcode-web` to the wrapper's optional dependencies, and `publish-npm.mjs` and `check-native.mjs` expect its npm package and native archive ([release packaging](../release/README.md)).
@@ -192,8 +380,8 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 | # | Question | Proposal |
 | --- | --- | --- |
-| Q1 | Model selection needs the model list, which only management methods return | Decided: serve `provider.list`, `provider.catalog` and `provider.selection` read-only on the web entry (§2.5) |
-| Q2 | Settings pages (providers, MCP, skills) are management | Phase 2: decide whether a loopback web entry may carry management methods; RemoteGateway currently says never |
+| Q1 | Model selection needs the model list, which only management methods return | Decided: serve `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` read-only on the web entry (§2.5) |
+| Q2 | Settings pages (providers, MCP, skills) are management | Decided: serve an explicit settings allowlist on the authenticated local Web entry (§4.3); paired RemoteGateway devices remain Session-only |
 
 ## 7. Rule check
 
@@ -202,11 +390,23 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 | §1 Capability and App Server boundary | WebEntry is App Server process code, not a Capability; Transport, Connection and Rpc gain only the `entry: Web` record and its method filter |
 | §4.1, §4.9 Timeline writes | WebEntry writes no Timeline event; web calls reach Session owners exactly like local calls |
 | §4.3 Before callbacks | No check at a Session entry; only the HTTP upgrade is authenticated |
-| §4.7 Public events and services | The browser uses only protocol v3 Session methods and notifications |
+| §4.7 Public events and services | The browser uses protocol v3 Session methods and notifications, and the explicit typed settings methods of existing owners |
 | ADR 002 D1 Scope | Process-scoped: one entry per daemon |
 | ADR 002 D4 Configuration | No configuration is persisted in phase 1; the port is a `web.open` parameter |
 | ADR 002 D5 Language-neutral contracts | The HTTP surface and `web.*` methods are given in neutral form above |
 
 ## 8. Requirements raised to mechanism owners
 
-None. Phase 1 exists so that the Web workspace does not wait for RemoteGateway's requirements (RemoteGateway §9).
+Settings parity raises these requirements to the existing owners. Browser-only
+defaults, archive flags or copied credentials cannot substitute for owner behavior.
+
+| Owner | Problem and why existing mechanisms do not suffice | Required capability and ordering |
+| --- | --- | --- |
+| [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing or understanding tasks | Typed default selection and task routing consumed by the runtime; persist the selection before reporting success |
+| [Session catalog](appserver/session-catalog.md) | A saved Session is not necessarily archived; reopening it cannot represent restore | Durable archive classification with search, restore and confirmed deletion; commit classification before publishing the new catalog view |
+| Skills | Plugin packages do not cover manifest-free skill repositories or selective installation | Owner-managed repository preview, selected installation and loose-skill update/removal, with explicit overwrite confirmation and catalog publication after persistence |
+| MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | An owner operation for scope migration that preserves hidden values and checks both source revisions; publish success only after the move commits |
+
+Legacy permission patterns and tracing behavior do not override the current
+[command-rule design](appserver/permission-command-rules.md) or accepted ADR 016.
+Any change to those contracts requires separate design alignment.

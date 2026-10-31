@@ -12,7 +12,11 @@ mod remote;
 mod secrets;
 mod view;
 pub use editing::{ConnectionInput, CreateProvider, ProbeProvider, ProbeResult, ProviderPatch};
-pub use legacy::ImportResult;
+pub use legacy::{
+    ImportResult, LEGACY_METADATA_FIELDS, LEGACY_PROVIDER_FIELDS, LegacyConversion, LegacyRow,
+    LegacySelection, LegacySnapshot, convert_legacy_provider, convert_legacy_selection,
+    legacy_omitted_fields, read_legacy_source,
+};
 pub use models::PreferencesPatch;
 pub use preferences::ModelPreferences;
 use secrets::StaticCredential;
@@ -25,8 +29,10 @@ use crate::{
     managed_oauth,
     managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
     model_catalog::{
-        BundledCatalog, MAX_MODEL_TOKENS, ModelCapabilities, ModelEdit, ModelEntry, ModelMetadata,
-        ModelSource, NewApiEndpoint, ProviderProjection,
+        BundledCatalog, CatalogCapabilities, CatalogProvider, MAX_MODEL_TOKENS, ModelEdit,
+        ModelEntry, ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection,
+        declarations_hold, declare, declare_supplied_limits, declared_limit_values,
+        drop_undeclared_limits, inherit_limits, limits_valid,
     },
     storage::SqliteStorage,
 };
@@ -155,22 +161,40 @@ pub struct ProviderModel {
     pub name: String,
     pub endpoint: Option<ModelProtocol>,
     pub config: ModelConfig,
-    pub capabilities: ModelCapabilities,
+    pub capabilities: CatalogCapabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_limits: Vec<String>,
     pub unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub zdr: bool,
     pub metadata: Option<ModelMetadata>,
 }
 
+/// The error text for a model no source declares limits for.
+fn undeclared_limits(capabilities: &CatalogCapabilities) -> String {
+    format!(
+        "Model has no declared {}",
+        capabilities.missing_limits().join(" or ")
+    )
+}
+
 /// The adopted capability snapshot of `model`: exactly the catalog fields a
-/// selection carries (ContextCompaction §13.2).
-fn capability_snapshot(model: &ProviderModel, target: ModelId) -> ModelCapabilitySnapshot {
-    ModelCapabilitySnapshot {
+/// selection carries (ContextCompaction §13.2). A model with an undeclared
+/// limit cannot be converted, which is where adoption refuses it.
+fn capability_snapshot(
+    model: &ProviderModel,
+    target: ModelId,
+) -> Result<ModelCapabilitySnapshot, ProviderError> {
+    let capabilities = model
+        .capabilities
+        .declared()
+        .ok_or_else(|| ProviderError::InvalidConfig(undeclared_limits(&model.capabilities)))?;
+    Ok(ModelCapabilitySnapshot {
         target,
-        capabilities: model.capabilities.clone(),
+        capabilities,
         reasoning: model.metadata.as_ref().and_then(|m| m.reasoning.clone()),
         service_tier: model.metadata.as_ref().and_then(|m| m.service_tier.clone()),
-    }
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,7 +254,7 @@ fn parse_static_row(
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StaticProviderRecord {
+pub struct StaticProviderRecord {
     kind: StaticRecordKind,
     display_name: String,
     driver_kind: String,
@@ -275,6 +299,24 @@ struct StaticProviderRecord {
 enum StaticRecordKind {
     Builtin,
     Custom,
+}
+
+impl StaticProviderRecord {
+    pub fn is_builtin(&self) -> bool {
+        self.kind == StaticRecordKind::Builtin
+    }
+    /// A builtin at version 1, the version seeding writes: no import or
+    /// reseed has replaced it.
+    pub fn is_pristine_builtin(&self) -> bool {
+        self.is_builtin() && self.version == 1
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+    pub fn with_version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,7 +411,7 @@ pub struct ProviderRecordError {
 }
 
 impl ProviderRecord {
-    fn catalog(&self, _bundled: &BundledCatalog) -> ProviderCatalog {
+    fn catalog(&self, bundled: &BundledCatalog) -> ProviderCatalog {
         let defaults: Vec<_> = self
             .models
             .iter()
@@ -381,7 +423,7 @@ impl ProviderRecord {
                 self.model_config_overrides
                     .iter()
                     .find(|m| m.model_id == entry.model_id)
-                    .cloned()
+                    .map(|replacement| inherit_limits(replacement.clone(), &entry))
                     .unwrap_or(entry)
             })
             .collect();
@@ -391,21 +433,28 @@ impl ProviderRecord {
             disabled_model_ids: self.disabled_model_ids.clone(),
             models: entries
                 .into_iter()
-                .filter_map(|entry| {
+                .filter_map(|mut entry| {
                     let source = self
                         .models
                         .iter()
                         .find(|model| model.entry.model_id == entry.model_id)?;
+                    fill_bundled_limits(bundled, &mut entry);
+                    let missing_limits = entry.capabilities.missing_limits();
+                    // `limits_undeclared` is derived from the effective limits,
+                    // so a supplied limit makes the model available again.
+                    let unavailable_reason =
+                        limits_reason(source.unavailable_reason.clone(), &missing_limits);
                     Some(ProviderModel {
                         id: entry.model_id,
                         name: entry.display_name,
                         endpoint: Some(source.protocol),
                         config: ModelConfig {
-                            max_tokens: Some(entry.capabilities.max_output_tokens as f64),
+                            max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
                             ..Default::default()
                         },
                         capabilities: entry.capabilities,
-                        unavailable_reason: source.unavailable_reason.clone(),
+                        missing_limits,
+                        unavailable_reason,
                         zdr: source.zdr,
                         metadata: entry.metadata,
                     })
@@ -456,7 +505,7 @@ fn read_static(
         .map_err(storage)
 }
 
-fn parse_static(
+pub fn parse_static(
     provider_id: &str,
     version: u32,
     body: &str,
@@ -594,10 +643,8 @@ fn validate_static_record(
             model.model_id.trim().is_empty()
                 || model.display_name.trim().is_empty()
                 || !ids.insert(&model.model_id)
-                || model.capabilities.context_window == 0
-                || model.capabilities.max_output_tokens == 0
-                || model.capabilities.context_window > MAX_MODEL_TOKENS
-                || model.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+                || !limits_valid(&model.capabilities)
+                || !declarations_hold(model)
         }) {
             return Err(failure(
                 "Provider contains invalid or duplicate model descriptors",
@@ -745,6 +792,7 @@ fn static_models(
     static_entries(bundled, provider_id, record)
         .into_iter()
         .map(|entry| {
+            let missing_limits = entry.capabilities.missing_limits();
             let unavailable =
                 matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable)
                     || !entry.capabilities.modalities.iter().any(|m| m == "text")
@@ -766,11 +814,18 @@ fn static_models(
                 name: entry.display_name,
                 endpoint,
                 config: ModelConfig {
-                    max_tokens: Some(entry.capabilities.max_output_tokens as f64),
+                    max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
                     ..Default::default()
                 },
                 capabilities: entry.capabilities,
-                unavailable_reason: unavailable.then(|| "provider_unavailable".into()),
+                unavailable_reason: if unavailable {
+                    Some("provider_unavailable".into())
+                } else if !missing_limits.is_empty() {
+                    Some("limits_undeclared".into())
+                } else {
+                    None
+                },
+                missing_limits,
                 zdr: false,
                 metadata: entry.metadata,
             }
@@ -791,6 +846,33 @@ fn can_list_models(
             .provider(provider_id)
             .and_then(|provider| provider.metadata.as_ref())
             .is_some_and(|metadata| metadata.remote_model_list == Some(false))
+}
+
+/// The conflict a listing raises when a discovered ID belongs to a user model.
+/// `provider.refresh` and an update that lists both fail with it — the catalog
+/// is never renamed or merged — and it names every colliding ID and the fix,
+/// so the user can delete them and retry.
+fn reject_user_model_conflicts(
+    record: &StaticProviderRecord,
+    models: &[ModelEntry],
+) -> Result<(), ProviderError> {
+    let colliding: Vec<&str> = models
+        .iter()
+        .filter(|model| {
+            record
+                .user_models
+                .iter()
+                .any(|user| user.model_id == model.model_id)
+        })
+        .map(|model| model.model_id.as_str())
+        .collect();
+    if colliding.is_empty() {
+        return Ok(());
+    }
+    Err(ProviderError::Conflict(format!(
+        "Discovered models conflict with user-added models: {}. Delete them through provider.models.delete, then retry.",
+        colliding.join(", ")
+    )))
 }
 
 fn static_summary(
@@ -839,75 +921,87 @@ fn static_catalog(
     }
 }
 
+fn seeded(provider: &CatalogProvider) -> bool {
+    matches!(provider.auth.kind.as_str(), "api_key" | "aws_bedrock")
+        || managed_authority(&provider.provider_id) != CredentialAuthority::Static
+}
+
+fn bundled_seed(provider: &CatalogProvider) -> Result<StaticProviderRecord, HostError> {
+    let authority = managed_authority(&provider.provider_id);
+    let endpoint_types = provider
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.raw.as_ref())
+        .map(|raw| raw.endpoint_type_by_model.clone())
+        .unwrap_or_default();
+    let fingerprint = serde_json::to_vec(&(
+        &provider.display_name,
+        &provider.driver_kind,
+        &provider.auth,
+        &provider.default_base_url,
+        &provider.models,
+        &endpoint_types,
+    ))
+    .map_err(failure)?;
+    Ok(StaticProviderRecord {
+        kind: StaticRecordKind::Builtin,
+        display_name: provider.display_name.clone(),
+        driver_kind: provider.driver_kind.clone(),
+        auth: if authority == CredentialAuthority::Static {
+            if provider.auth.kind == "aws_bedrock" {
+                StaticAuth::AwsBedrock
+            } else {
+                StaticAuth::ApiKey {
+                    header_name: provider
+                        .auth
+                        .header_name
+                        .clone()
+                        .unwrap_or_else(|| "Authorization".into()),
+                    prefix: provider.auth.prefix.clone(),
+                }
+            }
+        } else {
+            StaticAuth::Bearer
+        },
+        credential_authority: authority,
+        base_url: provider.default_base_url.clone().unwrap_or_default(),
+        network: ModelNetwork::default(),
+        headers: HashMap::new(),
+        credential: None,
+        models: provider.models.clone(),
+        remote_models: false,
+        endpoint_types,
+        routes: HashMap::new(),
+        bedrock_region: None,
+        model_config_overrides: Vec::new(),
+        user_models: Vec::new(),
+        model_preferences: BTreeMap::new(),
+        endpoint_overrides: BTreeMap::new(),
+        disabled_model_ids: Vec::new(),
+        enabled: authority != CredentialAuthority::Static,
+        definition_fingerprint: Some(format!("{:x}", Sha256::digest(fingerprint))),
+        version: 1,
+    })
+}
+
+fn bundled_seed_for(
+    bundled: &BundledCatalog,
+    provider_id: &str,
+) -> Result<Option<StaticProviderRecord>, HostError> {
+    bundled
+        .provider(provider_id)
+        .filter(|provider| seeded(provider))
+        .map(bundled_seed)
+        .transpose()
+}
+
 fn bundled_seeds(
     bundled: &BundledCatalog,
 ) -> Result<HashMap<String, StaticProviderRecord>, HostError> {
     bundled
         .providers()
-        .filter(|provider| {
-            matches!(provider.auth.kind.as_str(), "api_key" | "aws_bedrock")
-                || managed_authority(&provider.provider_id) != CredentialAuthority::Static
-        })
-        .map(|provider| {
-            let authority = managed_authority(&provider.provider_id);
-            let endpoint_types = provider
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.raw.as_ref())
-                .map(|raw| raw.endpoint_type_by_model.clone())
-                .unwrap_or_default();
-            let fingerprint = serde_json::to_vec(&(
-                &provider.display_name,
-                &provider.driver_kind,
-                &provider.auth,
-                &provider.default_base_url,
-                &provider.models,
-                &endpoint_types,
-            ))
-            .map_err(failure)?;
-            Ok((
-                provider.provider_id.clone(),
-                StaticProviderRecord {
-                    kind: StaticRecordKind::Builtin,
-                    display_name: provider.display_name.clone(),
-                    driver_kind: provider.driver_kind.clone(),
-                    auth: if authority == CredentialAuthority::Static {
-                        if provider.auth.kind == "aws_bedrock" {
-                            StaticAuth::AwsBedrock
-                        } else {
-                            StaticAuth::ApiKey {
-                                header_name: provider
-                                    .auth
-                                    .header_name
-                                    .clone()
-                                    .unwrap_or_else(|| "Authorization".into()),
-                                prefix: provider.auth.prefix.clone(),
-                            }
-                        }
-                    } else {
-                        StaticAuth::Bearer
-                    },
-                    credential_authority: authority,
-                    base_url: provider.default_base_url.clone().unwrap_or_default(),
-                    network: ModelNetwork::default(),
-                    headers: HashMap::new(),
-                    credential: None,
-                    models: provider.models.clone(),
-                    remote_models: false,
-                    endpoint_types,
-                    routes: HashMap::new(),
-                    bedrock_region: None,
-                    model_config_overrides: Vec::new(),
-                    user_models: Vec::new(),
-                    model_preferences: BTreeMap::new(),
-                    endpoint_overrides: BTreeMap::new(),
-                    disabled_model_ids: Vec::new(),
-                    enabled: authority != CredentialAuthority::Static,
-                    definition_fingerprint: Some(format!("{:x}", Sha256::digest(fingerprint))),
-                    version: 1,
-                },
-            ))
-        })
+        .filter(|provider| seeded(provider))
+        .map(|provider| Ok((provider.provider_id.clone(), bundled_seed(provider)?)))
         .collect()
 }
 
@@ -982,11 +1076,9 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
         || catalog.models.iter().any(|model| {
             model.entry.model_id.trim().is_empty()
                 || !ids.insert(&model.entry.model_id)
-                || model.entry.capabilities.context_window > MAX_MODEL_TOKENS
-                || model.entry.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+                || !limits_valid(&model.entry.capabilities)
                 || (model.unavailable_reason.is_none()
-                    && (model.entry.capabilities.max_output_tokens == 0
-                        || model.entry.capabilities.context_window == 0))
+                    && !model.entry.capabilities.missing_limits().is_empty())
         })
     {
         return Err(storage("Invalid persisted provider catalog"));
@@ -995,15 +1087,123 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
     if catalog.model_config_overrides.iter().any(|model| {
         model.model_id.trim().is_empty()
             || !overrides.insert(&model.model_id)
-            || model.capabilities.context_window == 0
-            || model.capabilities.max_output_tokens == 0
-            || model.capabilities.context_window > MAX_MODEL_TOKENS
-            || model.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+            || !limits_valid(&model.capabilities)
+            || !declarations_hold(model)
     }) {
         return Err(storage("Invalid persisted model override"));
     }
     Ok(())
 }
+/// The #522 format step. Projection output is re-derived, so a stored limit
+/// that neither `capabilityOverrideFields` marks nor `metadata.raw` declares
+/// there was the old assumed default and the upgrade deletes it, whatever its
+/// value: that is the remote listing of a record with `remoteModels`, a
+/// builtin record's bundle-derived `models`, and the managed record's
+/// `models[].entry`. A custom record's own models, its user models and its
+/// descriptor overrides hold what a client or the legacy importers supplied,
+/// which no format before this step marked; each field there is decided by
+/// `declare_supplied_limits`: a marked or raw-declared limit is a declaration,
+/// an unmarked limit equal to the assumed 128000/16384 may be the probe's fill
+/// and is deleted, and any other value was typed and gains the mark. A managed
+/// record's overrides are written only by `models.edit`, which marks every
+/// limit it edits, so they keep the strict rule. The storage layer calls this
+/// inside its startup transaction; this module owns the record's field names.
+pub(crate) fn rewrite_stored_limits(
+    connection: &rusqlite::Connection,
+) -> dim_agent_runtime::Result<()> {
+    let mut query = connection
+        .prepare("SELECT provider_id, record FROM providers")
+        .map_err(storage)?;
+    let rows = query
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage)?;
+    for (id, body) in rows {
+        // A record that does not parse is reported by `list`; the upgrade
+        // leaves its bytes untouched.
+        let Ok(record) = serde_json::from_str::<PersistedProviderRecord>(&body) else {
+            continue;
+        };
+        let (changed, body) = match record {
+            PersistedProviderRecord::Static(mut record) => {
+                let mut changed = false;
+                for model in &mut record.models {
+                    changed |= if record.remote_models || record.kind == StaticRecordKind::Builtin {
+                        drop_undeclared_limits(model)
+                    } else {
+                        declare_supplied_limits(model)
+                    };
+                }
+                // A descriptor override holds what a client or the legacy
+                // importers supplied, and the importers copy the legacy row
+                // without a mark, so the override takes the same per-field
+                // rule as the user models.
+                for model in &mut record.model_config_overrides {
+                    changed |= declare_supplied_limits(model);
+                }
+                for model in &mut record.user_models {
+                    changed |= declare_supplied_limits(model);
+                }
+                (changed, serde_json::to_string(&*record).map_err(storage)?)
+            }
+            PersistedProviderRecord::Managed(mut record) => {
+                let mut changed = false;
+                for model in &mut record.models {
+                    changed |= drop_undeclared_limits(&mut model.entry);
+                    // The managed record shape keeps a reason on a model with
+                    // an absent limit; the catalog recomputes the reason from
+                    // the effective limits.
+                    if !model.entry.capabilities.missing_limits().is_empty()
+                        && model.unavailable_reason.is_none()
+                    {
+                        model.unavailable_reason = Some("limits_undeclared".into());
+                        changed = true;
+                    }
+                }
+                for model in &mut record.model_config_overrides {
+                    changed |= drop_undeclared_limits(model);
+                }
+                (changed, serde_json::to_string(&*record).map_err(storage)?)
+            }
+        };
+        if changed {
+            connection
+                .execute(
+                    "UPDATE providers SET record=?2 WHERE provider_id=?1",
+                    params![id, body],
+                )
+                .map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+/// The limits a model does not declare come from the bundled catalog, which
+/// owns the descriptors both the catalog and the management view publish.
+pub(crate) fn fill_bundled_limits(bundled: &BundledCatalog, model: &mut ModelEntry) {
+    if let Some(found) = bundled.fallback(&model.model_id) {
+        model.capabilities.context_window = model
+            .capabilities
+            .context_window
+            .or(found.capabilities.context_window);
+        model.capabilities.max_output_tokens = model
+            .capabilities
+            .max_output_tokens
+            .or(found.capabilities.max_output_tokens);
+    }
+}
+
+/// A stored reason other than the limit-derived one stands; otherwise an
+/// absent limit names `limits_undeclared`, so a supplied limit clears it.
+pub(crate) fn limits_reason(reason: Option<String>, missing_limits: &[String]) -> Option<String> {
+    reason
+        .filter(|reason| reason != "limits_undeclared")
+        .or_else(|| (!missing_limits.is_empty()).then(|| "limits_undeclared".into()))
+}
+
 fn save_catalog(
     connection: &rusqlite::Connection,
     provider_id: &str,
@@ -1479,7 +1679,18 @@ impl ProviderService {
             return Err(ProviderError::NotFound);
         }
         if catalog.selectable(&target.model_id).is_none() {
-            return Err(ProviderError::InvalidConfig("Model is unavailable".into()));
+            let model = catalog
+                .models
+                .iter()
+                .find(|model| model.id == target.model_id)
+                .ok_or(ProviderError::NotFound)?;
+            return Err(ProviderError::InvalidConfig(
+                if model.missing_limits.is_empty() {
+                    "Model is unavailable".into()
+                } else {
+                    undeclared_limits(&model.capabilities)
+                },
+            ));
         }
         let db = self.db.clone();
         self.owned(cancel, move |_| Box::pin(async move {
@@ -1552,7 +1763,8 @@ impl ProviderService {
                     provider_id: id.clone(),
                     model_id: model.id.clone(),
                 },
-            );
+            )
+            .map_err(|error| failure(error.to_string()))?;
             let config = preferences
                 .configure(&snapshot, protocol, &model.config)
                 .map_err(failure)?;
@@ -1613,7 +1825,8 @@ impl ProviderService {
                 provider_id: current.provider_id.clone(),
                 model_id: current.model_id.clone(),
             },
-        );
+        )
+        .map_err(|error| failure(error.to_string()))?;
         let config = preferences
             .configure(&snapshot, protocol, &base)
             .map_err(failure)?;
@@ -1672,11 +1885,16 @@ impl ResolveModelConnection for ProductResolver {
                     .await?
                     .ok_or_else(|| failure("Provider not found"))?;
                 self.0.check(&cancel)?;
-                if static_catalog(&self.0.bundled, &request.provider_id, &record, true)
-                    .selectable(&model_id)
-                    .is_none()
-                {
-                    return Err(failure("Model is unavailable"));
+                let catalog = static_catalog(&self.0.bundled, &request.provider_id, &record, true);
+                if catalog.selectable(&model_id).is_none() {
+                    let message = catalog
+                        .models
+                        .iter()
+                        .find(|model| model.id == model_id)
+                        .filter(|model| !model.missing_limits.is_empty())
+                        .map(|model| undeclared_limits(&model.capabilities))
+                        .unwrap_or_else(|| "Model is unavailable".into());
+                    return Err(failure(message));
                 }
                 let protocol = record.routes[&model_id];
                 if record.driver_kind == "new-api-router"
@@ -1810,9 +2028,16 @@ impl ResolveModelConnection for ProductResolver {
                 .catalog(request.provider_id.clone(), &cancel)
                 .await?
                 .ok_or_else(|| failure("No current managed catalog"))?;
-            let model = catalog
-                .selectable(&request.model_id)
-                .ok_or_else(|| failure("Model is unavailable"))?;
+            let model = catalog.selectable(&request.model_id).ok_or_else(|| {
+                let message = catalog
+                    .models
+                    .iter()
+                    .find(|model| model.id == request.model_id)
+                    .filter(|model| !model.missing_limits.is_empty())
+                    .map(|model| undeclared_limits(&model.capabilities))
+                    .unwrap_or_else(|| "Model is unavailable".into());
+                failure(message)
+            })?;
             let lease = self
                 .0
                 .oauth

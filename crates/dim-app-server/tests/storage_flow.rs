@@ -1,13 +1,14 @@
 use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
-    TimelineStore, TimelineTrace, TraceStep,
+    TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -286,6 +287,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V15_ADDITIONS.iter().filter(|_| version >= 15))
         .chain(V16_ADDITIONS.iter().filter(|_| version >= 16))
         .chain(V23_ADDITIONS.iter().filter(|_| version >= 23))
+        .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .collect();
     statements.sort();
@@ -316,12 +318,21 @@ fn v16_tables_store(path: &std::path::Path, marker: u32) -> Connection {
         .unwrap();
     connection
 }
-/// Builds a disposable v23 store, as a v23 daemon created it.
-fn v23_store(path: &std::path::Path) -> Connection {
-    let connection = v16_tables_store(path, 23);
+/// Builds the v23 table layout under its v23 or v24 marker.
+fn catalog_store(path: &std::path::Path, marker: u32) -> Connection {
+    let connection = v16_tables_store(path, marker);
     for sql in V23_ADDITIONS {
         connection.execute_batch(sql).unwrap();
     }
+    connection
+}
+/// Builds a disposable v25 store, as #674's daemon created it: the v24
+/// layout without `timeline_events_by_end`.
+fn v25_store(path: &std::path::Path) -> Connection {
+    let connection = catalog_store(path, 25);
+    connection
+        .execute_batch("DROP INDEX timeline_events_by_end")
+        .unwrap();
     connection
 }
 /// Builds a disposable v15 store, as a v15 daemon created it.
@@ -508,7 +519,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("s1".into()).await.unwrap();
     assert!(session.sequence("child").unwrap() >= 2);
     agent.close().await.unwrap();
@@ -815,7 +826,7 @@ async fn output_block_start_id_roundtrips_through_the_merged_row() {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
     let restored = session.history("main", Some(2)).await.unwrap();
     let text: Vec<_> = restored
@@ -935,7 +946,7 @@ async fn extension_events_keep_their_own_rows_and_restore_unchanged() {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
     let restored = session.history("main", Some(3)).await.unwrap();
     let written: Vec<_> = written.iter().map(|entry| entry.event.clone()).collect();
@@ -1078,7 +1089,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
     let restored = session.history("main", Some(5)).await.unwrap();
     assert!(
@@ -1970,7 +1981,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(store.clone());
-        let mut agent = builder.build();
+        let mut agent = MinimalHost::start(&builder).await.unwrap();
         let bad = agent.create_session(SessionConfig::default()).await.unwrap();
         let mut good = agent.create_session(SessionConfig::default()).await.unwrap();
         let bad_id = bad.id().to_owned();
@@ -2016,7 +2027,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
             dim_agent_capabilities::defaults::mock_hosts(&mut builder);
             dim_agent_capabilities::defaults::install(&mut builder);
             builder.timeline_store(store.clone());
-            agent = builder.build();
+            agent = MinimalHost::start(&builder).await.unwrap();
             good = agent.restore_session(good_id).await.unwrap();
         }
         let session = agent.restore_session(bad_id).await.unwrap();
@@ -2463,6 +2474,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V22,
         V23,
         V24,
+        Current,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2626,6 +2638,16 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=24",
         ),
         (Base::V24, "DELETE FROM agent_store_format"),
+        (Base::V24, "DROP INDEX timeline_events_by_end"),
+        (Base::Current, "DELETE FROM agent_store_format"),
+        (
+            Base::Current,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=24",
+        ),
+        (
+            Base::Current,
+            "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
+        ),
         (
             Base::V24,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=23",
@@ -2649,6 +2671,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V22, "DROP TABLE session_metadata"),
         (Base::V23, "DROP TABLE session_metadata"),
         (Base::V24, "DROP TABLE session_metadata"),
+        (Base::Current, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2662,8 +2685,9 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V20 => drop(v16_tables_store(&database.0, 20)),
             Base::V21 => drop(v16_tables_store(&database.0, 21)),
             Base::V22 => drop(v16_tables_store(&database.0, 22)),
-            Base::V23 => drop(v23_store(&database.0)),
-            Base::V24 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V23 => drop(catalog_store(&database.0, 23)),
+            Base::V24 => drop(catalog_store(&database.0, 24)),
+            Base::Current => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2724,8 +2748,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(24));
-    assert_eq!(marker(&connection), [24]);
+    assert_eq!(schema(&connection), schema_of(26));
+    assert_eq!(marker(&connection), [26]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2804,8 +2828,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(24));
-    assert_eq!(marker(&connection), [24]);
+    assert_eq!(schema(&connection), schema_of(26));
+    assert_eq!(marker(&connection), [26]);
     drop(connection);
 
     let database = Database::new();
@@ -2925,7 +2949,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [24]);
+    assert_eq!(marker(&connection), [26]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -2946,7 +2970,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
     let restored = session.history("main", Some(2)).await.unwrap();
     assert_eq!(restored[0], configured.event);
@@ -2999,7 +3023,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v24; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v26; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -3611,7 +3635,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         agent.restore_session("session".into()).await.unwrap();
         agent.close().await.unwrap();
         dim_agent_runtime::core::close_timeline(&timeline)
@@ -4032,7 +4056,7 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(store.clone());
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let bad = agent.create_session(SessionConfig::default()).await.unwrap();
         let good = agent.create_session(SessionConfig::default()).await.unwrap();
         bad.submit("stored request".into(), InputMode::Queue, "main").await.unwrap();
@@ -4290,9 +4314,10 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
             .is_empty()
     );
     let call = sessions
-        .read_event("paged", "event-1")
+        .read_events("paged", &["event-1".to_owned()])
         .await
         .unwrap()
+        .remove("event-1")
         .unwrap();
     assert!(matches!(&call.kind, EventKind::ToolCall(data) if data.calls[0].name == "echo"));
     let connection = Connection::open(&database.0).unwrap();
@@ -4353,19 +4378,29 @@ async fn tool_use_starts_are_found_by_request_and_call_id() {
         )
         .unwrap();
     wait.await.unwrap().unwrap();
-    let name = async |request_id, call_id| {
-        sessions
-            .read_tool_use_start("starts", request_id, call_id)
-            .await
-            .unwrap()
-            .map(|event| match &event.kind {
-                EventKind::ToolUseStart(data) => data.name.clone(),
-                kind => panic!("unexpected {}", kind.key()),
-            })
+    let wanted = [
+        ("request".to_owned(), "call".to_owned()),
+        ("other".to_owned(), "call".to_owned()),
+        ("request".to_owned(), "missing".to_owned()),
+    ];
+    let names: HashMap<_, _> = sessions
+        .read_tool_use_starts("starts", &wanted)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(key, event)| match &event.kind {
+            EventKind::ToolUseStart(data) => (key, data.name.clone()),
+            kind => panic!("unexpected {}", kind.key()),
+        })
+        .collect();
+    let name = |request_id: &str, call_id: &str| {
+        names
+            .get(&(request_id.to_owned(), call_id.to_owned()))
+            .map(String::as_str)
     };
-    assert_eq!(name("request", "call").await.as_deref(), Some("echo"));
-    assert_eq!(name("other", "call").await.as_deref(), Some("wait"));
-    assert_eq!(name("request", "missing").await, None);
+    assert_eq!(name("request", "call"), Some("echo"));
+    assert_eq!(name("other", "call"), Some("wait"));
+    assert_eq!(name("request", "missing"), None);
     let connection = Connection::open(&database.0).unwrap();
     let plan: String = connection.query_row(
         "EXPLAIN QUERY PLAN SELECT sequence FROM timeline_events WHERE session_id='starts' AND branch_id='main' AND kind='step/tool-use-start' AND json_extract(body, '$.record.event.data.request_id')='request' AND json_extract(body, '$.record.event.data.call_id')='call'",
@@ -4966,11 +5001,435 @@ async fn a_v22_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 22).await;
 }
 
-/// An exact v23 store upgrades by replacing only its marker.
+/// An exact v23 store preserves its rows through subsequent format steps.
 #[tokio::test]
 async fn a_v23_store_upgrades_in_place_once() {
     let database = Database::new();
-    let connection = v23_store(&database.0);
+    let connection = catalog_store(&database.0, 23);
     assert_eq!(schema(&connection), schema_of(23));
     upgrades_in_place_once(&database, connection, 23).await;
+}
+
+/// A batch of starts larger than one SQLite compound statement still reads
+/// whole: the store chunks the keys inside one read and merges the rows.
+#[tokio::test]
+async fn a_large_batch_of_tool_use_starts_is_read_in_chunks() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = sessions.timeline_store();
+    store
+        .create_session("many-starts", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut records: Vec<_> = (1..=520)
+        .map(|at| {
+            record(
+                at,
+                EventKind::ToolUseStart(ToolUseStartData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_id: format!("call-{at}"),
+                    name: format!("tool-{at}"),
+                }),
+            )
+        })
+        .collect();
+    records.extend((521..=640).map(|sequence| text(sequence, "delta")));
+    let (done, wait) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key("many-starts", "main"),
+            records,
+            Box::new(move |result| {
+                let _ = done.send(result);
+            }),
+        )
+        .unwrap();
+    wait.await.unwrap().unwrap();
+    let wanted: Vec<(String, String)> = (1..=520)
+        .map(|at| ("request".to_owned(), format!("call-{at}")))
+        .collect();
+    let starts = sessions
+        .read_tool_use_starts("many-starts", &wanted)
+        .await
+        .unwrap();
+    assert_eq!(starts.len(), 520);
+    for at in 1..=520u64 {
+        let name = match &starts[&("request".to_owned(), format!("call-{at}"))].kind {
+            EventKind::ToolUseStart(data) => data.name.clone(),
+            kind => panic!("unexpected {}", kind.key()),
+        };
+        assert_eq!(name, format!("tool-{at}"));
+    }
+    drop(store);
+    drop(sessions);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_v24_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = catalog_store(&database.0, 24);
+    upgrades_in_place_once(&database, connection, 24).await;
+}
+
+/// An exact v25 store upgrades by rewriting Provider records only.
+#[tokio::test]
+async fn a_v25_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v25_store(&database.0);
+    assert_eq!(schema(&connection), schema_of(25));
+    upgrades_in_place_once(&database, connection, 25).await;
+}
+
+/// #522: the upgrade deletes an unmarked stored limit only from projection
+/// output, the remote listing of a record with `remoteModels`, which is
+/// re-derived anyway. A record's own models and every user model hold what
+/// the client supplied, and the earlier formats wrote no mark there, so
+/// each field is decided on its own: a value equal to the old assumed pair
+/// is deleted as a possible probe fill, any other value is kept and marked
+/// as the declaration it is. A user model that matches a bundled entry keeps
+/// its own window over the bundle's.
+#[tokio::test]
+async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
+    use serde_json::json;
+    let database = Database::new();
+    let connection = v25_store(&database.0);
+    let caps = |context: u64, output: u64| {
+        json!({"modalities":["text"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":false,"audio":false,"reasoning":false,
+            "contextWindow":context,"maxOutputTokens":output})
+    };
+    let kept = |context: Option<u64>, output: Option<u64>| {
+        let mut capabilities = json!({"modalities":["text"],"toolCalling":true,
+            "streaming":true,"structuredOutput":true,"vision":false,"audio":false,
+            "reasoning":false});
+        if let Some(context) = context {
+            capabilities["contextWindow"] = json!(context);
+        }
+        if let Some(output) = output {
+            capabilities["maxOutputTokens"] = json!(output);
+        }
+        capabilities
+    };
+    // `provider.refresh` wrote these from the remote listing.
+    let listed_record = json!({
+        "kind":"custom","displayName":"Listed","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"listed-both","displayName":"Listed Both","status":"active",
+             "capabilities":caps(1_000_000,65_536),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"listed-both","inputTokenLimit":1_000_000,"outputTokenLimit":65_536}}},
+            {"modelId":"listed-window","displayName":"Listed Window","status":"active",
+             "capabilities":caps(32_000,4_000),
+             "metadata":{"raw":{"id":"listed-window","inputTokenLimit":32_000}}},
+            {"modelId":"listed-none","displayName":"Listed None","status":"active",
+             "capabilities":caps(8_000,1_000),"metadata":{"raw":{"id":"listed-none","type":"chat"}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[
+            {"modelId":"renamed-listing","displayName":"Renamed","status":"active",
+             "capabilities":caps(128_000,16_384),"metadata":{"raw":{}}},
+            {"modelId":"override-marked","displayName":"Override","status":"active",
+             "capabilities":caps(64_000,8_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],"raw":{}}},
+            // The importer copied this override from the legacy data, which
+            // stored the limits a user typed and wrote no mark.
+            {"modelId":"imported-override","displayName":"Imported","status":"active",
+             "capabilities":caps(200_000,32_000),"metadata":{"raw":{}}}
+        ],
+        "userModels":[
+            {"modelId":"user-model","displayName":"User","status":"active",
+             "capabilities":caps(32_000,4_000)},
+            {"modelId":"user-assumed","displayName":"Assumed","status":"active",
+             "capabilities":caps(128_000,16_384)},
+            {"modelId":"user-mixed","displayName":"Mixed","status":"active",
+             "capabilities":caps(32_000,16_384)},
+            {"modelId":"user-typed","displayName":"Typed","status":"active",
+             "capabilities":caps(64_000,8_000)}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    // `provider.create` wrote these from its probe; the user model came from
+    // `provider.models.create`. Neither path marked the limits.
+    let custom_record = json!({
+        "kind":"custom","displayName":"Hand Entered","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"hand-entered","displayName":"Hand Entered","status":"active",
+             "capabilities":caps(32_000,4_000),
+             "metadata":{"raw":{"id":"hand-entered","providerId":"custom-provider"}}},
+            {"modelId":"declared-listing","displayName":"Declared","status":"active",
+             "capabilities":caps(64_000,8_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"declared-listing","inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    // A builtin whose listing does not hold the user's model ID: the bundled
+    // catalog declares 400000/128000 for it, the user's model 32000/4000.
+    let builtin_record = json!({
+        "kind":"builtin","displayName":"OpenAI","driverKind":"openai-responses",
+        "auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.openai.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"gpt-5.4-mini","displayName":"GPT-5.4 Mini","status":"active",
+             "capabilities":caps(400_000,128_000),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"gpt-5.4-mini","inputTokenLimit":400_000,"outputTokenLimit":128_000}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"gpt-5-nano","displayName":"GPT-5 Nano","status":"active",
+             "capabilities":caps(32_000,4_000)}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let managed_record = json!({
+        "kind":"managed",
+        "account":{"credentialEpoch":"epoch","generation":1,
+            "account":{"issuer":"issuer","subject":"subject","grantedScopes":[]}},
+        "models":[{"entry":{"modelId":"relay-model","displayName":"Relay","status":"active",
+            "capabilities":caps(128_000,16_384),"metadata":{"raw":{}}},
+            "protocol":"openai-compatible","zdr":false}],
+        "modelConfigOverrides":[],"disabledModelIds":[],"modelPreferences":{},"version":1
+    });
+    // A builtin record that never refreshed: its models are bundle-derived
+    // with `remoteModels` false. The bundle states the limits in `raw.limit`,
+    // so the strict rule keeps what the bundle declares and drops an unmarked
+    // limit no raw item declares.
+    let seeded_record = json!({
+        "kind":"builtin","displayName":"Anthropic","driverKind":"anthropic",
+        "auth":{"type":"api_key","headerName":"x-api-key","prefix":""},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.anthropic.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"claude-bundled","displayName":"Claude Bundled","status":"active",
+             "capabilities":caps(200_000,64_000),
+             "metadata":{"raw":{"id":"claude-bundled","limit":{"context":200_000,"output":64_000}}}},
+            {"modelId":"claude-unlisted","displayName":"Claude Unlisted","status":"active",
+             "capabilities":caps(200_000,8_000),"metadata":{"raw":{"id":"claude-unlisted"}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"claude-user","displayName":"Claude User","status":"active",
+             "capabilities":caps(32_000,16_384)}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    for (id, record) in [
+        ("listed-provider", &listed_record),
+        ("custom-provider", &custom_record),
+        ("openai", &builtin_record),
+        ("managed-provider", &managed_record),
+        ("anthropic", &seeded_record),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO providers(provider_id,version,record) VALUES (?1,1,?2)",
+                params![id, record.to_string()],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), Some(25));
+    db.close().await.unwrap();
+
+    let read = |id: &str| -> String {
+        Connection::open(&database.0)
+            .unwrap()
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), schema_of(26));
+    assert_eq!(marker(&connection), [26]);
+    drop(connection);
+
+    let listed_expected = json!({
+        "kind":"custom","displayName":"Listed","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"listed-both","displayName":"Listed Both","status":"active",
+             "capabilities":kept(Some(1_000_000),Some(65_536)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"listed-both","inputTokenLimit":1_000_000,"outputTokenLimit":65_536}}},
+            {"modelId":"listed-window","displayName":"Listed Window","status":"active",
+             "capabilities":kept(Some(32_000),None),
+             "metadata":{"raw":{"id":"listed-window","inputTokenLimit":32_000}}},
+            {"modelId":"listed-none","displayName":"Listed None","status":"active",
+             "capabilities":kept(None,None),"metadata":{"raw":{"id":"listed-none","type":"chat"}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[
+            {"modelId":"renamed-listing","displayName":"Renamed","status":"active",
+             "capabilities":kept(None,None),"metadata":{}},
+            {"modelId":"override-marked","displayName":"Override","status":"active",
+             "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}},
+            {"modelId":"imported-override","displayName":"Imported","status":"active",
+             "capabilities":kept(Some(200_000),Some(32_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
+        ],
+        "userModels":[
+            {"modelId":"user-model","displayName":"User","status":"active",
+             "capabilities":kept(Some(32_000),Some(4_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}},
+            {"modelId":"user-assumed","displayName":"Assumed","status":"active",
+             "capabilities":kept(None,None)},
+            {"modelId":"user-mixed","displayName":"Mixed","status":"active",
+             "capabilities":kept(Some(32_000),None),
+             "metadata":{"capabilityOverrideFields":["contextWindow"]}},
+            {"modelId":"user-typed","displayName":"Typed","status":"active",
+             "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let custom_expected = json!({
+        "kind":"custom","displayName":"Hand Entered","driverKind":"openai-compatible",
+        "auth":{"type":"anonymous"},"credentialAuthority":"static",
+        "baseUrl":"http://127.0.0.1:1/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"hand-entered","displayName":"Hand Entered","status":"active",
+             "capabilities":kept(Some(32_000),Some(4_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"hand-entered","providerId":"custom-provider"}}},
+            {"modelId":"declared-listing","displayName":"Declared","status":"active",
+             "capabilities":kept(Some(64_000),Some(8_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"declared-listing","inputTokenLimit":64_000,"outputTokenLimit":8_000}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let builtin_expected = json!({
+        "kind":"builtin","displayName":"OpenAI","driverKind":"openai-responses",
+        "auth":{"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.openai.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"gpt-5.4-mini","displayName":"GPT-5.4 Mini","status":"active",
+             "capabilities":kept(Some(400_000),Some(128_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"],
+                "raw":{"id":"gpt-5.4-mini","inputTokenLimit":400_000,"outputTokenLimit":128_000}}}
+        ],
+        "remoteModels":true,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"gpt-5-nano","displayName":"GPT-5 Nano","status":"active",
+             "capabilities":kept(Some(32_000),Some(4_000)),
+             "metadata":{"capabilityOverrideFields":["contextWindow","maxOutputTokens"]}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let seeded_expected = json!({
+        "kind":"builtin","displayName":"Anthropic","driverKind":"anthropic",
+        "auth":{"type":"api_key","headerName":"x-api-key","prefix":""},
+        "credentialAuthority":"static",
+        "baseUrl":"https://api.anthropic.com/v1","network":{},"headers":{},"credential":null,
+        "models":[
+            {"modelId":"claude-bundled","displayName":"Claude Bundled","status":"active",
+             "capabilities":kept(Some(200_000),Some(64_000)),
+             "metadata":{"raw":{"id":"claude-bundled","limit":{"context":200_000,"output":64_000}}}},
+            {"modelId":"claude-unlisted","displayName":"Claude Unlisted","status":"active",
+             "capabilities":kept(None,None),"metadata":{"raw":{"id":"claude-unlisted"}}}
+        ],
+        "remoteModels":false,
+        "modelConfigOverrides":[],
+        "userModels":[
+            {"modelId":"claude-user","displayName":"Claude User","status":"active",
+             "capabilities":kept(Some(32_000),None),
+             "metadata":{"capabilityOverrideFields":["contextWindow"]}}
+        ],
+        "disabledModelIds":[],"enabled":true,"definitionFingerprint":null,"version":1
+    });
+    let managed_expected = json!({
+        "kind":"managed",
+        "account":{"credentialEpoch":"epoch","generation":1,
+            "account":{"issuer":"issuer","subject":"subject","grantedScopes":[]}},
+        "models":[{"entry":{"modelId":"relay-model","displayName":"Relay","status":"active",
+            "capabilities":kept(None,None),"metadata":{}},
+            "protocol":"openai-compatible","zdr":false,"unavailableReason":"limits_undeclared"}],
+        "modelConfigOverrides":[],"disabledModelIds":[],"version":1
+    });
+    for (id, expected) in [
+        ("listed-provider", &listed_expected),
+        ("custom-provider", &custom_expected),
+        ("openai", &builtin_expected),
+        ("managed-provider", &managed_expected),
+        ("anthropic", &seeded_expected),
+    ] {
+        let stored: serde_json::Value = serde_json::from_str(&read(id)).unwrap();
+        assert_eq!(&stored, expected, "{id}");
+    }
+
+    // The user's window is the one in force: the bundled catalog declares
+    // 400000/128000 for this ID, so only the mark the upgrade wrote keeps the
+    // user's 32000/4000 from being replaced on the next read.
+    let stored: serde_json::Value = serde_json::from_str(&read("openai")).unwrap();
+    let entries: Vec<dim_app_server::model_catalog::ModelEntry> = stored["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(stored["userModels"].as_array().unwrap())
+        .map(|entry| serde_json::from_value(entry.clone()).unwrap())
+        .collect();
+    let bundled = dim_app_server::model_catalog::BundledCatalog::load().unwrap();
+    let effective = bundled.effective_models(
+        &dim_app_server::model_catalog::ProviderProjection {
+            provider_id: "openai".into(),
+            source: Some(dim_app_server::model_catalog::ModelSource::Builtin),
+            models: entries.clone(),
+            ..Default::default()
+        },
+        &entries,
+        &[],
+    );
+    let user = effective
+        .iter()
+        .find(|entry| entry.model_id == "gpt-5-nano")
+        .unwrap();
+    assert_eq!(user.capabilities.context_window, Some(32_000));
+    assert_eq!(user.capabilities.max_output_tokens, Some(4_000));
+
+    // A second open neither upgrades nor rewrites the records again.
+    let before = (
+        read("listed-provider"),
+        read("custom-provider"),
+        read("openai"),
+        read("managed-provider"),
+        read("anthropic"),
+    );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    assert_eq!(
+        (
+            read("listed-provider"),
+            read("custom-provider"),
+            read("openai"),
+            read("managed-provider"),
+            read("anthropic")
+        ),
+        before
+    );
 }

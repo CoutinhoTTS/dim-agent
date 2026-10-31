@@ -22,7 +22,12 @@ Dim uses these directly, without wrapping them ([ADR 006 D2](../adr/006-plugin-c
 - dependency gating, Pending and reload propagation;
 - services by type and by name, instanced groups and per-instance name resolution;
 - loader rows and configuration;
-- language runtimes, cross-language calls, the event bus and diagnostics.
+- language runtimes as the far ends of rutis sessions, cross-language calls, the event bus and
+  diagnostics.
+
+A local runtime is a connection row of the host: its plugin starts the runtime's process with
+rutis-bridge's public parts and mounts the session on it (appendix A.4). This is the form rutis
+documents for a host's own connection, not a wrapper.
 
 Dim adds no plugin trait, author-facing scope type, resolver, manifest, role field, second service
 directory, second bus, or per-language relay or adapter.
@@ -37,7 +42,7 @@ Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-co
 | Row field | Meaning |
 | --- | --- |
 | `id` | Stable row identity in the configuration |
-| `name` | The module: a built-in name, a path, or a runtime prefix (`py:`, `bun:` …) |
+| `name` | The module: a built-in name; a path or npm name, which runs in the Node runtime; or `<runtime row>:<module>`, such as `py:<module>` for the Python runtime |
 | `config` | Structural configuration, validated by the plugin's schema |
 | `inject` | The names the plugin depends on. A foreign plugin's own `inject` must equal this list or be a subset of it |
 | `isolate`, `disabled` | rutis isolation labels; whether the row is off |
@@ -48,17 +53,18 @@ Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-co
 generation unloads, however it ends. A generator's dependencies are checked against its scope when an
 instance mounts it, so a part that names a group outside its scope fails there.
 
-**Where plugins run.** The App Server places plugins as process rows of its loader and provides the
-registry to them by the process name `partRegistry`. A library host or a test adds plugins to the Agent
-builder (`AgentBuilder::plugin`), and an Agent that places itself mounts them in its own loader. The
-registry belongs to a placement: an Agent that places itself mounts only the parts its own plugins
-register, so two Agents built from one builder do not mount each other's parts.
+**Where plugins run.** A host has one loader, and its Agents are built in it
+(`AgentBuilder::build(loader, anchor)`). The App Server places plugins as process rows of its loader
+and provides the registry to them by the process name `partRegistry`. Tests, examples and `xtask` are
+hosts like the App Server: the minimal host (`dim_agent_runtime::testing::MinimalHost`) assembles one
+root and its loader the same way, with the plugins added to the Agent builder (`AgentBuilder::plugin`)
+as process rows. Each minimal host has a registry of its own, so two Agents built from one builder in
+two hosts do not mount each other's parts.
 
 **Isolation labels.** A label that separates rows is numbered by one process-wide counter, not one per
 loader or builder. A per-builder counter restarts at 1, so two Agents built from one builder isolate
-their values under the same label, and generated descriptions of the assembly change between runs. A
-label derived per loader lets two Agents sharing a host give their loader, part registry and language
-mounter one label, so they mount each other's parts. Numbering in the process prevents both.
+their values under the same label, and generated descriptions of the assembly change between runs.
+Numbering in the process prevents this.
 
 **Mounting.** Every Session and branch instance holds two mounter rows, the only rows of its group
 besides the scope's own mechanisms.
@@ -117,14 +123,14 @@ name-bound (#391, #392, #396–#398, #400).
   `AgentBuilder::feature`, or its own plugin added with `AgentBuilder::plugin`. The install functions,
   which are the profiles, require the parts they install by name (`require_feature`,
   `require_part`). The App Server places the builder's plugins as process rows and provides
-  `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself
-  mounts them in its own loader with a registry of its own. A required part nothing has registered
+  `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); the minimal host does the
+  same with a registry of its own. A required part nothing has registered
   yet holds an instance's creation as a required row does. A feature that owns process state
   registers its parts from the row that holds it: Mcp, Collaboration, Agents, SkillsCatalog and
   WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
   PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
-  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. An Agent
-  placing itself starts its plugins with its first Session or `Agent::start`.
+  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. The
+  minimal host starts its plugins when it starts.
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
@@ -169,8 +175,7 @@ hand-written adapter layer.
 
 Each name is declared once. A service that crosses languages declares its name on its Rust type with
 `#[rutis::service]`. A Rust-only service, or a name a foreign part provides, is registered in the
-host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask graph`
-writes the authoritative table from the real assembly, the
+host's loader catalog. `xtask graph` writes the authoritative table from the real assembly, the
 [generated catalog](../architecture/rust-agent/generated/catalog.md), and `xtask check` fails when it is
 stale (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
 
@@ -197,7 +202,15 @@ writes names only.
 | Rust | `injects` lists the name's key and `apply` reads it with `require_at`; it provides `T` at the same key | The binding takes the key from the catalog for the name and the copy's instances (appendix A) |
 
 - **Private names.** A part keeps a service to itself, or to a group of parts, with its row's
-  `isolate`. The catalog does not share such a name.
+  `isolate`, a runtime row as well as a Rust one. The catalog does not share such a name. A
+  Session or branch part of another language is a definition copy and has no row of its own, so it
+  carries no `isolate`: its names are its instance's.
+- **Runtime rows.** A TypeScript or Python plugin's row is resolved through its runtime's session
+  (`session-node` or `py`, appendix A.4). While that session is not there, the row waits for it, and
+  when the session ends its rows wait again. Dim writes no `isolate` on a runtime row.
+- **Sessions export.** Every rutis session exports to its far end each process-wide shared name that
+  a non-platform plugin provides, and announces every listener name. A language runtime and a UI
+  leaf reach these names alike; they are trusted local code (AGENTS rule 11).
 - **Rust keys.** A name registered with a Rust type is at that type's key; a name that crosses
   languages is at its dispatcher's key (`host_key`). Both are qualified by the group's instance. A Rust
   part reads a provider of any language at the dispatcher's key. An exported Rust service is at both.
@@ -246,7 +259,9 @@ Since rutis 0.15.1 there is one flat bus per root.
 How Dim's parts consume bus events and which public bus events Dim defines are in the
 [plugin contract §5.3](plugin-contract.md#53-bus-events).
 
-*Today:* Dim is on rutis 0.17.1, and this section holds.
+*Today:* Dim is on rutis 0.19.2, and this section holds. The bus spans every rutis session: each end
+announces its listener names, an event reaches the listeners of its name at either end, and every
+emit of a language runtime goes through the host.
 
 ## 6. Requirements raised to mechanism owners
 
@@ -449,9 +464,9 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 The required mounter mounts the parts the profile requires (`AgentBuilder::require_part`) and hands
 them to the instance's publication with its required rows; a required part nothing has registered
 yet holds the creation until it is, within the creation's deadline. The builder's registry
-(`AgentBuilder::parts`) serves the Agents a host places (`build_at`), which provides it to its
-process plugins as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself creates a
-registry of its own for the plugins it mounts. A registration is an effect of the caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
+(`AgentBuilder::parts`) serves the Agents the host builds (`AgentBuilder::build`), which provides it
+to its process plugins as `partRegistry` (`AgentBuilder::plugin_rows`); the minimal host creates a
+registry of its own. A registration is an effect of the caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
 already failed is not reported again when its instance closes, and `SessionLoader` creates instances
 from its instance's Session scope row, since the loader places an instance only from a row's
 context.
@@ -463,8 +478,7 @@ A dependency the configuration enables is an `Option<Key<T>>` the factory fills 
 A value the host configures for a process name, such as a scripted `ModelHost`, is
 `AgentBuilder::process_value`. The Agent group row (`AgentBuilder::agent_row`) holds its provider and
 isolates the name per Agent instance, so neither Agents sharing a host nor the host's own provider of the
-name collide with it. An Agent hosting itself places that row; a host using `build_at` places it in its
-loader, whose catalog is the builder's. `session_value` stays for Session names.
+name collide with it. The host places that row in its loader, whose catalog is the builder's. `session_value` stays for Session names.
 
 ### A.3 Settled questions
 
@@ -478,11 +492,50 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   gates when chosen (an `Option<Key<T>>` the factory fills), and the composition check covers it then;
   one used only if present is read with `get_at` and not listed in `injects`. Its name must still be
   registered.
-- **Startup deadline.** One deadline covers loader startup, reconcile and rows becoming Active. At the
-  deadline the creation fails and its rollback cancels the rows; rutis waits for a cancelled `apply` to
-  return and never aborts it, so `apply` returns once `ctx.cancelled()` resolves. A test injects a row
-  that waits in `apply` until then (`tests/integration/tests/named_parts.rs`). Failing on no progress
-  instead of a total deadline is [#387](https://github.com/arcships/dim/issues/387).
+- **Startup progress.** `startup_timeout` bounds an interval without progress, across loader startup,
+  reconcile, required rows becoming Active and opening replay. A row's first activation during the
+  opening, advancement of its branch's dispatch sequence, or completion of an opening receipt resets
+  that interval. Restarting the same row does not renew it; activity in another Session does not.
+  There is no fixed total startup deadline. The
+  same rule applies to Session and branch opening, process startup and restart. A branch waiting for
+  its parent follows that parent's bounded opening rather than imposing another total deadline.
+  A stalled opening fails with its inactive rows and unmet dependencies, and rollback cancels them.
+  A composition error or failed required provider fails immediately. Rutis never aborts `apply`:
+  rollback waits for it to return after `ctx.cancelled()` resolves.
+
+### A.4 Runtimes and sessions
+
+The App Server's root provides `rutis_bridge::LocalId("dim-daemon")`, the id it greets every session
+with. It does not mount `Session::service()`, whose name `sessions` is Dim's `AgentDirectory`.
+
+Each local runtime is a process connection row, `session-node` for Node and `py` for Python. Its
+plugin, `RuntimeConnection` (`dim-app-server/src/session_typescript.rs`):
+
+- injects a Rust-only process service carrying its launch command (`nodeRuntime`, `pythonRuntime`),
+  so the row starts once the command is provided. The App Server provides it at startup when the
+  runtime paths are configured, and RuntimeManager once it has acquired the runtime
+  ([RuntimeManager](plugins/RuntimeManager.md)); providing it again restarts the row;
+- starts the process with `rutis_bridge::runtime::Launcher` (`--id <row>`), records it in a
+  `pipe::Processes` of its own, waits for its greeting (`pipe::greeted`) and mounts
+  `Session::new(channel)`. Unloading kills a process that has not ended and waits for it. Standard
+  error goes to `tracing` line by line;
+- keeps the runtime's state in a value of Dim's own, `RuntimeStatus` (`starting`, `ready`, or `down`
+  with a reason), at `RuntimeStatus::key(row)`. The row stays Active when the runtime fails to start
+  or its process ends, so the status stays readable; the runtime's rows wait again.
+
+One `rutis_loader::runtime::SessionResolver::npm(catalog, "session-node")`, last in the resolver
+chain, resolves the rows of both runtimes: `py:<module>` on the `py` session, every other foreign
+name on `session-node`, where the Node runtime resolves npm names. It is attached to the loader
+before the loader mounts (`attach`), and follows each runtime row once the loader runs
+(`follow_row`). Dim's `SnapshotResolver` wraps it only for what rutis does not do: it checks each row
+against its `provides` snapshot and hands `workflowFiles` rows their packages. With configured runtime paths,
+admission waits for each runtime's rows (`SessionRows::key(row)`); a runtime RuntimeManager acquires
+is optional, so startup never waits for a download. `plugin.reload` is `Loader::reload(row)`; there
+is no resolver cache.
+
+rutis-loader's `LoaderPlugin` also serves the marked service `loader`. A foreign row that injects it
+can `reload` a row and read `status`; `create` and `remove` are refused, because Dim configures no
+editable layer, so PluginManager stays the only writer of rows.
 
 ## Appendix B: TypeScript and Python binding
 
@@ -513,8 +566,9 @@ export default definePlugin({
 })
 ```
 
-A Python row names its module after the runtime, `py:<module>`; the App Server runs it in its Python
-runtime when one is configured, importing the module from the configured project directory.
+A Python row names its module after the runtime's row, `py:<module>`; the App Server runs it in its
+Python runtime when one is configured, importing the module from the configured project directory.
+The Python runtime needs Python 3.12 or later.
 
 ```json
 { "id": "python", "name": "py:python_plugin", "provides": {}, "config": {} }

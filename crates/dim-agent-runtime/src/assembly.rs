@@ -2,18 +2,19 @@ use crate::core::OpeningCount;
 use crate::*;
 use futures_util::FutureExt;
 use rutis::host::{
-    BoxFuture as RutisFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key,
-    PluginFactory, PluginId, TypeKey,
+    BoxFuture as RutisFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState,
+    FiberStatusChanged, FiberView, Key, PluginFactory, PluginId, TypeKey,
 };
 use rutis::{Ctx, Error};
 use rutis_loader::edit::{CreateInstance, InstanceResult};
+use rutis_loader::report::EntryInfo;
 use rutis_loader::resolve::Build;
 use rutis_loader::resolve::{Resolved, ScopedFactory};
 use rutis_loader::{Builtins, Loader, LoaderError, Resolver};
 use serde_json::{Value, json};
 use std::time::Duration;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, Weak},
 };
@@ -25,6 +26,112 @@ pub const AGENT_GROUP: &str = "agent";
 pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct OpeningAdvanced(pub PluginId);
+impl rutis::Event for OpeningAdvanced {
+    const NAME: &'static str = "dim/opening-advanced";
+    type Value = ();
+}
+
+/// Bounds an opening by inactivity in its own fiber subtrees, including rows
+/// created while the opening is in flight. Other scopes cannot extend it.
+pub struct StartupProgress {
+    ctx: Ctx,
+    started: tokio::time::Instant,
+    timeout: Duration,
+    active: Arc<Mutex<HashMap<PluginId, tokio::time::Instant>>>,
+    listeners: Vec<rutis::Disposer>,
+}
+
+impl StartupProgress {
+    pub fn new(ctx: &Ctx, timeout: Duration) -> Result<Self> {
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let changes = active.clone();
+        let started = tokio::time::Instant::now();
+        let listener = ctx.on_sync::<FiberStatusChanged>(move |event, _| {
+            if event.to == FiberState::Active {
+                changes
+                    .lock()
+                    .unwrap()
+                    .entry(event.plugin_id)
+                    .or_insert_with(tokio::time::Instant::now);
+            }
+            Ok(None)
+        })?;
+        let mut progress = Self {
+            ctx: ctx.clone(),
+            started,
+            timeout,
+            active,
+            listeners: vec![listener],
+        };
+        let changes = progress.active.clone();
+        progress
+            .listeners
+            .push(ctx.on_sync::<OpeningAdvanced>(move |event, _| {
+                changes
+                    .lock()
+                    .unwrap()
+                    .insert(event.0, tokio::time::Instant::now());
+                Ok(None)
+            })?);
+        Ok(progress)
+    }
+
+    /// Returns `None` after no first activation, opening dispatch or receipt
+    /// completion in `roots` for the timeout.
+    /// The root identities are read when the inactivity interval expires.
+    pub async fn wait<F: std::future::Future>(
+        &mut self,
+        future: F,
+        roots: impl Fn() -> Vec<PluginId>,
+    ) -> Option<F::Output> {
+        tokio::pin!(future);
+        let mut deadline = self.started + self.timeout;
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut future => return Some(result),
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
+            let snapshot = self.ctx.diagnostics();
+            let members: HashSet<_> = roots()
+                .into_iter()
+                .flat_map(|id| subtree(&snapshot, id))
+                .collect();
+            let last = self
+                .active
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| members.contains(id))
+                .map(|(_, time)| *time)
+                .max()
+                .unwrap_or(self.started);
+            deadline = last + self.timeout;
+            if deadline <= tokio::time::Instant::now() {
+                return None;
+            }
+        }
+    }
+}
+
+impl Drop for StartupProgress {
+    fn drop(&mut self) {
+        let listeners = std::mem::take(&mut self.listeners);
+        if !listeners.is_empty() {
+            let sink = self.ctx.error_sink();
+            self.ctx.handle().spawn(async move {
+                for listener in listeners {
+                    if let Err(error) = listener.dispose().await {
+                        sink(error);
+                    }
+                }
+            });
+        }
+    }
+}
 
 /// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
 type PartMake =
@@ -50,15 +157,24 @@ type BindValue = Arc<dyn Fn(&Names<'_>) -> std::result::Result<ProvideValue, Err
 type ProvideValue = Box<dyn Fn(&Ctx) -> std::result::Result<(), Error> + Send + Sync>;
 /// The module of the part providing an Agent's process values.
 const PROCESS_VALUES: &str = "ProcessValues";
+/// The rows of a Session and of a branch that must be Active.
+#[derive(Default)]
+struct RequiredRows {
+    session: Arc<[String]>,
+    branch: Arc<[String]>,
+}
 #[derive(Clone)]
 pub(crate) struct Assembly {
     pub config: AgentConfig,
-    /// Deadline for a Session or branch to become Active.
+    /// Maximum inactivity interval while opening a Session or branch.
     pub startup_timeout: Duration,
     pub store: Arc<dyn TimelineStore>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
     /// This Agent's branch openings that are alive.
     pub openings: OpeningCount,
+    /// Shutdowns of instances whose creation was abandoned before the
+    /// instance could be found; the Agent's close waits for them.
+    pub abandoned: tokio_util::task::TaskTracker,
     values: Vec<Provide>,
     /// The names of `values`, each a Session name.
     value_names: Vec<String>,
@@ -67,11 +183,14 @@ pub(crate) struct Assembly {
     plugins: Vec<PartMake>,
     /// Where the plugin of each feature is in `plugins`, by name.
     features: std::collections::HashMap<String, usize>,
-    /// The parts plugins register: the builder's for a host that places
-    /// its Agents (`build_at`), a fresh one in each Agent placing itself.
+    /// The parts plugins register: the builder's, for the host that builds
+    /// its Agents ([`AgentBuilder::build`]); the minimal host takes a fresh one.
     pub parts: Arc<crate::parts::PartRegistry>,
     /// Registered parts the profile requires, by name.
     required_parts: Arc<HashSet<String>>,
+    /// The rows a Session and a branch need Active, as [`AgentBuilder::install`]
+    /// named them.
+    required_rows: Arc<Mutex<RequiredRows>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
     /// The builder's catalog, as its Agents were built: the facades read a
@@ -96,6 +215,7 @@ impl AgentBuilder {
                 store: Arc::new(MemoryTimelineStore::default()),
                 ephemeral_store: None,
                 openings: OpeningCount::default(),
+                abandoned: tokio_util::task::TaskTracker::new(),
                 values: vec![],
                 value_names: vec![],
                 process_values: vec![],
@@ -103,6 +223,7 @@ impl AgentBuilder {
                 features: Default::default(),
                 parts: Arc::default(),
                 required_parts: Arc::default(),
+                required_rows: Arc::default(),
                 extensions: vec![],
                 catalog: Arc::default(),
             },
@@ -114,6 +235,8 @@ impl AgentBuilder {
         self.custom_store = true;
         self
     }
+    /// Maximum interval without first activation, opening dispatch advancement
+    /// or receipt completion in an opening scope.
     pub fn startup_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.assembly.startup_timeout = timeout;
         self
@@ -127,21 +250,20 @@ impl AgentBuilder {
         &mut self.catalog
     }
     /// The registry where plugins register Session and branch parts
-    /// ([`PartRegistry::register`](crate::PartRegistry::register)) in a host
-    /// that places its Agents ([`Self::build_at`]): every such Agent mounts
+    /// ([`PartRegistry::register`](crate::PartRegistry::register)) in the
+    /// host that builds its Agents ([`Self::build`]): every such Agent mounts
     /// from it, and [`Self::plugin_rows`] provides it to the host's process
-    /// plugins as `partRegistry`. An Agent placing itself ([`Self::build`],
-    /// [`Self::build_in`]) has a registry of its own, where only its own
-    /// plugins register.
+    /// plugins as `partRegistry`. The minimal host (`testing::MinimalHost`)
+    /// takes a registry of its own, so two hosts built from one builder mount
+    /// only their own plugins' parts.
     pub fn parts(&self) -> Arc<crate::PartRegistry> {
         self.assembly.parts.clone()
     }
     /// Adds a process plugin: `make` builds it from the names its
     /// dependencies resolve to at the process, usually
-    /// `|names| Ok(Box::new(MyPlugin::new(names)?))`. An Agent placing itself mounts it in
-    /// its own loader; a host placing its Agents places it with
-    /// [`Self::plugin_rows`]. It reaches the registry by the process name
-    /// `partRegistry`.
+    /// `|names| Ok(Box::new(MyPlugin::new(names)?))`. The host places it as
+    /// a process row of its loader with [`Self::plugin_rows`]. It reaches the
+    /// registry by the process name `partRegistry`.
     pub fn plugin(
         &mut self,
         make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error>
@@ -179,7 +301,7 @@ impl AgentBuilder {
     }
     /// Registers in `builtins` the module providing [`Self::parts`] at
     /// `partRegistry` and those of the plugins added with [`Self::plugin`],
-    /// and returns their rows, for a host that places its Agents. Register
+    /// and returns their rows, for the host that builds its Agents. Register
     /// them before [`Self::install`]; a module of the same name registered
     /// already fails.
     pub async fn plugin_rows(&self, builtins: &mut Modules) -> Result<Vec<Value>> {
@@ -269,10 +391,8 @@ impl AgentBuilder {
     }
     /// Provides a host-configured value under its process name to this
     /// Agent's Sessions: each Agent instance provides it at the name's
-    /// process key, in a scope of its own ([`Self::agent_row`]). An Agent
-    /// hosting itself ([`Self::build`], [`Self::build_in`]) places that row;
-    /// under [`Self::build_at`] the host does. The name must be registered
-    /// at the process.
+    /// process key, in a scope of its own ([`Self::agent_row`]), which the
+    /// host places. The name must be registered at the process.
     pub fn process_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
         self.assembly.process_values.push(ProcessValue {
             name: crate::names::name_of::<T>(),
@@ -432,6 +552,10 @@ impl AgentBuilder {
                 session.push(group(name, rows));
             }
             let required_session: Arc<[String]> = required_session.into();
+            *assembly.required_rows.lock().unwrap() = RequiredRows {
+                session: required_session.clone(),
+                branch: required_branch.clone(),
+            };
             builtins.register(session_scope_module, move |build| {
                 let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
                     rutis::Error::from(ErrorKind::PluginFailed(
@@ -469,37 +593,50 @@ impl AgentBuilder {
         .await
         .unwrap_or_else(|_| Err(AgentError::Build("plugin registration panicked".into())))
     }
-    /// Sessions own a private rutis root that the Agent shuts down on close.
-    pub fn build(&self) -> Agent {
-        Agent::new(self.clone(), self.finished(), AgentHost::Private)
-    }
-    /// Sessions are loaded under `host`, in a loader of their own; the host
-    /// owns that context's lifetime.
-    pub fn build_in(&self, host: &Ctx) -> Agent {
+    /// Builds the Agent in its host's loader. A host has one loader, and the
+    /// Agent creates neither a root nor a loader: its Sessions are instances
+    /// of `loader`, created inside the Agent instance that `anchor` runs in,
+    /// a running loader plugin of that instance (usually the host's Agent
+    /// plugin). The loader must have this builder's modules
+    /// ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row must be
+    /// [`Self::agent_row`], which provides the process values. The host owns
+    /// the loader, the Agent instance and the root; closing the Agent closes
+    /// its Sessions only. Tests, examples and tools use the minimal host
+    /// (`testing::MinimalHost`).
+    pub fn build(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
             self.finished(),
-            AgentHost::Within(host.clone()),
-        )
-    }
-    /// Sessions are instances of `loader`, created inside the Agent instance
-    /// that `anchor` runs in: a running loader plugin of that instance,
-    /// usually the host's Agent plugin. The loader must have this builder's
-    /// modules ([`Self::install`]) and catalog, and its [`AGENT_GROUP`] row
-    /// must be [`Self::agent_row`], which provides the process values.
-    pub fn build_at(&self, loader: Loader, anchor: &Ctx) -> Agent {
-        Agent::new(
-            self.clone(),
-            self.finished(),
-            AgentHost::Placed(Placement {
+            Placement {
                 loader,
                 anchor: anchor.clone(),
-            }),
+            },
         )
+    }
+    /// This builder with a part registry of its own, for a host other than
+    /// the builder's: two hosts built from one builder then mount only their
+    /// own plugins' parts.
+    #[cfg(feature = "testing")]
+    pub(crate) fn with_own_registry(&self) -> Self {
+        let mut builder = self.clone();
+        builder.assembly.parts = Arc::default();
+        builder
+    }
+    /// Whether plugins were added ([`Self::plugin`]); a host without any
+    /// places no process rows.
+    #[cfg(feature = "testing")]
+    pub(crate) fn has_plugins(&self) -> bool {
+        !self.assembly.plugins.is_empty()
+    }
+    /// The longest a host waits for its assembly without progress.
+    #[cfg(feature = "testing")]
+    pub(crate) fn opening_timeout(&self) -> Duration {
+        self.assembly.startup_timeout
     }
     fn finished(&self) -> Assembly {
         let mut assembly = self.assembly.clone();
         assembly.openings = OpeningCount::default();
+        assembly.abandoned = tokio_util::task::TaskTracker::new();
         assembly.catalog = Arc::new(self.catalog.clone());
         if !self.custom_store {
             let store = Arc::new(MemoryTimelineStore::default());
@@ -518,19 +655,19 @@ pub struct NoConfig {}
 /// A loader module built from a closure. The first plugin is built when the
 /// factory is, to read the name and dependencies the fiber is registered
 /// with; it is handed to the first load.
-struct Factory {
+pub(crate) struct Factory {
     name: String,
     injects: Vec<TypeKey>,
     first: Mutex<Option<Box<dyn DynPlugin>>>,
     make: Box<dyn Fn() -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync>,
 }
 impl Factory {
-    fn new(
+    pub(crate) fn new(
         make: impl Fn() -> Box<dyn DynPlugin> + Send + Sync + 'static,
     ) -> std::result::Result<Self, Error> {
         Self::try_new(move || Ok(make()))
     }
-    fn try_new(
+    pub(crate) fn try_new(
         make: impl Fn() -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
     ) -> std::result::Result<Self, Error> {
         let make = Box::new(move || {
@@ -613,7 +750,7 @@ impl Modules {
     }
     /// Registers the module `name`: `build` makes each copy's factory from
     /// the instances it runs in.
-    fn register(
+    pub(crate) fn register(
         &mut self,
         name: impl Into<String>,
         build: impl Fn(&Build) -> std::result::Result<Factory, Error> + Send + Sync + 'static,
@@ -801,7 +938,7 @@ fn extension_value<V: Send + Sync + 'static>(build: &Build) -> std::result::Resu
     })
 }
 /// A row named after its module.
-fn row(module: &str) -> Value {
+pub(crate) fn row(module: &str) -> Value {
     json!({ "id": module, "name": module })
 }
 fn group(id: &str, config: Vec<Value>) -> Value {
@@ -819,15 +956,6 @@ fn branch_scope(build: &Build) -> std::result::Result<BranchScope, Error> {
     })
 }
 
-/// Where an Agent's Sessions are created.
-pub(crate) enum AgentHost {
-    /// A private root and loader, created with the first Session.
-    Private,
-    /// A loader of the Agent's own under the host's context.
-    Within(Ctx),
-    /// The host's loader, inside the host's Agent instance.
-    Placed(Placement),
-}
 /// A loader and a running plugin of the Agent instance Sessions go in.
 #[derive(Clone)]
 pub(crate) struct Placement {
@@ -835,161 +963,15 @@ pub(crate) struct Placement {
     pub anchor: Ctx,
 }
 
-/// What an Agent created for itself to host its Sessions.
-pub(crate) struct Owned {
-    /// The private root, when the Agent made one.
-    pub root: Option<Ctx>,
-    /// The Agent instance, then its loader.
-    pub views: Vec<FiberView>,
-}
-
-/// Mounts a loader of the Agent's own under `host` (a private root when
-/// `None`) and creates the Agent instance its Sessions go in. Under a host,
-/// the loader's service is isolated so several Agents can share the host.
-pub(crate) async fn own_placement(
-    builder: &AgentBuilder,
-    host: Option<&Ctx>,
-    timeout: Duration,
-    cancel: &CancellationToken,
-) -> Result<(Placement, Owned)> {
-    let mut builder = builder.clone();
-    builder.assembly.parts = Arc::default();
-    let builder = &builder;
-    let (root, parent) = match host {
-        None => {
-            let root = Ctx::root_with_sink(
-                tokio::runtime::Handle::current(),
-                Arc::new(|error| tracing::error!(%error, "Agent runtime error")),
-            );
-            (Some(root.clone()), root)
-        }
-        Some(host) => {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let label = format!("dim-agent/{number}");
-            (
-                None,
-                host.isolate(TypeKey::of::<Loader>(), &label)
-                    .isolate(TypeKey::of::<crate::PartRegistry>(), &label)
-                    .isolate(rutis_bridge::runtime::mounter_key().erase(), &label),
-            )
-        }
-    };
-    let mut builtins = Modules::new();
-    builtins.register("AgentAnchor", |build| {
-        let slot = build.value::<AnchorSlot>().ok_or_else(|| {
-            rutis::Error::from(ErrorKind::PluginFailed(
-                "Agent created without its slot".into(),
-            ))
-        })?;
-        Factory::new(move || Box::new(AgentAnchor((*slot).clone())) as Box<dyn DynPlugin>)
-    });
-    let installed = async {
-        let plugins = match builder.assembly.plugins.is_empty() {
-            true => vec![],
-            false => builder.plugin_rows(&mut builtins).await?,
-        };
-        Ok::<_, AgentError>((plugins, builder.install(&mut builtins, []).await?))
-    };
-    let (plugin_rows, session_row) = match installed.await {
-        Ok(rows) => rows,
-        Err(error) => {
-            if let Some(root) = root {
-                root.shutdown().await.map_err(AgentError::from)?;
-            }
-            return Err(error);
-        }
-    };
-    let plugin = rutis_loader::LoaderPlugin::new(
-        builtins,
-        rutis_loader::LoaderOptions {
-            catalog: builder.catalog().clone(),
-            ..Default::default()
-        },
-    );
-    let loader = plugin.handle();
-    let view = parent.plugin(plugin);
-    let mut owned = Owned {
-        root,
-        views: vec![view.clone()],
-    };
-    let placed = async {
-        wait_active(&parent, std::slice::from_ref(&view), timeout, cancel).await?;
-        let mut inserted = plugin_rows;
-        inserted.push(builder.agent_row([row("AgentAnchor"), session_row]));
-        let rows = json!([{ "insert": inserted }]);
-        let rows = serde_json::from_value(rows).map_err(|e| AgentError::Build(e.to_string()))?;
-        let report = loader
-            .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)
-            .await
-            .map_err(loader_error)?;
-        if !report.failures.is_empty() || !report.issues.is_empty() {
-            return Err(AgentError::Build(format!(
-                "{:?} {:?}",
-                report.failures, report.issues
-            )));
-        }
-        let slot = AnchorSlot::default();
-        let agent = loader
-            .create_instance(&parent, AGENT_GROUP)
-            .with(slot.clone())
-            .await
-            .map_err(loader_error)?;
-        owned.views.insert(0, agent.view);
-        let anchor = slot
-            .0
-            .get()
-            .cloned()
-            .ok_or_else(|| AgentError::Build("Agent anchor did not load".into()))?;
-        Ok(anchor)
-    }
-    .await;
-    match placed {
-        Ok(anchor) => Ok((Placement { loader, anchor }, owned)),
-        Err(error) => Err(match release(owned).await {
-            Ok(()) => error,
-            Err(cleanup) => error.with_cleanup(cleanup),
-        }),
-    }
-}
-/// Closes what [`own_placement`] created.
-pub(crate) async fn release(owned: Owned) -> Result<()> {
-    let mut errors = vec![];
-    match owned.root {
-        Some(root) => errors.extend(root.shutdown().await.err().map(AgentError::from)),
-        None => {
-            for view in owned.views {
-                errors.extend(view.shutdown().await.err().map(AgentError::from));
-            }
-        }
-    }
-    AgentError::aggregate(errors)
-}
-#[derive(Clone, Default)]
-struct AnchorSlot(Arc<std::sync::OnceLock<Ctx>>);
-/// The Agent instance's plugin when the Agent hosts itself: Sessions are
-/// created from its context.
-struct AgentAnchor(AnchorSlot);
-impl DynPlugin for AgentAnchor {
-    fn name(&self) -> &str {
-        "AgentAnchor"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> RutisFuture<'a, std::result::Result<Effect, Error>> {
-        Box::pin(async move {
-            self.0.0.set(ctx.clone()).map_err(|_| {
-                rutis::Error::from(ErrorKind::PluginFailed("Agent anchor reloaded".into()))
-            })?;
-            Ok(Effect::Done)
-        })
-    }
-}
-
 /// A loaded scope plugin: its own context and the capability plugins it installed.
 pub(crate) struct Loaded<S> {
     pub ctx: Ctx,
     pub scope: S,
     pub children: Vec<FiberView>,
-    required: Arc<[String]>,
+    pub(crate) required: Arc<[String]>,
+    /// The parts the required mounter mounted when the scope opened, which
+    /// creation waited for; the assembly check reports one that has left.
+    pub(crate) parts: Vec<FiberView>,
 }
 
 pub(crate) struct SessionAssembly {
@@ -1073,6 +1055,7 @@ impl DynPlugin for SessionScopePlugin {
                 scope,
                 children: vec![],
                 required: self.2.clone(),
+                parts: vec![],
             }));
             Ok(Effect::Done)
         })
@@ -1224,6 +1207,7 @@ impl DynPlugin for BranchScopePlugin {
                     scope,
                     children: vec![],
                     required: self.2.clone(),
+                    parts: vec![],
                 },
                 timeline,
                 dispatcher,
@@ -1249,22 +1233,6 @@ impl TimelineFactory {
         ancestors: Vec<(String, u64)>,
         cancel: CancellationToken,
     ) -> BoxFuture<'_, std::result::Result<Arc<TimelineContext>, TimelineBuildError>> {
-        self.build_until(
-            id,
-            ancestors,
-            cancel,
-            tokio::time::Instant::now() + self.startup_timeout(),
-        )
-    }
-
-    /// Uses the tree's complete opening budget, including parent readiness.
-    pub fn build_until(
-        &self,
-        id: String,
-        ancestors: Vec<(String, u64)>,
-        cancel: CancellationToken,
-        deadline: tokio::time::Instant,
-    ) -> BoxFuture<'_, std::result::Result<Arc<TimelineContext>, TimelineBuildError>> {
         Box::pin(async move {
             let parent = self
                 .0
@@ -1279,9 +1247,9 @@ impl TimelineFactory {
                 branch_id: id.clone(),
             };
             let sequence = tokio::select! {
-                result = parent.assembly.store.head(&key) => result?,
+                result = tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key)) =>
+                    result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                 _ = cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into()).into()),
-                _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into()).into()),
             };
             let owner = Arc::new(BranchAssembly {
                 session: parent.clone(),
@@ -1295,30 +1263,27 @@ impl TimelineFactory {
             });
             let started = {
                 let value = owner.clone();
+                let required = parent.assembly.required_rows.lock().unwrap().branch.clone();
                 create_instance(
                     &parent.loader,
                     &session.ctx,
                     BRANCH_GROUP.into(),
                     move |create| create.with(value),
-                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    self.startup_timeout(),
                     &cancel,
+                    &parent.assembly.abandoned,
+                    required,
                     {
                         let owner = owner.clone();
                         move || {
                             let instance = *owner.instance.lock().unwrap();
-                            let required = owner
-                                .loaded
-                                .lock()
-                                .unwrap()
-                                .as_ref()
-                                .map(|loaded| loaded.scope.required.clone());
-                            (instance, required, owner.mounted.lock().unwrap().clone())
+                            (instance, owner.mounted.lock().unwrap().clone())
                         }
                     },
                 )
                 .await
             };
-            std::mem::take(&mut *owner.mounted.lock().unwrap());
+            let mounted = std::mem::take(&mut *owner.mounted.lock().unwrap());
             let result = AssertUnwindSafe(async {
                 let created = started.as_ref().map_err(|(error, _)| error.clone())?;
                 let branch = {
@@ -1332,6 +1297,7 @@ impl TimelineFactory {
                             scope: current.scope.scope,
                             children: created.children.clone(),
                             required: current.scope.required.clone(),
+                            parts: mounted.required.clone(),
                         },
                         timeline: current.timeline.clone(),
                         dispatcher: current.dispatcher.clone(),
@@ -1353,6 +1319,8 @@ impl TimelineFactory {
                     ctx.clone(),
                     created.view.clone(),
                     branch.scope.children.clone(),
+                    branch.scope.required.clone(),
+                    branch.scope.parts.clone(),
                     owner.copies.clone(),
                     scope,
                     branch.timeline.clone(),
@@ -1408,13 +1376,15 @@ pub(crate) struct Created {
 }
 
 /// Creates an instance of `group` from `ctx` and waits until its registered
-/// rows are Active, within `timeout`. On failure the instance, when one was
-/// created, comes back with the error for the caller to roll back; when a
-/// timeout or cancellation leaves the creation running before the instance
-/// can be found, a task disposes it once the creation ends.
+/// rows are Active, within the opening's inactivity window `timeout`. On
+/// failure the instance, when one was created, comes back with the error for
+/// the caller to roll back; when a timeout or cancellation leaves the creation
+/// running before the instance can be found, a task disposes it once the
+/// creation ends.
 ///
 /// `instance` reads its identity and the scope's registered row IDs; the
 /// identity locates an instance whose creation is still running.
+#[allow(clippy::too_many_arguments)]
 async fn create_instance(
     loader: &Loader,
     ctx: &Ctx,
@@ -1422,22 +1392,33 @@ async fn create_instance(
     configure: impl for<'a> FnOnce(CreateInstance<'a>) -> CreateInstance<'a> + Send + 'static,
     timeout: Duration,
     cancel: &CancellationToken,
-    instance: impl Fn() -> (
-        Option<rutis::host::InstanceId>,
-        Option<Arc<[String]>>,
-        crate::parts::Opened,
-    ),
+    abandoned: &tokio_util::task::TaskTracker,
+    required: Arc<[String]>,
+    instance: impl Fn() -> (Option<rutis::host::InstanceId>, crate::parts::Opened),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let mut progress = StartupProgress::new(ctx, timeout).map_err(|error| (error, None))?;
     let mut creation = {
         let (loader, ctx, group) = (loader.clone(), ctx.clone(), group.clone());
         tokio::spawn(async move { configure(loader.create_instance(&ctx, &group)).await })
     };
-    let ended = tokio::select! {
-        joined = &mut creation => Some(joined),
-        _ = cancel.cancelled() => None,
-        _ = tokio::time::sleep_until(deadline) => None,
-    };
+    let ended = progress
+        .wait(
+            async {
+                tokio::select! {
+                    joined = &mut creation => Some(joined),
+                    _ = cancel.cancelled() => None,
+                }
+            },
+            || {
+                instance()
+                    .0
+                    .and_then(|id| locate(loader, ctx, id))
+                    .map(|created| vec![created.view.id])
+                    .unwrap_or_default()
+            },
+        )
+        .await
+        .flatten();
     let created = match ended {
         Some(Ok(Ok(instance))) => instance,
         Some(Ok(Err(error))) => return Err((loader_error(error), None)),
@@ -1457,7 +1438,7 @@ async fn create_instance(
                 None => AgentError::Build(format!("initialization timed out: {group}")),
             };
             if found.is_none() {
-                tokio::spawn(async move {
+                abandoned.spawn(async move {
                     if let Ok(Ok(instance)) = creation.await {
                         let _ = instance.view.shutdown().await;
                     }
@@ -1466,11 +1447,10 @@ async fn create_instance(
             return Err((error, found));
         }
     };
-    let required = instance().1;
     let failures = created
         .report
         .into_iter()
-        .filter(|(id, _)| required.as_ref().is_none_or(|rows| rows.contains(id)))
+        .filter(|(id, _)| required.contains(id))
         .filter_map(|(id, result)| match result {
             InstanceResult::Failed(error) if crate::parts::PartMounter::is_row(&id) => {
                 Some(AgentError::Build(loader_error(error).to_string()))
@@ -1486,60 +1466,97 @@ async fn create_instance(
     if let Err(error) = AgentError::aggregate(failures) {
         return Err((error, Some(created)));
     }
-    let Some(required) = required else {
-        return Err((
-            AgentError::Build(format!("{group} scope did not load")),
-            Some(created),
-        ));
-    };
+    // The instance's settle returns with its group or a row still waiting for
+    // dependencies. The group spawns the rows and the required rows mount the
+    // parts, so each is read once the one before it is Active.
+    let group = [created.view.clone()];
+    let mut ready = progress
+        .wait(active_rows(&group, cancel), || vec![created.view.id])
+        .await
+        .unwrap_or_else(|| Err(timed_out(ctx, &group)));
     let mut waiting = rows(loader, &created.view, Some(&required));
-    waiting.extend(instance().2.required);
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let ready = wait_active(ctx, &waiting, remaining, cancel).await;
+    if ready.is_ok() {
+        ready = progress
+            .wait(active_rows(&waiting, cancel), || vec![created.view.id])
+            .await
+            .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
+    }
+    if ready.is_ok() {
+        let parts = instance().1.required;
+        waiting.extend(parts.iter().cloned());
+        ready = progress
+            .wait(active_rows(&parts, cancel), || vec![created.view.id])
+            .await
+            .unwrap_or_else(|| Err(timed_out(ctx, &parts)));
+    }
     created.children = rows(loader, &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
     }
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let mut waiting = rows(loader, &created.view, Some(&required));
-    waiting.extend(instance().2.required);
-    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
-        .await
-        .and_then(|()| validate(ctx, created.view.id, &waiting))
-    {
-        return Err((error, Some(created)));
-    }
-    created.children = rows(loader, &created.view, None);
     let optional: Vec<FiberView> = created
         .children
         .iter()
         .filter(|view| !waiting.iter().any(|required| required.id == view.id))
         .cloned()
-        .chain(instance().2.optional)
+        .chain(instance().1.optional)
         .collect();
     let settled = async {
         for view in waiting.iter().chain(&optional) {
             let _ = view.await;
         }
     };
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    tokio::select! {
-        () = settled => Ok(created),
-        _ = cancel.cancelled() => Err((AgentError::Cancelled("initialization".into()), Some(created))),
-        _ = tokio::time::sleep(remaining) => {
-            let error = timed_out(ctx, &created.children);
-            Err((error, Some(created)))
-        }
+    let settled = progress
+        .wait(
+            async {
+                tokio::select! {
+                    () = settled => Ok(()),
+                    _ = cancel.cancelled() => Err(AgentError::Cancelled("initialization".into())),
+                }
+            },
+            || vec![created.view.id],
+        )
+        .await
+        .unwrap_or_else(|| Err(timed_out(ctx, &created.children)));
+    match settled {
+        Ok(()) => Ok(created),
+        Err(error) => Err((error, Some(created))),
     }
 }
-/// Reads current candidate rows, including nested instances added during
-/// readiness waits. Main and child branches have their own assembly snapshots.
+/// Reads current candidate rows, including nested instances added during readiness waits.
+/// Main and child branches have their own assembly snapshots.
 fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
     loader
         .instance_rows(instance.instance())
         .into_iter()
         .filter(|(id, _)| required.is_none_or(|rows| rows.contains(id)))
         .map(|(_, view)| view)
+        .collect()
+}
+
+/// The rows `instance` holds, the ones `required` names when given, and never
+/// its own row. A row belongs to an instance when its chain of enclosing
+/// instances contains it. Assembly preflight reads configuration here; runtime
+/// creation reads the same scope's live handles through `Loader::instance_rows`.
+fn scope_entries<'a>(
+    entries: &'a [EntryInfo],
+    instance: &FiberView,
+    required: Option<&[String]>,
+) -> Vec<&'a EntryInfo> {
+    entries
+        .iter()
+        .filter(|entry| required.is_none_or(|rows| rows.iter().any(|id| id == &entry.id)))
+        .filter(|entry| {
+            entry
+                .instance
+                .as_ref()
+                .is_some_and(|i| i.chain.iter().any(|(_, id)| *id == instance.instance()))
+        })
+        .filter(|entry| {
+            entry
+                .view
+                .as_ref()
+                .is_none_or(|view| view.id != instance.id)
+        })
         .collect()
 }
 /// The instance `instance` of a creation that did not end; it walks the
@@ -1557,7 +1574,7 @@ fn locate(loader: &Loader, ctx: &Ctx, instance: rutis::host::InstanceId) -> Opti
         view,
     })
 }
-fn loader_error(error: rutis_loader::LoaderError) -> AgentError {
+pub(crate) fn loader_error(error: rutis_loader::LoaderError) -> AgentError {
     match error {
         rutis_loader::LoaderError::Rejected { error, .. } => error.into(),
         error => AgentError::Build(error.to_string()),
@@ -1603,6 +1620,7 @@ pub(crate) async fn build_session(
             extension.group
         )));
     }
+    let startup_timeout = assembly.startup_timeout;
     let host = &placement.anchor;
     let owner = Arc::new(SessionAssembly {
         assembly,
@@ -1620,23 +1638,16 @@ pub(crate) async fn build_session(
         mounted: Arc::default(),
         copies: Arc::default(),
     });
-    let startup_timeout = owner.assembly.startup_timeout;
-    let deadline = tokio::time::Instant::now() + startup_timeout;
     let instance = |owner: &Arc<SessionAssembly>| {
         let owner = owner.clone();
         move || {
             let instance = *owner.instance.lock().unwrap();
-            let required = owner
-                .loaded
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|loaded| loaded.required.clone());
-            (instance, required, owner.mounted.lock().unwrap().clone())
+            (instance, owner.mounted.lock().unwrap().clone())
         }
     };
     let started = {
         let value = owner.clone();
+        let required = owner.assembly.required_rows.lock().unwrap().session.clone();
         create_instance(
             &placement.loader,
             host,
@@ -1644,11 +1655,13 @@ pub(crate) async fn build_session(
             move |create| create.with(value),
             startup_timeout,
             &owner.closing,
+            &owner.assembly.abandoned,
+            required,
             instance(&owner),
         )
         .await
     };
-    std::mem::take(&mut *owner.mounted.lock().unwrap());
+    let mounted = std::mem::take(&mut *owner.mounted.lock().unwrap());
     let result = AssertUnwindSafe(async {
         let created = started.as_ref().map_err(|(error, _)| error.clone())?;
         let current = owner.loaded()?;
@@ -1657,6 +1670,7 @@ pub(crate) async fn build_session(
             scope: current.scope,
             children: created.children.clone(),
             required: current.required.clone(),
+            parts: mounted.required.clone(),
         });
         *owner.loaded.lock().unwrap() = Some(session.clone());
         let tree = required::<dyn TimelineTreeControl>(
@@ -1671,18 +1685,23 @@ pub(crate) async fn build_session(
             }
         };
         tokio::pin!(initialize);
+        let mut progress = StartupProgress::new(host, startup_timeout)?;
         let initialize = tokio::select! {
-            result = &mut initialize => result,
+            result = progress.wait(&mut initialize, || vec![created.view.id]) => {
+                match result {
+                    Some(result) => result,
+                    None => {
+                        let error = timed_out(host, std::slice::from_ref(&created.view));
+                        tree.begin_close();
+                        let _ = initialize.await;
+                        Err(error)
+                    }
+                }
+            },
             _ = owner.closing.cancelled() => {
                 tree.begin_close();
                 let _ = initialize.await;
                 Err(AgentError::Cancelled("session initialization".into()))
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                let error = timed_out(host, std::slice::from_ref(&created.view));
-                tree.begin_close();
-                let _ = initialize.await;
-                Err(error)
             }
         };
         if let Err(error) = initialize {
@@ -1731,17 +1750,46 @@ fn required<T: ?Sized + Send + Sync + 'static>(ctx: &Ctx, key: Key<T>) -> Result
         ))
     })
 }
+/// Mounts `child` under `ctx` and waits until it is `Active` or `ctx`'s
+/// cancellation, then returns its view. A row or part that mounts a child in
+/// `apply` uses this rather than `(&view).await`: that is the settle fence,
+/// which returns while a child whose dependencies are not ready yet is still
+/// `Pending`, so the row would return before its child and creation would
+/// hand back a scope with a plugin below a required row not `Active`. That
+/// child would also miss the first request, until its own load finished.
+///
+/// The wait has no deadline of its own. During an opening, the opening's
+/// no-progress bound covers it, and on expiry it names the child and what it
+/// waits for. Outside an opening the row stays `Loading` until its child is
+/// `Active`, as any row with a missing dependency does, and the wait ends
+/// when the row's generation is cancelled. A child that fails or is disposed
+/// ends it with an error naming it.
+pub async fn mount_active(ctx: &Ctx, child: impl DynPlugin) -> Result<FiberView> {
+    let view = ctx.plugin(child);
+    active_rows(std::slice::from_ref(&view), &ctx.cancellation_token()).await?;
+    Ok(view)
+}
 /// Waits until every view is Active; a failure or disposal of any view,
-/// cancellation or the deadline ends the wait. Views are watched together, so
-/// a Failed view ends the wait even while a dependent of it stays Pending.
-/// `ctx` only describes unmet dependencies on timeout.
+/// cancellation or an interval without progress ends the wait. First activation
+/// or opening progress in any view's subtree renews the interval. A Failed view ends the wait even
+/// while a dependent stays Pending. `ctx` observes those rows and supplies
+/// unmet dependencies on timeout.
 pub async fn wait_active(
     ctx: &Ctx,
     views: &[FiberView],
     timeout: std::time::Duration,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let mut progress = StartupProgress::new(ctx, timeout)?;
+    progress
+        .wait(active_rows(views, cancel), || {
+            views.iter().map(|view| view.id).collect()
+        })
+        .await
+        .unwrap_or_else(|| Err(timed_out(ctx, views)))
+}
+
+async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<()> {
     let mut waiting: Vec<_> = views.iter().map(|view| (view, view.watch())).collect();
     loop {
         let mut index = 0;
@@ -1775,7 +1823,6 @@ pub async fn wait_active(
         );
         let ended = tokio::select! {
             _ = cancel.cancelled() => return Err(AgentError::Cancelled("initialization".into())),
-            _ = tokio::time::sleep_until(deadline) => return Err(timed_out(ctx, views)),
             (changed, index, _) = changed => changed.is_err().then_some(index),
         };
         if let Some(index) = ended {
@@ -1809,32 +1856,144 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
     AgentError::Build(format!("initialization timed out: {}", pending.join("; ")))
 }
 
-/// Assembly checks for plugin authors. A diagnostics snapshot walks the whole
-/// process tree, so release builds skip it to keep Session creation constant-time.
-fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
-    if !cfg!(debug_assertions) {
-        return Ok(());
+/// One rule an assembly breaks ([`Agent::check_assembly`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AssemblyRule {
+    /// A required row, or a plugin below one, is not `Active`.
+    Ready,
+    /// A plugin reads an external service it does not declare.
+    UndeclaredRead,
+    /// A plugin read a service generation its resolved dependencies lack.
+    Generation,
+    /// A scoped service is provided without an instance key.
+    InstanceKey,
+}
+
+/// One problem [`Agent::check_assembly`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AssemblyFinding {
+    /// The Session the finding is about.
+    pub session: String,
+    /// The branch the plugin belongs to, when its scope is a branch.
+    pub branch: Option<String>,
+    /// The plugin the finding is about.
+    pub plugin: String,
+    /// The rule the plugin breaks.
+    pub rule: AssemblyRule,
+    /// What the rule saw: a fiber state, or a service key.
+    pub detail: String,
+}
+impl std::fmt::Display for AssemblyFinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "session {}", self.session)?;
+        if let Some(branch) = &self.branch {
+            write!(f, " branch {branch}")?;
+        }
+        write!(f, ": ")?;
+        match self.rule {
+            AssemblyRule::Ready => write!(
+                f,
+                "{} is not Active after its scope became ready: {}",
+                self.plugin, self.detail
+            ),
+            AssemblyRule::UndeclaredRead => {
+                write!(f, "{} read undeclared service {}", self.plugin, self.detail)
+            }
+            AssemblyRule::Generation => write!(
+                f,
+                "{} read a service generation absent from resolved dependencies: {}",
+                self.plugin, self.detail
+            ),
+            AssemblyRule::InstanceKey => write!(
+                f,
+                "scoped service provided without an instance key: {}",
+                self.detail
+            ),
+        }
     }
-    let snapshot = ctx.diagnostics();
-    let members = subtree(&snapshot, scope);
-    let required: HashSet<_> = required
+}
+
+/// Checks one live scope of `snapshot`: its `required` rows, the parts its
+/// mounters mounted and everything else in the scope, as creation waits for
+/// them: a required row or part returns from `apply` once its own mounted
+/// children are `Active` ([`mount_active`]), so a child it left behind is not
+/// `Active` and breaks the rule. `rows` is the loader's [index](scope_rows) of
+/// rows by instance, `view` the scope instance, `required` the loader row ids
+/// its profile requires, `parts` the required parts it mounted and `nested`
+/// the scopes nested inside it. `scope` names the Session the scope belongs to
+/// and, for a branch scope, the branch. Each plugin is checked once, by the
+/// innermost scope that contains it: a nested scope's subtree is left to that
+/// scope's own pass. A required row or part that has left the tree is reported
+/// too: nothing in the snapshot would otherwise remember it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_scope(
+    snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
+    rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>>,
+    view: &FiberView,
+    required: &[String],
+    parts: &[FiberView],
+    nested: &[FiberView],
+    scope: (&str, Option<&str>),
+    findings: &mut Vec<AssemblyFinding>,
+) {
+    let (session, branch) = scope;
+    let mut report = |plugin: String, rule: AssemblyRule, detail: String| {
+        findings.push(AssemblyFinding {
+            session: session.to_string(),
+            branch: branch.map(str::to_string),
+            plugin,
+            rule,
+            detail,
+        });
+    };
+    let mut absent =
+        |id: String| report(id, AssemblyRule::Ready, "absent from the snapshot".into());
+    let entries = rows.get(&view.instance()).map(Vec::as_slice);
+    let required_rows = scope_entries(entries.unwrap_or_default(), view, Some(required));
+    for entry in &required_rows {
+        if !entry
+            .view
+            .as_ref()
+            .is_some_and(|row| snapshot.plugins.iter().any(|plugin| plugin.id == row.id))
+        {
+            absent(entry.id.clone());
+        }
+    }
+    for part in parts {
+        if !snapshot.plugins.iter().any(|plugin| plugin.id == part.id) {
+            absent(part.name().to_owned());
+        }
+    }
+    let excluded: HashSet<_> = nested
         .iter()
-        .flat_map(|view| subtree(&snapshot, view.id))
+        .flat_map(|nested| subtree(snapshot, nested.id))
+        .collect();
+    let members: HashSet<_> = subtree(snapshot, view.id)
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect();
+    let required: HashSet<_> = required_rows
+        .iter()
+        .filter_map(|entry| entry.view.as_ref().map(|row| row.id))
+        .flat_map(|id| subtree(snapshot, id))
         .collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
         if required.contains(&plugin.id) && plugin.state != FiberState::Active {
-            return Err(AgentError::Build(format!(
-                "{} is not Active after its scope became ready: {:?}",
-                plugin.name, plugin.state
-            )));
+            report(
+                plugin.name.clone(),
+                AssemblyRule::Ready,
+                format!("{:?}", plugin.state),
+            );
         }
         for access in &plugin.accesses {
             if access.external && !access.declared {
-                return Err(AgentError::Build(format!(
-                    "{} read undeclared service {}",
-                    plugin.name,
-                    access.key.describe()
-                )));
+                report(
+                    plugin.name.clone(),
+                    AssemblyRule::UndeclaredRead,
+                    access.key.describe(),
+                );
             }
             if access.external
                 && access.provider.is_some()
@@ -1846,25 +2005,49 @@ fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
                         && Some(r.generation) == access.generation
                 })
             {
-                return Err(AgentError::Build(format!(
-                    "{} read a service generation absent from resolved dependencies: {}",
-                    plugin.name,
-                    access.key.describe()
-                )));
+                report(
+                    plugin.name.clone(),
+                    AssemblyRule::Generation,
+                    access.key.describe(),
+                );
             }
         }
     }
-    if let Some(binding) = snapshot
+    for binding in snapshot
         .bindings
         .iter()
-        .find(|b| members.contains(&b.provider) && b.key.instance_id().is_none())
+        .filter(|b| members.contains(&b.provider) && b.key.instance_id().is_none())
     {
-        return Err(AgentError::Build(format!(
-            "scoped service provided without an instance key: {}",
-            binding.key.describe()
-        )));
+        report(
+            snapshot
+                .plugins
+                .iter()
+                .find(|p| p.id == binding.provider)
+                .map(|p| p.name.clone())
+                .unwrap_or_default(),
+            AssemblyRule::InstanceKey,
+            binding.key.describe(),
+        );
     }
-    Ok(())
+}
+
+/// The loader's rows by the instance each runs in: one pass over
+/// [`Loader::entries`], so a check of every live scope reads the rows once and
+/// the reads no longer grow with the number of Sessions. A row is filed under
+/// every enclosing instance, the chain [`scope_entries`] selects on.
+pub(crate) fn scope_rows(
+    loader: &Loader,
+) -> std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>> {
+    let mut rows: std::collections::HashMap<_, Vec<EntryInfo>> = Default::default();
+    for entry in loader.entries() {
+        let Some(instance) = &entry.instance else {
+            continue;
+        };
+        for (_, id) in &instance.chain {
+            rows.entry(*id).or_default().push(entry.clone());
+        }
+    }
+    rows
 }
 
 /// Plugin IDs of `root` and its descendants in one diagnostics snapshot.

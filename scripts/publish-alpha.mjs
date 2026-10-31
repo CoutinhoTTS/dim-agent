@@ -114,7 +114,8 @@ try {
     console.log(`\n▸ ${platform}`);
     run('rustup', ['target', 'add', triple], { stdio: ['ignore', 'ignore', 'inherit'] });
     run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', '--locked',
-      '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode'], { cwd: repo });
+      '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode'],
+    { cwd: repo, env: { ...process.env, DIM_RELEASE_BUILD: '1' } });
     run('node', ['scripts/stage-release.mjs', path.join(repo, 'target', triple, 'release'),
       path.join(staging, 'stage', platform), version, sourceCommit, ...(account ? ['--account'] : [])],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });

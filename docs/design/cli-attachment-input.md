@@ -56,8 +56,48 @@ session: <session-id>
 ```
 
 The composer stays in terminal scrollback. It redraws its own input and suggestion rows and
-keeps the cursor in the draft. Image pixels are not rendered in the terminal. Markers show
-escaped file names or paste line counts; labels are presentation, not model content.
+keeps the cursor in the draft. Image pixels are not rendered in the terminal. In the line
+client, markers show escaped file names or paste line counts; labels are presentation, not model
+content. An image whose sent form differs from its source's says how: both sizes when the size
+changed, as in `[Image 1: photo.jpg · 8064×6048 → 2048×1536]`, both media types when the re-encode
+changed the type, as in `[Image 1: shot.png · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image
+sent as it is keeps the plain marker.
+
+**Image markers.** The terminal UI's draft, its sent message and its restored history follow one
+rule: an image submitted as an image block reads the fixed token `[Image #N]`, where N is the
+image's position among the images of that message, and a path the model receives as a link keeps
+`[name]`. The draft recomputes N in content order whenever an image is added or removed, so a
+draft number is the number the message will show, and it chooses between the marker and the name
+by the same model capability that decides what the submission carries. The token is never
+translated, so both ends read alike under any interface language. What an attach adds after it may
+be: both sizes when the size changed, `[Image #1 · 8064×6048 → 2048×1536]`, both media types when
+the re-encode changed the type, `[Image #1 · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image sent
+as it is keeps the plain marker. The marker is display text. A token's buffer holds a file's
+name, its `@` path, or `[Image]` for a clipboard image, and never the numbered marker; what the
+token submits and the input history keeps is a file's link, or nothing for a clipboard image. So
+the marker never enters the message text, the input history or a model request, and a draft
+recalled with Up carries the image's link or nothing. A draft set aside for the command palette
+(Ctrl+O or Ctrl+P) or for an older input-history entry comes back as its buffer text, so a
+clipboard image in it comes back as the literal `[Image]` without the image.
+
+```text
+> What is this? [Image #1] [Image #2]
+┃ What is this?
+┃ [Image #1]
+┃ [Image #2]
+┃  [Pasted text: /files/paste.txt (1 lines)]
+
+┃ [Image #1]
+```
+
+After submission, the transcript draws the message's image blocks as those markers on separate
+lines in content order, including image-only messages and messages restored from history; a
+submitted image block has no filename. Tool results retain their existing text-only display.
+Editing, quoting, branching, forking and withdrawing a queued message reuse only its text;
+display markers are never inserted into those drafts.
+
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
 or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.
 Typing path components narrows the search from the displayed base. Suggestions list UTF-8 names;
@@ -98,7 +138,11 @@ separators outside single/double quotes, backslash-escaped spaces/quotes, and lo
 URLs with percent-encoded paths. A single existing path containing spaces also works. This is
 path parsing, without shell evaluation, variable expansion, globbing or implicit `~` expansion.
 For a file URL, accept an empty authority or `localhost`; other URL authorities are not local
-path imports. File paths must be representable in UTF-8 without lossy replacement.
+path imports. On macOS, resolve file-reference URLs and `/.file/id=…` paths with the
+native URL API before classifying an image or constructing a file link. Accepted file items
+carry image bytes or a real path, never the virtual file-reference ID. Linux and Windows
+keep their native filesystem paths. File paths must be representable in UTF-8 without
+lossy replacement.
 If the entire payload is not a file list, retain it as text rather than extracting guessed paths
 from prose. HTTP image links remain text; the CLI never fetches them as images.
 
@@ -118,14 +162,16 @@ newlines. Count lines as Rust `str::lines()` does: a trailing newline adds no ex
 ### Terminal UI composer
 
 The terminal UI (scrollback and fullscreen) follows the TypeScript TUI's markers, which differ
-from the line client's above:
+from the line client's above. Image markers are the rule stated under scrollback layout:
 
 - **Dropped or pasted paths.** A terminal delivers a drag as a paste of the path. A paste naming
   only existing files or directories (one path or several per line, one line per path or group)
-  inserts one atomic `[name]` marker per path; a repeated name reads `[name #2]`. A backslash
-  escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a shell-mode draft the
-  paste stays text.
-- **Clipboard images** read `[Image #N]`, counting the draft's images.
+  inserts one atomic marker per path: a path the model receives as a link reads `[name]`, a
+  repeated name reads `[name #2]`, and an image the model takes reads that rule's token instead.
+  A backslash escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a
+  shell-mode draft the paste stays text.
+- **Clipboard images.** `Ctrl+V` inserts an image token of that rule; a clipboard image has no
+  name to read.
 - **Pasted text.** A paste of fewer than 4 lines and 201 characters is typed into the draft. A
   longer one is one atomic `[... N lines]` marker (over 5,000 characters `[Text: preview (N
   chars)]`), and on submission it is stored with `attachment.put` and sent as
@@ -134,16 +180,28 @@ from the line client's above:
 - **`@` mentions.** `@` at the start of the draft or after a space or punctuation opens a file
   picker for the path query before the cursor. Up/Down select (wrapping), Enter or Tab accepts,
   Esc closes it for that query. A directory is typed in as `@dir/` and the picker stays open; a
-  file becomes an atomic `@relative/path` marker followed by a space. `~/`, absolute and `../`
-  prefixes list that directory. Hidden entries are offered only when the query names one.
+  file becomes an atomic token followed by a space: a path the model receives as a link keeps
+  `@relative/path`, and an image it takes reads that rule's token instead. `~/`,
+  absolute and `../` prefixes list that directory. Hidden entries are offered only when the query
+  names one.
+  A pending clipboard read does not block accepting a file or entering a directory. Only
+  submission waits for the clipboard result:
+
+  ```text
+  @first.txt compare with @second
+                           Enter -> @first.txt compare with @second.txt
+                           Enter -> wait for clipboard insertion before sending
+  ```
 - **Submission.** A file or directory marker becomes a Markdown link to its absolute path
   (`[name](/abs/path)`, `[@src/a.rs](/abs/src/a.rs)`); its bytes are not uploaded, and the model
-  reads it with its tools. An image file is read and checked (A.1) at submission and sent as an
-  image block only when the session's model takes image input: its `provider.catalog` entry has
-  `vision`, or `image` among its `modalities`. Otherwise the image is sent as its link. A
+  reads it with its tools. An image path is read and scaled (A.1) when it is attached if the
+  session's model takes image input — its `provider.catalog` entry has `vision`, or `image`
+  among its `modalities` — and the token adds what the sent form changed, as the image-marker
+  rule gives it. On submission that model gets the image block and a model that does not gets the
+  link; a path attached while the model took no images is read and scaled on submission. A
   clipboard image has no path, so with such a model the draft is kept with the reason. A catalog
-  that does not answer within 5 seconds leaves images sent as images. Audio and video files are
-  sent as links: user input has no audio or video content block.
+  that does not answer within 5 seconds leaves images sent as images.
+  Audio and video files are sent as links: user input has no audio or video content block.
 
 The `@` index must not slow the interface, whatever directory the CLI runs in. A project
 directory is walked once on a thread of its own, breadth first, honouring `.gitignore` files and
@@ -152,6 +210,20 @@ like), within 8 levels, 50,000 entries and 2 seconds. The picker ranks what has 
 and redraws as more arrives; a finished index is reused for 10 seconds. The home directory and
 the filesystem root are never walked: there the picker lists only the directory being typed, one
 directory read of at most 2,000 entries, as it does for an outside prefix.
+
+## Terminal and shell paste entry points
+
+Terminal.app, iTerm2, Ghostty, Warp and VS Code handle their own paste shortcuts. A terminal's
+`Cmd+V` or paste action supplies only the text or paths that host forwards; use the `Ctrl+V`
+entry above for native clipboard images and files when the host forwards that key. The CLI
+cannot observe a shortcut consumed without sending input. PowerShell and CMD are shells;
+their terminal host determines which keys and paste events reach the CLI. Linux clipboard
+backends and native platform validation are specified below.
+
+Relative pasted paths follow the local `--cwd` contract above, independent of the shell.
+Quoting a path does not run PowerShell, CMD or a Unix shell. Native execution is required
+for platform acceptance; shared parser and emulated terminal tests alone do not establish
+behavior in every terminal.
 
 ## Clipboard and local image validation
 
@@ -176,7 +248,8 @@ read; the request carries the name `dim` and a password fixed for the process, s
 remembers the answer asks once per run. A denial, an error status, an empty choice or no answer
 within 60 seconds shows the error and keeps the draft; replies to an earlier, abandoned read are
 ignored by their request id, and a reply that stops mid-sequence for 5 seconds is dropped so keys
-are read again. Image and text size limits are those of the native readers.
+are read again. An image reply is bounded by a 64 MiB read guard — the most one reply may make
+the CLI hold, not an image limit; it is scaled after the read. Text keeps its 10 MiB limit.
 
 macOS uses AppKit's pasteboard; Windows uses Win32 clipboard formats. Linux uses `wl-paste`
 when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection. On macOS the
@@ -188,26 +261,36 @@ All are read only after Ctrl+V. No shell evaluates pasted paths or clipboard dat
 reader is the editor's owned, cancellable subprocess; Ctrl+C clears the draft and releases it.
 On Linux, editing remains available during the read, and the result inserts at the current
 cursor. Enter while that read is pending asks the user to wait without submitting input.
-macOS and Windows clipboard reads, pixel decoding and PNG encoding run synchronously;
+macOS and Windows clipboard reads, pixel decoding and re-encoding run synchronously;
 input editing and cancellation resume when the read returns. A Linux `text/uri-list`
 containing no `file:` URI falls through to image/text selection. A file list mixing local
 files with other URIs is rejected atomically.
 
-Read and validate image files at insertion so an accepted item retains the captured bytes even
-if the original changes later. Clipboard pixel data is encoded once as PNG, after checking its
-dimensions; it is not resized. An encoded image from the clipboard keeps its supported format.
-No temporary image file is needed when the clipboard component can return bytes directly.
+Read, scale and validate image files at insertion so an accepted item retains the captured bytes
+even if the original changes later. Every entry — a file, the clipboard's bytes or pixels, a
+terminal reply — is scaled by the shared rule at insertion, so the draft holds exactly the bytes
+that will be sent. A clipboard bitmap or a terminal-paste screenshot becomes a PNG while its
+scaled PNG fits; a file keeps its own format when nothing had to change. The terminal UI reads a
+pasted group's image paths off the interface thread: the paste returns at once, a notice shows
+while the read runs, the tokens go in at the cursor as it is then, and a second paste or Ctrl+V
+during the read is refused. The line editor reads on a blocking task and awaits it, so the
+runtime keeps running through a decode. No temporary image file is needed when the clipboard
+component can return bytes directly.
 Any temporary file a platform component requires belongs to this draft and is removed on item
 removal, successful submission or exit. Original source files are never temporary cache files.
 
 Apply [Attachments A.1](plugins/Attachments.md#a1-image-handling-cli-checks-and-modelprovider)
-at the local-data boundary: PNG, JPEG, WebP and GIF; at most 20 images per submission; at most
-5 MiB per image file after base64 decoding; at most 8000 px per side. Reject invalid/truncated
-headers, unsupported image data and violations rather than resizing. The 5 MiB limit is encoded
-image-file bytes, not an assertion about expanded pixel memory. A paste is limited to 10 MiB
-of UTF-8. The complete encoded request must fit the existing 16 MiB transport frame, including
-its JSON envelope and escaping and excluding the NDJSON newline. Several individually valid
-images can still exceed that combined request limit.
+at the local-data boundary: PNG, JPEG, WebP and GIF, recognized from their content; at most 20
+images per submission. An image is made acceptable by the shared scaling rule instead of being
+refused — the same function `read` uses, with its limits and its handling of PNG, EXIF
+orientation and the first frame of an animation, written in
+[WorkspaceTools § read results and images](../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images).
+The only size refusal is that rule's pixel guard, which names the dimensions; invalid or
+truncated data and unsupported formats are refused. A paste is limited to 10 MiB of UTF-8. The
+complete encoded request must fit the existing 16 MiB transport frame, including its JSON
+envelope and escaping
+and excluding the NDJSON newline. Several individually valid images can still exceed that
+combined request limit.
 
 ## Submission, rejection and cancellation
 
@@ -282,8 +365,16 @@ RPC contracts; headless slash commands remain literal model text.
 `dimcode exec [resume SESSION_ID] [--image PATH ...] [-p TEXT] [--json]` accepts repeated image
 arguments and image-only requests. When text is supplied through `-p` or redirected stdin, its
 text part comes first, followed by images in argument order. Relative image paths use the
-invoking process's cwd. Apply the same image checks and encoded-frame limit before submission;
-`--image` accepts local files, not URL sources. Invalid input reports an error and a nonzero exit.
+invoking process's cwd. Apply the same scaling rule and encoded-frame limit before submission;
+`--image` accepts local files, not URL sources. An image whose sent form differs from its file
+adds one line to stderr before the run starts, naming the sent form: `Scaled photo.jpg from
+8064×6048 to 2048×1536 px (image/jpeg)` when the size changed, with a resized animation
+appending `; only the first frame is sent`; `Re-encoded shot.png as image/jpeg (1500×1500 px)`
+when only the encoding changed, whether or not the media type did; and `Only the first frame
+of anim.gif is sent (image/jpeg)` when only the frame changed. The media type in parentheses
+is the one sent, so a size change that also changed the type is still one line. stdout keeps
+carrying only the reply or the JSON stream.
+Invalid input reports an error and a nonzero exit.
 Headless execution does not inspect the clipboard or infer images/file references from text.
 Its notification output and approval/stop semantics remain the existing exec contract.
 
@@ -304,8 +395,9 @@ Platform acceptance records native calibration and dependencies. No clipboard wr
 `objc2` and the Foundation/AppKit bindings (MIT) bind macOS, and the existing `windows-sys`
 dependency (MIT OR Apache-2.0) binds Windows. Linux invokes the installed system component.
 The existing image codec enables TIFF for macOS pixel data and BMP for Windows DIB data only;
-submitted image formats remain PNG, JPEG, WebP and GIF. The existing `url` crate parses local
-file URLs. Neither encoded clipboard images nor selected image files are re-encoded.
+those pixels enter the draft as the shared rule's PNG or JPEG. Everything else keeps its own
+bytes, and so its format, unless it has to be scaled, turned upright or reduced to a first
+frame, in which case it becomes PNG or JPEG. The existing `url` crate parses local file URLs.
 
 | Area | Required client work |
 | --- | --- |

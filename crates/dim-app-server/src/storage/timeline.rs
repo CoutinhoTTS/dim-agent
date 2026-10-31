@@ -34,6 +34,11 @@ use std::{
 /// Rounds of output deltas alone wait until this long after the previous
 /// round started (timeline storage §3).
 const ROUND_WINDOW: Duration = Duration::from_millis(20);
+
+/// Starts one `read_tool_use_starts` statement looks up. Each start is one
+/// term of a `UNION ALL`, and SQLite's default `SQLITE_MAX_COMPOUND_SELECT`
+/// is 500 terms, so a batch is read in statements of half that.
+const STARTS_PER_STATEMENT: usize = 250;
 struct Pending {
     key: TimelineKey,
     events: Vec<StoredEvent>,
@@ -303,16 +308,6 @@ impl SqliteTimelineStore {
         }
         #[cfg(not(feature = "testing"))]
         drop(reader);
-    }
-    async fn read_indexed(
-        &self,
-        session: &str,
-        locate: impl Fn(&Connection) -> Result<Option<(String, u64)>> + Send + Sync + 'static,
-    ) -> Result<Option<StoredEvent>> {
-        let mut reader = self.reader();
-        let record = read_indexed(&self.db, &mut reader, session.to_owned(), locate).await?;
-        self.finish(reader);
-        Ok(record)
     }
     fn commit_round(&self, pending: Vec<Pending>) {
         let mut sessions: BTreeMap<String, Vec<Pending>> = BTreeMap::new();
@@ -857,10 +852,11 @@ impl SessionStore {
         &self,
         agent: Option<String>,
         version: u32,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Vec<crate::protocol::SessionInfo>> {
         self.timeline
             .db
-            .run(move |connection| {
+            .run_cancellable(cancel, move |connection| {
                 let filter = if agent.is_some() {
                     " AND o.agent_id=?2"
                 } else {
@@ -933,60 +929,125 @@ impl SessionStore {
             .map(|record| record.event)
             .collect())
     }
-    pub async fn read_event(
+    /// The stored events of `event_ids` in one statement; ids the store
+    /// does not hold are absent.
+    pub async fn read_events(
         &self,
         id: &str,
-        event_id: &str,
-    ) -> Result<Option<Arc<dim_agent_types::AgentEvent>>> {
-        let (session, event_id) = (id.to_owned(), event_id.to_owned());
-        let wanted = event_id.clone();
-        let record = self
-            .timeline
-            .read_indexed(id, move |connection| {
-                connection
-                    .query_row(
-                        "SELECT branch_id, sequence FROM timeline_events WHERE session_id=?1 AND event_id=?2",
-                        params![session, event_id],
-                        |row| Ok((row.get(0)?, read_sequence(row, 1)?)),
-                    )
-                    .optional()
-                    .map_err(error)
-            })
-            .await?;
-        let Some(record) = record else {
-            return Ok(None);
-        };
-        if record.event.id != wanted {
-            return Err(error("event identity index does not match row"));
+        event_ids: &[String],
+    ) -> Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
+        if event_ids.is_empty() {
+            return Ok(HashMap::new());
         }
-        Ok(Some(record.event))
-    }
-    /// The main-branch `step/tool-use-start` of call `call_id` in request
-    /// `request_id`, found through `timeline_tool_use_starts`.
-    pub async fn read_tool_use_start(
-        &self,
-        id: &str,
-        request_id: &str,
-        call_id: &str,
-    ) -> Result<Option<Arc<dim_agent_types::AgentEvent>>> {
         let session = id.to_owned();
-        let request_id = request_id.to_owned();
-        let call_id = call_id.to_owned();
-        let record = self
-            .timeline
-            .read_indexed(id, move |connection| {
-                connection
-                    .query_row(
-                        "SELECT sequence FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND kind='step/tool-use-start' AND json_extract(body, '$.record.event.data.request_id')=?2 AND json_extract(body, '$.record.event.data.call_id')=?3",
-                        params![session, request_id, call_id],
-                        |row| read_sequence(row, 0),
-                    )
-                    .optional()
-                    .map_err(error)
-                    .map(|sequence| sequence.map(|sequence| ("main".to_owned(), sequence)))
+        let wanted = event_ids.to_vec();
+        let rows = self
+            .read_rows(id, move |connection| {
+                let columns = (0..wanted.len())
+                    .map(|at| format!("?{}", at + 2))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut query = connection
+                    .prepare(&format!(
+                        "SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                     WHERE session_id=?1 AND event_id IN ({columns})"
+                    ))
+                    .map_err(error)?;
+                let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&session];
+                parameters.extend(wanted.iter().map(|id| id as &dyn rusqlite::ToSql));
+                query_fetched(&mut query, rusqlite::params_from_iter(parameters))
             })
             .await?;
-        Ok(record.map(|record| record.event))
+        let mut events = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let record = indexed(row)?;
+            events.insert(record.event.id.clone(), record.event);
+        }
+        Ok(events)
+    }
+    /// The main-branch `step/tool-use-start`s of `keys`; calls the store does
+    /// not hold are absent. The keys are read in bounded statement chunks.
+    pub async fn read_tool_use_starts(
+        &self,
+        id: &str,
+        keys: &[(String, String)],
+    ) -> Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let session = id.to_owned();
+        let wanted = keys.to_vec();
+        let rows = self
+            .read_rows(id, move |connection| {
+                let mut rows = Vec::with_capacity(wanted.len());
+                for chunk in wanted.chunks(STARTS_PER_STATEMENT) {
+                    let selects = (0..chunk.len())
+                        .map(|at| {
+                            format!(
+                                "SELECT sequence, last_sequence, kind, body, event_id FROM \
+                             timeline_events WHERE session_id=?1 AND branch_id='main' AND \
+                             kind='step/tool-use-start' AND \
+                             json_extract(body, '$.record.event.data.request_id')=?{} AND \
+                             json_extract(body, '$.record.event.data.call_id')=?{}",
+                                at * 2 + 2,
+                                at * 2 + 3
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" UNION ALL ");
+                    let mut query = connection.prepare(&selects).map_err(error)?;
+                    let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&session];
+                    for (request_id, call_id) in chunk {
+                        parameters.push(request_id);
+                        parameters.push(call_id);
+                    }
+                    rows.extend(query_fetched(
+                        &mut query,
+                        rusqlite::params_from_iter(parameters),
+                    )?);
+                }
+                Ok(rows)
+            })
+            .await?;
+        let mut starts = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let record = indexed(row)?;
+            if let EventKind::ToolUseStart(start) = &record.event.kind {
+                starts.insert(
+                    (start.request_id.clone(), start.call_id.clone()),
+                    record.event,
+                );
+            }
+        }
+        Ok(starts)
+    }
+    /// The rows `select` picks, decoded with one content reader; `select`
+    /// runs its one statement in the first connection hold.
+    async fn read_rows(
+        &self,
+        session: &str,
+        select: impl Fn(&Connection) -> Result<Vec<Fetched>> + Send + Sync + 'static,
+    ) -> Result<Vec<Fetched>> {
+        let session = session.to_owned();
+        let mut reader = self.timeline.reader();
+        let rows = holds(
+            &self.timeline.db,
+            &mut reader,
+            None,
+            move |connection, reader, rows: &mut Option<Rows>| {
+                let rows = match rows {
+                    Some(rows) => rows,
+                    None => rows.insert(Rows {
+                        fetched: select(connection)?.into(),
+                        decoded: vec![],
+                    }),
+                };
+                rows.advance(connection, &session, reader)
+            },
+        )
+        .await?;
+        self.timeline.finish(reader);
+        Ok(rows.expect("a finished read fetched its rows").decoded)
     }
     pub async fn has_records(&self, id: &str) -> Result<bool> {
         let id = id.to_owned();
@@ -1317,10 +1378,11 @@ fn transaction<'a>(
                     .execute(params![session, row.hash, row.kind, row.body])
                     .map_err(error)?;
             }
+            let mut outputs = BTreeMap::new();
             batches
                 .iter()
                 .zip(&prepared.lists)
-                .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists))
+                .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists, &mut outputs))
         });
         match written {
         Ok(()) => tx.commit().map_err(|failure| {
@@ -1384,11 +1446,19 @@ pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::
 fn sql_sequence(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(error)
 }
+struct OutputRow {
+    sequence: u64,
+    kind: String,
+    bytes: usize,
+    row: Row,
+}
+
 /// Writes `batch`, with `lists` the prepared lists of each of its records.
 fn write_batch(
     connection: &Connection,
     batch: &Pending,
     lists: &[Vec<Option<ListReferences>>],
+    outputs: &mut BTreeMap<String, OutputRow>,
 ) -> Result<()> {
     #[cfg(test)]
     if let Some(fault) = batch.fault {
@@ -1404,34 +1474,45 @@ fn write_batch(
         let kind = record.event.kind.key();
         match &record.event.kind {
             EventKind::Text(data) | EventKind::Thinking(data) => {
-                let previous: Option<(u64, String, String)> = connection.prepare_cached("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1").map_err(error)?.query_row(params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
+                if !outputs.contains_key(&batch.key.branch_id) {
+                    let previous: Option<(u64, String, String)> = connection.prepare_cached("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1").map_err(error)?.query_row(params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
+                    if let Some((sequence, previous_kind, body)) = previous
+                        && previous_kind == kind
+                        && body.len() < 4096
+                    {
+                        outputs.insert(
+                            batch.key.branch_id.clone(),
+                            OutputRow {
+                                sequence,
+                                kind: previous_kind,
+                                bytes: body.len(),
+                                row: serde_json::from_str(&body).map_err(error)?,
+                            },
+                        );
+                    }
+                }
                 let output_data = wire.event["data"]
                     .as_object_mut()
                     .ok_or_else(|| error("output data is missing in event encoding"))?;
                 output_data.remove("turn_id");
                 output_data.remove("request_id");
-                if let Some((start, previous_kind, body)) = previous
-                    && previous_kind == kind
-                    && body.len() < 4096
+                if let Some(previous) = outputs.get_mut(&batch.key.branch_id)
+                    && previous.kind == kind
+                    && previous.bytes < 4096
                     && let Row::Output {
                         turn_id,
                         request_id,
                         started_at,
-                        mut records,
-                    } = serde_json::from_str(&body).map_err(error)?
-                    && turn_id == data.turn_id
-                    && request_id == data.request_id
-                    && record.event.create_at.saturating_sub(started_at) < 1000
+                        records,
+                    } = &mut previous.row
+                    && *turn_id == data.turn_id
+                    && *request_id == data.request_id
+                    && record.event.create_at.saturating_sub(*started_at) < 1000
                 {
                     records.push(wire);
-                    let body = serde_json::to_string(&Row::Output {
-                        turn_id,
-                        request_id,
-                        started_at,
-                        records,
-                    })
-                    .map_err(error)?;
-                    connection.prepare_cached("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5").map_err(error)?.execute(params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(start)?]).map_err(error)?;
+                    let body = serde_json::to_string(&previous.row).map_err(error)?;
+                    connection.prepare_cached("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5").map_err(error)?.execute(params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(previous.sequence)?]).map_err(error)?;
+                    previous.bytes = body.len();
                     continue;
                 }
                 let row = Row::Output {
@@ -1440,9 +1521,19 @@ fn write_batch(
                     started_at: record.event.create_at,
                     records: vec![wire],
                 };
-                insert_event(connection, &batch.key, sequence, kind, &row)?;
+                let bytes = insert_event(connection, &batch.key, sequence, kind, &row)?;
+                outputs.insert(
+                    batch.key.branch_id.clone(),
+                    OutputRow {
+                        sequence,
+                        kind: kind.into(),
+                        bytes,
+                        row,
+                    },
+                );
             }
             _ => {
+                outputs.remove(&batch.key.branch_id);
                 insert_event(
                     connection,
                     &batch.key,
@@ -1501,7 +1592,8 @@ fn insert_event(
     sequence: u64,
     kind: &str,
     row: &Row,
-) -> Result<()> {
+) -> Result<usize> {
+    let body = serde_json::to_string(row).map_err(error)?;
     connection
         .prepare_cached("INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)")
         .map_err(error)?
@@ -1510,14 +1602,14 @@ fn insert_event(
             key.branch_id,
             sql_sequence(sequence)?,
             kind,
-            serde_json::to_string(row).map_err(error)?,
+            body,
             match row {
                 Row::Event { record } => record.event["id"].as_str(),
                 Row::Output { .. } => None,
             }
         ])
         .map_err(error)?;
-    Ok(())
+    Ok(body.len())
 }
 /// A stored row whose records are decoded in order, across connection holds.
 struct Fetched {
@@ -1571,6 +1663,29 @@ impl Fetched {
             records: vec![],
         })
     }
+}
+/// The rows a batch read selects, in the five-column form both of them use:
+/// sequence, last sequence, kind, body and the identity the index matched.
+fn query_fetched(
+    query: &mut rusqlite::Statement<'_>,
+    parameters: impl rusqlite::Params,
+) -> Result<Vec<Fetched>> {
+    query
+        .query_map(parameters, |row| {
+            Ok((
+                read_sequence(row, 0)?,
+                read_sequence(row, 1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(error)?
+        .map(|row| {
+            let (first, last, kind, body, event_id) = row.map_err(error)?;
+            Fetched::parse(first, last, kind, &body, event_id)
+        })
+        .collect()
 }
 /// The rows of one query, decoded in sequence order with one `Reader`.
 struct Rows {
@@ -1739,50 +1854,21 @@ pub(super) async fn read_range(
     rows.expect("a finished read fetched its rows")
         .records(&range, boundary)
 }
-/// The record at `sequence` of the branch an index query finds in the
-/// first hold, or `None` when it finds none.
-async fn read_indexed(
-    db: &Arc<SqliteStorage>,
-    reader: &mut Reader,
-    session: String,
-    locate: impl Fn(&Connection) -> Result<Option<(String, u64)>> + Send + Sync + 'static,
-) -> Result<Option<StoredEvent>> {
-    let found = holds(
-        db,
-        reader,
-        None,
-        move |connection, reader, found: &mut Option<Option<(u64, Rows)>>| {
-            let found = match found {
-                Some(found) => found,
-                None => found.insert(match locate(connection)? {
-                    Some((branch_id, sequence)) => {
-                        let key = TimelineKey {
-                            session_id: session.clone(),
-                            branch_id,
-                        };
-                        Some((
-                            sequence,
-                            Rows::fetch(connection, &key, &(sequence..=sequence))?,
-                        ))
-                    }
-                    None => None,
-                }),
-            };
-            match found {
-                Some((_, rows)) => rows.advance(connection, &session, reader),
-                None => Ok(true),
-            }
-        },
-    )
-    .await?;
-    let Some((sequence, mut rows)) = found.flatten() else {
-        return Ok(None);
-    };
-    Ok(Some(
-        rows.records(&(sequence..=sequence), false)?
-            .pop()
-            .ok_or_else(|| error("indexed event is missing"))?,
-    ))
+/// The one event of a row an identity index found.
+fn indexed(row: Fetched) -> Result<StoredEvent> {
+    let Fetched {
+        mut records,
+        event_id,
+        ..
+    } = row;
+    let record = records
+        .pop()
+        .filter(|_| records.is_empty())
+        .ok_or_else(|| error("indexed event is missing"))?;
+    if event_id.as_deref() != Some(record.event.id.as_str()) {
+        return Err(error("event identity index does not match row"));
+    }
+    Ok(record)
 }
 
 impl TimelineStore for SqliteTimelineStore {

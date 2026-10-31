@@ -115,6 +115,302 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_editor_preserves_redacts_and_removes_credentials_with_source_cas() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let native = home.join("native");
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(native.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
+    for method in ["mcp.configuration", "mcp.update"] {
+        assert!(client.features.as_array().unwrap().contains(&json!(method)));
+        assert_eq!(
+            remote.rpc(method, json!({})).await["error"]["data"]["appError"],
+            "local_transport_required"
+        );
+    }
+    for (id, configuration, patch, removed) in [
+        (
+            "command",
+            json!({"command":"never-start-this-fixture","args":["private-argument-fixture"],"enabled":false,"env":{"KEEP":"preserved-fixture-value","REPLACE":"old-fixture-value","DELETE":"deleted-fixture-value"},"extension":"preserved"}),
+            json!({"env":{"REPLACE":"replacement-fixture-value","DELETE":null}}),
+            json!({"args":[],"env":{"KEEP":null,"REPLACE":null}}),
+        ),
+        (
+            "remote",
+            json!({"type":"http","url":"https://url-user-fixture:url-password-fixture@example.invalid/url-path-fixture?access_token=url-query-fixture#url-fragment-fixture","enabled":false,"headers":{"KEEP":"preserved-fixture-value","REPLACE":"old-fixture-value","DELETE":"deleted-fixture-value"},"auth":{"type":"bearer","token":"bearer-fixture-value"},"extension":"preserved"}),
+            json!({"headers":{"REPLACE":"replacement-fixture-value","DELETE":null}}),
+            json!({"headers":{"KEEP":null,"REPLACE":null},"bearer":{"action":"remove"}}),
+        ),
+    ] {
+        let before = client.rpc("mcp.catalog", json!({})).await;
+        assert_ok(&client.rpc("mcp.save", json!({"source":"user","id":id,"expectedVersion":before["result"]["userRevision"],"configuration":configuration})).await);
+        let before = client.rpc("mcp.catalog", json!({})).await;
+        let view = client
+            .rpc("mcp.configuration", json!({"source":"user","id":id}))
+            .await;
+        assert_ok(&view);
+        let inspection = client
+            .rpc("mcp.inspect", json!({"source":"user","id":id}))
+            .await;
+        assert_ok(&inspection);
+        for secret in [
+            "private-argument-fixture",
+            "preserved-fixture-value",
+            "old-fixture-value",
+            "deleted-fixture-value",
+            "bearer-fixture-value",
+            "url-user-fixture",
+            "url-password-fixture",
+            "url-path-fixture",
+            "url-query-fixture",
+            "url-fragment-fixture",
+        ] {
+            assert!(
+                !view.to_string().contains(secret),
+                "configuration must not expose stored values"
+            );
+            assert!(
+                !inspection.to_string().contains(secret),
+                "inspection must not expose stored values"
+            );
+        }
+        let request = json!({"source":"user","id":id,"expectedVersion":before["result"]["userRevision"],"patch":patch});
+        assert_ok(&client.rpc("mcp.update", request.clone()).await);
+        assert_eq!(
+            client.rpc("mcp.update", request).await["error"]["data"]["appError"],
+            "mcp_settings_conflict"
+        );
+        let db = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+        let document: String = db
+            .query_row(
+                "SELECT document FROM settings_documents WHERE source='user/mcp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let document: Value = serde_json::from_str(&document).unwrap();
+        let stored = &document["mcpServers"][id];
+        let values = if id == "command" {
+            &stored["env"]
+        } else {
+            &stored["headers"]
+        };
+        assert_eq!(values["KEEP"], "preserved-fixture-value");
+        assert_eq!(values["REPLACE"], "replacement-fixture-value");
+        assert!(values.get("DELETE").is_none());
+        assert_eq!(stored["enabled"], false);
+        assert_eq!(stored["extension"], "preserved");
+        if id == "command" {
+            assert_eq!(stored["args"], configuration["args"]);
+            assert_eq!(view["result"]["argsCount"], 1);
+            assert!(view["result"].get("args").is_none());
+        }
+        if id == "remote" {
+            assert_eq!(stored["auth"], configuration["auth"]);
+            assert_eq!(
+                stored["url"], configuration["url"],
+                "an omitted URL must preserve hidden credentials"
+            );
+            assert_eq!(view["result"]["endpoint"], "https://example.invalid");
+            assert!(view["result"].get("url").is_none());
+            let current = client.rpc("mcp.catalog", json!({})).await;
+            assert_ok(&client.rpc("mcp.update", json!({"source":"user","id":id,"expectedVersion":current["result"]["userRevision"],"patch":{"bearer":{"action":"set","token":"replacement-bearer-fixture"}}})).await);
+            let view = client
+                .rpc("mcp.configuration", json!({"source":"user","id":id}))
+                .await;
+            assert_ok(&view);
+            assert_eq!(view["result"]["authConfigured"], true);
+            assert!(!view.to_string().contains("replacement-bearer-fixture"));
+            let document: String = db
+                .query_row(
+                    "SELECT document FROM settings_documents WHERE source='user/mcp'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let document: Value = serde_json::from_str(&document).unwrap();
+            assert_eq!(
+                document["mcpServers"][id]["auth"]["token"],
+                "replacement-bearer-fixture"
+            );
+        }
+        let after = client.rpc("mcp.catalog", json!({})).await;
+        let invalid_patch = if id == "command" {
+            json!({"url":"https://example.invalid"})
+        } else {
+            json!({"command":"invalid-transport-field"})
+        };
+        let invalid = client.rpc("mcp.update", json!({"source":"user","id":id,"expectedVersion":after["result"]["userRevision"],"patch":invalid_patch})).await;
+        assert_eq!(invalid["error"]["data"]["appError"], "invalid_params");
+        assert_ok(&client.rpc("mcp.update", json!({"source":"user","id":id,"expectedVersion":after["result"]["userRevision"],"patch":removed})).await);
+        let view = client
+            .rpc("mcp.configuration", json!({"source":"user","id":id}))
+            .await;
+        assert_ok(&view);
+        let names = if id == "command" {
+            &view["result"]["envNames"]
+        } else {
+            &view["result"]["headerNames"]
+        };
+        assert_eq!(names, &json!([]));
+        if id == "command" {
+            assert_eq!(view["result"]["argsCount"], 0);
+        }
+        if id == "remote" {
+            assert_eq!(view["result"]["authConfigured"], false);
+            let document: String = db
+                .query_row(
+                    "SELECT document FROM settings_documents WHERE source='user/mcp'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let document: Value = serde_json::from_str(&document).unwrap();
+            assert!(document["mcpServers"][id].get("auth").is_none());
+        }
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_connection_tests_are_disposable_preserve_drafts_and_respect_project_authority() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("project")).unwrap();
+    let marker = home.join("probe");
+    let script = r#"import sys, json, pathlib
+marker = pathlib.Path(sys.argv[1])
+marker.with_suffix('.started').write_text('started')
+try:
+    for line in sys.stdin:
+        message = json.loads(line)
+        if 'id' not in message:
+            continue
+        if message['method'] == 'initialize':
+            result = {'protocolVersion': message['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'probe', 'version': '1'}}
+        elif len(sys.argv) > 2:
+            print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'error': {'code': -32603, 'message': 'discovery-secret-failure'}}), flush=True)
+            continue
+        else:
+            result = {'tools': [{'name': 'inspect', 'description': 'Inspect a file', 'inputSchema': {'type': 'object'}}]}
+        print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
+finally:
+    marker.with_suffix('.closed').write_text('closed')
+"#;
+    let configuration = json!({"command":"python3","args":["-u","-c",script,marker],"enabled":false,"env":{"TOKEN":"probe-secret-value"}});
+    std::fs::write(
+        home.join("project/.mcp.json"),
+        json!({"mcpServers":{"probe":configuration}}).to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
+    for method in ["mcp.inspect", "mcp.test", "mcp.auth.cancel"] {
+        assert!(client.features.as_array().unwrap().contains(&json!(method)));
+        assert_eq!(
+            remote.rpc(method, json!({})).await["error"]["data"]["appError"],
+            "local_transport_required"
+        );
+    }
+    let before = client.rpc("mcp.catalog", json!({})).await;
+    let tested = client
+        .rpc(
+            "mcp.test",
+            json!({"source":"user","id":"unsaved","configuration":configuration}),
+        )
+        .await;
+    assert_ok(&tested);
+    assert_eq!(tested["result"]["tools"][0]["name"], "inspect");
+    assert_eq!(
+        tested["result"]["tools"][0]["description"],
+        "Inspect a file"
+    );
+    assert!(
+        marker.with_extension("closed").exists(),
+        "test returns only after its child has closed"
+    );
+    assert!(!tested.to_string().contains("probe-secret-value"));
+    let after = client.rpc("mcp.catalog", json!({})).await;
+    assert_eq!(
+        before["result"]["userRevision"],
+        after["result"]["userRevision"]
+    );
+    assert!(
+        !after["result"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "unsaved")
+    );
+    assert_ok(&client.rpc("mcp.save", json!({"source":"user","id":"probe","expectedVersion":after["result"]["userRevision"],"configuration":configuration})).await);
+    let before = client.rpc("mcp.catalog", json!({})).await;
+    let inspected = client
+        .rpc("mcp.inspect", json!({"source":"user","id":"probe"}))
+        .await;
+    assert_ok(&inspected);
+    assert_eq!(inspected["result"]["enabled"], false);
+    assert_eq!(inspected["result"]["connections"], json!([]));
+    assert!(!inspected.to_string().contains("probe-secret-value"));
+    let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"command":"missing-probe-secret-command"}})).await;
+    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert!(!failed.to_string().contains("missing-probe-secret-command"));
+    std::fs::remove_file(marker.with_extension("closed")).unwrap();
+    let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"fail-discovery"]}})).await;
+    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert!(!failed.to_string().contains("discovery-secret-failure"));
+    assert!(
+        marker.with_extension("closed").exists(),
+        "failed discovery closes its spawned child before returning"
+    );
+    let after = client.rpc("mcp.catalog", json!({})).await;
+    assert_eq!(
+        before["result"]["userRevision"],
+        after["result"]["userRevision"]
+    );
+    let tested = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"env":{"TOKEN":"replacement-probe-secret"}}})).await;
+    assert_ok(&tested);
+    assert!(!tested.to_string().contains("replacement-probe-secret"));
+    std::fs::remove_file(marker.with_extension("started")).unwrap();
+    let project = json!({"source":"project","id":"probe","cwd":home.join("project")});
+    let refused = client.rpc("mcp.test", project.clone()).await;
+    assert_eq!(refused["error"]["data"]["appError"], "mcp_unavailable");
+    assert!(
+        !marker.with_extension("started").exists(),
+        "disabled project commands cannot run as tests"
+    );
+    let refused = client.rpc("mcp.test", json!({"source":"project","id":"new","cwd":home.join("project"),"configuration":configuration})).await;
+    assert_eq!(refused["error"]["data"]["appError"], "invalid_params");
+    let catalog = client
+        .rpc("mcp.catalog", json!({"cwd":home.join("project")}))
+        .await;
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"source":"project","id":"probe","cwd":home.join("project"),"expectedVersion":catalog["result"]["projectRevision"],"enabled":true})).await);
+    assert_ok(&client.rpc("mcp.test", project).await);
+    assert!(marker.with_extension("started").exists());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnect_locates_a_published_submission_without_resubmitting() {
     for ws in [false, true] {
         let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
@@ -845,11 +1141,9 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         );
     }
     let entry = |id: &str, max: u64| {
-        let caps = dim_agent_types::ModelCapabilities {
+        let caps = dim_agent_types::CatalogCapabilities {
             reasoning: true,
-            context_window: 32000,
-            max_output_tokens: max,
-            ..Default::default()
+            ..dim_agent_types::CatalogCapabilities::with_limits(32000, max)
         };
         json!({"modelId":id,"displayName":id,"status":"active","capabilities":caps,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}},
@@ -1612,12 +1906,8 @@ impl Plugin for ContextHostOwner {
         "ContextHostOwner"
     }
     async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
-        let view = ctx.plugin(ContextHostPlugin(self.host.clone()));
-        (&view).await.map_err(|error| {
-            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                format!("Context host failed: {error}").into(),
-            ))
-        })?;
+        let view =
+            dim_agent_runtime::mount_active(ctx, ContextHostPlugin(self.host.clone())).await?;
         self.views.lock().unwrap().push(view);
         Ok(())
     }

@@ -36,11 +36,11 @@ flowchart TB
 
 ## 2. rutis 能力
 
-生命周期按 crates.io rutis 0.17.1 设计；接口见[单树装配](single-tree.md#rutis)。
+生命周期按 crates.io rutis 0.19.2 设计；接口见[单树装配](single-tree.md#rutis)。
 
 | 项目 | 使用方式 |
 | --- | --- |
-| 初始化 | injects 门控、validate、apply；各作用域插件 `FiberView::watch` 全部 Active 后发布实例；Pending 不视为成功 |
+| 初始化 | injects 门控、apply；各作用域插件 `FiberView::watch` 全部 Active 后发布实例；Pending 不视为成功 |
 | 资源登记 | `ctx.effect`、同步/异步 disposer、逆序清理；每取得资源立即登记 |
 | 幂等清理 | dispose/shutdown 并发调用共享结果；等待方放弃后清理继续 |
 | 子树永久卸载 | `FiberView::shutdown()`：卸载准入同步关闭，子树内消费者先于提供者释放，回收父级、依赖索引与总线记录；root 仍用 `Ctx::shutdown()` |
@@ -48,7 +48,7 @@ flowchart TB
 | 实例隔离 | 实例键按作用域子树校验；总线按名字投递，分支通道见[单树事件](single-tree.md#事件) |
 | 严格读取 | 插件必需外部服务用 `require` / `require_as`；普通及命名作用域服务都检查声明，release 同样执行，失败保留 `ServiceReadError` |
 | 监听调用 | 卸载、重启、关闭和装载回滚等待插件正在运行的监听调用退出，至多到 rutis 关闭期限（`RUTIS_SHUTDOWN_TIMEOUT`）；不包含调用返回后的业务提交，不能代替 Timeline 与 Loop 状态的结算屏障 |
-| 诊断 | `Ctx::diagnostics()` 只读快照；debug 构建检查直接 `get_as` 绕过严格读取的未声明访问、读取代次与无实例键提供 |
+| 诊断 | `Ctx::diagnostics()` 只读快照；`Agent::check_assembly()` 在快照上报告直接 `get_as` 绕过严格读取的未声明访问、读取代次与无实例键提供，以及必需行及其子树的 Active 状态；创建不运行该检查，测试在创建后调用一次 |
 
 插件调用的 panic 由 rutis 在注册元数据、apply 构造与 poll 边界捕获并转为失败；平台捕获自身工厂构造。业务 Dispatcher 和受管操作回调的构造/poll 由对应组件的故障边界处理。
 
@@ -62,12 +62,12 @@ flowchart TB
 | 绑定 | 在父节点下载入 Session/分支作用域 Plugin；Session 服务按实例键注入 |
 | 装配 | 挂载器用已登记的生成器为本实例建立部件；rutis 按依赖状态调用 apply |
 | 取得资源 | 在下一次可取消 await 前登记清理；部分初始化失败同样释放 |
-| 等待 | 观察插件状态、取消和统一初始化期限；不以 settle 代替 Active |
+| 等待 | 观察插件状态、取消和本次打开范围内的无进展期限；一行的首次 Active、打开派发序号前进或回执完成会重置间隔；不以 settle 代替 Active。部件在 `apply` 中挂载的子插件也一样：用 `mount_active` 等到 `Active`——创建期间整次打开受上述无进展期限约束，到期时报告子插件的名字和它缺的依赖；创建之后该部件与任何缺依赖的行一样保持 `Loading`，直到子插件 `Active` 或本代被取消 |
 | 发布 | 全部 Active、订阅齐全、Loop 状态端口可解析后由 `TimelineContext::start` 启动 Dispatcher；子分支还须完成 branch/start 和首输入接纳，才出现在公共分支列表与操作入口。发布时 TimelineTree 调用 `TimelineContext::activate`，分支生命周期 `BranchLifecycle` 进入 Active；能力在 apply 中派生的后台业务等它才开始，分支装配失败时它直接进入 Closed，后台业务从不开始。分支进入 Closing 时 `BranchLifecycle::closing()` 返回，后台业务随即结束，不等所属能力卸载。Session 同理：`Agent` 在 entries 锁内裁决发布与关闭准入，登记为可用时 `SessionLifecycle` 进入 Active；Session 能力在 apply 中派生的后台业务（替换 Session 自有实例、联系外部服务）等它才开始，装配失败时它直接进入 Closed，后台业务从不开始，Session 就绪检查也就不会看到装配期间被替换或关闭的实例。装配本身需要的初始实例（如 Skills 的初始内容）在 apply 内同步创建，属于装配而非后台业务。Session 的关闭 token 一被取消（`Session::close`、`Agent::close` 或装配期间），`SessionLifecycle` 即为 Closing，`closing()` 返回，后台业务随即结束；`Agent::close` 依次关闭各 Session，但它们都在关闭开始时同时看到 Closing。初始化内部可持有句柄，不等于公开发布；发布与关闭准入在树锁内裁决，不持锁运行 before 或异步构建 |
 | 回滚 | 禁止继续装配，取消初始化，等待已开始的 apply 和所有清理；永久卸载该作用域子树 |
 | 返回错误 | 包含初始化原因、未就绪插件/服务与清理错误；不发布半成品句柄 |
 
-构建结果与清理结果分别保存：初始化拒绝或取消但回滚成功，不使 Session close 失败；普通候选失败不关闭仍可用的 Session。真实回滚失败必须进入最终关闭结果，不能按 `InactiveEffect` 等错误名称过滤。rutis 以 apply 原因在前、回滚错误在后的结构保留失败插件的装载结果，子树 shutdown 会再次报告它；runtime 按卸载前状态从 shutdown 结果中去掉已作为构建原因报告的部分，构建入口合并两者向创建调用方报告。
+构建结果与清理结果分别保存：初始化拒绝或取消但回滚成功，不使 Session close 失败；普通候选失败不关闭仍可用的 Session。真实回滚失败必须进入最终关闭结果，不能按 `InactiveEffect` 等错误名称过滤。已知限制：rutis 0.19.2 上，关闭取消一个正在构建的插件时，它的清理错误只进入 error sink，不进入 `Agent::close` 的结果（rutis#969，已报告为 [rutis#983](https://github.com/arcships/rutis/issues/983)）；`lifecycle_review` 中检查这一点的两个测试在修复前忽略。rutis 以 apply 原因在前、回滚错误在后的结构保留失败插件的装载结果，子树 shutdown 会再次报告它；runtime 按卸载前状态从 shutdown 结果中去掉已作为构建原因报告的部分，构建入口合并两者向创建调用方报告。
 
 同一缓存清理结果可能经创建返回值、树关闭及子树卸载被多次观察。runtime 在既有错误聚合入口展开聚合与框架回传包装，按共享错误对象的身份只保留一次；不同对象即使类型和文案相同也全部保留。不改变 rutis 原有诊断、清理执行次数或并发关闭的缓存结果。
 
@@ -178,7 +178,7 @@ App Server 有原生存储时，Agents 每隔宽限期 `idle_unload_after`（默
 
 “关键运行缺陷关闭 Session”是 Rust 首版策略，用于保持 v1 的故障通知与生命周期可解释；不是宣称原设计 D2/D3 已经最终定案。业务错误保留类型化枚举；跨包基础设施错误携带组件、实例、操作身份和原始错误，不解析错误字符串决定行为。
 
-rutis error sink 进入诊断与监督，不能代替业务终态，也不能作为唯一的关闭成功判断。
+rutis error sink 进入诊断与监督，不能代替业务终态，也不能作为唯一的关闭成功判断。App Server 的根把它接到 `tracing`；`dimcode` 的根用一个什么都不写的 sink，所以 rutis 的输出不会进入 TUI 的终端。
 
 ## 7. 禁止形成的等待环
 

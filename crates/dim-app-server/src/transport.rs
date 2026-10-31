@@ -694,6 +694,7 @@ async fn run_connection(
                                             vec!["session.summaries", "daemon.shutdown.completed"];
                                         if hub.config().database_path.is_some() {
                                             methods.push("session.catalog");
+                                            methods.push("session.catalog.cancel");
                                         }
                                         methods
                                     } else {
@@ -721,7 +722,7 @@ async fn run_connection(
                                     if local {
                                         features.extend(WEB_ENTRY_METHODS);
                                         features.extend(UI_HOST_METHODS);
-                                        features.push("ui.leaf");
+                                        features.push("ui.leaf.2");
                                     }
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();
@@ -730,7 +731,7 @@ async fn run_connection(
                                             .into_iter()
                                             .filter(|method| {
                                                 local
-                                                    || WEB_READABLE_METHODS
+                                                    || WEB_MANAGEMENT_METHODS
                                                         .contains(&method.as_str())
                                             })
                                             .filter(|_| trusted),

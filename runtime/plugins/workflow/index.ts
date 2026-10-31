@@ -9,7 +9,17 @@ import session from './session.ts'
 import { settings } from './settings.ts'
 import { bounded, RunStore, type Run } from './store.ts'
 
-const options = z.strictObject({ packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })) })
+/// `report_guidance` is one line: the entry names the report's last line as
+/// guidance, not part of the workflow's account, so a value with a line
+/// break is refused.
+const guidance = z.string().min(1).refine(value => !/[\r\n]/.test(value), {
+  message: 'report_guidance must be one line: the entry names the report\'s last line as guidance',
+})
+const options = z.strictObject({
+  packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })),
+  report_guidance: guidance.optional(),
+  invalid_definition_guidance: z.string().min(1).optional(),
+})
 const provides = { workflowRuns: { call: 'async' } } as const
 
 function visible(entries: DefinitionEntry[]) {
@@ -22,14 +32,17 @@ function visible(entries: DefinitionEntry[]) {
 
 export default definePlugin({
   name: 'Workflow',
-  config: z.toJSONSchema(options),
+  // A plain JSON Schema: zod's result also carries `~standard`, which
+  // rutis refuses as a Standard Schema.
+  config: JSON.parse(JSON.stringify(z.toJSONSchema(options))),
   inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods', 'partRegistry'],
   provides,
   async apply(ctx, config: z.infer<typeof options>) {
+    config = options.parse(config)
     await ctx.use<Settings>('settings').register(settings)
     const catalog = new Catalog(ctx.use<Settings>('settings'), ctx.use<WorkflowFiles>('workflowFiles'), config.packages)
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
-    const workflow = new Workflow(catalog, ctx.use<Sessions>('sessions'), new RunStore(scope))
+    const workflow = new Workflow(catalog, ctx.use<Sessions>('sessions'), new RunStore(scope), config.report_guidance)
     ctx.effect(() => workflow.close())
     try { await workflow.restore() }
     catch (error) {
@@ -70,7 +83,7 @@ export default definePlugin({
       },
     }
     ctx.provide('workflowRuns', owner)
-    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'WorkflowSession', session)
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'WorkflowSession', session(config.invalid_definition_guidance))
 
     await ctx.use<ManagementMethods>('managementMethods').register(
       'workflow',

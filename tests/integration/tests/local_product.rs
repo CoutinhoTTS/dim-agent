@@ -18,20 +18,18 @@ use dim_agent_capabilities::{
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::host::CtxHost;
 use std::{path::Path, sync::Arc, time::Duration};
 
 struct Product {
-    _root: rutis::Ctx,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<ScriptedModel>,
 }
 
 async fn product(dirs: &Dirs) -> Product {
-    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
     let mut platform = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
         executable_path: "/bin/sh".into(),
         edition: ShellEdition::Sh,
@@ -40,11 +38,6 @@ async fn product(dirs: &Dirs) -> Product {
     }))
     .unwrap();
     platform.home = dirs.home.clone();
-    root.provide_as::<HostPlatform>(Arc::new(platform)).unwrap();
-    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
-        MemorySkillSettings::default(),
-    ))))
-    .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
@@ -70,11 +63,16 @@ async fn product(dirs: &Dirs) -> Product {
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-    Product {
-        agent: builder.build_in(&root),
-        _root: root,
-        model,
-    }
+    let agent = MinimalHost::start_with(&builder, |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(platform))?;
+        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+            MemorySkillSettings::default(),
+        ))))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    Product { agent, model }
 }
 
 async fn session(product: &Product, cwd: &Path) -> Session {
@@ -130,6 +128,31 @@ async fn tool_results(session: &Session) -> Vec<ToolResult> {
         .flatten()
         .map(|call| call.result)
         .collect()
+}
+
+/// The product assembly with its default plugins is sound once its Session
+/// and a branch are live: the assembly check reports nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_product_assembly_passes_the_assembly_check() {
+    let dirs = Dirs::new();
+    let product = product(&dirs).await;
+    let session = session(&product, &dirs.dir("work")).await;
+    session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "check".into(),
+                source: BranchSource::Host {
+                    operation_id: "check".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = product.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    product.agent.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

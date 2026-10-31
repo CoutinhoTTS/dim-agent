@@ -79,7 +79,7 @@ async fn available(client: &mut Client, server: &RunningServer) -> Value {
 pub(super) async fn select_model(client: &mut Client) {
     assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000007","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{
             "modelId":"fixture", "displayName":"Fixture", "status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)
         }],"enabled":true})).await);
     assert_ok(
         &client
@@ -1116,10 +1116,9 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         json!({"id":"workflow-reader","config":{"packages":[{"id":"unlisted","root":unlisted}]}}),
     )
     .unwrap();
-    let report = loader
-        .set_overlay("workflow-package-roots", Some(vec![patch]))
-        .await
-        .unwrap();
+    let report =
+        session_typescript::fixture_layer(&loader, "workflow-package-roots", Some(vec![patch]))
+            .await;
     assert!(
         report
             .failures

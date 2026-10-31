@@ -13,20 +13,20 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
-use dim_agent_runtime::*;
+use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use dim_app_server::{
-    mcp::{self, McpChange, McpPlugin, McpService, McpSession, McpSourceState},
+    mcp::{self, McpChange, McpPlugin, McpPublication, McpService, McpSession, McpSourceState},
     settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::Ctx;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     convert::Infallible,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -46,6 +46,7 @@ struct Remote {
     release: Notify,
     revision: AtomicUsize,
     events: broadcast::Sender<String>,
+    images: AtomicBool,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -59,6 +60,7 @@ impl Remote {
             release: Notify::new(),
             revision: AtomicUsize::new(0),
             events: broadcast::channel(16).0,
+            images: AtomicBool::new(false),
         })
     }
 }
@@ -85,10 +87,14 @@ async fn rpc(
             if remote.invalid.load(Ordering::SeqCst) {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            json!({"tools":[
-                {"name":"lookup/item","description":format!("Subtract two numbers, revision {}", remote.revision.load(Ordering::SeqCst)),"inputSchema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"},"rule":{"oneOf":[{"type":"object","properties":{"kind":{"type":"string","const":"manual"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","const":"minutes"},"every":{"type":"integer","minimum":1}},"required":["kind","every"],"additionalProperties":false}]}},"required":["a","b"]}},
-                {"name":"lookup_item","description":"A distinct original name","inputSchema":{"type":"object"}}
-            ]})
+            let mut tools = vec![
+                json!({"name":"lookup/item","description":format!("Subtract two numbers, revision {}", remote.revision.load(Ordering::SeqCst)),"inputSchema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"},"rule":{"oneOf":[{"type":"object","properties":{"kind":{"type":"string","const":"manual"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","const":"minutes"},"every":{"type":"integer","minimum":1}},"required":["kind","every"],"additionalProperties":false}]}},"required":["a","b"]}}),
+                json!({"name":"lookup_item","description":"A distinct original name","inputSchema":{"type":"object"}}),
+            ];
+            if remote.images.load(Ordering::SeqCst) {
+                tools.push(json!({"name":"screenshot","description":"Capture the screen and return the PNG.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}));
+            }
+            json!({"tools":tools})
         }
         "tools/call" => {
             remote
@@ -96,10 +102,17 @@ async fn rpc(
                 .lock()
                 .unwrap()
                 .push(body["params"]["name"].as_str().unwrap().into());
-            let a = body["params"]["arguments"]["a"].as_i64().unwrap();
-            let b = body["params"]["arguments"]["b"].as_i64().unwrap();
-            let generation = headers.get("x-generation").unwrap().to_str().unwrap();
-            json!({"content":[{"type":"text","text":format!("{generation}:{}", a-b)}]})
+            if body["params"]["name"] == "screenshot" {
+                json!({"content":[
+                    {"type":"text","text":"screenshot captured"},
+                    {"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=","mimeType":"image/png"}
+                ]})
+            } else {
+                let a = body["params"]["arguments"]["a"].as_i64().unwrap();
+                let b = body["params"]["arguments"]["b"].as_i64().unwrap();
+                let generation = headers.get("x-generation").unwrap().to_str().unwrap();
+                json!({"content":[{"type":"text","text":format!("{generation}:{}", a-b)}]})
+            }
         }
         _ => panic!("unexpected method: {body}"),
     };
@@ -221,10 +234,8 @@ impl ModelDriver for Model {
 }
 
 struct Env {
-    root: Ctx,
-    publication: mcp_host::Host,
     home: PathBuf,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Model>,
     directory: Arc<McpService>,
     remote: Arc<Remote>,
@@ -232,8 +243,35 @@ struct Env {
     stop: CancellationToken,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
-#[path = "fixtures/mcp_host.rs"]
-mod mcp_host;
+/// The host plugins MCP Sessions need, as process rows of the minimal host:
+/// management methods, the MCP publication, FileStorage with `home` as root
+/// 0, Settings and Mcp.
+fn mcp_host_rows(builder: &mut AgentBuilder, home: &Path) {
+    builder.plugin(|names| {
+        Ok(Box::new(
+            dim_app_server::methods::ManagementMethodsPlugin::new(names)?,
+        ))
+    });
+    builder.plugin(|names| Ok(Box::new(McpPublication::new(names)?)));
+    let files = dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.into()]);
+    builder.plugin(move |_| Ok(Box::new(files.clone())));
+    let settings = {
+        let catalog = dim_app_server::catalog();
+        let build = Build::default();
+        SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
+    };
+    builder.plugin(move |_| Ok(Box::new(settings.clone())));
+    builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
+}
+/// Authorizes `home`'s project in the host's Settings.
+async fn authorize_project(host: &MinimalHost, home: &Path) {
+    host.root()
+        .get::<SettingsService>()
+        .unwrap()
+        .authorize_project(home.join("project"), &CancellationToken::new())
+        .await
+        .unwrap();
+}
 impl Env {
     async fn new() -> Self {
         Self::with(|_, _| {}).await
@@ -262,35 +300,6 @@ impl Env {
             json!({"mcpServers":{"docs":configuration(&url, "one")}}).to_string(),
         )
         .unwrap();
-        let root = Ctx::root().unwrap();
-        root.plugin(
-            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-                .unwrap(),
-        );
-        let (publication, _) = mcp_host::Host::start(&root).await;
-        let views = vec![
-            root.plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            ),
-            root.plugin({
-                let catalog = dim_app_server::catalog();
-                let build = Build::default();
-                SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
-            }),
-        ];
-        wait_active(
-            &root,
-            &views,
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        root.get::<SettingsService>()
-            .unwrap()
-            .authorize_project(home.join("project"), &CancellationToken::new())
-            .await
-            .unwrap();
         let model = Arc::new(Model::default());
         let mut builder = AgentBuilder::new(Default::default());
         builder
@@ -314,14 +323,12 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
-        builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
+        mcp_host_rows(&mut builder, &home);
         configure(&mut builder, &remote);
-        let agent = builder.build_in(&root);
-        agent.start().await.unwrap();
-        let directory = root.get::<McpService>().unwrap();
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        authorize_project(&agent, &home).await;
+        let directory = agent.root().get::<McpService>().unwrap();
         Self {
-            root,
-            publication,
             home,
             agent,
             model,
@@ -376,8 +383,6 @@ impl Env {
     }
     async fn close(self) {
         self.agent.close().await.unwrap();
-        self.publication.close().await;
-        self.root.shutdown().await.unwrap();
         self.stop.cancel();
         self.server.await.unwrap().unwrap();
         std::fs::remove_dir_all(self.home).unwrap();
@@ -514,6 +519,8 @@ async fn temporary_mcp_binds_calls_isolates_and_disposes_without_settings_writes
     let second = env.session(false, PermissionPreset::FullAccess).await;
     ready(&first).await;
     ready(&second).await;
+    let findings = env.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
     let settings = std::fs::read(env.home.join("mcp.json")).unwrap();
     let binding = uuid::Uuid::new_v4().to_string();
     let input =
@@ -1518,4 +1525,230 @@ async fn a_shadowed_user_server_closes_its_unused_connection() {
     .expect("the unused user connection closes");
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
     env.close().await;
+}
+
+const TOOL_IMAGE: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
+
+/// The Part 1 flow: an MCP tool returns a text block and a PNG, and the model
+/// request that follows carries the image instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() {
+    use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let requests: Arc<Mutex<Vec<Value>>> = Default::default();
+        let seen = requests.clone();
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let seen = seen.clone();
+                async move {
+                    let tool_done = body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|message| message["role"] == "tool");
+                    let offered = body["tools"].as_array().map(|tools| {
+                        tools
+                            .iter()
+                            .find_map(|tool| {
+                                tool["function"]["name"]
+                                    .as_str()
+                                    .filter(|name| name.contains("screenshot"))
+                                    .map(str::to_owned)
+                            })
+                    });
+                    let (delta, finish) = match (tool_done, offered.flatten()) {
+                        (true, _) => (json!({"content":"the screen shows one pixel"}), "stop"),
+                        (false, None) => (json!({"content":"waiting for the tool"}), "stop"),
+                        (false, Some(name)) => (
+                            json!({"tool_calls":[{"index":0,"id":"call-image","type":"function","function":{"name":name,"arguments":"{}"}}]}),
+                            "tool_calls",
+                        ),
+                    };
+                    seen.lock().unwrap().push(body);
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            json!({"id":"remote","choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+                        ),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let stop = CancellationToken::new();
+        let cancel = stop.clone();
+        let http = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(cancel.cancelled_owned())
+                .await
+                .unwrap();
+        });
+
+        let remote = Remote::new();
+        remote.images.store(true, Ordering::SeqCst);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mcp_url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let mcp_stop = CancellationToken::new();
+        let mcp_cancel = mcp_stop.clone();
+        let mcp = tokio::spawn(
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/mcp", post(rpc).get(events).delete(delete))
+                    .with_state(remote.clone()),
+            )
+            .with_graceful_shutdown(mcp_cancel.cancelled_owned())
+            .into_future(),
+        );
+
+        let home = std::env::temp_dir().join(format!("dim-mcp-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("project")).unwrap();
+        let home = home.canonicalize().unwrap();
+        std::fs::write(
+            home.join("mcp.json"),
+            json!({"mcpServers":{"docs":configuration(&mcp_url, "one")}}).to_string(),
+        )
+        .unwrap();
+        let models = Arc::new(
+            AimuxModels::from_config(
+                serde_json::from_value(json!({
+                    "defaultModel":{"providerId":"local","modelId":"test-model"},
+                    "providers":[{"id":"local","kind":"openai-compatible","baseUrl":url,
+                        "models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,
+                            "config":{"maxTokens":4096,"temperature":0}}]}]
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let mut builder = AgentBuilder::new(AgentConfig {
+            model: models.default_model().clone(),
+            ..Default::default()
+        });
+        builder
+            .session_value(Arc::new(HistoryRenderer::default()))
+            .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+            .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)));
+        defaults::tool_host(&mut builder, Arc::new(MockTools));
+        defaults::install_with_prompt_capability(
+            &mut builder,
+            dim_agent_capabilities::model_provider::ModelProviderPlugin::process,
+        );
+        builder
+            .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+            .session_value(Arc::new(
+                dim_agent_capabilities::prompt::InitialPromptConfiguration::fixed(Some(
+                    ConfigureUpdate {
+                        sources: vec![],
+                        model: Some(ModelSelection {
+                            provider_id: "local".into(),
+                            model_id: "test-model".into(),
+                            capability_snapshot: None,
+                            config: None,
+                            metadata: None,
+                        }),
+                    },
+                )),
+            ))
+            .session_value(Arc::new(dim_agent_capabilities::permission::CommandRulesHost(
+                Arc::new(dim_agent_capabilities::permission::NoCommandRules),
+            )));
+        dim_agent_aimux::install(&mut builder);
+        mcp::install(&mut builder);
+        mcp_host_rows(&mut builder, &home);
+        builder
+            .plugin(|_| Ok(Box::new(AimuxPlugin)))
+            .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        authorize_project(&agent, &home).await;
+
+        let session = agent
+            .create_session(SessionConfig {
+                cwd: home.join("project").to_string_lossy().into(),
+                tools: Some(vec![]),
+                model: ModelSelection {
+                    provider_id: "local".into(),
+                    model_id: "test-model".into(),
+                    capability_snapshot: None,
+                    config: None,
+                    metadata: None,
+                },
+                permission_policy: PermissionPolicy {
+                    preset: PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // The tool enters the request once its source is adopted.
+        ready(&session).await;
+        let mut ran = false;
+        for _ in 0..3 {
+            session
+                .submit("capture the screen".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+            let events = session.history("main", None).await.unwrap();
+            assert!(
+                matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                "{:?}",
+                events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect::<Vec<_>>()
+            );
+            ran = events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if matches!(&data.results[0].result.content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. })))));
+            if ran {
+                break;
+            }
+        }
+        assert!(ran, "the MCP image tool ran and the stored tool result keeps the image");
+        let bodies = requests.lock().unwrap().clone();
+        let next = bodies
+            .iter()
+            .rev()
+            .find(|body| {
+                body["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"))
+            })
+            .unwrap();
+        let tool = next["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap();
+        assert!(
+            tool["content"].as_str().unwrap().contains("[Image: sent in the following user message as tool output.]"),
+            "{tool}"
+        );
+        let user = next["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(user["role"], "user");
+        assert!(
+            user["content"][1]["image_url"]["url"].as_str().unwrap() == format!("data:image/png;base64,{TOOL_IMAGE}"),
+            "{user}"
+        );
+        session
+            .submit("thanks".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        assert!(
+            matches!(session.history("main", None).await.unwrap().last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+            "a later turn also completes"
+        );
+        agent.close().await.unwrap();
+        stop.cancel();
+        http.await.unwrap();
+        mcp_stop.cancel();
+        mcp.await.unwrap().unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+    })
+    .await
+    .unwrap();
 }

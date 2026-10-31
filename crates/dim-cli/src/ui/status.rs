@@ -153,11 +153,11 @@ impl Runs {
     /// permission requests answered here that the App Server has not
     /// confirmed yet. A question waits until its call's result arrives, as
     /// its prompt does.
-    pub fn status(&self, snapshot: &ViewSnapshot, answered: &HashSet<String>) -> Status {
+    pub fn status(&self, snapshot: &ViewSnapshot, answered: &HashSet<(String, String)>) -> Status {
         if let Some(approval) = snapshot
             .approvals
             .iter()
-            .find(|a| !answered.contains(&a.request_id))
+            .find(|a| !answered.contains(&(a.branch_id.clone(), a.request_id.clone())))
         {
             return Status::Permission(approval.tool_name.clone());
         }
@@ -279,7 +279,7 @@ mod tests {
     /// A Session as a snapshot shows it.
     struct Session {
         snapshot: ViewSnapshot,
-        answered: HashSet<String>,
+        answered: HashSet<(String, String)>,
         runs: Runs,
     }
 
@@ -319,6 +319,7 @@ mod tests {
 
         fn approval(&mut self, request_id: &str, tool: &str) -> Status {
             self.snapshot.approvals.push(ApprovalView {
+                member: None,
                 request_id: request_id.into(),
                 branch_id: "main".into(),
                 reason: String::new(),
@@ -353,9 +354,9 @@ mod tests {
             session.question("question"),
             Status::Permission("exec".into())
         );
-        session.answered.insert("approval".into());
+        session.answered.insert(("main".into(), "approval".into()));
         assert_eq!(session.status(), Status::Question);
-        session.answered.insert("question".into());
+        session.answered.insert(("main".into(), "question".into()));
         assert_eq!(session.status(), Status::Question);
         session.snapshot.approvals.clear();
         session.snapshot.questions.clear();

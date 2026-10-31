@@ -22,8 +22,10 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `hostPlatform` | process | HostPlatform | Rust-only | — |
 | `listenAddresses` | process | Transport | Rust-only | — |
 | `loader` | process | rutis-loader | Rust-only | — |
+| `loaderService` | process | rutis-loader | yes | — |
+| `localId` | process | root | yes | — |
 | `managedProviders` | process | ManagedProviders | Rust-only | — |
-| `managementMethods` | process | ManagementMethods | yes | `register` async |
+| `managementMethods` | process | ManagementMethods | Rust-only | — |
 | `mcpAuth` | process | Mcp | Rust-only | — |
 | `mcpService` | process | Mcp | Rust-only | — |
 | `modelHost` | process | Aimux | Rust-only | — |
@@ -31,6 +33,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
 | `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
+| `pluginMounter` | process | rutis-loader | yes | — |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
 | `publication` | process | McpPublication | Rust-only | — |
@@ -48,6 +51,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `agentConfig` | session | SessionScope | Rust-only | — |
+| `collaborationConfig` | session | SessionScope | Rust-only | — |
 | `collaborationSession` | session | CollaborationSession | Rust-only | — |
 | `commandRulesHost` | session | CommandRules | Rust-only | — |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | Rust-only | — |
@@ -67,6 +71,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `sessionLoader` | session | SessionScope | Rust-only | — |
 | `sessionMethods` | session | SessionMethods | yes | `register` async |
 | `sessionSkills` | session | Skills | Rust-only | — |
+| `skillsConfig` | session | SessionScope | Rust-only | — |
 | `timelineFactory` | session | SessionScope | Rust-only | — |
 | `timelineStore` | session | SessionScope | Rust-only | — |
 | `timelineTree` | session | TimelineTree | Rust-only | — |

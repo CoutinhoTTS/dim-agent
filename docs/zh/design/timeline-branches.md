@@ -363,31 +363,30 @@ WorkspaceTools 不变。
 上面的文本是初版，归 TimelineTree 插件所有。下面这些事项属于面向模型的提示词层：
 
 - `main` 怎样给一条线写说明，以及协调对 `main` 意味着什么：分配区域、回应 steer、结束自己的等待、不重做线上的工作。
-- **Goal 的措辞（归 Goal）。** 下面这些文本把子分支当作被委派的工作，与 §1 矛盾：
-  - 目标文本 "If you are working on a delegated sub-task started from branch X, treat this goal as background and do not call goal_update."（`runtime/plugins/goal/goal.ts:98`）；
-  - 续跑文本（`goal.ts:131`）；
-  - [Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标) 和 Goal §5 子分支那一行里的 "delegated work"。
-
-  替换为 "on another line of this Session"。本设计不改这些文本，它们归 Goal。
+- **Goal 的措辞（归 Goal）。** 一条线不是被委派的工作（§1）：目标块的句子、续跑块的句子，以及 [Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标) 和 Goal §5 子分支那一行的陈述。这些文本见 [Goal §A.5](plugins/Goal.md#a5-模型可见文本)；任一句的改动都是一次策略改动，按 [Goal §A.5.2](plugins/Goal.md#a52-评估) 判定。这些文本归 Goal。
 
 回答这些事项的需求见 [面向模型的提示词](model-prompts.md)。
 
 ### 12.3 评估场景
 
-这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：七个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
 
-| 场景 | 关注什么 |
-| --- | --- |
-| 线把自己当成 main | 它开线、把名册当成自己的，或去协调其他线 |
-| 重复劳动 | `main` 重做一条线正在做的事，或者两条线做同一件事 |
-| 过时的认识 | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
-| 刷屏 | append 或 steer 消息重复接收方已经知道的内容 |
-| 过度拆分 | 为很短或必须按顺序做的步骤开线 |
-| 不结束 | 一条线已经做完，却不调用 `end` |
-| 兄弟中转 | 用 `main` 在本该合成一条线的几条线之间传话 |
-| 压缩后的身份 | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
-| 来回空转 | 不推进工作的 steer 往复 |
-| 问用户 | 该问用户时，线直接问用户，而不是绕道 `main` |
+`identity-after-compaction` 沿用 `redone-work` 的消息和 workspace，`flooding` 与 `never-ending` 共用同一个 workspace：这两对保持完全相同，改动其中一份而不同步另一份时，读取两个提交目录的无模型测试会失败。
+
+| 场景 | 场景目录 | 关注什么 |
+| --- | --- | --- |
+| 线把自己当成 main | — | 它开线、把名册当成自己的，或去协调其他线 |
+| 重复劳动 | `timeline-branches/redone-work` | `main` 重做一条线正在做的事，或者两条线做同一件事 |
+| 过时的认识 | — | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
+| 刷屏 | `timeline-branches/flooding` | append 或 steer 消息重复接收方已经知道的内容 |
+| 过度拆分 | `timeline-branches/over-splitting` | 为很短或必须按顺序做的步骤开线 |
+| 不结束 | `timeline-branches/never-ending` | 一条线已经做完，却不调用 `end` |
+| 兄弟中转 | `timeline-branches/sibling-relay` | 用 `main` 在本该合成一条线的几条线之间传话 |
+| 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
+| 来回空转 | `timeline-branches/ping-pong` | 不推进工作的 steer 往复 |
+| 问用户 | `timeline-branches/asking-the-user` | 该问用户时，线直接问用户，而不是绕道 `main` |
+
+场景目录为 `—` 的一行在这个场景集里没有对应场景。
 
 ### 12.4 文本及其类别
 
@@ -405,7 +404,7 @@ WorkspaceTools 不变。
 
 **策略。**
 
-- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则，以及 `message` 关于选模式的规则。它是分支唯一有工厂配置成员的策略文本：[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它部分覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域。回应 steer、结束 `main` 自己的等待、不重做线上的工作仍未覆盖（[#636](https://github.com/arcships/dim/issues/636)）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them." 也是 `main` 的协调文字；它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
+- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则，以及 `message` 关于选模式的规则。[`BranchToolConfig.description`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这段描述，不替换别的。它部分覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配它的文件或区域。回应 steer、结束 `main` 自己的等待、不重做线上的工作仍未覆盖（[#636](https://github.com/arcships/dim/issues/636)）。名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them." 也是 `main` 的协调文字；[`BranchToolConfig.roster_closing`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 只替换这句，不替换别的。
 - **线的工作规则。** "How you work with P:" 的五条要点——目的、消息（含 "Do not repeat what P already knows"）、工作区、用户和结束——除了点明机制的从句："You cannot open lines"、动作名与模式名，以及 "the file was modified after it was last read"（`edit` 与 `write` 报告的那次失败）是协议，见上。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
 - **通知的指引。** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." 与 "read it if you need what it did."。它还没有工厂配置成员，在第一次为它评估候选的改动里获得成员。
 

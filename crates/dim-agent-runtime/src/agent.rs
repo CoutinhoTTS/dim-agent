@@ -1,8 +1,8 @@
 use crate::*;
 use crate::{
     assembly::{
-        AgentHost, Assembly, BuiltSession, Extension, Owned, Placement, SessionInitialization,
-        build_session, own_placement, release, scope_diagnostics, shutdown_scope,
+        Assembly, BuiltSession, Extension, Placement, SessionInitialization, build_session,
+        check_scope, scope_diagnostics, shutdown_scope,
     },
     core::TailLock,
     lifecycle::{CloseOnce, guarded},
@@ -22,9 +22,8 @@ pub struct Agent(Arc<AgentInner>);
 struct AgentInner {
     builder: AgentBuilder,
     assembly: Assembly,
-    host: AgentHost,
-    /// Where Sessions are created, settled with the first Session.
-    placed: tokio::sync::OnceCell<Placed>,
+    /// The host's loader and the Agent instance Sessions go in.
+    placement: Placement,
     /// Captured at admission, including while placement is still building.
     handle: std::sync::OnceLock<tokio::runtime::Handle>,
     entries: Mutex<BTreeMap<String, Entry>>,
@@ -35,23 +34,16 @@ enum Entry {
     Building(watch::Receiver<Option<Result<Session>>>),
     Ready(Session),
 }
-/// The loader and Agent instance Sessions go in, and what the Agent created
-/// for them itself.
-struct Placed {
-    placement: Placement,
-    owned: Mutex<Option<Owned>>,
-}
 enum SessionStart {
     Create,
     Prepared(BoxFuture<'static, Result<()>>),
     Restore,
 }
 impl Agent {
-    pub(crate) fn new(builder: AgentBuilder, assembly: Assembly, host: AgentHost) -> Self {
+    pub(crate) fn new(builder: AgentBuilder, assembly: Assembly, placement: Placement) -> Self {
         Self(Arc::new(AgentInner {
             builder,
-            host,
-            placed: tokio::sync::OnceCell::new(),
+            placement,
             handle: std::sync::OnceLock::new(),
             assembly,
             entries: Mutex::new(BTreeMap::new()),
@@ -135,46 +127,6 @@ impl Agent {
             .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
         self.create(id, config, SessionStart::Restore, None).await
     }
-    /// Places an Agent hosting itself now, with its plugins, rather than
-    /// with its first Session: their process services are then there before
-    /// any Session is. An Agent a host placed ([`AgentBuilder::build_at`])
-    /// is placed already.
-    pub async fn start(&self) -> Result<()> {
-        if self.0.closing.is_cancelled() {
-            return Err(AgentError::Closed("agent".into()));
-        }
-        self.placement().await.map(|_| ())
-    }
-    /// The loader and Agent instance Sessions go in; an Agent hosting itself
-    /// creates them with its first Session, or when it starts.
-    async fn placement(&self) -> Result<&Placed> {
-        self.0
-            .placed
-            .get_or_try_init(|| async {
-                let host = match &self.0.host {
-                    AgentHost::Placed(placement) => {
-                        return Ok(Placed {
-                            placement: placement.clone(),
-                            owned: Mutex::new(None),
-                        });
-                    }
-                    AgentHost::Private => None,
-                    AgentHost::Within(host) => Some(host),
-                };
-                let (placement, owned) = own_placement(
-                    &self.0.builder,
-                    host,
-                    self.0.assembly.startup_timeout,
-                    &self.0.closing,
-                )
-                .await?;
-                Ok(Placed {
-                    placement,
-                    owned: Mutex::new(Some(owned)),
-                })
-            })
-            .await
-    }
     async fn create(
         &self,
         id: String,
@@ -204,7 +156,7 @@ impl Agent {
         tokio::spawn(async move {
             let mut created = false;
             let mut result = async {
-                let placement = owner.placement().await?.placement.clone();
+                let placement = owner.0.placement.clone();
                 let initialization = match start {
                     SessionStart::Create => {
                         assembly.store.create_session(&id, &config).await?;
@@ -280,10 +232,93 @@ impl Agent {
     }
     /// Snapshot of the tree hosting this Agent's Session subtrees.
     pub fn diagnostics(&self) -> Option<rutis::host::diagnostics::RuntimeDiagnostics> {
-        self.0
-            .placed
-            .get()
-            .map(|placed| placed.placement.anchor.diagnostics())
+        Some(self.0.placement.anchor.diagnostics())
+    }
+    /// Checks how the live assembly is written, over one diagnostics snapshot:
+    /// for every Session and branch this Agent hosts, that its profile's
+    /// required rows and the plugins below them are `Active`, that no plugin
+    /// reads an external service it does not declare, that every declared read
+    /// is among the reader's resolved dependencies, and that no scoped service
+    /// is provided without an instance key. Each plugin is checked once, by the
+    /// innermost scope that contains it, and names the Session it belongs to
+    /// and, for a branch plugin, the branch. It reports every finding rather
+    /// than the first, and nothing for a sound assembly. The loader's rows are
+    /// read once per call; each scope still walks one whole snapshot, so the
+    /// cost grows with the square of the live Sessions.
+    ///
+    /// Creation does not run this. A test that wants the check creates the
+    /// Session, branch or scope it wants covered, then calls this once; a
+    /// plugin's own tests do the same for the assembly they build.
+    ///
+    /// A check that could not inspect a Session is an `Err`, never an empty
+    /// list: a Session whose loaded assembly is already gone. `Ok` with no
+    /// findings means every live scope was inspected and is sound.
+    pub fn check_assembly(&self) -> Result<Vec<AssemblyFinding>> {
+        let placement = &self.0.placement;
+        let snapshot = placement.anchor.diagnostics();
+        // Every Session of an Agent is placed by the same loader, so one pass
+        // over its rows covers all of them.
+        let rows = scope_rows(&placement.loader);
+        let parents: std::collections::HashMap<_, _> = snapshot
+            .plugins
+            .iter()
+            .map(|plugin| (plugin.id, plugin.parent))
+            .collect();
+        let mut findings = Vec::new();
+        for session in self.sessions() {
+            let owner = &session.0.owner;
+            let loaded = owner.loaded().map_err(|_| {
+                AgentError::fault(
+                    "assembly check",
+                    format!("Session {} has no loaded assembly", session.id()),
+                )
+            })?;
+            let branches: Vec<_> = session
+                .0
+                .tree
+                .list()
+                .into_iter()
+                .filter_map(|info| session.0.tree.get(&info.id))
+                .collect();
+            /// One scope of a Session: its view, the loader row ids its
+            /// profile requires, the required parts it mounted and the branch.
+            type Scope<'a> = (
+                &'a FiberView,
+                &'a [String],
+                &'a [FiberView],
+                Option<&'a str>,
+            );
+            let mut scopes: Vec<Scope> =
+                vec![(&session.0.view, &loaded.required[..], &loaded.parts, None)];
+            for branch in &branches {
+                scopes.push((
+                    branch.0.scope_view(),
+                    branch.0.required_rows(),
+                    branch.0.required_parts(),
+                    Some(branch.id()),
+                ));
+            }
+            for (view, required, parts, branch) in scopes.iter().copied() {
+                let nested: Vec<FiberView> = scopes
+                    .iter()
+                    .filter(|(other, _, _, _)| {
+                        other.id != view.id && below(&parents, other.id, view.id)
+                    })
+                    .map(|(other, _, _, _)| (*other).clone())
+                    .collect();
+                check_scope(
+                    &snapshot,
+                    &rows,
+                    view,
+                    required,
+                    parts,
+                    &nested,
+                    (session.id(), branch),
+                    &mut findings,
+                );
+            }
+        }
+        Ok(findings)
     }
     pub fn sessions(&self) -> Vec<Session> {
         self.0
@@ -317,8 +352,10 @@ impl Agent {
                 Entry::Ready(session) => sessions.push(session.clone()),
             }
         }
+        // The close keeps the Agent alive until its Sessions are closed.
         let owner = self.clone();
         self.0.close.start(handle, async move {
+            let _owner = owner;
             let mut errors = vec![];
             for mut result in pending {
                 while result.borrow().is_none() {
@@ -341,16 +378,11 @@ impl Agent {
                     errors.push(error);
                 }
             }
-            let owned = owner
-                .0
-                .placed
-                .get()
-                .and_then(|placed| placed.owned.lock().unwrap().take());
-            if let Some(owned) = owned
-                && let Err(error) = release(owned).await
-            {
-                errors.push(error);
-            }
+            // A creation abandoned before its instance was found still
+            // shuts that instance down; the close ends after it.
+            let abandoned = &_owner.0.assembly.abandoned;
+            abandoned.close();
+            abandoned.wait().await;
             AgentError::aggregate(errors)
         })
     }
@@ -780,25 +812,27 @@ fn extension<V: Send + Sync + 'static>(group: impl Into<String>, value: V) -> Ex
 impl Drop for AgentInner {
     fn drop(&mut self) {
         self.closing.cancel();
-        let closing: Vec<_> = self
-            .entries
-            .get_mut()
-            .unwrap()
-            .values()
-            .filter_map(|entry| match entry {
-                Entry::Ready(session) => Some(session.close()),
-                Entry::Building(_) => None,
-            })
-            .collect();
-        if let Some(placed) = self.placed.get()
-            && let Some(owned) = placed.owned.lock().unwrap().take()
-        {
-            placed.placement.anchor.handle().clone().spawn(async move {
-                for close in closing {
-                    let _ = close.await;
-                }
-                let _ = release(owned).await;
-            });
+        // A Session's close starts when it is called; nothing waits for it
+        // here.
+        for entry in self.entries.get_mut().unwrap().values() {
+            if let Entry::Ready(session) = entry {
+                drop(session.close());
+            }
         }
     }
+}
+
+/// Whether `ancestor` is above `id` in the snapshot's parent links.
+fn below(
+    parents: &std::collections::HashMap<rutis::host::PluginId, Option<rutis::host::PluginId>>,
+    mut id: rutis::host::PluginId,
+    ancestor: rutis::host::PluginId,
+) -> bool {
+    while let Some(Some(parent)) = parents.get(&id) {
+        if *parent == ancestor {
+            return true;
+        }
+        id = *parent;
+    }
+    false
 }

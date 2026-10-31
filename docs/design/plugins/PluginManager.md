@@ -157,14 +157,14 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 
 | State | Owner | Read through |
 | --- | --- | --- |
-| Which rows exist and their `EntryStatus` | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waiting_for`; shown as in A.1 |
+| Which rows exist and their `EntryStatus` | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waits`; shown as in A.1 |
 | Which built-in rutis plugins exist | the App Server's assembly | rows of the `assembly` layer in `Loader::entries()`; the row id is the plugin's name |
 | Skills, MCP servers, hooks registered from a plugin | SkillsCatalog, Mcp, Hooks | the owner's own methods |
 | A plugin's business configuration | the plugin's Settings sources | Settings |
 
 ### 2.5 Runtimes
 
-Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is [RuntimeManager](RuntimeManager.md) ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there shows rutis' status and reason in `plugin.list`. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
+Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is [RuntimeManager](RuntimeManager.md) ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there is `pending` in `plugin.list`, waiting for the runtime's connection row (`session-node` or `py`). How far the runtime itself got (acquiring, failed, starting, down) is `runtime.list`'s. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
 
 A TypeScript row is named by its entry file's absolute path. A Python plugin is imported through a link PluginManager keeps: `<home>/plugins/.python/<package>` points to the plugin directory, where `<package>` is its id (a default plugin's name) with `-` as `_`; its row is named `py:<package>.<entry module>`, and the plugin uses relative imports inside its package. PluginManager creates the link when the plugin is turned on, points it at the new directory after an update, and removes it when the plugin is removed. The Python runtime imports from `<home>/plugins/.python/` (#476).
 
@@ -216,7 +216,7 @@ When a content owner itself is turned on (Hooks, for example), PluginManager reg
 `plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
 
 1. Read the manifest again. If its name changed, refuse (`name_changed`); the user installs it again under the new name.
-2. Code: `Loader::reload("plugin:<name>")`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
+2. Code: `Loader::reload("plugin:<name>")`, and nothing else: there is no resolver cache to clear, since the runtime describes the module again at every resolution. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
 3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
 4. Update `kinds` in `plugins.json` if they changed.
 
@@ -241,12 +241,12 @@ An owner validates what it is given. Content it refuses (an MCP document that fa
 
 - PluginManager changes `plugins.json` in one step on its in-memory table, then writes the file, then reconciles the layer derived from it and gives owners their commands. A second operation on the same id or name sees the first one's change (`plugin_exists`, or it acts on the new state). Deriving the layer and reconciling it run one at a time, each from the record as it is then, so the layer reconciled last is the latest record's. rutis-loader runs its own operations one at a time.
 - A row that rutis or a command that an owner refuses leaves the configuration as written; the item shows the refusal in `plugin.list` (for example, the new plugin failed because another plugin of a different name provides the same service).
-- `instanceNames`: rutis needs the names a plugin's parts provide in Sessions and branches in the catalog before the runtime starts ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Installing, switching or reloading to a plugin whose `instanceNames` are not in the running catalog records the change and replies `restart_required`; the row is created at the next start. Plugins that only register tools, methods or prompt sources do not have this limit.
+- `instanceNames`: rutis needs the names a plugin's parts provide in Sessions and branches in the catalog before the runtime starts ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Installing, switching or reloading to a plugin whose `instanceNames` are not in the running catalog records the change and replies `restartRequired`; the row is created at the next start. Plugins that only register tools, methods or prompt sources do not have this limit.
 - A reload or replacement in use: the old generation unloads, rutis cancels its running calls, and in-flight turns using it may fail ([ADR 002](../../adr/002-plugin-scope.md) consequences). This is documented, not prevented.
 
 ## 5. Context mapping
 
-PluginManager adds nothing to model context. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). Results of the `plugin` tool say what changed, the status, and `restart_required` when it applies.
+PluginManager adds no text of its own to model context beyond the `plugin` tool. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). The tool's texts are marked by [model-facing prompts §4](../model-prompts.md#4-protocol-and-policy). The declaration's schema is protocol, and so is "Manage Dim plugins.", which states the tool's reach; the one-line command list it carries, with the command names and each command's argument grammar, is protocol too, because the tool parses them exactly. "Run `help <command>` for a command's details." is policy guidance, with `help <command>` protocol because it names the command to call; that sentence has no factory member yet, and gets one in the change that first evaluates a candidate for it. In a usage text the `Usage:` line is protocol, and the sentences after it, and in `help`, that say what a command does or does not touch are policy. A malformed command's error result carries the command list or that command's usage, and a refused call's error carries its code (A.2) — both protocol. A completed call's result says what changed, the status, and `restartRequired` when it applies; that is protocol too, because the model decides its next step by it.
 
 ## 6. Interfaces (summary)
 
@@ -300,7 +300,7 @@ PluginManager is not a Capability: it has no Timeline state, writes no Timeline 
 
 ## 9. Requirements raised to mechanism owners
 
-None to rutis: every loader operation used exists in rutis-loader 0.17.1.
+None to rutis: every loader operation used exists in rutis-loader 0.19.1.
 
 **R1. Settings: sources registered at run time (M1).**
 
@@ -356,11 +356,24 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
+`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor`, the services of `Loader::waits`; a row waiting for its runtime names the runtime's connection row, `session-node` or `py`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
+
+The client RPC boundary omits Git source userinfo, query and fragment, preserving
+the repository path, ref and commit. The persisted source is unchanged and remains
+available to update. Only catalog candidate sources, top-level status errors and
+direct content-refusal errors are projected; plugin-owned settings are not traversed.
+Status and content-refusal errors carry a generic message at this boundary, including
+in mutation replies: arbitrary Git, loader, manifest and content-error text can contain
+credentials.
 
 ### A.2 Errors
 
 `plugin_exists`, `plugin_not_found`, `invalid_id`, `path_outside_plugins` (both before any file system change, §7), `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
+
+The codes are stable across clients. Client RPC errors identify their code with a
+stable, actionable description without including the owner's raw diagnostic message
+or echoing request fields; the descriptions above identify the owner's error, not a
+permission to publish secrets.
 
 ## Appendix B. Conflict table
 
@@ -373,7 +386,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | Content owner absent at install | That kind is skipped and reported; registered when PluginManager turns the owner on | PluginManager, owner |
 | Content owner reloads | It restores its own registered content | owner |
 | Plugin removed while its owner is off | Its content is withdrawn when the owner is turned on or at the next start | PluginManager |
-| `instanceNames` not in the running catalog | Configuration recorded, `restart_required`; row created at next start | PluginManager |
+| `instanceNames` not in the running catalog | Configuration recorded, `restartRequired`; row created at next start | PluginManager |
 | Process stops during a Git install | Staging directory deleted at next start; `plugins.json` was not written | PluginManager |
 | Process stops after `plugins.json` was written, before the loader or owner command | Next start builds rows from `plugins.json` and brings the owners to it | PluginManager startup |
 

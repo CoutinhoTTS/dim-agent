@@ -8,14 +8,8 @@ use dim_agent_runtime::Session;
 use dim_agent_types::AgentEvent;
 use rutis::Ctx;
 use rutis::Disposer;
-use rutis::host::CtxHost;
 use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::mpsc;
-
-/// A root the test owns, so it can listen on the Agent's rutis bus.
-pub fn root() -> Ctx {
-    Ctx::root_with(tokio::runtime::Handle::current())
-}
 
 pub struct Events {
     history: VecDeque<Arc<AgentEvent>>,

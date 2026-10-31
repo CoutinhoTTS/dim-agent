@@ -3,6 +3,9 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+/// The `dim-workflow` entry (Workflow §5.2), byte for byte.
+const WORKFLOW_ENTRY: &str = r#"<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report's body gives the run's outcome, each stage's state and a bounded preview of the stages' own last-step results: the workflow's account of the run, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with."#;
+
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
     config.rows = vec![session_typescript::manifest_row("workflow")];
@@ -170,7 +173,7 @@ async fn report_restart(kill_runtime: bool) {
         kill_node(before["result"]["pid"].as_u64().unwrap()).await;
     }
     let name = if kill_runtime {
-        "SessionNodeRuntime"
+        "session-node"
     } else {
         "workflow"
     };
@@ -341,7 +344,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     } else {
         kill_node(before["result"]["pid"].as_u64().unwrap()).await;
         drop(release);
-        loader.restart("SessionNodeRuntime").await.unwrap();
+        loader.restart("session-node").await.unwrap();
     }
     ready(&mut client).await;
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -611,6 +614,10 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
                 dim_agent_types::PermissionPreset::ReadOnly
             );
             assert!(stage["result_text"].as_str().unwrap().contains("file.ts"));
+            // The stage's request carries the stage marker and, from the same
+            // Session part, the dim-workflow entry.
+            let system = super::reload::last_system(&session, "main").await;
+            assert!(system.contains(WORKFLOW_ENTRY), "{system}");
         }
         tokio::time::timeout(Duration::from_secs(5), async {
             while stored(&home)["runs"][0]["report"]["state"] != "delivered" {
@@ -649,6 +656,25 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
             reports, 1,
             "one published report in the actual starter Timeline"
         );
+        // The request that consumes the report carries its entry.
+        assert_ok(
+            &client
+                .rpc(
+                    "session.submit",
+                    json!({"sessionId":starter,"branchId":"main","text":"Check the workflow result"}),
+                )
+                .await,
+        );
+        assert_ok(
+            &client
+                .rpc(
+                    "session.idle",
+                    json!({"sessionId":starter,"branchId":"main"}),
+                )
+                .await,
+        );
+        let system = super::reload::last_system(&agent.get_session(starter).unwrap(), "main").await;
+        assert!(system.contains(WORKFLOW_ENTRY), "{system}");
         server.shutdown();
         server.join().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();
@@ -1464,7 +1490,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             assert_ok(&probe);
             kill_node(probe["result"]["pid"].as_u64().unwrap()).await;
             drop(release);
-            loader.restart("SessionNodeRuntime").await.unwrap();
+            loader.restart("session-node").await.unwrap();
             ready(&mut client).await;
             let run = settled(&mut client, id).await;
             assert_eq!(run["state"], "interrupted", "{run}");
@@ -1922,15 +1948,14 @@ async fn native_retention(fault: &str) {
     assert_ok(&fork);
     let fork = fork["result"]["sessionId"].as_str().unwrap().to_owned();
 
-    loader
-        .set_overlay(
-            "retention-fixture",
-            Some(vec![
-                serde_json::from_value(json!({"id":"workflow","disabled":true})).unwrap(),
-            ]),
-        )
-        .await
-        .unwrap();
+    session_typescript::fixture_layer(
+        &loader,
+        "retention-fixture",
+        Some(vec![
+            serde_json::from_value(json!({"id":"workflow","disabled":true})).unwrap(),
+        ]),
+    )
+    .await;
     assert!(loader.get("workflow").unwrap().view.is_none());
     let runs: Vec<_> = (0..102)
         .map(|index| {
@@ -1961,7 +1986,7 @@ async fn native_retention(fault: &str) {
             .kind(),
         std::io::ErrorKind::PermissionDenied
     );
-    loader.set_overlay("retention-fixture", None).await.unwrap();
+    session_typescript::fixture_layer(&loader, "retention-fixture", None).await;
     ready(&mut client).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -2060,7 +2085,7 @@ async fn native_retention(fault: &str) {
             "failed atomic replacement retains the last ownership record"
         );
         kill_node(observed["result"]["pid"].as_u64().unwrap()).await;
-        loader.restart("SessionNodeRuntime").await.unwrap();
+        loader.restart("session-node").await.unwrap();
         ready(&mut client).await;
     } else if fault == "read" {
         let mode = std::fs::metadata(&path).unwrap().permissions();
@@ -2335,4 +2360,145 @@ async fn node_workflow_retention_recovers_native_deletion_before_failed_record_r
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_workflow_retention_retries_failed_native_store_reads_without_deleting_sessions() {
     native_retention("read").await;
+}
+
+/// The report's guidance line and the `invalid_definition` recovery hint
+/// as the factory configuration: a candidate replaces each built-in text,
+/// and unset keeps the built-ins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_workflow_factory_texts_reach_the_report_and_the_refusal() {
+    const GUIDANCE: &str = "Ask workflow status with {run_id} later.";
+    const RECOVERY: &str = "Open list to read the issues.";
+    for configured in [true, false] {
+        let home =
+            std::env::temp_dir().join(format!("dim-workflow-factory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("workflow")).unwrap();
+        let home: PathBuf = home.canonicalize().unwrap();
+        let mut parts = rows();
+        if configured {
+            parts.rows[0]["config"] = json!({
+                "packages": [],
+                "report_guidance": GUIDANCE,
+                "invalid_definition_guidance": RECOVERY,
+            });
+        }
+        let mut config = ServerConfig {
+            product_home: Some(home.clone()),
+            database_path: Some(home.join("native.sqlite")),
+            session_typescript: Some(parts),
+            ..Default::default()
+        };
+        config.session_defaults.tools = Some(vec!["echo".into(), "wait".into(), "workflow".into()]);
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":home,"tools":["workflow","wait","echo"],
+                    "permissionPolicy":{"preset":"full-access"}}),
+            )
+            .await;
+        assert_ok(&created);
+        let starter = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        let starter_session = agent.get_session(&starter).unwrap();
+        ready(&mut client).await;
+
+        // Two user definitions: one the catalog keeps but reports issues for,
+        // and one that runs and reports to this branch.
+        let settings = client
+            .rpc("settings.read", json!({"source":"workflow","scope":"user"}))
+            .await;
+        assert_ok(&settings);
+        let mut source = settings["result"]["document"].clone();
+        source["definitions"] = json!({
+            "invalid": {"schema":"dim.workflow/v1","name":"invalid","description":"Broken reference",
+                "steps":[{"stage":{"id":"only","prompt":"{{stages.missing.result}}"}}]},
+            "guided": {"schema":"dim.workflow/v1","name":"guided","description":"One stage",
+                "steps":[{"stage":{"id":"only","prompt":"Say hi"}}]},
+        });
+        assert_ok(
+            &client
+                .rpc(
+                    "settings.update",
+                    json!({"source":"workflow","scope":"user",
+                        "expectedRevision":settings["result"]["revision"],"document":source}),
+                )
+                .await,
+        );
+
+        // The refusal the tool carries.
+        let refused = tool_result(
+            &mut client,
+            &starter_session,
+            json!({"action":"start","name":"invalid"}),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        let dim_agent_types::ToolContent::Text(text) = refused.content else {
+            panic!("the refusal is text")
+        };
+        if configured {
+            assert_eq!(text, format!("workflow: invalid_definition. {RECOVERY}"));
+        } else {
+            assert_eq!(
+                text,
+                "workflow: invalid_definition. Use list to inspect the definition issues."
+            );
+        }
+
+        // The report the tool's start sends to this branch.
+        let started = tool_result(
+            &mut client,
+            &starter_session,
+            json!({"action":"start","name":"guided"}),
+        )
+        .await;
+        assert_ne!(started.is_error, Some(true), "{started:?}");
+        let dim_agent_types::ToolContent::Text(content) = started.content else {
+            panic!("Workflow returns text")
+        };
+        let run_id = content.split('\n').next().unwrap();
+        let run_id: Value = serde_json::from_str(run_id).unwrap();
+        let run_id = run_id["run_id"].as_str().unwrap().to_owned();
+        let run = settled(&mut client, &json!(run_id)).await;
+        assert_eq!(run["state"], "completed", "{run}");
+        let text = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let history = starter_session.local("main", ..).await.unwrap();
+                if let Some(text) = history.iter().find_map(|event| match &event.kind {
+                    EventKind::InputMessage(data) => data.blocks.first().and_then(
+                        |dim_agent_types::InputBlock::Raw { text, .. }| {
+                            text.contains(&run_id).then(|| text.clone())
+                        },
+                    ),
+                    _ => None,
+                }) {
+                    break text;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the report reaches the starter");
+        if configured {
+            assert!(
+                text.ends_with(&format!(
+                    "Ask workflow status with {run_id} later.</dim-workflow>"
+                )),
+                "{text}"
+            );
+        } else {
+            assert!(
+                text.ends_with(&format!(
+                    "Use workflow status with run_id {run_id} for stored stage results.</dim-workflow>"
+                )),
+                "{text}"
+            );
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

@@ -22,9 +22,9 @@ use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
     Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
-    ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply,
-    ProviderAction, ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update,
+    ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
+    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
+    SubagentModelPolicy, SwitchKind, Update,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -216,6 +216,7 @@ struct Worker {
     parked: String,
     projection: Projection,
     question_responses: Vec<(u64, String, crate::question::Call)>,
+    approval_details: std::collections::BTreeMap<u64, MemberDetailRead>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
     cursors: std::collections::HashMap<String, u64>,
     projection_id: u64,
@@ -256,18 +257,30 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
-    /// The composer's context reading is out of date: a run on main ended, a
-    /// compaction result arrived on main, or the session or its model
-    /// changed.
+    /// The composer's context reading is out of date: a model request on main
+    /// finished, a run on main ended, a compaction result arrived on main, or
+    /// the session or its model changed.
     context_stale: bool,
+    /// The last `model/usage` on main, folded from the events so `/usage`
+    /// can report its cache read share.
+    last_usage: Option<LastUsage>,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
-    /// Providers whose catalog this connection already asked to refill, so an
-    /// endpoint that lists nothing costs one request, not one per open.
-    refilled_catalogs: std::collections::HashSet<String>,
+    /// The catalog version each provider was last asked to refill at in this
+    /// connection, moved to the version the refresh stored: an endpoint that
+    /// lists nothing costs one request per unchanged record, not one per open,
+    /// and a write to the record (a re-point, an enable) asks once more.
+    refilled_catalogs: std::collections::HashMap<String, u32>,
     /// The outstanding `provider.refresh` requests `models()` sent for those
-    /// catalogs.
-    refill_requests: Vec<u64>,
+    /// catalogs, with the provider each was sent for.
+    refill_requests: Vec<(u64, String)>,
+}
+
+struct MemberDetailRead {
+    projection_id: u64,
+    branch_id: String,
+    request_id: String,
+    allow: bool,
 }
 
 struct OutputWatch {
@@ -331,6 +344,7 @@ async fn run(
         parked: String::new(),
         projection: Projection::default(),
         question_responses: Vec::new(),
+        approval_details: Default::default(),
         cursors: Default::default(),
         projection_id: 0,
         focus: "main".into(),
@@ -356,6 +370,7 @@ async fn run(
         login: None,
         login_callbacks: unbounded_channel(),
         context_stale: false,
+        last_usage: None,
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
@@ -405,7 +420,7 @@ async fn run(
                         break;
                     }
                 };
-                if let Err(error) = worker.message(message) {
+                if let Err(error) = worker.message(message).await {
                     let _ = updates.send(Update::Failed(error.to_string()));
                     break;
                 }
@@ -543,6 +558,49 @@ fn tokens(value: f64) -> u64 {
     value.max(0.0).round() as u64
 }
 
+/// The last `model/usage` fact on `main`: the counters `/usage` reports the
+/// cache read share of.
+#[derive(Clone, Copy)]
+struct LastUsage {
+    prompt_tokens: u64,
+    cache_read_tokens: Option<u64>,
+}
+
+impl LastUsage {
+    /// The share `/usage` prints, or `None` when the counters cannot
+    /// produce one.
+    fn percent(&self) -> Option<String> {
+        cache_hit_rate(self.prompt_tokens, self.cache_read_tokens)
+    }
+}
+
+/// The cache read share of one request, floored at every step so the figure
+/// never flatters: `100%` only when every prompt token was a cache read, one
+/// decimal rounded down between 99% and 100%, an integer rounded down below
+/// that, and `<1%` for a positive share too small for an integer. `None` when
+/// the request reported no cache read count, its cache reads exceed its
+/// prompt, or its prompt is zero, so a reported zero stays `0%`.
+fn cache_hit_rate(prompt_tokens: u64, cache_read_tokens: Option<u64>) -> Option<String> {
+    let cache_read_tokens = cache_read_tokens?;
+    if prompt_tokens == 0 || cache_read_tokens > prompt_tokens {
+        return None;
+    }
+    if cache_read_tokens == prompt_tokens {
+        return Some("100%".to_owned());
+    }
+    if cache_read_tokens == 0 {
+        return Some("0%".to_owned());
+    }
+    let tenths = u128::from(cache_read_tokens) * 1000 / u128::from(prompt_tokens);
+    Some(if tenths >= 990 {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    } else if tenths >= 10 {
+        format!("{}%", tenths / 10)
+    } else {
+        "<1%".to_owned()
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClosedNotice {
@@ -564,9 +622,21 @@ struct ApprovalNotice {
 struct CancelNotice {
     session_id: String,
     request_id: String,
+    branch_id: String,
 }
 
 impl Worker {
+    async fn cancel_catalog(&mut self) -> crate::Result<()> {
+        if let Some((request, _, _)) = self.catalog_request.take()
+            && self.client.offers("session.catalog.cancel")
+        {
+            self.client
+                .send("session.catalog.cancel", json!({"requestId":request}))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
@@ -580,6 +650,7 @@ impl Worker {
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
         let mut preferences = None;
+        let mut target = None;
         if let (Some(provider), Some(model)) =
             (self.options.provider.clone(), self.options.model.clone())
         {
@@ -588,12 +659,20 @@ impl Worker {
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
+            target = Some((provider, model));
         }
-        let created: Created = self
-            .client
-            .typed("session.create", params)
-            .await
-            .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
+        let created: Created = match self.client.typed("session.create", params).await {
+            Ok(created) => created,
+            Err(error) => {
+                return Err(crate::model_adoption_error(
+                    &mut self.client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await);
+            }
+        };
         self.enter(
             created.session_id,
             Some(created.model),
@@ -609,6 +688,7 @@ impl Worker {
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
         let mut preferences = None;
+        let mut target = None;
         let result = async {
             if let Some(model) = &self.model {
                 params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
@@ -617,11 +697,18 @@ impl Worker {
                 if let Some(preferences) = &preferences {
                     params["modelPreferences"] = preferences.clone();
                 }
+                target = Some((provider, model));
             }
-            self.client
-                .typed::<Created>("session.create", params)
-                .await
-                .map_err(|error| model_adoption_error(error, preferences.as_ref()))
+            match self.client.typed::<Created>("session.create", params).await {
+                Ok(created) => Ok(created),
+                Err(error) => Err(crate::model_adoption_error(
+                    &mut self.client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await),
+            }
         }
         .await;
         match result {
@@ -964,10 +1051,17 @@ impl Worker {
                 let params = json!({
                     "sessionId": self.session_id,
                     "branchId": self.focus,
-                    "reason": "TUI interrupted",
+                    "reason": crate::model::view::INTERRUPT_REASON,
                 });
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
+            }
+            Command::RetryApproval {
+                request_id,
+                branch_id,
+            } => {
+                self.read_member_approval(&branch_id, &request_id, false)
+                    .await?;
             }
             Command::Approval {
                 request_id,
@@ -975,12 +1069,22 @@ impl Worker {
                 allow,
                 remember,
             } => {
+                let is_member = self.projection.approvals().iter().any(|approval| {
+                    approval.request_id == request_id
+                        && approval.branch_id == branch_id
+                        && approval.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+                });
+                if allow && is_member {
+                    self.read_member_approval(&branch_id, &request_id, true)
+                        .await?;
+                    return Ok(());
+                }
                 // "Always" saves the exact allow rule first (F2 §5.4); the
                 // call is allowed once either way, as the user asked.
                 if allow && remember {
                     let rule = self
                         .projection
-                        .approval_always(&request_id)
+                        .approval_always(&branch_id, &request_id)
                         .and_then(|command| permission::proposed(&command, ""));
                     let notice = match rule {
                         Some(rule) => {
@@ -1011,7 +1115,7 @@ impl Worker {
                 });
                 let result = self.client.rpc("approval.respond", params).await;
                 if self.report_failure(result) {
-                    self.projection.remove_approval(&request_id);
+                    self.projection.remove_approval(&branch_id, &request_id);
                     self.changed();
                 }
             }
@@ -1030,7 +1134,7 @@ impl Worker {
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
             Command::ListSessions { id, query, cursor } => {
-                self.catalog_request = None;
+                self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
                 let (method, params) = if paged {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
@@ -1050,11 +1154,32 @@ impl Worker {
                     }),
                 }
             }
-            Command::CloseSessions => self.catalog_request = None,
-            Command::Usage => match self.context_usage().await {
-                Ok(usage) => self.report(usage.describe(), false),
-                Err(error) => self.report(error.to_string(), true),
-            },
+            Command::CloseSessions => self.cancel_catalog().await?,
+            Command::Usage => {
+                let reading = self.context_usage().await;
+                // Pages land oldest first: until `main`'s history has
+                // finished loading, an earlier page's older request is not
+                // the newest, so the segment waits for `done`.
+                let loaded = self
+                    .task_history
+                    .get("main")
+                    .is_some_and(|history| history.done);
+                let cached = self
+                    .last_usage
+                    .filter(|_| loaded)
+                    .and_then(|usage| usage.percent());
+                match reading {
+                    Ok(usage) => {
+                        let mut line = usage.describe();
+                        if let Some(cached) = cached {
+                            line.push_str(" · last request cached ");
+                            line.push_str(&cached);
+                        }
+                        self.report(line, false)
+                    }
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::Compact => self.compact().await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -1180,15 +1305,24 @@ impl Worker {
             Command::SetApprovals(mode) => {
                 let result = match permission::parse_preset(&mode) {
                     Err(error) => Err(error.to_string()),
-                    Ok(_) if self.session_id.is_empty() => Err(NO_SESSION.to_owned()),
-                    Ok(_) if !self.client.supports(&permission::PRESET_METHODS) => {
+                    Ok(_)
+                        if !self.session_id.is_empty()
+                            && !self.client.supports(&permission::PRESET_METHODS) =>
+                    {
                         Err("This daemon cannot change the permission preset".to_owned())
                     }
                     Ok(preset) => {
-                        let session_id = self.session_id.clone();
-                        permission::select(&mut self.client, &session_id, preset)
-                            .await
-                            .map(|()| permission::name(preset).to_owned())
+                        let result = if self.session_id.is_empty() {
+                            Ok(())
+                        } else {
+                            let session_id = self.session_id.clone();
+                            permission::select(&mut self.client, &session_id, preset).await
+                        };
+                        result
+                            .map(|()| {
+                                self.options.permission = Some(preset);
+                                permission::name(preset).to_owned()
+                            })
                             .map_err(|error| error.to_string())
                     }
                 };
@@ -1304,6 +1438,11 @@ impl Worker {
                     self.report(mcp::error(error).to_string(), true);
                 }
             }
+            Command::Recording(args) => {
+                if let Err(error) = self.recording(&args).await {
+                    self.report(error.to_string(), true);
+                }
+            }
             Command::ListPlugins => {
                 let plugins = self.plugins().await;
                 self.send(Update::Plugins(plugins));
@@ -1364,7 +1503,7 @@ impl Worker {
             } => {
                 let main = stop_turn && branch_id != "main";
                 for branch in std::iter::once(branch_id.as_str()).chain(main.then_some("main")) {
-                    let result = self.client.rpc("session.stop", json!({"sessionId":session_id,"branchId":branch,"reason":"CLI interrupted question"})).await;
+                    let result = self.client.rpc("session.stop", json!({"sessionId":session_id,"branchId":branch,"reason":crate::model::view::INTERRUPT_REASON})).await;
                     self.report_failure(result);
                 }
             }
@@ -1530,7 +1669,7 @@ impl Worker {
             && projection_id == self.projection_id
     }
 
-    /// Reports a failed command as a notice; the session itself keeps going.
+    /// Reports an error as a notice and returns true only on success.
     fn report_failure<T>(&self, result: crate::Result<T>) -> bool {
         match result {
             Ok(_) => true,
@@ -1581,10 +1720,14 @@ impl Worker {
         scoped
     }
 
-    fn message(&mut self, message: Message) -> crate::Result<()> {
+    async fn message(&mut self, message: Message) -> crate::Result<()> {
         let (method, params) = match message {
             Message::Notice { method, params } => (method, params),
             Message::Response { id, result } => {
+                if let Some(read) = self.approval_details.remove(&id) {
+                    self.member_approval_reply(read, result).await?;
+                    return Ok(());
+                }
                 self.reply(id, result)?;
                 return Ok(());
             }
@@ -1610,6 +1753,13 @@ impl Worker {
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
+                    // Live only: history pages arrive as `session.history`
+                    // replies applied by `apply`, so they spend no read.
+                    if notice.branch_id == "main"
+                        && matches!(notice.event.content, EventContent::ModelEnd(_))
+                    {
+                        self.context_stale = true;
+                    }
                     self.task_event(&notice.branch_id, notice.event);
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
                     self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
@@ -1656,6 +1806,9 @@ impl Worker {
                         .supports(&permission::RULE_METHODS)
                         .then(|| permission::always_command(&notice.call).map(str::to_owned))
                         .flatten();
+                    let member = notice.call.name == dim_agent_types::MEMBER_APPROVAL_ALLOW;
+                    let branch_id = notice.branch_id.clone();
+                    let request_id = notice.request_id.clone();
                     self.projection.add_approval(
                         notice.branch_id,
                         notice.request_id,
@@ -1665,14 +1818,49 @@ impl Worker {
                         always,
                     );
                     self.changed();
+                    if member {
+                        self.publish();
+                        self.read_member_approval(&branch_id, &request_id, false)
+                            .await?;
+                    }
                 }
             }
-            "approval.cancelled" => {
+            "approval.resolved" | "approval.cancelled" => {
                 let notice: CancelNotice = serde_json::from_value(params)?;
-                if notice.session_id == self.session_id {
-                    self.projection.remove_approval(&notice.request_id);
+                if notice.session_id == self.session_id
+                    && self.projection.approvals().iter().any(|approval| {
+                        approval.request_id == notice.request_id
+                            && approval.branch_id == notice.branch_id
+                    })
+                {
+                    self.projection
+                        .remove_approval(&notice.branch_id, &notice.request_id);
                     self.changed();
                 }
+            }
+            "session.notice"
+                if params["sessionId"] == self.session_id
+                    && params["source"] == "Collaboration"
+                    && params["kind"] == "memberApprovalEnded" =>
+            {
+                let ended: dim_agent_types::MemberApprovalEnded =
+                    serde_json::from_value(params["data"].clone())?;
+                let requests: Vec<_> = self
+                    .projection
+                    .approvals()
+                    .into_iter()
+                    .filter(|approval| {
+                        approval.branch_id == ended.branch_id
+                            && approval.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+                            && approval.tool_input["approvalId"] == ended.approval_id
+                    })
+                    .collect();
+                for approval in requests {
+                    self.projection
+                        .remove_approval(&approval.branch_id, &approval.request_id);
+                    let _ = self.client.rpc("approval.respond", json!({"sessionId":self.session_id,"branchId":ended.branch_id,"requestId":approval.request_id,"decision":"deny"})).await;
+                }
+                self.changed();
             }
             "session.mcp.state" => {
                 let state: mcp::State = serde_json::from_value(params)?;
@@ -1715,6 +1903,108 @@ impl Worker {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn read_member_approval(
+        &mut self,
+        branch_id: &str,
+        request_id: &str,
+        allow: bool,
+    ) -> crate::Result<()> {
+        if let Some(read) = self.approval_details.values_mut().find(|read| {
+            read.projection_id == self.projection_id
+                && read.branch_id == branch_id
+                && read.request_id == request_id
+        }) {
+            read.allow |= allow;
+            return Ok(());
+        }
+        let id = self
+            .client
+            .send(
+                dim_agent_types::MEMBER_APPROVAL_GET,
+                json!({"sessionId":self.session_id,"branchId":branch_id,"requestId":request_id}),
+            )
+            .await?;
+        self.approval_details.insert(
+            id,
+            MemberDetailRead {
+                projection_id: self.projection_id,
+                branch_id: branch_id.into(),
+                request_id: request_id.into(),
+                allow,
+            },
+        );
+        self.projection.member_approval(branch_id, request_id, None);
+        self.changed();
+        Ok(())
+    }
+
+    async fn member_approval_reply(
+        &mut self,
+        read: MemberDetailRead,
+        result: std::result::Result<serde_json::Value, client::RpcError>,
+    ) -> crate::Result<()> {
+        if read.projection_id != self.projection_id
+            || !self.projection.approvals().iter().any(|approval| {
+                approval.branch_id == read.branch_id
+                    && approval.request_id == read.request_id
+                    && approval.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
+            })
+        {
+            return Ok(());
+        }
+        let detail = result
+            .map_err(crate::member_approval::DetailError::from)
+            .and_then(|value| {
+                serde_json::from_value::<dim_agent_types::MemberApprovalDetail>(value).map_err(
+                    |error| {
+                        crate::member_approval::DetailError::Failed(format!(
+                            "Invalid member approval detail: {error}"
+                        ))
+                    },
+                )
+            });
+        match detail {
+            Ok(dim_agent_types::MemberApprovalDetail::Pending { descriptor, .. }) => {
+                self.projection.member_approval(
+                    &read.branch_id,
+                    &read.request_id,
+                    Some(Ok(*descriptor)),
+                );
+                if read.allow {
+                    let result = self.client.rpc("approval.respond", json!({"sessionId":self.session_id,"branchId":read.branch_id,"requestId":read.request_id,"decision":"allow"})).await;
+                    if self.report_failure(result) {
+                        self.projection
+                            .remove_approval(&read.branch_id, &read.request_id);
+                    } else {
+                        self.send(Update::ApprovalPending {
+                            branch_id: read.branch_id,
+                            request_id: read.request_id,
+                        });
+                    }
+                }
+            }
+            Ok(dim_agent_types::MemberApprovalDetail::Ended) => {
+                self.projection
+                    .remove_approval(&read.branch_id, &read.request_id);
+                let _ = self.client.rpc("approval.respond", json!({"sessionId":self.session_id,"branchId":read.branch_id,"requestId":read.request_id,"decision":"deny"})).await;
+                self.send(Update::Notice("Member request ended".into()));
+            }
+            Err(error) => {
+                self.projection.member_approval(
+                    &read.branch_id,
+                    &read.request_id,
+                    Some(Err(error)),
+                );
+                self.send(Update::ApprovalPending {
+                    branch_id: read.branch_id,
+                    request_id: read.request_id,
+                });
+            }
+        }
+        self.changed();
         Ok(())
     }
 
@@ -1793,6 +2083,20 @@ impl Worker {
             _ => return Err(USAGE.into()),
         }
         Ok(())
+    }
+
+    async fn recording(&mut self, args: &str) -> crate::Result<String> {
+        let enabled = match args.split_whitespace().next() {
+            None => None,
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            Some(_) => return Err("Usage: /settings recording [on|off]".into()),
+        };
+        let state = match enabled {
+            Some(enabled) => crate::recording::set(&mut self.client, enabled).await?,
+            None => crate::recording::read(&mut self.client).await?,
+        };
+        Ok(crate::recording::report(&state, &self.options))
     }
 
     async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {
@@ -2180,7 +2484,11 @@ impl Worker {
             name: String,
             unavailable_reason: Option<String>,
             #[serde(default)]
-            capabilities: dim_agent_types::ModelCapabilities,
+            missing_limits: Vec<String>,
+            #[serde(default)]
+            zdr: bool,
+            #[serde(default)]
+            capabilities: dim_agent_types::CatalogCapabilities,
             #[serde(default)]
             metadata: Option<CatalogReasoning>,
         }
@@ -2228,6 +2536,7 @@ impl Worker {
         }
         let mut models = Vec::new();
         let mut empty = Vec::new();
+        let mut limits = Vec::new();
         for (provider_id, provider_name, listable) in usable {
             let snapshot = self
                 .client
@@ -2244,17 +2553,18 @@ impl Worker {
                     continue;
                 }
             };
+            let version = catalog.as_ref().map_or(0, |catalog| catalog.version);
             if catalog
                 .as_ref()
                 .is_none_or(|catalog| catalog.models.is_empty())
                 && refillable.contains(&provider_id)
-                && self.refilled_catalogs.insert(provider_id.clone())
+                && self.refilled_catalogs.insert(provider_id.clone(), version) != Some(version)
                 && let Ok(request) = self
                     .client
                     .send("provider.refresh", json!({"providerId": provider_id}))
                     .await
             {
-                self.refill_requests.push(request);
+                self.refill_requests.push((request, provider_id.clone()));
             }
             let Some(catalog) = catalog else {
                 empty.push(EmptyProvider {
@@ -2266,6 +2576,17 @@ impl Worker {
             };
             let preferences = self.saved_preferences(&provider_id).await;
             let total = catalog.models.len();
+            let undeclared = catalog
+                .models
+                .iter()
+                .filter(|model| {
+                    crate::limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        catalog.disabled_model_ids.contains(&model.id),
+                    )
+                })
+                .count();
             let unavailable = catalog
                 .models
                 .iter()
@@ -2309,12 +2630,20 @@ impl Worker {
                             provider_version: catalog.version,
                             model_id: model.id,
                             display_name: model.name,
+                            zdr: model.zdr,
                             efforts,
                             default_effort,
                             saved_effort,
                         }
                     }),
             );
+            if undeclared > 0 {
+                limits.push(NeedsLimitsProvider {
+                    provider_id: provider_id.clone(),
+                    provider_name: provider_name.clone(),
+                    count: undeclared,
+                });
+            }
             if models.len() == before {
                 let reason = if total == 0 {
                     EmptyReason::NoModels { listable }
@@ -2343,6 +2672,7 @@ impl Worker {
             models,
             current,
             empty,
+            limits,
         })
     }
 
@@ -2477,15 +2807,23 @@ impl Worker {
             self.send(features);
             model
         } else {
+            let target = (provider_id.clone(), model_id.clone());
             let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
-            let updated: Updated = self
-                .client
-                .typed("session.model.update", params)
-                .await
-                .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
+            let updated: Updated = match self.client.typed("session.model.update", params).await {
+                Ok(updated) => updated,
+                Err(error) => {
+                    return Err(crate::model_adoption_error(
+                        &mut self.client,
+                        Some((target.0.as_str(), target.1.as_str())),
+                        error,
+                        preferences.as_ref(),
+                    )
+                    .await);
+                }
+            };
             let features = self.model_features(&updated.model).await;
             self.send(Update::Ready {
                 provider: updated.model.provider_id.clone(),
@@ -2977,15 +3315,21 @@ impl Worker {
         if let Some(index) = self
             .refill_requests
             .iter()
-            .position(|request| *request == id)
+            .position(|(request, _)| *request == id)
         {
-            self.refill_requests.remove(index);
-            if result.is_ok() {
-                // The refresh stored the catalog; a picker that is still
-                // open reads the list again to show it, and
-                // `refilled_catalogs` keeps that read from asking twice.
-                // With the picker closed this only records the fill: the
-                // next open reads anyway.
+            let (_, provider_id) = self.refill_requests.remove(index);
+            if let Ok(value) = result {
+                // The refresh stored the catalog under a new version; record
+                // it, so a listing that came back empty is not asked for
+                // again. A picker that is still open reads the list again to
+                // show the fill; with the picker closed this only records it.
+                #[derive(Deserialize)]
+                struct Stored {
+                    version: u32,
+                }
+                if let Ok(Stored { version }) = serde_json::from_value(value) {
+                    self.refilled_catalogs.insert(provider_id, version);
+                }
                 self.send(Update::ModelsRefilled);
             }
             return Ok(());
@@ -3046,6 +3390,14 @@ impl Worker {
         }
         if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
             self.context_stale = true;
+        }
+        if branch_id == "main"
+            && let EventContent::ModelUsage(data) = &event.content
+        {
+            self.last_usage = Some(LastUsage {
+                prompt_tokens: tokens(data.usage.prompt_tokens),
+                cache_read_tokens: data.usage.cache_read_tokens.map(tokens),
+            });
         }
         self.projection.apply(branch_id, &event);
         if let EventContent::ExecEnded(data) = &event.content
@@ -3235,7 +3587,7 @@ fn group(n: u64) -> String {
 #[derive(Deserialize)]
 struct CatalogModel {
     id: String,
-    capabilities: dim_agent_types::ModelCapabilities,
+    capabilities: dim_agent_types::CatalogCapabilities,
     metadata: Option<CatalogPreferences>,
 }
 #[derive(Deserialize)]
@@ -3245,7 +3597,7 @@ struct CatalogPreferences {
 }
 
 fn effort_choices(
-    capabilities: &dim_agent_types::ModelCapabilities,
+    capabilities: &dim_agent_types::CatalogCapabilities,
     reasoning: Option<&dim_agent_types::ModelReasoning>,
 ) -> (Vec<String>, Option<String>) {
     let Some(reasoning) = reasoning else {
@@ -3315,21 +3667,121 @@ pub(crate) async fn clear_saved_model_preferences(
     clear_model_preferences(client, provider_id, model_id, version).await
 }
 
+/// The models `dimcode models PROVIDER --set-limits` declares limits for.
+pub(crate) enum LimitTarget {
+    /// The one model the command names.
+    Model(String),
+    /// Every model `dimcode models` marks `undeclared`: an enabled model whose
+    /// missing limits are its only blocker.
+    Missing,
+}
+
+/// Declares a context window and maximum output for the target models
+/// through `provider.models.edit`, sending each model only the limits its
+/// catalog entry reports missing, so a declared value is never overwritten.
+/// The catalog reply carries the record version, and each write uses the
+/// version the previous reply returned. A conflict stops the run and keeps
+/// the server's reread requirement.
+pub(crate) async fn declare_model_limits(
+    client: &mut Client,
+    provider_id: &str,
+    target: LimitTarget,
+    context_window: u64,
+    max_output_tokens: u64,
+) -> crate::Result<()> {
+    #[derive(Deserialize)]
+    struct Snapshot {
+        catalog: Option<Catalog>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Catalog {
+        version: u32,
+        #[serde(default)]
+        disabled_model_ids: Vec<String>,
+        models: Vec<CatalogModel>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CatalogModel {
+        id: String,
+        #[serde(default)]
+        missing_limits: Vec<String>,
+        #[serde(default)]
+        unavailable_reason: Option<String>,
+    }
+    let snapshot: Snapshot = client
+        .typed("provider.catalog", json!({"providerId": provider_id}))
+        .await?;
+    let catalog = snapshot
+        .catalog
+        .ok_or("Provider catalog must be refreshed before declaring model limits")?;
+    let mut version = catalog.version;
+    let targets: Vec<(String, Vec<String>)> = match target {
+        LimitTarget::Model(model) => vec![(
+            model,
+            vec!["contextWindow".into(), "maxOutputTokens".into()],
+        )],
+        LimitTarget::Missing => {
+            let disabled = catalog.disabled_model_ids;
+            catalog
+                .models
+                .into_iter()
+                .filter(|model| {
+                    crate::limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        disabled.contains(&model.id),
+                    )
+                })
+                .map(|model| (model.id, model.missing_limits))
+                .collect()
+        }
+    };
+    for (model_id, missing) in targets {
+        #[derive(Deserialize)]
+        struct Edited {
+            version: u32,
+        }
+        let mut edit = serde_json::Map::new();
+        for field in missing {
+            match field.as_str() {
+                "contextWindow" => {
+                    edit.insert("contextWindow".into(), json!(context_window));
+                }
+                "maxOutputTokens" => {
+                    edit.insert("maxOutputTokens".into(), json!(max_output_tokens));
+                }
+                _ => {}
+            }
+        }
+        let edited: Edited = client
+            .typed(
+                "provider.models.edit",
+                json!({
+                    "providerId": provider_id,
+                    "expectedVersion": version,
+                    "modelId": model_id,
+                    "edit": edit,
+                }),
+            )
+            .await
+            .map_err(|error| match client::app_error(&error) {
+                Some("provider_conflict") if !error.to_string().contains("reread") => {
+                    format!("{error}; reread before retrying").into()
+                }
+                _ => error,
+            })?;
+        version = edited.version;
+    }
+    Ok(())
+}
+
 /// The notice when no Session could be started.
 fn no_session(error: &crate::Error) -> String {
     match error.downcast_ref::<client::RpcError>().and_then(app_error) {
         Some("provider_failed") => NO_SESSION.to_owned(),
         _ => format!("{error}. {NO_SESSION}"),
-    }
-}
-
-pub(crate) fn model_adoption_error(
-    error: crate::Error,
-    preferences: Option<&serde_json::Value>,
-) -> crate::Error {
-    match preferences {
-        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Clear them with Ctrl+X in /models or dimcode models PROVIDER --clear-preferences MODEL; saved preferences were kept.").into(),
-        None => error,
     }
 }
 

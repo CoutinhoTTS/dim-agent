@@ -213,12 +213,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Salida del shell no registrada: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Leyendo portapapeles…",
+        "Reading image…" => "Leyendo imagen…",
+        "Wait for the image insertion before sending" => {
+            "Espera a que se inserte la imagen antes de enviar"
+        }
+        "The image could not be read" => "No se pudo leer la imagen",
+        "An image is still being inserted; paste again when it is in" => {
+            "Se está insertando una imagen; pega de nuevo cuando termine"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Se está insertando el portapapeles; pega de nuevo cuando termine"
+        }
         "Clipboard: {reason}" => "Portapapeles: {reason}",
         "Wait for clipboard insertion before sending" => {
             "Espera a pegar el portapapeles antes de enviar"
         }
         "A submission accepts at most 20 images" => "Máximo 20 imágenes por envío",
-        "[Image #{index}]" => "[Imagen #{index}]",
+        "first frame" => "solo el primer fotograma",
+        "re-encoded" => "recodificada",
         "The current model does not accept images; remove {label} to send" => {
             "El modelo actual no admite imágenes; quita {label} para enviar"
         }
@@ -417,6 +429,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} modelos no disponibles · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 1 modelo necesita una ventana · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: {count} modelos necesitan una ventana · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: sin modelos · dimcode models {id} --refresh"
         }
@@ -428,6 +446,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: catálogo ilegible · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Un modelo cuyos límites no están declarados no se puede seleccionar; decláralos con dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Decláralos con dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "Sin catálogo en caché. Inicia sesión y ejecuta models PROVIDER --refresh."
@@ -480,8 +504,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C borrar, dos veces salir · Ctrl+D salir con borrador vacío"
         }
         "Fullscreen" => "Pantalla completa",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown desplazar · Home/End inicio o final · Tab elegir mensaje, e editar, q citar"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown desplazar · Home/End inicio o final (con el borrador vacío) · Tab elegir mensaje, e editar, q citar"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "rueda desplazar · arrastrar selecciona y copia · clic abre enlaces y expande grupos de herramientas"

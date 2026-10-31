@@ -205,12 +205,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Output shell tak tercatat: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Membaca clipboard…",
+        "Reading image…" => "Membaca gambar…",
+        "Wait for the image insertion before sending" => {
+            "Tunggu penyisipan gambar sebelum mengirim"
+        }
+        "The image could not be read" => "Gambar tidak dapat dibaca",
+        "An image is still being inserted; paste again when it is in" => {
+            "Gambar masih disisipkan; tempel lagi setelah selesai"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Clipboard masih disisipkan; tempel lagi setelah selesai"
+        }
         "Clipboard: {reason}" => "Clipboard: {reason}",
         "Wait for clipboard insertion before sending" => {
             "Tunggu clipboard disisipkan sebelum kirim"
         }
         "A submission accepts at most 20 images" => "Maks. 20 gambar per kiriman",
-        "[Image #{index}]" => "[Gambar #{index}]",
+        "first frame" => "hanya frame pertama",
+        "re-encoded" => "dikodekan ulang",
         "The current model does not accept images; remove {label} to send" => {
             "Model ini tak menerima gambar; hapus {label} untuk kirim"
         }
@@ -399,6 +411,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} model tak tersedia · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 1 model membutuhkan jendela · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: {count} model membutuhkan jendela · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: tanpa model · dimcode models {id} --refresh"
         }
@@ -410,6 +428,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: katalog tidak terbaca · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Model yang batasnya belum dideklarasikan tidak dapat dipilih; deklarasikan dengan dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Deklarasikan dengan dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "Tidak ada katalog tersimpan. Masuk dan jalankan models PROVIDER --refresh."
@@ -464,8 +488,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"
         }
         "Fullscreen" => "Layar penuh",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown gulir · Home/End atas/bawah · Tab pilih pesan, e edit, q kutip"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown gulir · Home/End atas/bawah (saat draf kosong) · Tab pilih pesan, e edit, q kutip"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "roda gulir · seret pilih dan salin · klik tautan/grup tool untuk membukanya"

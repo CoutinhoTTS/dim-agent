@@ -333,10 +333,20 @@ impl ProviderService {
         if self.oauth.contains(&input.provider_id, cancel).await? {
             return Err(ProviderError::Conflict("Provider ID already exists".into()));
         }
-        let mut record =
-            input
-                .connection
-                .record(input.display_name, input.models, input.enabled)?;
+        let mut models = input.models;
+        // A created Provider's models are the user's own descriptors, so the
+        // limits they state are declarations, not inherited defaults.
+        for model in &mut models {
+            if model.capabilities.context_window.is_some() {
+                declare(model, "contextWindow");
+            }
+            if model.capabilities.max_output_tokens.is_some() {
+                declare(model, "maxOutputTokens");
+            }
+        }
+        let mut record = input
+            .connection
+            .record(input.display_name, models, input.enabled)?;
         validate_static_record(&input.provider_id, &mut record)
             .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
         let provider_id = input.provider_id;
@@ -430,30 +440,28 @@ impl ProviderService {
                 }
                 validate_static_record(&provider_id, &mut admitted)
                     .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
+                let bundled_models =
+                    owner.bundled.provider(&provider_id).is_some() && !admitted.remote_models;
+                let own_models =
+                    !bundled_models && owner.remote_model_list(&provider_id, &admitted);
                 let (models, models_listed) = if !admitted.enabled {
-                    (None, ModelsListed::Disabled)
-                } else if owner.bundled.provider(&provider_id).is_some() && !admitted.remote_models
-                {
+                    // A re-pointed disabled record drops the old endpoint's
+                    // models in this same write, without a request: they are
+                    // not the new endpoint's, and the empty, listable catalog
+                    // is what the picker refills once the record is enabled.
+                    (own_models.then(Vec::new), ModelsListed::Disabled)
+                } else if bundled_models {
                     // The bundled catalog defines these models; a later
                     // bundled update must still reach the record.
                     (None, ModelsListed::Bundled)
-                } else if !owner.remote_model_list(&provider_id, &admitted) {
+                } else if !own_models {
                     (None, ModelsListed::Unsupported)
                 } else {
                     let models = owner.discover(&provider_id, &admitted, &cancel).await?;
                     (Some(models), ModelsListed::Listed)
                 };
-                if let Some(models) = &models
-                    && models.iter().any(|model| {
-                        admitted
-                            .user_models
-                            .iter()
-                            .any(|user| user.model_id == model.model_id)
-                    })
-                {
-                    return Err(ProviderError::Conflict(
-                        "Discovered models conflict with user-added model IDs".into(),
-                    ));
+                if let Some(models) = &models {
+                    reject_user_model_conflicts(&admitted, models)?;
                 }
                 if let Some(models) = models {
                     admitted.models = models;

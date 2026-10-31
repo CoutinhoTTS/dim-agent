@@ -9,6 +9,9 @@ mod catalog;
 #[path = "cli_flow/context.rs"]
 mod context;
 
+#[path = "cli_flow/exit.rs"]
+mod exit;
+
 #[path = "cli_flow/migration.rs"]
 mod migration;
 #[path = "cli_flow/permission.rs"]
@@ -18,6 +21,7 @@ mod question;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
 
+use dim_agent_capabilities::images::{MAX_BASE64_BYTES, MAX_EDGE, base64_len};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -29,6 +33,7 @@ use std::{
     },
     path::PathBuf,
     process::{Child, Command, ExitStatus, Output, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -198,6 +203,22 @@ fn help_and_version_do_not_create_product_state() {
 }
 
 #[test]
+fn a_build_from_source_reports_its_version_as_source() {
+    let home = Home::new();
+    let output = home.command().arg("--version").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("dimcode {}-source\n", env!("CARGO_PKG_VERSION")),
+        "a build the release flow did not stamp reports the committed version marked -source"
+    );
+}
+
+#[test]
 fn model_catalog_lists_safe_ids_and_availability_and_refreshes_explicitly() {
     for refresh in [false, true] {
         let home = Home::new();
@@ -303,6 +324,321 @@ fn model_catalog_refresh_names_an_empty_listing() {
         String::from_utf8_lossy(&output.stderr),
         "No models. The provider listed none.\n"
     );
+}
+
+/// A model no source declares limits for is marked `undeclared` and the
+/// list names the command that declares them, instead of hiding it among
+/// the unavailable models.
+#[test]
+fn model_catalog_marks_undeclared_limits_and_names_the_declaring_command() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tundeclared\nready\tReady\tavailable\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models fixture --set-missing-limits --context-window N --max-output-tokens N.\n"
+    );
+}
+
+/// A model refused for its undeclared limits names the command that
+/// declares them, with its provider and model, when the explicit start
+/// model cannot be adopted.
+#[test]
+fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let create = wire.read("session.create");
+        assert_eq!(
+            create["params"]["model"],
+            json!({"provider":"fixture","modelId":"narrow"})
+        );
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Explicit model is unavailable","data":{"appError":"provider_invalid_config"}}}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "--provider",
+            "fixture",
+            "--model",
+            "narrow",
+            "--prompt",
+            "hello",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot create session: "), "{stderr}");
+    assert!(
+        stderr.contains("Declare them with dimcode models fixture --set-limits narrow --context-window N --max-output-tokens N."),
+        "{stderr}"
+    );
+}
+
+/// `--set-limits` declares both limits of the named model at the record
+/// version, then prints the catalog the way `models PROVIDER` does.
+#[test]
+fn model_catalog_declares_limits_for_one_model() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]}
+            ]}}),
+        );
+        let edit = wire.read("provider.models.edit");
+        assert_eq!(
+            edit["params"],
+            json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&edit, json!({"version":2,"disabledModelIds":[],"models":[
+            {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
+        ]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":2,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "models",
+            "fixture",
+            "--set-limits",
+            "narrow",
+            "--context-window",
+            "64000",
+            "--max-output-tokens",
+            "8000",
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tavailable\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+/// `--set-missing-limits` reads the catalog, declares the limits of every
+/// model the list marks `undeclared`, and chains each reply's version into
+/// the next write. A disabled model and one unavailable for another reason
+/// keep that state even when they report missing limits.
+#[test]
+fn model_catalog_declares_missing_limits_for_every_model() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":1,"disabledModelIds":["gone"],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
+                {"id":"wide","name":"Wide","unavailableReason":"limits_undeclared","missingLimits":["maxOutputTokens"]},
+                {"id":"gone","name":"Gone","unavailableReason":null,"missingLimits":["contextWindow","maxOutputTokens"]},
+                {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":["contextWindow"]}
+            ]}}),
+        );
+        let first = wire.read("provider.models.edit");
+        assert_eq!(
+            first["params"],
+            json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+        );
+        wire.reply(&first, json!({"version":2,"disabledModelIds":[],"models":[]}));
+        let second = wire.read("provider.models.edit");
+        assert_eq!(
+            second["params"],
+            json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
+                "edit":{"maxOutputTokens":8000}})
+        );
+        wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"version":3,"disabledModelIds":[],"models":[
+                {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]},
+                {"id":"ready","name":"Ready","unavailableReason":null,"missingLimits":[]},
+                {"id":"wide","name":"Wide","unavailableReason":null,"missingLimits":[]}
+            ]}}),
+        );
+    });
+    let output = home
+        .command()
+        .env("LC_ALL", "C")
+        .args([
+            "models",
+            "fixture",
+            "--set-missing-limits",
+            "--context-window",
+            "64000",
+            "--max-output-tokens",
+            "8000",
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "narrow\tNarrow\tavailable\nready\tReady\tavailable\nwide\tWide\tavailable\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+/// The declaration flags require the models command, one form and both
+/// values, and fail before the CLI connects to a daemon.
+#[test]
+fn model_limit_declaration_flags_are_validated_before_connecting() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    for (args, reason) in [
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "64000",
+            ],
+            "--max-output-tokens",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "0",
+                "--max-output-tokens",
+                "8000",
+            ],
+            "positive integer",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--set-limits",
+                "narrow",
+                "--set-missing-limits",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "not both",
+        ),
+        (
+            vec![
+                "models",
+                "fixture",
+                "--refresh",
+                "--set-missing-limits",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "cannot be combined",
+        ),
+        (
+            vec!["models", "fixture", "--context-window", "1"],
+            "--set-limits or --set-missing-limits",
+        ),
+        (
+            vec![
+                "exec",
+                "--set-limits",
+                "narrow",
+                "--context-window",
+                "1",
+                "--max-output-tokens",
+                "1",
+            ],
+            "models PROVIDER",
+        ),
+    ] {
+        let output = home
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!home.0.join("rust").exists(), "{args:?}");
+    }
 }
 
 #[test]
@@ -492,6 +828,409 @@ fn image_fixture(format: image::ImageFormat, width: u32, height: u32) -> Vec<u8>
     bytes.into_inner()
 }
 
+/// Deterministic RGB noise of `width`×`height` pixels.
+fn noise_rgb(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut step = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 3);
+    for _ in 0..width as usize * height as usize {
+        let (red, green, blue) = (step(), step(), step());
+        pixels.extend([(red >> 24) as u8, (green >> 24) as u8, (blue >> 24) as u8]);
+    }
+    pixels
+}
+
+/// Deterministic noise: JPEG quality 100 keeps it over 5 MiB, and its long
+/// edge is over the shared edge limit, so an entry has to scale it.
+fn noise_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100);
+    encoder
+        .encode(
+            &noise_rgb(width, height),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+    bytes
+}
+
+/// `noise_jpeg`, with a minimal EXIF APP1 segment whose one IFD0 entry is the
+/// orientation: `3` turns the image 180° and `6` 90° clockwise.
+fn oriented_jpeg(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+    let mut bytes = noise_jpeg(width, height);
+    let mut exif = vec![0xFF, 0xE1, 0x00, 0x22];
+    exif.extend(b"Exif\0\0");
+    exif.extend(b"II\x2A\x00");
+    exif.extend(8u32.to_le_bytes());
+    exif.extend(1u16.to_le_bytes());
+    exif.extend(0x0112u16.to_le_bytes());
+    exif.extend(3u16.to_le_bytes());
+    exif.extend(1u32.to_le_bytes());
+    exif.extend(orientation.to_le_bytes());
+    exif.extend([0, 0]);
+    exif.extend(0u32.to_le_bytes());
+    bytes.splice(2..2, exif);
+    bytes
+}
+
+/// Deterministic noise as PNG: within the shared edge limit while its base64
+/// is over the byte limit, so it is sent as a JPEG at the same size.
+fn noise_png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut bytes),
+        &noise_rgb(width, height),
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )
+    .unwrap();
+    bytes
+}
+
+#[test]
+fn exec_scales_a_large_photo_and_reports_both_sizes() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    // Quality-100 noise over the raw bytes that fit the base64 limit, while a
+    // debug-build decode and scale stay well inside the harness patience.
+    let bytes = noise_jpeg(2100, 700);
+    assert!(
+        base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, &bytes).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&sent[..3], b"\xff\xd8\xff");
+        assert!(
+            base64_len(sent.len() as u64) <= MAX_BASE64_BYTES,
+            "{}",
+            sent.len()
+        );
+        let image = image::load_from_memory(&sent).unwrap();
+        assert!(
+            image.width() <= MAX_EDGE && image.height() <= MAX_EDGE,
+            "{}×{}",
+            image.width(),
+            image.height()
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args([
+                "exec",
+                "--image",
+                photo.to_str().unwrap(),
+                "-p",
+                "Describe this",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Scaled photo.jpg from 2100×700 to "),
+        "{stderr}"
+    );
+    assert!(stderr.contains("px (image/jpeg)"), "{stderr}");
+}
+
+/// A PNG within the edge limit whose base64 is over the byte limit is
+/// re-encoded as JPEG at the same size: the size alone would hide that the
+/// screenshot is now lossy, so exec says the type changed.
+#[test]
+fn exec_reports_a_reencode_that_keeps_the_size() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let bytes = noise_png(1500, 1500);
+    assert!(
+        base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let shot = home.0.join("shot.png");
+    fs::write(&shot, &bytes).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&sent[..3], b"\xff\xd8\xff");
+        let sent = image::load_from_memory(&sent).unwrap();
+        assert_eq!((sent.width(), sent.height()), (1500, 1500));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", shot.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded shot.png as image/jpeg (1500×1500 px)"),
+        "{stderr}"
+    );
+}
+
+/// A JPEG within the edge and byte limits whose EXIF orientation turns it
+/// upright is re-encoded as JPEG at the same size: the file differs from what
+/// is sent only in its encoding, and exec says so.
+#[test]
+fn exec_reports_a_photo_turned_upright_at_the_same_size() {
+    let home = Home::new();
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, oriented_jpeg(40, 20, 3)).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", photo.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded photo.jpg as image/jpeg (40×20 px)"),
+        "{stderr}"
+    );
+}
+
+/// The 90° turn swaps the axes before the sizes are compared, so a square
+/// result keeps the size too: exec still says the encoding changed.
+#[test]
+fn exec_reports_a_quarter_turn_at_the_same_size() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, oriented_jpeg(40, 20, 6)).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        let sent = image::load_from_memory(&sent).unwrap();
+        assert_eq!((sent.width(), sent.height()), (20, 40));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", photo.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded photo.jpg as image/jpeg (20×40 px)"),
+        "{stderr}"
+    );
+}
+
+/// A JPEG within the edge limit whose base64 is over the byte limit fits once
+/// it is re-encoded at quality 85, again without a size or type change.
+#[test]
+fn exec_reports_a_jpeg_that_fits_only_after_the_reencode() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let bytes = noise_jpeg(1500, 1500);
+    assert!(
+        base64_len(bytes.len() as u64) > MAX_BASE64_BYTES,
+        "{}",
+        bytes.len()
+    );
+    let photo = home.0.join("photo.jpg");
+    fs::write(&photo, &bytes).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        let sent = STANDARD
+            .decode(image["source"]["data"].as_str().unwrap())
+            .unwrap();
+        let sent = image::load_from_memory(&sent).unwrap();
+        assert_eq!((sent.width(), sent.height()), (1500, 1500));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", photo.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Re-encoded photo.jpg as image/jpeg (1500×1500 px)"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn exec_reports_the_first_frame_of_an_animation() {
+    let home = Home::new();
+    let mut gif = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+        encoder
+            .encode_frames([
+                image::Frame::new(image::RgbaImage::from_pixel(
+                    2,
+                    2,
+                    image::Rgba([255, 0, 0, 255]),
+                )),
+                image::Frame::new(image::RgbaImage::from_pixel(
+                    2,
+                    2,
+                    image::Rgba([0, 0, 255, 255]),
+                )),
+            ])
+            .unwrap();
+    }
+    let animation = home.0.join("anim.gif");
+    fs::write(&animation, &gif).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        let image = content
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the request carries the image");
+        assert_eq!(image["source"]["mediaType"], "image/jpeg");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--image", animation.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Only the first frame of anim.gif is sent (image/jpeg)"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -520,7 +1259,7 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
         .into_iter()
         .enumerate()
         {
-            let bytes = image_fixture(format, 1, if index == 0 { 8000 } else { 1 });
+            let bytes = image_fixture(format, 1, if index == 0 { MAX_EDGE } else { 1 });
             let path = format!("image {index}.txt");
             fs::write(home.0.join(&path), &bytes).unwrap();
             images.push(json!({"type":"image","source":{"type":"base64","mediaType":media_type,"data":STANDARD.encode(bytes)}}));
@@ -613,10 +1352,13 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
     let png = image_fixture(image::ImageFormat::Png, 1, 1);
     let mut bad_crc = png.clone();
     bad_crc[29] ^= 1;
-    let mut oversized = png.clone();
-    oversized.resize(5 * 1024 * 1024 + 1, 0);
     let mut zero = image_fixture(image::ImageFormat::Gif, 1, 1);
     zero[6..8].fill(0);
+    let mut guard = b"GIF89a".to_vec();
+    guard.extend(12000u16.to_le_bytes());
+    guard.extend(9000u16.to_le_bytes());
+    guard.extend([0, 0, 0, 0]);
+    guard.push(b';');
     for (name, bytes, reason) in [
         ("text", b"not an image".to_vec(), "PNG, JPEG, WebP or GIF"),
         ("truncated", png[..8].to_vec(), "Invalid or truncated"),
@@ -630,27 +1372,7 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
         ("webp", b"RIFF\0\0\0\0WEBP".to_vec(), "Invalid or truncated"),
         ("zero", zero, "dimensions"),
         ("crc", bad_crc, "Invalid or truncated"),
-        (
-            "wide",
-            image_fixture(image::ImageFormat::Png, 8001, 1),
-            "8000",
-        ),
-        (
-            "tall",
-            image_fixture(image::ImageFormat::Gif, 1, 8001),
-            "8000",
-        ),
-        (
-            "jpeg_wide",
-            image_fixture(image::ImageFormat::Jpeg, 8001, 1),
-            "8000",
-        ),
-        (
-            "webp_tall",
-            image_fixture(image::ImageFormat::WebP, 1, 8001),
-            "8000",
-        ),
-        ("large", oversized, "5 MiB"),
+        ("guard", guard, "12000×9000"),
     ] {
         let file = home.0.join(name);
         fs::write(&file, bytes).unwrap();
@@ -700,25 +1422,33 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
 
 #[test]
 fn exec_images_check_the_combined_encoded_frame_before_sending() {
-    for size in [5 * 1024 * 1024, 4 * 1024 * 1024 - 3] {
+    // A kept image encodes to at most MAX_BASE64_BYTES, so four of them
+    // exceed the 16 MiB request frame; one raw byte over the fit is
+    // re-encoded and fits.
+    let fits_raw = (MAX_BASE64_BYTES / 4 * 3) as usize;
+    assert_eq!(base64_len(fits_raw as u64), MAX_BASE64_BYTES);
+    for (size, refused) in [(fits_raw, true), (fits_raw + 1024 * 1024, false)] {
         let home = Home::new();
-        let early = size > 4 * 1024 * 1024;
         let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
         png.resize(size, 0);
         let image = home.0.join("large.png");
         fs::write(&image, png).unwrap();
-        let daemon = if early {
+        let daemon = if refused {
             fs::remove_dir_all(home.0.join("rust")).unwrap();
             None
         } else {
             Some(home.daemon(|wire| {
                 wire.start(false);
+                let submit = wire.read("session.submit");
+                wire.reply(&submit, json!({"event":{}}));
+                let idle = wire.read("session.idle");
+                wire.reply(&idle, json!({"sequence":30}));
                 wire.detach();
             }))
         };
         let mut command = home.command();
         command.arg("exec").stdin(Stdio::null());
-        for _ in 0..3 {
+        for _ in 0..4 {
             command.arg("--image").arg(&image);
         }
         let output = command.output().unwrap();
@@ -727,9 +1457,17 @@ fn exec_images_check_the_combined_encoded_frame_before_sending() {
         } else {
             assert!(!home.0.join("rust").exists());
         }
-        assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
-        assert!(output.stdout.is_empty());
+        if refused {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
+            assert!(output.stdout.is_empty());
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
 
@@ -1366,6 +2104,28 @@ impl Terminal {
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
     }
+    /// Bytes the child wrote that the terminal has not consumed yet. A pty
+    /// master reports the queue on its other side through `TIOCOUTQ` on
+    /// macOS, while `FIONREAD` there always answers zero; Linux has no
+    /// `TIOCOUTQ` for terminals and answers through `FIONREAD`.
+    fn unread(&self) -> libc::c_int {
+        #[cfg(target_os = "macos")]
+        const WAITING_BYTES: libc::c_ulong = 0x4004_7473; // TIOCOUTQ
+        #[cfg(not(target_os = "macos"))]
+        const WAITING_BYTES: libc::c_ulong = libc::FIONREAD as libc::c_ulong;
+        let mut waiting: libc::c_int = 0;
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::ioctl(fd, WAITING_BYTES, &mut waiting) }, 0);
+        waiting
+    }
+    /// The terminal's local mode. Both ends of a pty share one termios, so
+    /// the master reads what raw mode set on the slave.
+    fn local_mode(&self) -> libc::tcflag_t {
+        let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::tcgetattr(fd, &mut mode) }, 0);
+        mode.c_lflag
+    }
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -1386,6 +2146,23 @@ impl Terminal {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// Waits for the child without reading its output: the terminal stopped
+    /// consuming it, as a suspended application's or a stalled remote
+    /// session's terminal does, and stays that way until the child is gone.
+    fn wait_without_reading(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "CLI did not exit with its terminal unread: {}",
+                self.transcript
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -2233,6 +3010,47 @@ fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
 }
 
 #[test]
+fn a_line_draft_of_images_over_the_frame_is_refused_and_kept() {
+    // A kept image encodes to at most MAX_BASE64_BYTES; four exceed the
+    // 16 MiB request frame, and deleting one leaves three that fit.
+    let fits_raw = (MAX_BASE64_BYTES / 4 * 3) as usize;
+    assert_eq!(base64_len(fits_raw as u64), MAX_BASE64_BYTES);
+    let home = Home::new();
+    let mut paths = Vec::new();
+    for index in 0..4 {
+        let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
+        png.resize(fits_raw, 0);
+        let path = home.0.join(format!("large{index}.png"));
+        fs::write(&path, &png).unwrap();
+        paths.push(path);
+    }
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3, "{content:?}");
+        assert!(content.iter().all(|block| block["type"] == "image"));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let mut terminal = Terminal::launch(home.command());
+    terminal.editor();
+    for path in &paths {
+        terminal.paste(path.to_str().unwrap());
+    }
+    terminal.until("[Image 4: large3.png]");
+    terminal.write(b"\n");
+    terminal.until("Draft retained");
+    terminal.write(b"\x7f\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+#[test]
 fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -2606,8 +3424,10 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(
             &request,
@@ -2693,7 +3513,7 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
         let home = Home::new();
         let daemon = home.daemon(|wire| {
             let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","ui.leaf"]}));
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","ui.leaf.2"]}));
             let management = wire.read("provider.management");
             assert_eq!(management["params"], json!({"providerId":"fixture"}));
             wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{"fixture-model":{"reasoningEffort":"high","serviceTier":"priority"}}}],"errors":[]}));
@@ -2751,6 +3571,70 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
         "{}",
         terminal.transcript
     );
+}
+
+#[test]
+fn tui_escape_sends_the_reason_that_records_the_interruption() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (settle, settlement) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":true,"stopping":false}),
+            );
+            let stop = wire.read("session.stop");
+            assert_eq!(
+                stop["params"],
+                json!({
+                    "sessionId":"session", "branchId":"main", "reason":"User interrupted the run."
+                })
+            );
+            settlement.recv_timeout(PATIENCE).unwrap();
+            wire.end(
+                json!({"turn_id":"turn", "status":"cancelled", "reason":stop["params"]["reason"]}),
+            );
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":false,"stopping":false}),
+            );
+            wire.reply(&stop, json!({"sequence":25}));
+            wire.no_context();
+            let mut line = String::new();
+            assert_eq!(
+                wire.0.read_line(&mut line).unwrap(),
+                0,
+                "unexpected action: {line}"
+            );
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("esc interrupt");
+        terminal.write(b"\x1b");
+        terminal.until("Stopping");
+        assert!(!terminal.transcript.contains("User interrupted the run."));
+        settle.send(()).unwrap();
+        terminal.until("User interrupted the run.");
+        terminal.until("stopped");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
@@ -2860,7 +3744,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&complete, json!({}));
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities = serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        let mut capabilities = serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(&request, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}));
@@ -3025,6 +3909,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
             {"type":"text","text":" [Pasted text: /files/paste.txt (1 lines)]"},
         ]));
         wire.reply(&submit, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"image-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":submit["params"]["user"],"mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -3034,14 +3919,15 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     terminal.until("test / model");
     terminal.write(b"look ");
     terminal.paste(image.to_str().unwrap());
-    terminal.until("[shot.png]");
+    terminal.until("[Image #1]");
     terminal.paste(&long);
     terminal.until("16385 chars");
     terminal.write(b"\r");
-    let joined = daemon.join();
+    terminal.until("[Image #1]");
+    terminal.until("[Pasted text: /files/paste.txt (1 lines)]");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
-    joined.unwrap();
+    daemon.join().unwrap();
 }
 
 #[test]
@@ -3707,8 +4593,11 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     "branch",
                     "edit",
                     "exec",
+                    "exec_stop",
                     "glob",
                     "grep",
+                    "member_approval_allow",
+                    "member_approval_reject",
                     "plugin",
                     "read",
                     "recall",
@@ -4834,7 +5723,7 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
         let stop=wire.read("session.stop");
         finish.recv_timeout(PATIENCE).unwrap();
-        wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
+        wire.notice("approval.cancelled",json!({"sessionId":"session","branchId":"main","requestId":"approval"}));
         wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
         let next = wire.read("session.submit");
         assert_eq!(next["params"]["text"], "after interrupts");
@@ -4937,13 +5826,34 @@ fn web_off_clears_the_daemon_switch() {
 
 #[test]
 fn web_without_the_web_workspace_says_how_to_get_it() {
-    for installed in [false, true] {
+    let source = "Set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature";
+    let cases = [
+        (
+            false,
+            "web_assets_missing",
+            format!("The Web workspace is not installed.\n{source}.\n"),
+        ),
+        (
+            true,
+            "web_assets_missing",
+            "The Web workspace was installed after the daemon started.\nRestart the daemon with `dimcode daemon stop`, then try again.\n".to_owned(),
+        ),
+        (
+            false,
+            "web_assets_incompatible",
+            format!(
+                "The installed Web workspace does not fit dimcode {}-source.\n{source}.\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ),
+    ];
+    for (installed, error, expected) in cases {
         let home = Home::new();
-        let daemon = home.daemon(|wire| {
+        let daemon = home.daemon(move |wire| {
             let hello = wire.read("hello");
             wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
             let open = wire.read("web.open");
-            wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":"web_assets_missing"}}}));
+            wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":error}}}));
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 line.clear();
@@ -4964,153 +5874,46 @@ fn web_without_the_web_workspace_says_how_to_get_it() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         assert!(output.stdout.is_empty());
-        let expected = if installed {
-            "The Web workspace was installed after the daemon started.\nRestart the daemon with `dimcode daemon stop`, then try again.\n"
-        } else {
-            "The Web workspace is not installed.\nInstall it with `dimcode web install`.\n"
-        };
         assert_eq!(stderr, expected);
     }
 }
 
-/// A registry that serves `dimcode-web@<this version>` with `integrity`
-/// until the test ends; its base URL.
-fn web_registry(tarball: Vec<u8>, integrity: String) -> String {
+/// A registry that records the requests it receives; its base URL.
+fn recording_registry() -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let manifest =
-        json!({"dist":{"tarball":format!("{base}/dimcode-web.tgz"),"integrity":integrity}})
-            .to_string();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
             let mut wire = BufReader::new(stream.unwrap());
             let mut request = String::new();
             wire.read_line(&mut request).unwrap();
-            let mut line = String::new();
-            while wire.read_line(&mut line).unwrap() > 2 {
-                line.clear();
-            }
-            let body = if request
-                .starts_with(&format!("GET /dimcode-web/{} ", env!("CARGO_PKG_VERSION")))
-            {
-                manifest.as_bytes().to_vec()
-            } else {
-                assert!(request.starts_with("GET /dimcode-web.tgz "), "{request}");
-                tarball.clone()
-            };
-            let stream = wire.get_mut();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(&body).unwrap();
+            recorded.lock().unwrap().push(request);
         }
     });
-    base
+    (base, requests)
 }
 
 #[test]
-fn web_install_puts_this_versions_frontend_in_the_home() {
-    use base64::Engine;
-    use sha2::Digest;
+fn web_install_refuses_for_a_build_from_source() {
     let home = Home::new();
-    let package = home.0.join("pack/package");
-    fs::create_dir_all(package.join("web/assets")).unwrap();
-    fs::write(package.join("package.json"), "{}").unwrap();
-    fs::write(package.join("web/index.html"), "<!doctype html>").unwrap();
-    fs::write(package.join("web/assets/app-1.js"), "export {}").unwrap();
-    let archive = home.0.join("pack/dimcode-web.tgz");
-    assert!(
-        Command::new("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(home.0.join("pack"))
-            .arg("package")
-            .status()
-            .unwrap()
-            .success()
-    );
-    let tarball = fs::read(&archive).unwrap();
-    let integrity = format!(
-        "sha512-{}",
-        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball))
-    );
-    fs::create_dir_all(home.0.join("web")).unwrap();
-    fs::write(home.0.join("web/stale.js"), "").unwrap();
-
+    let (registry, requests) = recording_registry();
     let output = home
         .command()
         .args(["web", "install"])
-        .env(
-            "DIMCODE_NPM_REGISTRY",
-            web_registry(tarball.clone(), integrity.clone()),
-        )
-        .env_remove("DIMCODE_WEB_ASSETS")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let version = env!("CARGO_PKG_VERSION");
-    assert_eq!(
-        stdout,
-        format!(
-            "Downloading dimcode-web@{version}…\nWeb workspace {version} installed in {}.\n",
-            home.0.join("web").display()
-        )
-    );
-    assert_eq!(
-        fs::read_to_string(home.0.join("web/assets/app-1.js")).unwrap(),
-        "export {}"
-    );
-    assert!(home.0.join("web/index.html").is_file());
-    assert!(!home.0.join("web/stale.js").exists());
-    assert!(!home.0.join("web/package.json").exists());
-    assert!(!home.0.join("web.partial").exists());
-
-    let output = home
-        .command()
-        .args(["web", "install"])
-        .env(
-            "DIMCODE_NPM_REGISTRY",
-            web_registry(tarball.clone(), format!("sha512-{}", "A".repeat(88))),
-        )
+        .env("DIMCODE_NPM_REGISTRY", registry)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains(&format!(
-            "dimcode-web@{version} does not match its registry integrity"
-        )),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("A build from source has no published Web workspace"),
+        "{stderr}"
     );
-    assert!(home.0.join("web/assets/app-1.js").is_file());
-
-    let first = home.0.join("npm-web");
-    fs::create_dir_all(&first).unwrap();
-    fs::write(first.join("index.html"), "<!doctype html>").unwrap();
-    let output = home
-        .command()
-        .args(["web", "install"])
-        .env("DIMCODE_NPM_REGISTRY", web_registry(tarball, integrity))
-        .env("DIMCODE_WEB_ASSETS", &first)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stdout).ends_with(&format!(
-            "The Web workspace in {} is used instead; remove it to use this one.\n",
-            first.display()
-        )),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
+        requests.lock().unwrap().is_empty(),
+        "a build from source sent a registry request"
     );
 }
 
@@ -5158,7 +5961,7 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
     terminal.write(b"/web\r");
     terminal.until("Web interface off");
     terminal.write(b"/web\r");
-    terminal.until("The Web workspace is not installed. Install it with `dimcode web install`.");
+    terminal.until("The Web workspace is not installed. Set DIMCODE_WEB_ASSETS");
     assert!(!terminal.transcript.contains("RPC"));
     terminal.write(b"/exit\r");
     let status = terminal.wait();
@@ -5588,7 +6391,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     let created = rpc(
         &mut wire,
         "provider.create",
-        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true}),
+        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true}),
     );
     assert!(created.get("result").is_some(), "{created}");
     let mut terminal = Terminal::launch_tui(command());
@@ -6168,6 +6971,8 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.reply(&respond, json!({}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-2","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm run lint"}},"reason":"shell command"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-3","source":{"kind":"model"},"call":{"name":"write","input":{"path":"notes.md"}},"reason":"file write"}));
+        wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"member","call":{"name":"member_approval_allow","input":{"approvalId":"member-route"}},"reason":"Member requires explicit review"}));
+        let detail = wire.read("session.collaboration.approval.get");
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         let mut allowed = Vec::new();
@@ -6178,6 +6983,16 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
             wire.reply(&respond, json!({}));
         }
         assert_eq!(allowed, ["req-2", "req-3"]);
+        wire.quiet(Duration::from_millis(200));
+        let original = json!({"state":"pending","approvalId":"member-route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"explicit member action"}},"reason":"Member process request"}});
+        wire.reply(&detail, original.clone());
+        let refresh = wire.read("session.collaboration.approval.get");
+        wire.reply(&refresh, original);
+        let response = wire.read("approval.respond");
+        assert_eq!(response["params"], json!({"sessionId":"session","branchId":"review","requestId":"member","decision":"allow"}));
+        wire.reply(&response, json!({}));
+        wire.quiet(Duration::from_millis(200));
+
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-9","sequence":10,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"both allowed"}]},"mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -6202,6 +7017,8 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.until("Confirm Full Access");
     terminal.write(b"y");
     terminal.until("Tool approvals: Full access");
+    terminal.until("explicit member action");
+    terminal.write(b"y");
     terminal.until("both allowed");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
@@ -7144,8 +7961,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
-                    {"id":"model","name":"Model","capabilities":dim_agent_types::ModelCapabilities::default()},
-                    {"id":"other","name":"Other","capabilities":dim_agent_types::ModelCapabilities::default()}]}}),
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
+                    {"id":"other","name":"Other","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
                 "collaboration.model_policy" => json!({"revision":revision.to_string(),"policy":policy}),
                 "collaboration.set_model_policy" => {
@@ -7234,7 +8051,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
         let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+            serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
             "id":"model","name":"Model","capabilities":capabilities,
@@ -7308,8 +8125,9 @@ fn tui_models_picker_cycles_reasoning_effort() {
 /// `/models` sends `provider.refresh` for a usable provider whose catalog is
 /// empty when the daemon says its models can be listed, draws its rows without
 /// waiting for that listing, shows the models a late listing returns in the
-/// same open picker, keeps the row of a refresh that fails, and asks no
-/// provider twice in one connection.
+/// same open picker, keeps the row of a refresh that fails, and asks an
+/// unchanged catalog once in a connection while a written record asks once
+/// more.
 #[test]
 fn tui_models_picker_refills_an_empty_provider_catalog() {
     let home = Home::new();
@@ -7322,6 +8140,7 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
         Value,
     >::new()));
     let kept = stored.clone();
+    let changed = stored.clone();
     let (release, wait_release) = std::sync::mpsc::channel::<()>();
     let daemon = home.daemon(move |wire| {
         // One writer at a time: the listing a provider is slow to give is
@@ -7374,9 +8193,9 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
                             wait.recv_timeout(PATIENCE).unwrap();
                             let catalog = json!({"version":2,"disabledModelIds":[],"models":[
                                 {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                    "capabilities":dim_agent_types::ModelCapabilities::default()},
+                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
                                 {"id":"vendor/model-b","name":"Model B","unavailableReason":null,
-                                    "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
                             stored.lock().unwrap().insert(provider, catalog.clone());
                             let _guard = writes.lock().unwrap();
                             writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
@@ -7420,13 +8239,31 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
     }
     terminal.until("Broken: no models · dimcode models broken --refresh");
     terminal.until("Fresh / vendor/model-a");
+    // Another client writes the record (an enable or a re-point), which moves
+    // its catalog version: the same empty catalog is asked once more.
+    changed.lock().unwrap().insert(
+        "broken".to_owned(),
+        json!({"version":3,"disabledModelIds":[],"models":[]}),
+    );
+    terminal.write(b"\x1b");
+    thread::sleep(Duration::from_millis(500));
+    terminal.write(b"/models\r");
+    let deadline = Instant::now() + PATIENCE;
+    while *listed.lock().unwrap() < 4 {
+        assert!(
+            Instant::now() < deadline,
+            "the picker did not open after the write"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    terminal.until("Broken: no models · dimcode models broken --refresh");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
     assert_eq!(
         *refreshed.lock().unwrap(),
-        ["fresh".to_owned(), "broken".to_owned()],
-        "one refresh per provider that can be listed in the connection, none on the reopen"
+        ["fresh".to_owned(), "broken".to_owned(), "broken".to_owned()],
+        "one refresh per catalog version that can be listed, none on an unchanged reopen"
     );
 }
 
@@ -7477,7 +8314,7 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
                         wait.recv_timeout(PATIENCE).unwrap();
                         let catalog = json!({"version":2,"disabledModelIds":[],"models":[
                             {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
                         *stored.lock().unwrap() = catalog.clone();
                         writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
                             .unwrap();
@@ -7523,10 +8360,13 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
 /// A provider that offers nothing selectable keeps a row naming it and the
 /// reason: no models with the refresh command when the daemon can list them,
 /// no models with the add method when it cannot, an unreadable catalog, or
-/// the unavailable and disabled counts together. The picker refills only the
-/// provider whose catalog is empty and can be listed: a provider whose models
-/// are its bundled catalog's, one the daemon cannot list and one whose
-/// catalog cannot be read are never refreshed.
+/// the unavailable and disabled counts together. Undeclared limits count as
+/// the reason only when declaring them would unblock the model: a model
+/// unavailable for another reason keeps that reason, and a disabled one is
+/// not counted. The picker refills only the provider whose catalog is empty
+/// and can be listed: a provider whose models are its bundled catalog's, one
+/// the daemon cannot list and one whose catalog cannot be read are never
+/// refreshed.
 #[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
@@ -7537,14 +8377,20 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
-            let model = |id: &str, unavailable: bool| {
-                let reason = if unavailable {
-                    json!("provider_unavailable")
+            let model = |id: &str, reason: Option<&str>, declared: bool| {
+                let reason = reason.map_or(Value::Null, |reason| json!(reason));
+                let capabilities = if declared {
+                    dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)
                 } else {
-                    Value::Null
+                    dim_agent_types::CatalogCapabilities::default()
+                };
+                let missing = if declared {
+                    json!([])
+                } else {
+                    json!(["contextWindow", "maxOutputTokens"])
                 };
                 json!({"id":id,"name":id,"unavailableReason":reason,
-                    "capabilities":dim_agent_types::ModelCapabilities::default()})
+                    "missingLimits":missing,"capabilities":capabilities})
             };
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
@@ -7570,19 +8416,24 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     }
                     let (models, disabled) = match provider {
                         "empty" => (
-                            json!([model("vendor/embed-a", true), model("vendor/embed-b", true)]),
+                            json!([
+                                model("vendor/embed-a", Some("provider_unavailable"), false),
+                                model("vendor/embed-b", Some("provider_unavailable"), false)]),
                             json!([]),
                         ),
                         "mixed" => (
-                            json!([model("vendor/embed-c", true), model("vendor/hidden-a", false)]),
-                            json!(["vendor/hidden-a"]),
+                            json!([
+                                model("vendor/embed-c", Some("provider_unavailable"), true),
+                                model("vendor/hidden-a", None, true),
+                                model("vendor/hidden-c", Some("limits_undeclared"), false)]),
+                            json!(["vendor/hidden-a", "vendor/hidden-c"]),
                         ),
                         "hidden" => (
-                            json!([model("vendor/hidden-b", false)]),
+                            json!([model("vendor/hidden-b", None, true)]),
                             json!(["vendor/hidden-b"]),
                         ),
                         "blank" | "manual" => (json!([]), json!([])),
-                        _ => (json!([model("vendor/model-a", false)]), json!([])),
+                        _ => (json!([model("vendor/model-a", None, true)]), json!([])),
                     };
                     json!({"catalog":{"version":1,"disabledModelIds":disabled,"models":models}})
                 }
@@ -7603,7 +8454,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     terminal.write(b"/models\r");
     terminal.until("Ready / vendor/model-a");
     terminal.until("Empty: 2 models unavailable · dimcode models empty");
-    terminal.until("Mixed: 1 unavailable and 1 disabled · dimcode models mixed");
+    terminal.until("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
     terminal.until("All disabled: 1 model disabled · dimcode models hidden");
     terminal.until("Blank: no models · dimcode models blank --refresh");
     terminal.until("Manual: no models · add a model with provider.models.create");
@@ -7613,6 +8464,10 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
     );
+    assert!(
+        !terminal.transcript.contains("need a window"),
+        "a model unavailable for another reason, and a disabled one, raise no limits row"
+    );
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -7621,5 +8476,183 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         refreshed.as_slice(),
         ["blank".to_owned()],
         "only the empty catalog the daemon can list is refreshed"
+    );
+}
+
+#[test]
+fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (checked, wait_checked) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers"); wire.reply(&providers, json!([]));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Leader permission"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            assert_eq!(detail["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer"}));
+            wire.send(json!({"jsonrpc":"2.0","id":detail["id"],"error":{"code":-32000,"message":"detail service reloading"}}));
+            wire.quiet(Duration::from_millis(200));
+            checked.send(()).unwrap();
+            let detail = wire.read("session.collaboration.approval.get");
+            let original = json!({"state":"pending","approvalId":"route","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original","call":{"name":"exec","input":{"command":"cargo test trusted action"}},"reason":"Member process request"}});
+            wire.reply(&detail, original.clone());
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.reply(&detail, original);
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"review","requestId":"outer","decision":"allow"}));
+            wire.reply(&answer, json!({}));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"outer2","call":{"name":"member_approval_allow","input":{"approvalId":"route2"}},"reason":"Member cancellation"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.reply(&detail, json!({"state":"pending","approvalId":"route2","descriptor":{"delegationId":"delegation","member":{"agentId":"reviewer","sessionId":"member-session","branchId":"main"},"requestId":"original2","call":{"name":"exec","input":{"command":"cancel this member action"}},"reason":"Member process request"}}));
+            wire.notice("session.notice", json!({"sessionId":"session","source":"Collaboration","kind":"memberApprovalEnded","data":{"branchId":"review","approvalId":"route2"}}));
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"]["requestId"], "outer2");
+            assert_eq!(answer["params"]["decision"], "deny");
+            wire.reply(&answer, json!({}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"model","delta":"member approvals finished"}}}));
+            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Cannot review member action");
+        terminal.write(b"y");
+        wait_checked.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"r");
+        terminal.until("member-session");
+        terminal.until("cargo test trusted action");
+        assert!(terminal.transcript.contains("Leader branch: review"));
+        assert!(!terminal.transcript.contains("Full access"));
+        assert!(!terminal.transcript.contains("Allow always"));
+        terminal.write(b"y");
+        terminal.until("member approvals finished");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn member_approval_without_the_detail_method_offers_only_rejection() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (checked, wait_checked) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]); wire.created();
+            let attach = wire.read("session.attach"); wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers"); wire.reply(&providers, json!([]));
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"outer","call":{"name":"member_approval_allow","input":{"approvalId":"route"}},"reason":"Member action"}));
+            let detail = wire.read("session.collaboration.approval.get");
+            wire.send(json!({"jsonrpc":"2.0","id":detail["id"],"error":{"code":-32601,"message":"Unknown method"}}));
+            wire.quiet(Duration::from_millis(250)); checked.send(()).unwrap();
+            let answer = wire.read("approval.respond");
+            assert_eq!(answer["params"]["decision"], "deny"); wire.reply(&answer, json!({}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"unsupported approval rejected"}}}));
+            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("combination cannot review");
+        assert!(!terminal.transcript.contains("Retry"));
+        terminal.write(b"ry");
+        wait_checked.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"n");
+        terminal.until("unsupported approval rejected");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// `dimcode recording on` switches the `model-log` source and names the file.
+#[test]
+fn recording_on_switches_the_model_log() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(
+            &hello,
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+        );
+        let read = wire.read("settings.read");
+        assert_eq!(read["params"], json!({"source":"model-log","scope":"user"}));
+        wire.reply(
+            &read,
+            json!({"revision":"user/model-log:1","document":{"enabled":false}}),
+        );
+        let update = wire.read("settings.update");
+        assert_eq!(
+            update["params"],
+            json!({
+                "source":"model-log",
+                "scope":"user",
+                "expectedRevision":"user/model-log:1",
+                "document":{"enabled":true},
+            })
+        );
+        wire.reply(
+            &update,
+            json!({"revision":"user/model-log:2","document":{"enabled":true}}),
+        );
+    });
+    let output = home.command().args(["recording", "on"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "Model request recording is on: {}\n",
+            home.0.join("model-log/recordings.jsonl").display()
+        )
+    );
+}
+
+/// `dimcode recording` reads the source without writing it.
+#[test]
+fn recording_reports_whether_it_is_on() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(
+            &hello,
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+        );
+        let read = wire.read("settings.read");
+        wire.reply(
+            &read,
+            json!({"revision":"user/model-log:1","document":{"enabled":false}}),
+        );
+    });
+    let output = home.command().arg("recording").output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Model request recording is off.\n"
     );
 }
