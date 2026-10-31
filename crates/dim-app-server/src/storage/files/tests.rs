@@ -331,6 +331,59 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
     fixture.close().await;
 }
 
+/// ADR 013 D4 on Windows: the directory separator is also the LIKE escape
+/// character, so it must be escaped before the wildcard is appended.
+#[test]
+fn a_windows_style_directory_pattern_matches_a_nested_row() {
+    let pattern = like_prefix(Path::new(r"C:\data\command-output\S"), '\\');
+    assert_eq!(pattern, r"C:\\data\\command-output\\S\\%");
+    let connection = Connection::open_in_memory().unwrap();
+    let matched: bool = connection
+        .query_row(
+            "SELECT ?1 LIKE ?2 ESCAPE '\\'",
+            rusqlite::params![r"C:\data\command-output\S\exec.log", pattern],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(matched);
+}
+
+/// ADR 013 D4: two concurrent deletes of a source and its copy must not both
+/// keep the shared directory and leave it without an owner.
+#[tokio::test]
+async fn concurrent_deletes_remove_a_shared_output_directory() {
+    let fixture = Fixture::new().await;
+    let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
+    fixture.session("source").await;
+    let log = fixture.home.join("command-output/source/exec.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"output").unwrap();
+    fixture
+        .files
+        .register("source".into(), log.clone())
+        .await
+        .unwrap();
+    store.fork_session("source", "fork", 0).await.unwrap();
+
+    let (source, fork) = tokio::join!(store.delete_session("source"), store.delete_session("fork"));
+    assert!(source.unwrap());
+    assert!(fork.unwrap());
+    assert!(
+        !log.exists(),
+        "the last owner's delete removes the directory"
+    );
+    let remaining: i64 = fixture
+        .connection()
+        .query_row("SELECT COUNT(*) FROM session_output_owners", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+
+    drop(store);
+    fixture.close().await;
+}
+
 /// ADR 013 D4: a shell output directory goes through HostPlatform, is kept
 /// while another Session names a path under it, and is removed by the last
 /// owner's delete.

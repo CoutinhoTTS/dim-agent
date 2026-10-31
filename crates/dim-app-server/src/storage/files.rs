@@ -180,15 +180,24 @@ fn has_relative_component(path: &Path) -> bool {
         .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
 }
 
-/// `path` escaped for a `LIKE` pattern with `ESCAPE '\'`.
-fn like_prefix(path: &Path) -> String {
-    let mut prefix = path.to_string_lossy().into_owned();
-    for character in ['\\', '%', '_'] {
-        prefix = prefix.replace(character, &format!("\\{character}"));
+/// `path` followed by `separator` and `%`, escaped for a `LIKE` pattern with
+/// `ESCAPE '\'`. The separator is escaped like any other literal: on Windows
+/// it is `\`, which would otherwise escape the wildcard (ADR 013 D4).
+fn like_prefix(path: &Path, separator: char) -> String {
+    let mut prefix = String::new();
+    for character in path.to_string_lossy().chars() {
+        push_like_literal(&mut prefix, character);
     }
-    prefix.push(std::path::MAIN_SEPARATOR);
+    push_like_literal(&mut prefix, separator);
     prefix.push('%');
     prefix
+}
+
+fn push_like_literal(pattern: &mut String, character: char) {
+    if matches!(character, '\\' | '%' | '_') {
+        pattern.push('\\');
+    }
+    pattern.push(character);
 }
 
 /// How txn 2 ended.
@@ -327,7 +336,7 @@ impl SessionFiles {
                     let shared: bool = connection
                         .query_row(
                             "SELECT EXISTS(SELECT 1 FROM session_output_owners WHERE session_id <> ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\'))",
-                            params![session, text, like_prefix(&candidate)],
+                            params![session, text, like_prefix(&candidate, std::path::MAIN_SEPARATOR)],
                             |row| row.get(0),
                         )
                         .map_err(error)?;

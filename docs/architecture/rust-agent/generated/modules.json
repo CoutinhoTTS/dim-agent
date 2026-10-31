@@ -2562,6 +2562,8 @@
         "assert_eq",
         "env",
         "format",
+        "rusqlite::params",
+        "tokio::join",
         "vec"
       ]
     },
@@ -22729,6 +22731,7 @@
       "references": [
         "path SessionFiles",
         "path SessionFiles::new",
+        "path like_prefix",
         "path share"
       ]
     },
