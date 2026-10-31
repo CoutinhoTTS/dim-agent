@@ -1676,8 +1676,8 @@ impl Worker {
             "session.event" => {
                 let notice: EventNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
-                    // Only a live notice counts: a replayed history page
-                    // carries these events too and must not spend a read.
+                    // Live only: history pages arrive as `session.history`
+                    // replies applied by `apply`, so they spend no read.
                     if notice.branch_id == "main"
                         && matches!(notice.event.content, EventContent::ModelEnd(_))
                     {
