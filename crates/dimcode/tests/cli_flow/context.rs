@@ -729,7 +729,12 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
 #[test]
 fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
     for fullscreen in [false, true] {
-        for provider in ["dimcode-api-oauth", "test"] {
+        for scenario in ["quota", "unlimited", "account_error", "other_provider"] {
+            let provider = if scenario == "other_provider" {
+                "test"
+            } else {
+                "dimcode-api-oauth"
+            };
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
                 wire.hello(&[]);
@@ -744,8 +749,6 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
                 wire.reply(&attach, record);
                 let history = wire.read("session.history");
                 wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-                let mut context_reads = 0;
-                let mut account_reads = 0;
                 let mut line = String::new();
                 while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                     let request: Value = serde_json::from_str(&line).unwrap();
@@ -756,8 +759,7 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
                             "account":{"issuer":"fixture","subject":"signed-in","grantedScopes":[]}
                         })),
                         "session.context.usage" => {
-                            context_reads += 1;
-                            if context_reads == 3 {
+                            if scenario == "unlimited" {
                                 failed(wire, &request);
                             } else {
                                 wire.reply(&request, usage(1849.0));
@@ -766,26 +768,23 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
                         "account.usage" => {
                             assert_eq!(provider, "dimcode-api-oauth");
                             assert_eq!(request["params"], json!({"providerId":"dimcode-api-oauth"}));
-                            account_reads += 1;
-                            match account_reads {
-                                1 => wire.reply(&request, json!({
-                                    "plan":{"name":"Pro","status":"active","expiresAt":"2026-11-30T00:00:00Z"},
+                            match scenario {
+                                "quota" => wire.reply(&request, json!({
+                                    "plan":{"name":"\u{1b}]2;injected-title\u{7}Pro","status":"active","expiresAt":"2026-11-30T00:00:00Z"},
                                     "credits":{"usedUnits":25000,"totalUnits":300000,"resetsAt":"2026-11-30T00:00:00Z"},
                                     "windows":[{"durationHours":5,"tokenUsed":9500,"tokenCap":10000}],
-                                    "features":[{"key":"web_search","used":211,"allowance":1500}]
+                                    "features":[{"key":"web_\u{1b}[2Jsearch","used":211,"allowance":1500}]
                                 })),
-                                2 => wire.reply(&request, json!({"credits":{"unlimited":true}})),
-                                3 => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                                    "code":-32000,"message":"Account usage temporarily unavailable"
+                                "unlimited" => wire.reply(&request, json!({"credits":{"unlimited":true}})),
+                                "account_error" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                                    "code":-32000,"message":"Account usage temporarily \u{1b}]2;injected-title\u{7}unavailable"
                                 }})),
-                                _ => panic!("unexpected account usage refresh"),
+                                _ => panic!("unexpected account usage for {scenario}"),
                             }
                         }
                         method => panic!("unexpected request {method}"),
                     }
                 }
-                assert_eq!(context_reads, if provider == "test" { 2 } else { 4 });
-                assert_eq!(account_reads, if provider == "test" { 0 } else { 3 });
             });
             let mut command = home.command();
             command.arg(if fullscreen {
@@ -796,8 +795,12 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
             let mut terminal = Terminal::launch_tui(command);
             terminal.until(&format!("{provider} / model"));
             terminal.write(b"/usage\r");
-            terminal.until("Context: 1,849 / 256,000 tokens");
-            if provider == "dimcode-api-oauth" {
+            terminal.until(if scenario == "unlimited" {
+                "This daemon does not track context usage"
+            } else {
+                "Context: 1,849 / 256,000 tokens"
+            });
+            if scenario == "quota" {
                 for expected in [
                     "DimAgent OAuth",
                     "Pro · active · expires 2026-11-30",
@@ -807,17 +810,24 @@ fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
                 ] {
                     terminal.until(expected);
                 }
-                terminal.write(b"/usage\r");
-                terminal.until("This daemon does not track context usage");
+            } else if scenario == "unlimited" {
+                terminal.until("DimAgent OAuth");
                 terminal.until("unlimited");
-                terminal.write(b"/usage\r");
-                terminal.until("Context: 1,849 / 256,000 tokens");
+            } else if scenario == "account_error" {
                 terminal.until("Account usage temporarily unavailable");
             }
             terminal.write(b"/exit\r");
             terminal.until("Bye!");
             assert!(terminal.wait().success());
             daemon.join().unwrap();
+            assert!(
+                !terminal.transcript.contains("injected-title"),
+                "{scenario}"
+            );
+            if scenario == "unlimited" {
+                assert!(!terminal.transcript.contains("window"));
+                assert!(!terminal.transcript.contains("Web search"));
+            }
             if provider == "test" {
                 assert!(!terminal.transcript.contains("DimAgent OAuth"));
                 assert!(!terminal.transcript.contains("Credits"));

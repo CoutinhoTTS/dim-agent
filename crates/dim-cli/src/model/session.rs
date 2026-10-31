@@ -11,6 +11,9 @@ use crate::model::shell::ShellResult;
 use crate::model::view::{MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot};
 use crate::wire::Configuration;
 
+/// The Dim account provider, signed in with `/login`.
+pub const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
+
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DraftPart {

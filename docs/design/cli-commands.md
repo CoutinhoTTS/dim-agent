@@ -54,7 +54,8 @@ enable the account report. The `/login` account view remains available.
 
 Context and account failures are reported independently: unavailable context
 usage does not hide account usage, and an account error does not discard the
-context report. Missing optional account fields stay absent.
+context report. Missing optional account fields stay absent. The illustration
+below uses synthetic data; an account need not have a 5h window.
 
 ```text
 /usage

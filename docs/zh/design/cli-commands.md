@@ -36,6 +36,33 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+## 用量报告
+
+两种 TUI 模式下，`/usage` 都输出主分支的上下文用量。当前模型使用 Dim OAuth 时，
+还通过现有[账号用量合同](../../../crates/dim-oauth/docs/runtime-contract.md)查询并输出账号的
+套餐、积分、滚动窗口和功能额度。其他模型提供方只显示上下文用量；仅登录 Dim 账号不会启用
+账号用量报告。`/login` 中的账号视图保持可用。
+
+上下文和账号查询失败时分别报告：上下文用量不可用不会隐藏账号用量，账号查询失败也不会丢弃
+上下文报告。账号未返回的可选字段不显示。下图为虚构示例，不代表账号一定具有 5h 窗口。
+
+```text
+/usage
+  Context: 1,849 / 256,000 tokens (...) ...
+
+  DimAgent OAuth
+  Pro · active · expires 2026-11-30
+
+  Credits     25,000 / 300,000  8%
+  [###-------------------------------------]
+
+  5h window   9,500 / 10,000  95%
+  [######################################--]
+
+  Web search  211 / 1,500  14%
+  [######----------------------------------]
+```
+
 ## 命令隔离设置
 
 现有 `/settings` 面板在 Permissions 下、`Tool approvals` 旁增加独立的 `Command isolation` 行。

@@ -21,9 +21,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
-    ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
+    Account, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, EmptyProvider,
+    EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent,
+    OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
     SubagentModelPolicy, SwitchKind, Update, Usage,
 };
 use crate::model::view::{
@@ -1186,11 +1186,9 @@ impl Worker {
                 if self
                     .model
                     .as_ref()
-                    .is_some_and(|model| model.provider_id == crate::ui::oauth_view::DIM_OAUTH_ID)
+                    .is_some_and(|model| model.provider_id == DIM_OAUTH_ID)
                 {
-                    let usage = self
-                        .account_usage(crate::ui::oauth_view::DIM_OAUTH_ID)
-                        .await;
+                    let usage = self.account_usage(DIM_OAUTH_ID).await;
                     self.send(Update::UsageReport(usage));
                 }
             }

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::model::session::{
-    Command, CompactReply, ContextReading, DraftPart, SessionPort, SwitchKind, Update,
+    Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -24,7 +24,7 @@ use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
 use crate::ui::models_panel::ModelsPanel;
-use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
@@ -5406,6 +5406,86 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn account_usage_stays_safe_and_fits_after_reflow_and_in_login() {
+        use crate::model::session::Usage;
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+        use crate::ui::theme::{Appearance, ColorMode};
+
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "plan":{"name":"\u{1b}]2;injected-title\u{7}Pro","status":"active"},
+            "credits":{"usedUnits":25000,"totalUnits":300000},
+            "features":[{"key":"web_\u{1b}[2Jsearch","unlimited":true}]
+        }))
+        .unwrap();
+        for theme in [
+            test_theme(),
+            Theme::system(ColorMode::TrueColor, Appearance::Light, None),
+            Theme::named("monokai-dark", ColorMode::TrueColor, Appearance::Dark, None),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            app.frame((80, 32));
+            app.apply(Update::UsageReport(Ok(usage.clone())));
+            let committed = app.frame((80, 32)).commits.join("\n");
+            assert!(strip_escapes(&committed).contains("Pro · active"));
+            assert!(!committed.contains("injected-title"));
+            assert!(!committed.contains("\u{1b}[2J"));
+            let index = app.len() - 1;
+            for (cols, filled, empty) in [(80, 3, 37), (40, 3, 33), (16, 1, 11)] {
+                let rows = app.rows(index, cols);
+                let plain: Vec<_> = rows.iter().map(|row| strip_escapes(row)).collect();
+                assert!(
+                    rows.iter().all(|row| visible_width(row) <= cols),
+                    "{rows:?}"
+                );
+                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+                assert!(plain.iter().any(|row| row.trim() == bar), "{plain:?}");
+                if cols >= 40 {
+                    assert!(
+                        plain.iter().any(|row| row.contains("Web search")),
+                        "{plain:?}"
+                    );
+                }
+            }
+
+            let mut panel_usage = usage.clone();
+            let plan = panel_usage.plan.as_mut().unwrap();
+            plan.name = Some("A very long plan 名称".repeat(10));
+            plan.status = Some("\u{1b}[2Jactive\nstatus".into());
+            plan.price_amount = Some(100.0);
+            plan.price_currency = Some("\u{1b}]2;injected-title\u{7}custom".into());
+            plan.price_interval = Some("\u{1b}[2Jperiod".into());
+            let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+            view.set_account(Ok(Some(crate::model::session::Account {
+                issuer: "fixture".into(),
+                subject: "signed-in".into(),
+                name: None,
+                email: None,
+            })));
+            view.set_usage(Ok(panel_usage));
+            for width in [80, 40] {
+                let rows = view.render(width, &theme.palette);
+                assert!(
+                    rows.iter().all(|row| visible_width(row) <= width),
+                    "{rows:?}"
+                );
+                assert!(rows.iter().all(|row| !row.contains(['\n', '\t'])));
+                assert!(
+                    rows.iter()
+                        .all(|row| !row.contains("injected-title") && !row.contains("\u{1b}[2J"))
+                );
+                assert!(rows.iter().any(|row| strip_escapes(row).contains("…")));
+            }
+        }
     }
 
     #[test]
