@@ -162,7 +162,7 @@ A connection closes on `close`, when the opening client connection ends, after 1
 
 `dimcode modality set-default image.generate <provider>/<model>` and the Web page call `modality.configure`, which validates that the model is selectable through Provider and that a registered adapter serves it for that operation, then writes the operation key in Modality's own `modality` settings document through its owner write (Settings CAS). `model: null` clears that key. The reply is the same snapshot `modality.capabilities` returns, including the new `revision`, so a client applies it without a second read.
 
-A task resolves its model in this order: the explicit `model` in the request; the persisted default for the operation key; automatic resolution — Provider's global default selection when that model is selectable and served, otherwise the first selectable served model in the order Provider's own automatic selection uses. An explicit model or a persisted default that is no longer selectable fails the task (`model_unavailable` or `default_unavailable`); Modality never substitutes another model. Only an absent default reaches automatic resolution, so clearing a default restores it. The resolved model is written into the task record and does not change when the default changes later.
+A task resolves its model in this order: the explicit `model` in the request; the persisted default for the operation key; automatic resolution — Provider's global default selection when that model is selectable and served, otherwise the first selectable served model in the order Provider's own automatic selection uses. An explicit model or a persisted default that is no longer selectable fails the task (`model_unavailable` or `default_unavailable`); an operation with no adapter for the resolved model fails `unavailable`. Modality never substitutes another model. Only an absent default reaches automatic resolution, so clearing a default restores it. The resolved model is written into the task record and does not change when the default changes later.
 
 Image understanding in an agent turn is the Session model through `read` and attachments ([WorkspaceTools §read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images)); its default is the Agent default on the Web, not a Modality row. This design adds no separate image-understanding default.
 
@@ -347,7 +347,7 @@ The default snapshot is the one shape both methods return. A model reference is 
 - `options` lists the models a registered adapter serves and Provider can select, plus the current default when it is no longer selectable, marked with its reason. The owner computes them at read time from Provider's catalog and the registered adapters; the client does not derive them.
 - `configure` validates the operation, Provider selectability and adapter support, then writes or clears the operation key through Settings' owner write with CAS. `model: null` clears that key; clearing restores automatic resolution. `operation` is required where the operation has its own key (image, speech) and may be absent only for a category-keyed category. The write happens before the reply is sent, so a success means the default is persisted.
 
-Boundary validation: files at most 100 MiB per submission and 25 MiB per inline file (A5); media types checked per operation; `node_path` only for host-executed operations; `node` only for host-executed categories, default control node (A15). Model selection: explicit `model`; else the operation default; else automatic resolution; else `no_default_model`. An explicit model that is not selectable fails `model_unavailable`, and an unavailable default fails `default_unavailable`; neither falls back to another model. The resolved model is fixed in the record. At most 4 running tasks per category; others stay `queued` in submission order (A6).
+Boundary validation: files at most 100 MiB per submission and 25 MiB per inline file (A5); media types checked per operation; `node_path` only for host-executed operations; `node` only for host-executed categories, default control node (A15). Model selection: explicit `model`; else the operation default; else automatic resolution; else `no_default_model`. An explicit model that is not selectable fails `model_unavailable`, an unavailable default fails `default_unavailable`, and a resolved model no adapter serves fails `unavailable`; none of them falls back to another model. The resolved model is fixed in the record. At most 4 running tasks per category; others stay `queued` in submission order (A6).
 
 ### A.4 Task record (`pluginFiles` (extended), format version 1)
 
@@ -426,8 +426,8 @@ Invoking an unavailable category prints the same reason as the listing. The firs
 | `invalid_input` | Unknown category or operation, parameter or file violation |
 | `unavailable` | Category or operation unavailable; `reasons` from `modality.capabilities` included |
 | `no_default_model` | No explicit model, no operation default, and automatic resolution found no serving model |
-| `default_unavailable` | The persisted operation default is no longer selectable or served; clear or replace it |
-| `model_unavailable` | An explicit model is not selectable or no adapter serves it |
+| `default_unavailable` | The persisted operation default is no longer selectable; clear or replace it |
+| `model_unavailable` | An explicit model is not selectable |
 | `modality_conflict` | The settings revision is stale; reread and retry |
 | `modality_invalid_selection` | The model is not selectable through Provider or no registered adapter serves the operation; the reply carries the reason |
 | `modality_unknown_operation` | Unknown category, operation or default key |
