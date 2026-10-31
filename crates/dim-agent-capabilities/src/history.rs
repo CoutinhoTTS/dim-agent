@@ -209,6 +209,7 @@ impl HistoryRenderer {
         let mut state = None;
         let mut history = Vec::new();
         let mut compaction = None;
+        let mut streamed_state = None;
         let mut start = 1;
         while start <= through {
             let end = (start + batch - 1).min(through);
@@ -219,16 +220,32 @@ impl HistoryRenderer {
             let projected = project_batch(&events, state.as_ref())
                 .map_err(|error| AgentError::fault("History", error))?;
             history.extend(projected.history);
+            streamed_state = projected.checkpoint.or(streamed_state);
             compaction = projected.compaction.or(compaction);
             state = Some(projected.state);
             start = end + 1;
         }
         let state = state.unwrap_or_default();
+        let order = timeline.policy_order(through).await?.events;
+        let checkpoint = streamed_state.and_then(|streamed| {
+            let event = order
+                .iter()
+                .find(|event| event.id == streamed.resume_event)?;
+            Some(ProjectionCheckpoint {
+                resume: dim_agent_types::TimelinePosition {
+                    branch_id: event.branch_id.clone(),
+                    sequence: event.sequence,
+                },
+                state: streamed.state,
+            })
+        });
         Ok(StreamedContext {
             history,
             configuration: state.configuration,
             prompt: PromptSnapshot::from_checkpoint(&state.prompts).revision,
             ancestry: ancestors.into_iter().map(|(branch, _)| branch).collect(),
+            order,
+            checkpoint,
             compaction,
             fallback: false,
         })
@@ -242,6 +259,8 @@ pub struct StreamedContext {
     pub configuration: Option<ContextConfiguredData>,
     pub prompt: Option<PromptReference>,
     pub ancestry: Vec<String>,
+    pub order: Vec<dim_agent_runtime::PolicyOrderEvent>,
+    pub checkpoint: Option<ProjectionCheckpoint>,
     pub compaction: Option<Arc<AgentEvent>>,
     /// The caller must use the full `rendered_context` path.
     pub fallback: bool,
@@ -254,6 +273,8 @@ impl StreamedContext {
             configuration: None,
             prompt: None,
             ancestry: Vec::new(),
+            order: Vec::new(),
+            checkpoint: None,
             compaction: None,
             fallback: true,
         }

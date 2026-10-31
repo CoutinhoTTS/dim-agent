@@ -71,6 +71,7 @@ pub(crate) struct PolicyContext {
     compaction: Option<ContextCompactionData>,
     order: Vec<PolicyOrderEvent>,
     full: Option<ContextHistory>,
+    checkpoint: Option<ProjectionCheckpoint>,
 }
 
 impl PolicyContext {
@@ -100,6 +101,7 @@ impl PolicyContext {
             compaction,
             order,
             full: Some(context),
+            checkpoint: None,
         }
     }
 
@@ -166,6 +168,10 @@ impl PolicyContext {
 
     pub fn full(&self) -> Option<&ContextHistory> {
         self.full.as_ref()
+    }
+
+    pub fn checkpoint(&self) -> Option<&ProjectionCheckpoint> {
+        self.checkpoint.as_ref()
     }
 
     pub fn sequence(&self, id: &str) -> Option<u64> {
