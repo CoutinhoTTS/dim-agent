@@ -3,7 +3,23 @@
 //! §13.4). It calls real models, so it is not part of CI: the operator runs it
 //! against an isolated product home whose providers are configured, and the
 //! output goes outside the repository.
+//!
+//! The candidate rule is the rule of model-prompts §8.1, applied through the
+//! shared `rule` module: one comparison is the candidate arm's loss against
+//! the current arm on one rate, and a regression is a loss above `δ = 0.05`
+//! that a one-sided mid-p Fisher exact test on both arms' counts confirms. The
+//! family is fixed before any data — fact recall, exact recall, the violation
+//! rate, the failed-run rate and the unjudged-run rate — and Holm adjusts it
+//! at a family-wise `α = 0.10`. A failed run enters no probe's rate; it is
+//! compared once, as the failed-run rate. The unjudged-run rate counts a run
+//! once however many of its probes the judge left unanswered, because the
+//! judge answers all of them in one call. The verdict is `fail` when any
+//! comparison is a regression, `pass` when none is and every case ran 20 times
+//! in each arm, and `inconclusive` otherwise. The multi-arm runs read their
+//! decisions from the same test: each arm's loss and p-value against the
+//! decision's baseline stand beside the table.
 use crate::app_server;
+use crate::rule::{self, Comparison, Counts, Worse};
 use crate::scenario_eval::text_tokens;
 use dim_agent_capabilities::{
     context_block,
@@ -27,6 +43,7 @@ use dim_app_server::provider::ProviderService;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
@@ -151,20 +168,7 @@ pub async fn run() -> Result<()> {
         .iter()
         .map(|(arm, metrics)| metrics.row(arm))
         .collect();
-    let scored: Vec<(String, String)> = prepared
-        .iter()
-        .flat_map(|case| {
-            case.probes
-                .iter()
-                .map(|probe| (case.id.clone(), probe.id.clone()))
-        })
-        .collect();
-    let verdict = match results.as_slice() {
-        [(_, current), (_, candidate)] if options.candidate.is_some() => {
-            Some(verdict(current, candidate, &scored))
-        }
-        _ => None,
-    };
+    let min_runs = options.runs as u64;
     let mut report = table(&rows);
     report.push_str(&candidate_cost_line(
         &options.model,
@@ -177,8 +181,27 @@ pub async fn run() -> Result<()> {
         no_temperature,
         results.len() * prepared.len() * options.runs,
     ));
-    if let Some(verdict) = &verdict {
-        report.push_str(&format!("\n{verdict}\n"));
+    let mut verdict = None;
+    if let [(_, current), (_, candidate)] = results.as_slice()
+        && options.candidate.is_some()
+    {
+        let judged = rule::judge(&comparisons(current, candidate), min_runs);
+        report.push('\n');
+        report.push_str(rule::COMPARISON_HEADER);
+        for row in &judged.rows {
+            report += &row.line();
+            report.push('\n');
+        }
+        let line = rule::verdict_line(&judged, min_runs, "case", "candidate");
+        report.push_str(&format!(
+            "\n{line}; median T: current {}, candidate {}\n",
+            median_tokens(current),
+            median_tokens(candidate),
+        ));
+        verdict = Some(line);
+    }
+    if results.len() > 2 {
+        report.push_str(&against_baseline(&results, min_runs));
     }
     std::fs::write(options.out.join("summary.md"), report)?;
     server.shutdown();
@@ -1345,23 +1368,30 @@ impl Configuration {
     }
 }
 
-/// The arm's metrics over its cases and runs (ContextCompaction §13.4).
+/// The arm's metrics over its cases and runs (ContextCompaction §13.4). A
+/// failed run enters no probe's rate: it is compared once, as the failed-run
+/// rate (model-prompts §8.1).
 #[derive(Default)]
 struct Metrics {
-    exact: (usize, usize),
-    facts: (usize, usize),
+    /// The exact probes' present count out of their counted probes.
+    exact: Counts,
+    /// The fact probes' present count out of their judged probes.
+    facts: Counts,
     /// `fact` probes that carry an `item`, counted per 3b class
     /// (ContextCompaction §13.4).
-    items: BTreeMap<ItemClass, (usize, usize)>,
-    violations: usize,
-    /// Judged probes the judge did not answer, for the operator to correct
-    /// by hand (ContextCompaction §13.4).
-    unjudged: usize,
-    /// The `(case, probe)` pairs the judge answered at least once
-    /// (model-prompts §8.1): the judged floor asks every scored probe for
-    /// one in each arm.
-    judged: BTreeSet<(String, String)>,
+    items: BTreeMap<ItemClass, Counts>,
+    /// The absent probes' violations out of their judged probes.
+    violations: Counts,
+    /// Probes the judge did not answer, out of the probes it was asked about,
+    /// for the operator to correct by hand (ContextCompaction §13.4).
+    unjudged: Counts,
+    /// Runs whose judge left at least one `fact` or `absent` probe without a
+    /// verdict: the judge answers all of a run's such probes in one call, so
+    /// an unusable answer counts the run once (ContextCompaction §13.4).
+    unjudged_runs: usize,
     cut_offs: u64,
+    /// Every run of the arm, failed and skipped included.
+    runs: usize,
     failed: usize,
     skipped: usize,
     /// Runs whose applied reasoning differs from the arm's value, because
@@ -1385,6 +1415,7 @@ impl Metrics {
         probes: &[Value],
         configuration: &Configuration,
     ) {
+        self.runs += 1;
         if run.fell_back(arm) {
             self.fell_back += 1;
         }
@@ -1400,31 +1431,51 @@ impl Metrics {
         match run.label() {
             "completed" => {}
             "skipped" => self.skipped += 1,
-            _ => self.failed += 1,
+            _ => {
+                self.failed += 1;
+                return;
+            }
         }
-        for (probe, record) in case.probes.iter().zip(probes) {
+        self.add_probes(&case.probes, probes);
+    }
+    /// Counts one run's probes, and the run in the unjudged-run rate when the
+    /// judge left any of its `fact` or `absent` probes without a verdict: the
+    /// judge answers all of a run's such probes in one call, so an unusable
+    /// answer leaves them together and counts once (ContextCompaction §13.4).
+    fn add_probes(&mut self, probes: &[Probe], records: &[Value]) {
+        let mut left_unjudged = false;
+        for (probe, record) in probes.iter().zip(records) {
             let verdict = record["verdict"].as_str();
             let present = verdict == Some("present");
-            if verdict == Some("unparsed") {
-                self.unjudged += 1;
-            } else {
-                self.judged.insert((case.id.clone(), probe.id.clone()));
-            }
             match probe.kind {
                 ProbeKind::Exact => {
                     self.exact = count(self.exact, present);
                 }
-                ProbeKind::Fact => {
-                    self.facts = count(self.facts, present);
-                    if let Some(item) = probe.item {
-                        let counts = self.items.entry(item).or_default();
-                        *counts = count(*counts, present);
+                ProbeKind::Fact | ProbeKind::Absent => {
+                    let unjudged = verdict == Some("unparsed");
+                    self.unjudged = Counts::new(
+                        self.unjudged.outcome + u64::from(unjudged),
+                        self.unjudged.total + 1,
+                    );
+                    if unjudged {
+                        left_unjudged = true;
+                        continue;
+                    }
+                    match probe.kind {
+                        ProbeKind::Fact => {
+                            self.facts = count(self.facts, present);
+                            if let Some(item) = probe.item {
+                                let counts = self.items.entry(item).or_default();
+                                *counts = count(*counts, present);
+                            }
+                        }
+                        ProbeKind::Absent => self.violations = count(self.violations, present),
+                        ProbeKind::Exact => {}
                     }
                 }
-                ProbeKind::Absent if present => self.violations += 1,
-                ProbeKind::Absent => {}
             }
         }
+        self.unjudged_runs += usize::from(left_unjudged);
     }
     fn row(&self, arm: &Arm) -> Value {
         let by_item: BTreeMap<&str, Value> = self
@@ -1434,8 +1485,8 @@ impl Metrics {
                 (
                     item.name(),
                     json!({
-                        "present": counts.0,
-                        "total": counts.1,
+                        "present": counts.outcome,
+                        "total": counts.total,
                         "recall": recall(*counts),
                     }),
                 )
@@ -1454,8 +1505,8 @@ impl Metrics {
             "factRecall": recall(self.facts),
             "factRecallByItem": by_item,
             "exactRecall": recall(self.exact),
-            "violations": self.violations,
-            "unjudged": self.unjudged,
+            "violations": format!("{}/{}", self.violations.outcome, self.violations.total),
+            "unjudged": format!("{}/{}", self.unjudged.outcome, self.unjudged.total),
             "cutOffCount": self.cut_offs,
             "failed": self.failed,
             "skipped": self.skipped,
@@ -1483,14 +1534,16 @@ impl Metrics {
     }
     fn line(&self, arm: &Arm) -> String {
         format!(
-            "{}: fact {}/{}, exact {}/{}, violations {}, unjudged {}, cut-offs {}, failed {}, skipped {}, fell back {}",
+            "{}: fact {}/{}, exact {}/{}, violations {}/{}, unjudged {}/{}, cut-offs {}, failed {}, skipped {}, fell back {}",
             arm.id,
-            self.facts.0,
-            self.facts.1,
-            self.exact.0,
-            self.exact.1,
-            self.violations,
-            self.unjudged,
+            self.facts.outcome,
+            self.facts.total,
+            self.exact.outcome,
+            self.exact.total,
+            self.violations.outcome,
+            self.violations.total,
+            self.unjudged.outcome,
+            self.unjudged.total,
             self.cut_offs,
             self.failed,
             self.skipped,
@@ -1498,84 +1551,143 @@ impl Metrics {
         )
     }
 }
-fn count(counts: (usize, usize), present: bool) -> (usize, usize) {
-    (counts.0 + usize::from(present), counts.1 + 1)
+fn count(counts: Counts, present: bool) -> Counts {
+    Counts::new(counts.outcome + u64::from(present), counts.total + 1)
 }
-fn recall(counts: (usize, usize)) -> Option<f64> {
-    (counts.1 > 0).then(|| counts.0 as f64 / counts.1 as f64)
-}
-
-/// The model-prompts §8.1 rule of the candidate arm against the current one
-/// (ContextCompaction §13.4): each rate at least `current − δ` with
-/// `δ = 0.05`, violations, failed runs and unjudged runs no higher, and every
-/// scored probe judged at least once in each arm. A rate with no probe of its
-/// kind among the cases is left out. There is no absolute pass line.
-struct Rule {
-    passes: bool,
-    failures: Vec<String>,
-}
-fn rule(current: &Metrics, candidate: &Metrics, scored: &[(String, String)]) -> Rule {
-    const DELTA: f64 = 0.05;
-    let mut failures = Vec::new();
-    let mut rate = |name: &str, current: (usize, usize), candidate: (usize, usize)| {
-        let (Some(current), Some(candidate)) = (recall(current), recall(candidate)) else {
-            return;
-        };
-        if candidate < current - DELTA {
-            failures.push(format!(
-                "{name} falls from {current:.3} to {candidate:.3} (δ = {DELTA:.2})"
-            ));
-        }
-    };
-    rate("fact recall", current.facts, candidate.facts);
-    rate("exact recall", current.exact, candidate.exact);
-    if candidate.violations > current.violations {
-        failures.push(format!(
-            "violations rise from {} to {}",
-            current.violations, candidate.violations
-        ));
-    }
-    if candidate.failed > current.failed {
-        failures.push(format!(
-            "failed runs rise from {} to {}",
-            current.failed, candidate.failed
-        ));
-    }
-    if candidate.unjudged > current.unjudged {
-        failures.push(format!(
-            "unjudged runs rise from {} to {}",
-            current.unjudged, candidate.unjudged
-        ));
-    }
-    for (case, probe) in scored {
-        for (arm, metrics) in [("current", current), ("candidate", candidate)] {
-            if !metrics.judged.contains(&(case.clone(), probe.clone())) {
-                failures.push(format!("{case}/{probe} has no judged run in the {arm} arm"));
-            }
-        }
-    }
-    Rule {
-        passes: failures.is_empty(),
-        failures,
-    }
+fn recall(counts: Counts) -> Option<f64> {
+    (counts.total > 0).then(|| counts.outcome as f64 / counts.total as f64)
 }
 
-/// The verdict line: whether the candidate passes, the rules that failed
-/// when it does not, and both arms' median `T` beside them, so the length is
-/// visible (ContextCompaction §13.4).
-fn verdict(current: &Metrics, candidate: &Metrics, scored: &[(String, String)]) -> String {
-    let rule = rule(current, candidate, scored);
-    let failures = if rule.failures.is_empty() {
-        String::new()
+/// Each arm's loss and p-value against the decision's baseline
+/// (ContextCompaction §13.4), so both multi-arm decisions are read off the
+/// same test as the candidate rule: `inherit` for the reasoning phase, and the
+/// best arm for the target phase.
+fn against_baseline(results: &[(Arm, Metrics)], min_runs: u64) -> String {
+    let reasoning = results.iter().all(|(arm, _)| arm.target.is_none());
+    let baseline = if reasoning {
+        results
+            .iter()
+            .position(|(arm, _)| arm.reasoning == SummaryReasoning::Inherit)
     } else {
-        format!(": {}", rule.failures.join("; "))
+        Some(best_arm(results))
     };
-    format!(
-        "candidate {}{failures}; median T: current {}, candidate {}",
-        if rule.passes { "passes" } else { "fails" },
-        median_tokens(current),
-        median_tokens(candidate),
-    )
+    let Some(baseline) = baseline else {
+        return String::new();
+    };
+    let (baseline_arm, baseline_metrics) = &results[baseline];
+    let mut text = format!(
+        "\nagainst `{}`: every other arm's loss and p-value, Holm-adjusted over its five comparisons (model-prompts §8.1, floor of {} runs)\n\n",
+        baseline_arm.id,
+        rule::FLOOR,
+    );
+    text.push_str(rule::COMPARISON_HEADER);
+    for (index, (arm, metrics)) in results.iter().enumerate() {
+        if index == baseline {
+            continue;
+        }
+        let judged = rule::judge(&comparisons(baseline_metrics, metrics), min_runs);
+        for row in &judged.rows {
+            text += &row.line();
+            text.push('\n');
+        }
+        let subject = format!("`{}` against `{}`", arm.id, baseline_arm.id);
+        text += &format!(
+            "{}\n",
+            rule::verdict_line(&judged, min_runs, "case", &subject)
+        );
+    }
+    text
+}
+
+/// The best arm of a target phase: the highest fact recall, ties broken by
+/// exact recall, the lower violation rate, fewer failed runs and the table's
+/// own order (ContextCompaction §13.4). Rates compare in integers, so arms
+/// whose counted runs differ rank on their rates rather than their counts,
+/// and an arm with no counted probe of a kind ranks below one that has.
+fn best_arm(results: &[(Arm, Metrics)]) -> usize {
+    let mut best = 0;
+    for index in 1..results.len() {
+        if outranks(&results[index].1, &results[best].1) {
+            best = index;
+        }
+    }
+    best
+}
+/// Whether `left` ranks above `right` on the target phase's order; a tie
+/// keeps the earlier arm.
+fn outranks(left: &Metrics, right: &Metrics) -> bool {
+    higher(left.facts, right.facts)
+        .then(higher(left.exact, right.exact))
+        .then(lower(left.violations, right.violations))
+        .then(left.failed.cmp(&right.failed))
+        == Ordering::Less
+}
+/// `left` against `right` where the higher rate ranks above: `Less` when
+/// `left` does, `Greater` when it ranks below, and an arm that counted no
+/// probe of the kind ranks below one that did.
+fn higher(left: Counts, right: Counts) -> Ordering {
+    match (left.total > 0, right.total > 0) {
+        (true, true) => (left.outcome * right.total)
+            .cmp(&(right.outcome * left.total))
+            .reverse(),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => Ordering::Equal,
+    }
+}
+/// `left` against `right` where the lower rate ranks above: `Less` when
+/// `left` does, `Greater` when it ranks below, and an arm that counted no
+/// probe of the kind ranks below one that did.
+fn lower(left: Counts, right: Counts) -> Ordering {
+    match (left.total > 0, right.total > 0) {
+        (true, true) => (left.outcome * right.total).cmp(&(right.outcome * left.total)),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => Ordering::Equal,
+    }
+}
+
+/// The candidate rule's family, fixed before any data (ContextCompaction
+/// §13.4): fact recall, exact recall, the violation rate over the probes that
+/// can be violated, the failed-run rate and the unjudged-run rate — a run
+/// whose judge left any of its `fact` or `absent` probes without a verdict,
+/// counted once.
+fn comparisons(current: &Metrics, candidate: &Metrics) -> Vec<Comparison> {
+    let rate = |metrics: &Metrics| Counts::new(metrics.failed as u64, metrics.runs as u64);
+    let unjudged =
+        |metrics: &Metrics| Counts::new(metrics.unjudged_runs as u64, metrics.runs as u64);
+    vec![
+        Comparison {
+            name: "fact recall".into(),
+            worse: Worse::Lower,
+            current: current.facts,
+            candidate: candidate.facts,
+        },
+        Comparison {
+            name: "exact recall".into(),
+            worse: Worse::Lower,
+            current: current.exact,
+            candidate: candidate.exact,
+        },
+        Comparison {
+            name: "violations".into(),
+            worse: Worse::Higher,
+            current: current.violations,
+            candidate: candidate.violations,
+        },
+        Comparison {
+            name: "failed runs".into(),
+            worse: Worse::Higher,
+            current: rate(current),
+            candidate: rate(candidate),
+        },
+        Comparison {
+            name: "unjudged runs".into(),
+            worse: Worse::Higher,
+            current: unjudged(current),
+            candidate: unjudged(candidate),
+        },
+    ]
 }
 fn median_tokens(metrics: &Metrics) -> String {
     percentile(&metrics.tokens, 0.5).map_or_else(|| "–".to_owned(), |tokens| format!("{tokens:.0}"))
@@ -1622,8 +1734,8 @@ fn table(rows: &[Value]) -> String {
             target,
             number(&row["factRecall"]),
             number(&row["exactRecall"]),
-            row["violations"],
-            row["unjudged"],
+            row["violations"].as_str().unwrap_or("–"),
+            row["unjudged"].as_str().unwrap_or("–"),
             row["cutOffCount"],
             row["failed"],
             row["skipped"],
@@ -1778,64 +1890,248 @@ mod tests {
         assert!(error.contains("unknown variant `maybe`"), "{error}");
     }
 
-    /// An arm's metrics over one judged case, with the given unjudged count
-    /// and every other metric level.
-    fn metrics(judged: &[(&str, &str)], unjudged: usize) -> Metrics {
+    /// An arm's metrics with every rate level and `runs` runs in all.
+    fn level(runs: usize) -> Metrics {
         Metrics {
-            judged: judged
-                .iter()
-                .map(|(case, probe)| ((*case).to_owned(), (*probe).to_owned()))
-                .collect(),
-            unjudged,
+            facts: Counts::new(20, 20),
+            exact: Counts::new(10, 10),
+            violations: Counts::new(0, 20),
+            unjudged: Counts::new(0, 50),
+            runs,
             ..Metrics::default()
         }
     }
-    fn scored_probes(probes: &[(&str, &str)]) -> Vec<(String, String)> {
-        probes
-            .iter()
-            .map(|(case, probe)| ((*case).to_owned(), (*probe).to_owned()))
-            .collect()
-    }
 
-    /// More unjudged probes than the current arm fails the verdict even when
-    /// every other metric is level (model-prompts §8.1).
+    /// The candidate rule is five comparisons through the module: identical
+    /// counts pass at the floor and fall to inconclusive below it, and a
+    /// planted loss in any of the five fails and names it (model-prompts
+    /// §8.1, ContextCompaction §13.4).
     #[test]
-    fn a_candidate_with_more_unjudged_runs_fails() {
-        let scored = scored_probes(&[("cjk", "constraint")]);
-        let current = metrics(&[("cjk", "constraint")], 0);
-        let candidate = metrics(&[("cjk", "constraint")], 1);
+    fn the_candidate_rule_judges_five_comparisons_through_the_module() {
+        let current = level(20);
         assert_eq!(
-            verdict(&current, &candidate, &scored),
-            "candidate fails: unjudged runs rise from 0 to 1; median T: current –, candidate –"
+            rule::judge(&comparisons(&current, &current), 20).verdict,
+            rule::Verdict::Pass
         );
-        assert!(verdict(&current, &current, &scored).starts_with("candidate passes"));
+        assert_eq!(
+            rule::judge(&comparisons(&current, &level(19)), 19).verdict,
+            rule::Verdict::Inconclusive
+        );
+        for (name, candidate) in [
+            (
+                "fact recall",
+                Metrics {
+                    facts: Counts::new(10, 20),
+                    ..level(20)
+                },
+            ),
+            (
+                "exact recall",
+                Metrics {
+                    exact: Counts::new(4, 10),
+                    ..level(20)
+                },
+            ),
+            (
+                "violations",
+                Metrics {
+                    violations: Counts::new(8, 20),
+                    ..level(20)
+                },
+            ),
+            (
+                "failed runs",
+                Metrics {
+                    failed: 6,
+                    ..level(20)
+                },
+            ),
+            (
+                "unjudged runs",
+                Metrics {
+                    unjudged_runs: 8,
+                    ..level(20)
+                },
+            ),
+        ] {
+            let judged = rule::judge(&comparisons(&current, &candidate), 20);
+            assert_eq!(judged.verdict, rule::Verdict::Fail, "{name}");
+            assert!(
+                judged
+                    .rows
+                    .iter()
+                    .any(|row| row.name == name && row.rejected),
+                "{name}: {:?}",
+                judged.rows
+            );
+            let line = rule::verdict_line(&judged, 20, "case", "candidate");
+            assert!(line.contains(name), "{line}");
+        }
     }
 
-    /// A scored probe the judge never answered in one arm fails the verdict
-    /// (model-prompts §8.1): the rate it feeds would rest on no judgment
-    /// there.
+    /// A failed run leaves every probe rate and is compared once, as the
+    /// failed-run rate over all the arm's runs (model-prompts §8.1).
     #[test]
-    fn a_probe_with_no_judged_run_in_one_arm_fails() {
-        let both = [("cjk", "constraint"), ("code", "signature")];
-        let scored = scored_probes(&both);
-        let line = verdict(
-            &metrics(&both, 0),
-            &metrics(&[("cjk", "constraint")], 0),
-            &scored,
+    fn a_failed_run_enters_only_the_failed_run_rate() {
+        let current = level(20);
+        let with_failure = Metrics {
+            failed: 1,
+            runs: 21,
+            ..level(20)
+        };
+        let family = comparisons(&current, &with_failure);
+        let fact = family
+            .iter()
+            .find(|comparison| comparison.name == "fact recall")
+            .unwrap();
+        assert_eq!(fact.candidate, current.facts);
+        let failed = family
+            .iter()
+            .find(|comparison| comparison.name == "failed runs")
+            .unwrap();
+        assert_eq!(failed.candidate, Counts::new(1, 21));
+    }
+
+    /// The unjudged-run rate counts the run, not its probes: the judge
+    /// answers all of a run's `fact` and `absent` probes in one call, so an
+    /// unusable answer adds one run to the comparison and each probe to the
+    /// column (ContextCompaction §13.4).
+    #[test]
+    fn an_unjudged_run_counts_once_however_many_probes_it_left() {
+        let probes = [
+            Probe {
+                id: "a".into(),
+                kind: ProbeKind::Fact,
+                text: "a".into(),
+                item: None,
+            },
+            Probe {
+                id: "b".into(),
+                kind: ProbeKind::Fact,
+                text: "b".into(),
+                item: None,
+            },
+            Probe {
+                id: "c".into(),
+                kind: ProbeKind::Absent,
+                text: "c".into(),
+                item: None,
+            },
+        ];
+        let unparsed = [
+            json!({"verdict": "unparsed"}),
+            json!({"verdict": "unparsed"}),
+            json!({"verdict": "unparsed"}),
+        ];
+        let mut candidate = level(20);
+        candidate.add_probes(&probes, &unparsed);
+        assert_eq!(
+            candidate.unjudged,
+            Counts::new(3, 53),
+            "three to the column"
         );
-        assert!(line.starts_with("candidate fails"), "{line}");
+        let family = comparisons(&level(20), &candidate);
+        let unjudged = family
+            .iter()
+            .find(|comparison| comparison.name == "unjudged runs")
+            .unwrap();
+        assert_eq!(
+            unjudged.candidate,
+            Counts::new(1, 20),
+            "one unjudged run to the comparison"
+        );
+    }
+
+    /// The target phase's baseline is the arm that keeps the most facts,
+    /// ties broken by exact recall, the lower violation rate, fewer failed
+    /// runs and then the table's own order (ContextCompaction §13.4). Rates
+    /// compare, not counts: failed runs and the probes a judge left
+    /// unanswered leave the denominators, so the arms' counted runs differ.
+    #[test]
+    fn the_target_phase_reads_its_baseline_as_the_best_arm() {
+        let arm = |id: &str, facts: (u64, u64), exact: (u64, u64), failed: usize| {
+            (
+                Arm {
+                    id: id.into(),
+                    reasoning: SummaryReasoning::Off,
+                    target: Some(TargetRule {
+                        output_share: 0.25,
+                        input_share: 0.05,
+                    }),
+                    prompt: None,
+                    length_sentence: None,
+                },
+                Metrics {
+                    facts: Counts::new(facts.0, facts.1),
+                    exact: Counts::new(exact.0, exact.1),
+                    failed,
+                    runs: 20,
+                    ..Metrics::default()
+                },
+            )
+        };
+        let results = vec![
+            arm("none", (19, 20), (10, 10), 0),
+            arm("a", (20, 20), (10, 10), 0),
+            arm("b", (20, 20), (9, 10), 0),
+        ];
+        assert_eq!(best_arm(&results), 1);
+        let tied = vec![
+            arm("none", (20, 20), (10, 10), 0),
+            arm("a", (20, 20), (10, 10), 0),
+        ];
+        assert_eq!(best_arm(&tied), 0, "a tie keeps the table's own order");
+        // 18/18 is F = 1.0 and 19/20 is F = 0.95: the arm whose two failed
+        // runs left its counted facts whole outranks the arm with one more
+        // fact but a lower rate.
+        let unequal = vec![
+            arm("short", (18, 18), (10, 10), 2),
+            arm("long", (19, 20), (10, 10), 0),
+        ];
+        assert_eq!(best_arm(&unequal), 0, "rates compare, not counts");
+        // An arm with no counted `fact` probe ranks below one that has one.
+        let unmeasured = vec![
+            arm("none-counted", (0, 0), (10, 10), 0),
+            arm("counted", (0, 20), (10, 10), 0),
+        ];
+        assert_eq!(best_arm(&unmeasured), 1);
+    }
+
+    /// The multi-arm report reads the decision against the baseline it names:
+    /// `inherit` for the reasoning phase, and each other arm's loss and
+    /// p-value under the same test (ContextCompaction §13.4).
+    #[test]
+    fn the_multi_arm_table_reads_the_decisions_against_the_baseline() {
+        let reasoning = |id: &str, reasoning: SummaryReasoning| {
+            (
+                Arm {
+                    id: id.into(),
+                    reasoning,
+                    target: None,
+                    prompt: None,
+                    length_sentence: None,
+                },
+                level(20),
+            )
+        };
+        let results = vec![
+            reasoning("reasoning-inherit", SummaryReasoning::Inherit),
+            reasoning("reasoning-off", SummaryReasoning::Off),
+            reasoning("reasoning-low", SummaryReasoning::Low),
+        ];
+        let text = against_baseline(&results, 20);
+        assert!(text.contains("against `reasoning-inherit`"), "{text}");
         assert!(
-            line.contains("code/signature has no judged run in the candidate arm"),
-            "{line}"
-        );
-        let line = verdict(
-            &metrics(&[("code", "signature")], 0),
-            &metrics(&both, 0),
-            &scored,
+            text.contains("| fact recall | 20/20 (1.000) | 20/20 (1.000) |"),
+            "{text}"
         );
         assert!(
-            line.contains("cjk/constraint has no judged run in the current arm"),
-            "{line}"
+            text.contains("`reasoning-off` against `reasoning-inherit` passes"),
+            "{text}"
+        );
+        assert!(
+            text.contains("`reasoning-low` against `reasoning-inherit` passes"),
+            "{text}"
         );
     }
 
