@@ -87,7 +87,7 @@ shutdown 取消的构造的清理错误放回结果（[rutis#983](https://github
 | `Closer::close(&str)` | `Closer::close(Close)` |
 | `StaticCatalog::with(name, Described { .. }, factory)` | `StaticCatalog::with(name, Installed::new(factory))`，提供在 `catalog_key()`；不使用：leaf 不提供目录（M8） |
 | `rutis_bridge::build::Exports` | `rutis_types::Exports`，API 不变；生成文件的文件头变了 |
-| `LoaderPlugin` 提供 `Loader` 和 mounter | 另外还提供标记服务 `loader`，以及 `catalog_key()` 下的会话插件目录 |
+| `LoaderPlugin` 提供 `Loader` 和 mounter | 另外还提供标记服务 `rutis/loader`，以及 `catalog_key()` 下的会话插件目录 |
 
 `host_key`、`HostDispatch`、`Build`、`ServiceCatalog`、`Builtins`、`Resolved`、`mounter_key`、
 `session::Error` 和 `settle` 保持原有契约。
@@ -489,7 +489,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   - 准入会等待运行时的行；
   - `plugin.reload` 能用上改动后的模块。
 - **快照行（M4）：** 运行时停着时解析的行，按它的 `provides` 快照被接受。
-- **`loader`（M5）：** 注入 `loader` 的 TypeScript 行可以 `reload` 某一行、读取 `status`；`create` 和 `remove` 会被拒绝，
+- **`rutis/loader`（M5）：** 注入 `rutis/loader` 的 TypeScript 行可以 `reload` 某一行、读取 `status`；`create` 和 `remove` 会被拒绝，
   因为 Dim 没有配置可编辑层。
 - **放置（M6）：** 迁到最小宿主上的测试保留原有断言。
   - `agents_of_one_builder_mount_only_their_own_plugins_parts` 的用意变了：只剩一个放置 API 之后，登记表属于宿主，
@@ -546,7 +546,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | --- | --- |
 | 宿主、运行时和 leaf 之间版本不一致（握手会拒绝） | M1 在一个提交里升级所有固定版本；`ui.leaf.2` 让版本不一致的 CLI 和 daemon 改走直接 TUI |
 | daemon 的服务变得可以从 leaf 访问 | M8：只用私有地址（Unix socket，或带一次性 token 的 loopback TCP）、隔离会话插件目录、核对 id；Tui §8 写明完整的集合，以及为什么 `isolate` 不适用 |
-| 已安装的插件能拿到导出的服务和 `loader` | 接受：它们是受信代码（规则 11）；没有可编辑层时，`loader` 不能增删行（M5） |
+| 已安装的插件能拿到导出的服务和 `rutis/loader` | 接受：它们是受信代码（规则 11）；没有可编辑层时，`rutis/loader` 不能增删行（M5） |
 | leaf 建立了会话，但它的 `Tui` 一直不 attach | 在 `START` 之后关闭；替换时在新界面 attach 之前保留旧界面（M8） |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
 | 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
@@ -574,7 +574,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 规则 | 回答 |
 | --- | --- |
 | 原则 §4 规则 1–3、5–7、9 | 不变：命令、交接、`before` 契约、批次、上下文路径和事实都不变；M2 保留 `before` 的契约、顺序和失败规则 |
-| AGENTS 规则 4（状态归属） | 行仍只由 PluginManager 写入：没有可编辑层时，插件可以通过 `loader` 重新加载某一行，但不能增删行（M5）。运行时的状态是连接插件的 `RuntimeStatus`，由这个插件写、RuntimeManager 读；RuntimeManager 自己只保留获取运行时的状态（M4） |
+| AGENTS 规则 4（状态归属） | 行仍只由 PluginManager 写入：没有可编辑层时，插件可以通过 `rutis/loader` 重新加载某一行，但不能增删行（M5）。运行时的状态是连接插件的 `RuntimeStatus`，由这个插件写、RuntimeManager 读；RuntimeManager 自己只保留获取运行时的状态（M4） |
 | §4 规则 8（基础设施默认不变） | 改动来自依赖升级，限定在 runtime crate、App Server 和 CLI 之内；唯一向 rutis 提出的需求是 M2 的，已由 0.19.1 中的 rutis#947 答复（§9） |
 | AGENTS 规则 11（受信插件，明确的边界） | M8 写明 leaf 链接暴露了什么，信任边界保持在本地用户；审批和权限都不变 |
 | AGENTS 规则 6（冻结的夹具） | 不动 `crates/dim-agent-types/tests/fixtures/` |
