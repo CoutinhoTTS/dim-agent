@@ -145,7 +145,6 @@ that excerpt, and a handler whose document does not parse is reported by
 `a_stop_follow_up_carries_the_block_reason_then_the_context`,
 `a_stop_follow_up_is_recognized_when_its_reason_carries_markup`,
 `only_the_follow_ups_turn_reports_stop_hook_active`,
-`the_follow_up_state_is_rebuilt_from_the_branch`,
 `permission_request_answers_through_approval`,
 `a_failed_permission_request_with_block_denies_the_approval`,
 `a_failed_permission_request_with_continue_answers_allow`,
@@ -162,6 +161,10 @@ that excerpt, and a handler whose document does not parse is reported by
 `disable_all_hooks_turns_every_source_off`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
+`the_follow_up_state_is_rebuilt_from_the_branch` pins that the follow-up's
+identity and consecutive count are rebuilt from the branch, not carried in
+memory; `a_deleted_operator_input_is_forgotten` pins that a withdrawn operator
+input leaves the record and moves nothing;
 `the_live_subscription_follows_exactly_the_kinds_the_folds_match` pins that the
 live subscription follows every event kind the two folds handle, `input/deleted`
 included;
