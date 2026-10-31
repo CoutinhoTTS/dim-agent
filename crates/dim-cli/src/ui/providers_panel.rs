@@ -2,11 +2,11 @@
 //! static provider. The management snapshot supplies safe connection fields
 //! and the record version used for partial writes.
 
-use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
+use crate::model::session::{DIM_OAUTH_ID, OauthEvent, ProviderAction, ProviderEntry};
 use crate::ui::i18n::{t, tf};
 use crate::ui::line_input::{LineInput, window};
 use crate::ui::list_panel::{Event, Item, ListPanel};
-use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::oauth_view::OauthView;
 use crate::ui::prompts::Effect;
 use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, key_hints};
 use crate::ui::rows::title_plain;

@@ -21,10 +21,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DraftPart, EmptyProvider, EmptyReason,
-    ExecutionSnapshot, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent,
-    OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
-    SubagentModelPolicy, SwitchKind, Update,
+    Account, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, EmptyProvider,
+    EmptyReason, ExecutionSnapshot, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
+    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem,
+    SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -1183,6 +1183,14 @@ impl Worker {
                     }
                     Err(error) => self.report(error.to_string(), true),
                 }
+                if self
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.provider_id == DIM_OAUTH_ID)
+                {
+                    let usage = self.account_usage(DIM_OAUTH_ID).await;
+                    self.send(Update::UsageReport(usage));
+                }
             }
             Command::Compact => self.compact().await,
             Command::ToggleWeb => {
@@ -1387,16 +1395,7 @@ impl Worker {
                 self.send(Update::Login(account));
             }
             Command::LoginUsage(provider_id) => {
-                let usage = self
-                    .client
-                    .typed("account.usage", json!({"providerId": provider_id}))
-                    .await
-                    .map_err(|error| {
-                        match error.downcast_ref::<client::RpcError>().and_then(app_error) {
-                            Some("unknown_method") => USAGE_MISSING.to_owned(),
-                            _ => error.to_string(),
-                        }
-                    });
+                let usage = self.account_usage(&provider_id).await;
                 self.send(Update::Usage(usage));
             }
             Command::Logout(provider_id) => {
@@ -1633,6 +1632,18 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    async fn account_usage(&mut self, provider_id: &str) -> Result<Usage, String> {
+        self.client
+            .typed("account.usage", json!({"providerId": provider_id}))
+            .await
+            .map_err(
+                |error| match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+                    Some("unknown_method") => USAGE_MISSING.to_owned(),
+                    _ => error.to_string(),
+                },
+            )
     }
 
     /// The main branch's context window as `session.context.usage`

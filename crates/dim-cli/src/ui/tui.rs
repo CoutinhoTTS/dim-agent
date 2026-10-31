@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::model::session::{
-    Command, CompactReply, ContextReading, DraftPart, SessionPort, SwitchKind, Update,
+    Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -24,7 +24,7 @@ use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
 use crate::ui::models_panel::ModelsPanel;
-use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
@@ -734,8 +734,7 @@ struct App {
     /// call's row id.
     tail_groups: Vec<(usize, String)>,
     notices: Vec<String>,
-    /// Multi-line status blocks to commit (reports), with their tone.
-    reports: Vec<(String, Tone)>,
+    reports: Vec<Block>,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
     /// The adopted model and its reasoning effort, once the session exists.
@@ -1527,15 +1526,17 @@ impl App {
                 }
             }
             Update::Toast(text) => self.set_notice(text),
-            Update::Report { text, warning } => self
-                .reports
-                .push((text, if warning { Tone::Warning } else { Tone::Muted })),
+            Update::Report { text, warning } => self.reports.push(Block::Status {
+                text,
+                tone: if warning { Tone::Warning } else { Tone::Muted },
+            }),
             Update::Web { enabled, open, url } => {
                 if enabled && open {
                     match url {
-                        Some(url) => self
-                            .reports
-                            .push((format!("Web interface on: {url}"), Tone::Muted)),
+                        Some(url) => self.reports.push(Block::Status {
+                            text: format!("Web interface on: {url}"),
+                            tone: Tone::Muted,
+                        }),
                         None => self.notices.push("Web interface is on".to_owned()),
                     }
                 } else if open {
@@ -1599,6 +1600,17 @@ impl App {
                     view.set_usage(usage);
                 }
             }
+            Update::UsageReport(usage) => self.reports.push(match usage {
+                Ok(usage) => Block::AccountUsage(usage),
+                Err(reason) => Block::Status {
+                    text: format!(
+                        "{} · {}",
+                        t("DimAgent OAuth"),
+                        tf("Usage: {reason}", &[("reason", &reason)])
+                    ),
+                    tone: Tone::Warning,
+                },
+            }),
             Update::Context(context) => self.context = context,
             Update::Compacted(reply) => {
                 let (text, tone) = match reply {
@@ -1620,7 +1632,7 @@ impl App {
                         Tone::Warning,
                     ),
                 };
-                self.reports.push((text, tone));
+                self.reports.push(Block::Status { text, tone });
             }
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
@@ -3021,7 +3033,10 @@ impl App {
             }
             "keys" => {
                 let rows = crate::ui::keys::report(self.fullscreen, self.mouse);
-                self.reports.push((rows.join("\n"), Tone::Muted));
+                self.reports.push(Block::Status {
+                    text: rows.join("\n"),
+                    tone: Tone::Muted,
+                });
                 Outcome::Continue
             }
             "settings" => {
@@ -3203,16 +3218,10 @@ impl App {
             self.record(Block::Status { text: notice, tone });
             frame.commits.push(text);
         }
-        for (text, tone) in std::mem::take(&mut self.reports) {
-            let color = match tone {
-                Tone::Muted => &self.palette.muted,
-                Tone::Warning => &self.palette.warning,
-                Tone::Danger => &self.palette.danger,
-            };
-            let rows = gutter_text(STATUS_MARK, &text, width, color);
-            let chunk_text = chunk(&rows);
-            self.record(Block::Status { text, tone });
-            frame.commits.push(chunk_text);
+        for block in std::mem::take(&mut self.reports) {
+            let text = chunk(&render_block(&block, width, &self.palette, &self.markdown));
+            self.record(block);
+            frame.commits.push(text);
         }
         for run in std::mem::take(&mut self.shell_runs) {
             let block = Block::Shell(run);
@@ -5507,6 +5516,86 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn account_usage_stays_safe_and_fits_after_reflow_and_in_login() {
+        use crate::model::session::Usage;
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+        use crate::ui::theme::{Appearance, ColorMode};
+
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "plan":{"name":"\u{1b}]2;injected-title\u{7}Pro","status":"active"},
+            "credits":{"usedUnits":25000,"totalUnits":300000},
+            "features":[{"key":"web_\u{1b}[2Jsearch","unlimited":true}]
+        }))
+        .unwrap();
+        for theme in [
+            test_theme(),
+            Theme::system(ColorMode::TrueColor, Appearance::Light, None),
+            Theme::named("monokai-dark", ColorMode::TrueColor, Appearance::Dark, None),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            app.frame((80, 32));
+            app.apply(Update::UsageReport(Ok(usage.clone())));
+            let committed = app.frame((80, 32)).commits.join("\n");
+            assert!(strip_escapes(&committed).contains("Pro · active"));
+            assert!(!committed.contains("injected-title"));
+            assert!(!committed.contains("\u{1b}[2J"));
+            let index = app.len() - 1;
+            for (cols, filled, empty) in [(80, 3, 37), (40, 3, 33), (16, 1, 11)] {
+                let rows = app.rows(index, cols);
+                let plain: Vec<_> = rows.iter().map(|row| strip_escapes(row)).collect();
+                assert!(
+                    rows.iter().all(|row| visible_width(row) <= cols),
+                    "{rows:?}"
+                );
+                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+                assert!(plain.iter().any(|row| row.trim() == bar), "{plain:?}");
+                if cols >= 40 {
+                    assert!(
+                        plain.iter().any(|row| row.contains("Web search")),
+                        "{plain:?}"
+                    );
+                }
+            }
+
+            let mut panel_usage = usage.clone();
+            let plan = panel_usage.plan.as_mut().unwrap();
+            plan.name = Some("A very long plan 名称".repeat(10));
+            plan.status = Some("\u{1b}[2Jactive\nstatus".into());
+            plan.price_amount = Some(100.0);
+            plan.price_currency = Some("\u{1b}]2;injected-title\u{7}custom".into());
+            plan.price_interval = Some("\u{1b}[2Jperiod".into());
+            let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
+            view.set_account(Ok(Some(crate::model::session::Account {
+                issuer: "fixture".into(),
+                subject: "signed-in".into(),
+                name: None,
+                email: None,
+            })));
+            view.set_usage(Ok(panel_usage));
+            for width in [80, 40] {
+                let rows = view.render(width, 32, &theme.palette);
+                assert!(
+                    rows.iter().all(|row| visible_width(row) <= width),
+                    "{rows:?}"
+                );
+                assert!(rows.iter().all(|row| !row.contains(['\n', '\t'])));
+                assert!(
+                    rows.iter()
+                        .all(|row| !row.contains("injected-title") && !row.contains("\u{1b}[2J"))
+                );
+                assert!(rows.iter().any(|row| strip_escapes(row).contains("…")));
+            }
+        }
     }
 
     #[test]

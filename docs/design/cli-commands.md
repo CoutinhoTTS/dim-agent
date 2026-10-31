@@ -43,6 +43,37 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+## Usage report
+
+In both TUI modes, `/usage` prints the main branch's context usage. When the
+active model uses Dim OAuth, it also queries and prints the account's plan,
+credits, rolling windows and feature meters through the existing
+[account usage contract](../../crates/dim-oauth/docs/runtime-contract.md).
+Other model providers keep context-only output; signing in alone does not
+enable the account report. The `/login` account view remains available.
+
+Context and account failures are reported independently: unavailable context
+usage does not hide account usage, and an account error does not discard the
+context report. Missing optional account fields stay absent. The illustration
+below uses synthetic data; an account need not have a 5h window.
+
+```text
+/usage
+  Context: 1,849 / 256,000 tokens (...) ...
+
+  DimAgent OAuth
+  Pro · active · expires 2026-11-30
+
+  Credits     25,000 / 300,000  8%
+  [###-------------------------------------]
+
+  5h window   9,500 / 10,000  95%
+  [######################################--]
+
+  Web search  211 / 1,500  14%
+  [######----------------------------------]
+```
+
 ## Execution settings
 
 The existing `/settings` panel has one `Execution` row, next to `Tool approvals`. It is the only

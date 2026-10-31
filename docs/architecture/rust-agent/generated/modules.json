@@ -24640,6 +24640,7 @@
         "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
+        "path DIM_OAUTH_ID",
         "path DraftPart",
         "path DraftPart::Block",
         "path DraftPart::Paste",
@@ -24708,11 +24709,14 @@
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
+        "path Update::UsageReport",
         "path Update::Web",
+        "path Usage",
         "use crate::model::session::Account",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
         "use crate::model::session::EmptyProvider",
         "use crate::model::session::EmptyReason",
@@ -24731,7 +24735,8 @@
         "use crate::model::session::SessionPort",
         "use crate::model::session::SubagentModelPolicy",
         "use crate::model::session::SwitchKind",
-        "use crate::model::session::Update"
+        "use crate::model::session::Update",
+        "use crate::model::session::Usage"
       ]
     },
     {
@@ -27246,6 +27251,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path AccountInfo",
+        "path DIM_OAUTH_ID",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -27255,9 +27261,17 @@
         "path OauthStart",
         "path Usage",
         "use crate::model::session::Account",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
         "use crate::model::session::Usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -27392,6 +27406,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path AccountInfo",
+        "path DIM_OAUTH_ID",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
@@ -27410,7 +27425,6 @@
       "from": "dim_cli::ui::oauth_view::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path DIM_OAUTH_ID",
         "path Focus::Input",
         "path Focus::Submit",
         "path OauthView",
@@ -27949,11 +27963,13 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::model::session",
       "references": [
+        "path DIM_OAUTH_ID",
         "path OauthEvent",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry"
@@ -28002,11 +28018,9 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path DIM_OAUTH_ID",
         "path OauthView",
         "path OauthView::native_selection",
         "path OauthView::new",
-        "use crate::ui::oauth_view::DIM_OAUTH_ID",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -28106,6 +28120,7 @@
       "from": "dim_cli::ui::providers_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path DIM_OAUTH_ID",
         "path ProviderAction::Create",
         "path ProviderEntry"
       ]
@@ -28115,13 +28130,6 @@
       "to": "dim_cli::ui::line_input",
       "references": [
         "path LineInput::new"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::providers_panel::tests",
-      "to": "dim_cli::ui::oauth_view",
-      "references": [
-        "path DIM_OAUTH_ID"
       ]
     },
     {
@@ -29817,6 +29825,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::block",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path crate::model::session::Usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellRun",
@@ -30010,6 +30025,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path crate::ui::oauth_view::OauthView::render_usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::ui::render::markdown",
       "references": [
         "path MarkdownRenderer",
@@ -30082,6 +30104,7 @@
       "to": "dim_cli::ui::transcript::block",
       "references": [
         "path Block",
+        "path Block::AccountUsage",
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
@@ -30396,6 +30419,7 @@
         "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
+        "path DIM_OAUTH_ID",
         "path SessionPort",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -30435,11 +30459,13 @@
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
+        "path Update::UsageReport",
         "path Update::Web",
         "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -30645,10 +30671,8 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path DIM_OAUTH_ID",
         "path OauthView",
         "path OauthView::new",
-        "use crate::ui::oauth_view::DIM_OAUTH_ID",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -31012,6 +31036,7 @@
       "to": "dim_cli::ui::transcript::block",
       "references": [
         "path Block",
+        "path Block::AccountUsage",
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
@@ -31025,8 +31050,6 @@
         "path Block::Thinking",
         "path Block::ToolGroup",
         "path Block::User",
-        "path Tone",
-        "path Tone::Danger",
         "path Tone::Muted",
         "path Tone::Warning",
         "path group_rows",
@@ -31186,6 +31209,7 @@
         "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::Submit",
+        "path DIM_OAUTH_ID",
         "path SessionPort",
         "path SwitchKind::Forked",
         "path Update",
@@ -31195,6 +31219,8 @@
         "path Update::Plugins",
         "path Update::Snapshot",
         "path Update::Switched",
+        "path Update::UsageReport",
+        "path crate::model::session::Account",
         "path crate::model::session::SwitchKind::Resumed"
       ]
     },
@@ -31226,6 +31252,13 @@
       "to": "dim_cli::projection",
       "references": [
         "path crate::projection::Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path OauthView::new"
       ]
     },
     {
@@ -31300,6 +31333,7 @@
       "to": "dim_cli::ui::theme",
       "references": [
         "path Theme",
+        "path Theme::named",
         "path Theme::system"
       ]
     },
