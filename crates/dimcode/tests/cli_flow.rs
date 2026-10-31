@@ -9148,3 +9148,118 @@ fn recording_reports_whether_it_is_on() {
         "Model request recording is off.\n"
     );
 }
+
+#[test]
+fn tui_default_theme_respects_background_and_saved_choice() {
+    for (program, term, signal, background, saved, expected) in [
+        ("ghostty", "xterm-256color", None, None, None, "Dim Dark"),
+        (
+            "ghostty",
+            "xterm-256color",
+            Some(("COLORFGBG", "0;15")),
+            None,
+            None,
+            "System",
+        ),
+        (
+            "Apple_Terminal",
+            "xterm-256color",
+            None,
+            None,
+            None,
+            "System",
+        ),
+        ("", "nsterm-256color", None, None, None, "System"),
+        (
+            "Apple_Terminal",
+            "xterm-256color",
+            None,
+            Some("rgb:ffff/ffff/ffff"),
+            None,
+            "System",
+        ),
+        (
+            "Apple_Terminal",
+            "xterm-256color",
+            None,
+            Some("rgb:0000/0000/0000"),
+            None,
+            "Dim Dark",
+        ),
+        (
+            "Apple_Terminal",
+            "xterm-256color",
+            Some(("DIM_TERMINAL_APPEARANCE", "dark")),
+            None,
+            None,
+            "Dim Dark",
+        ),
+        (
+            "Apple_Terminal",
+            "xterm-256color",
+            Some(("COLORFGBG", "15;0")),
+            None,
+            None,
+            "Dim Dark",
+        ),
+        ("", "xterm", None, None, None, "System"),
+        (
+            "ghostty",
+            "xterm-256color",
+            None,
+            None,
+            Some("system"),
+            "System",
+        ),
+        (
+            "ghostty",
+            "xterm-256color",
+            None,
+            None,
+            Some("monokai-dark"),
+            "Monokai Dark",
+        ),
+    ] {
+        let home = Home::new();
+        if let Some(saved) = saved {
+            fs::write(
+                home.0.join("config.json"),
+                json!({"locale":"en","themeId":saved}).to_string(),
+            )
+            .unwrap();
+        }
+        let (quieted, quiet_done) = std::sync::mpsc::channel();
+        let daemon = no_session_daemon(&home, quieted);
+        let mut command = home.command();
+        for key in [
+            "COLORTERM",
+            "TERMINAL_EMULATOR",
+            "WT_SESSION",
+            "COLORFGBG",
+            "DIM_TERMINAL_APPEARANCE",
+            "DIMCODE_TERMINAL_APPEARANCE",
+        ] {
+            command.env_remove(key);
+        }
+        command.env("TERM_PROGRAM", program).env("TERM", term);
+        if let Some((key, value)) = signal {
+            command.env(key, value);
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("\x1b]11;?\x07");
+        if let Some(background) = background {
+            terminal.raw(format!("\x1b]11;{background}\x07").as_bytes());
+        }
+        terminal.raw(b"\x1b[?1;2c");
+        terminal.until("Sign in with /login");
+        terminal.write(b"/settings\r");
+        terminal.until(&format!("{expected} ›"));
+        quiet_done.recv_timeout(PATIENCE).unwrap();
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+        let config: Value =
+            serde_json::from_slice(&fs::read(home.0.join("config.json")).unwrap()).unwrap();
+        assert_eq!(config.get("themeId").and_then(Value::as_str), saved);
+    }
+}

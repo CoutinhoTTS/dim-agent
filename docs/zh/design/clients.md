@@ -112,7 +112,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 
 | 能力 | CLI | Web | 来源 |
 | --- | --- | --- | --- |
-| `/settings`：主题、语言、启动形态、鼠标、通知、审批、模型 | 已实现 | 后续阶段（需要先决定管理方法，§6） | |
+| `/settings`：主题、语言、启动形态、鼠标、通知、审批 | 已实现 | 后续阶段（需要先决定管理方法，§6） | 模型选择使用 `/model`（`/models`），不在 `/settings` 中。 |
 | `/settings`：子 agent 模型、辅助模型、默认多模态模型、执行 Shell、沙箱、提示词语言 | 已在别处设计，没有客户端界面 | — | 总体设计 B.1、[Modality](plugins/Modality.md) |
 | `/settings`：VS Code 聚焦、资源监控、套餐用量显示 | 无 | — | |
 | `/settings`：ACP Session 显示 | 不支持：没有原生持久化 client-origin 字段 | — | [AcpGateway](plugins/AcpGateway.md#a5-client-label) |

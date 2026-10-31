@@ -336,8 +336,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Tool approvals" => "도구 승인",
         "Execution" => "실행",
         "Models" => "모델",
-        "Model" => "모델",
-        "not set" => "미설정",
         "Settings" => "설정",
         "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ 이동 · Enter 선택 · ←→/Space 변경 · Esc 닫기"
