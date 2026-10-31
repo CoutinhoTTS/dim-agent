@@ -6794,7 +6794,19 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
             .unwrap();
         native
             .execute_batch(
-                "DROP TABLE agent_store_format;
+                "PRAGMA foreign_keys=OFF;
+                 CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
+                 DROP TABLE agents;
+                 CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)));
+                 CREATE UNIQUE INDEX agents_default_unique ON agents(is_default) WHERE is_default = 1;
+                 INSERT INTO agents(agent_id, profile, is_default) SELECT agent_id, profile, is_default FROM agents_rows;
+                 DROP TABLE agents_rows;
+                 CREATE TEMP TABLE sessions_rows AS SELECT * FROM agent_sessions;
+                 DROP TABLE agent_sessions;
+                 CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0));
+                 INSERT INTO agent_sessions(session_id, config, created_at_ms) SELECT session_id, config, created_at_ms FROM sessions_rows;
+                 DROP TABLE sessions_rows;
+                 DROP TABLE agent_store_format;
                  CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25));
                  INSERT INTO agent_store_format VALUES (25);",
             )

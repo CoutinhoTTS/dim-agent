@@ -1852,7 +1852,7 @@ async fn migration_preserves_removed_client_settings_and_refuses_unsupported_tar
     let preview = directory.path().join("preview");
     std::fs::create_dir_all(preview.join("rust")).unwrap();
     let native = Connection::open(preview.join("rust/dimcode.sqlite")).unwrap();
-    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=27));INSERT INTO agent_store_format VALUES(27);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
+    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=28));INSERT INTO agent_store_format VALUES(28);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
     drop(native);
     let before = std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap();
     let root = rutis::Ctx::root().unwrap();
