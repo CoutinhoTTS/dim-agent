@@ -1157,7 +1157,17 @@ impl Worker {
             Command::CloseSessions => self.cancel_catalog().await?,
             Command::Usage => {
                 let reading = self.context_usage().await;
-                let cached = self.last_usage.and_then(|usage| usage.percent());
+                // Pages land oldest first: until `main`'s history has
+                // finished loading, an earlier page's older request is not
+                // the newest, so the segment waits for `done`.
+                let loaded = self
+                    .task_history
+                    .get("main")
+                    .is_some_and(|history| history.done);
+                let cached = self
+                    .last_usage
+                    .filter(|_| loaded)
+                    .and_then(|usage| usage.percent());
                 match reading {
                     Ok(usage) => {
                         let mut line = usage.describe();

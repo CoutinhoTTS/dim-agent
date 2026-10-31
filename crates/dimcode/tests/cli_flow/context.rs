@@ -184,6 +184,17 @@ fn model_usage(wire: &mut Wire, branch: &str, sequence: u64, prompt: f64, cache_
     );
 }
 
+/// A `model/usage` event as a history page carries it: the same fact, in the
+/// page's own shape.
+fn history_usage(sequence: u64, cache_read: f64) -> Value {
+    json!({
+        "id":format!("event-{sequence}"),"sequence":sequence,"create_at":1,
+        "type":"model","name":"usage",
+        "data":{"turn_id":"turn","request_id":"request","usage":{
+            "promptTokens":10000.0,"completionTokens":1.0,
+            "totalTokens":10001.0,"cacheReadTokens":cache_read}}})
+}
+
 /// `/usage` reports the last request's cache read share beside the context
 /// reading, follows a newer request's usage, and drops the segment when the
 /// newest usage reports no cache field.
@@ -478,4 +489,100 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+}
+
+/// `/usage` leaves the segment out while `main`'s history is still paging, so
+/// it never reports a page's older request; the second page's newer usage is
+/// what the next read shows.
+#[test]
+fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
+    let home = Home::new();
+    let (read, wait_read) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let first = wire.read("session.history");
+        assert_eq!(
+            first["params"],
+            json!({"sessionId":"session","branchId":"main","after":0,"limit":256})
+        );
+        wire.reply(
+            &first,
+            json!({"events":[history_usage(5, 5000.0)],"through":8,"nextAfter":6,"done":false}),
+        );
+        let mut second = None;
+        let mut started = 0;
+        while second.is_none() || started < 2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => {
+                    wire.reply(&request, json!([]));
+                    started += 1;
+                }
+                Some("session.context.usage") => {
+                    wire.reply(&request, usage(1849.0));
+                    started += 1;
+                }
+                Some("session.history") => {
+                    assert!(second.is_none(), "one history page at a time");
+                    second = Some(request);
+                }
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        let second = second.expect("main history pages");
+        assert_eq!(
+            second["params"],
+            json!({"sessionId":"session","branchId":"main","after":6,"limit":256,"through":8})
+        );
+        // The first `/usage` reads the context while the second page is
+        // outstanding, and only then does the page land.
+        let pending = wire.read("session.context.usage");
+        wire.reply(&pending, usage(64000.0));
+        wait_read.recv_timeout(PATIENCE).unwrap();
+        wire.reply(
+            &second,
+            json!({"events":[
+                history_usage(7, 9200.0),
+                {"id":"event-8","sequence":8,"create_at":1,"type":"step","name":"text",
+                 "data":{"turn_id":"turn","request_id":"request","delta":"history loaded"}}],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        let loaded = wire.read("session.context.usage");
+        wire.reply(&loaded, usage(64000.0));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("1.8K / 256K");
+    terminal.write(b"/usage\r");
+    terminal.until("tokens (25%)");
+    read.send(()).unwrap();
+    terminal.until("history loaded");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 92%");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    let first = terminal.transcript.find("Context:").expect("a /usage line");
+    let second = terminal
+        .transcript
+        .rfind("Context:")
+        .expect("the second /usage line");
+    assert_ne!(first, second, "{}", terminal.transcript);
+    assert!(
+        !terminal.transcript[first..second].contains("last request cached"),
+        "{}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("last request cached 50%"),
+        "{}",
+        terminal.transcript
+    );
 }
