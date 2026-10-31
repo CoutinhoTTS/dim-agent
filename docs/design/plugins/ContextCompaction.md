@@ -1273,7 +1273,8 @@ Internal Rust changes:
 | Substantive summary | Non-empty is enforced on every reply, so a committed summary is never empty; the parts are checked when [#429's prompt](../compaction-quality.md#77-model-facing-prompts-429) declares them, added with it (§5.2) |
 
 Open: the #128 follow-ups outside F1 (a summarizer request that reuses the conversation prefix,
-Anthropic cache breakpoints, provider-reported overflow mapped to recovery).
+provider-reported overflow mapped to recovery). The request's cache breakpoints are the port's own
+rule, not an open item ([dim-agent-aimux README](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)).
 
 ## 11. Acceptance (flow tests)
 
@@ -1497,8 +1498,8 @@ Both are decided: §13.2–§13.4 are the contract and the evaluation that decid
 | Reasoning of summarizer requests | `off`. `summary_request` copies `input.request.config` and sets `maxTokens = output_tokens`; the strategy then maps the copy to the model's off declaration (§13.2), and leaves it as `inherit` where the model and its protocol have none ([summary_strategy.rs](../../../crates/dim-agent-capabilities/src/summary_strategy.rs)) | §13.4's rule on the reasoning class that ran: `off` is non-inferior in `F`, `X`, `V` and failures, at lower latency and cost than `inherit`. Thinking shares `max_tokens` with the summary text and its length is not controllable on every model, so it costs calls and latency on every model; the evaluation found no quality it buys on the class it measured |
 | Target length | No instruction. The fixed `SYSTEM` prompt says "concise" and states no length | §13.3: every phase-2 arm passed, and the no-instruction arm's cut-offs and failures were no higher than any target arm's, so a sentence stating a length adds a constraint the evidence does not support |
 
-Out of scope: a separate summarizer model (§10), summarizer prefix reuse and cache breakpoints
-(#128 follow-ups), and any change to chunking, the cut-off rule, retention or the trigger.
+Out of scope: a separate summarizer model (§10), summarizer prefix reuse (#128 follow-up), and any
+change to chunking, the cut-off rule, retention or the trigger.
 
 ### 13.2 `summaryReasoning`
 
