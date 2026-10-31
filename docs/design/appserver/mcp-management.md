@@ -40,33 +40,33 @@ the entry and `mcp.set_enabled` writes enablement. `mcp.configuration` returns a
 projection of one entry, `mcp.inspect` returns that projection with the entry's connection
 generations, and `mcp.test` probes a draft configuration.
 
-Three properties of that surface prevent a client from editing an entry:
+Two properties of that surface prevent a client from editing an entry:
 
 1. **The read carries no revision.** `mcp.save`, `mcp.update`, `mcp.remove` and `mcp.set_enabled`
    all require the target source's revision as `expectedVersion`, and the read does not return
    it. A client pairs the read with a separate `mcp.catalog` call, so the entry it renders and
-   the token it writes with come from two snapshots taken at different times. Creating a new
-   entry has the same shape of problem: it reads the token from the catalog, which is the list
-   read, not the entry read.
+   the token it writes with come from two snapshots taken at different times.
 2. **The read and the patch are not the same configuration.** Both go through the effective
-   entry. For a project stdio entry that declares no `cwd`, the read shows the resolved
-   workspace path, and a patch that leaves `cwd` alone persists that absolute path into
-   `.mcp.json`. For a project entry the patch also persists the user record's enablement as the
-   file's `enabled` field, which the same design ignores when it runs the entry.
-3. **The projection does not say which values are safe to write back.** A client cannot tell a
-   value it may echo from one it must leave alone, so an editor either drops stored fields or
-   writes effective values into a source.
+   entry, so a value the read shows is not a value the client may write back. For a project stdio
+   entry that declares no `cwd`, the read shows the resolved workspace path, and a patch that
+   leaves `cwd` alone persists that absolute path into `.mcp.json`. For a project entry the patch
+   also persists the user record's enablement as the file's `enabled` field, which the same
+   design ignores when it runs the entry.
 
 ## 3. Decisions
 
-### D1. One edit read: the entry, its source revision and its enablement
+### D1. One edit read, with the source revision and the enablement
 
-`mcp.configuration` is the single read a client uses before editing one entry, and the single
-read `mcp.save` and `mcp.update` are built from. Its reply carries the source revision, the
+`mcp.configuration` is the read an edit is based on: the reply carries the source revision, the
 enablement the entry runs with, and the configuration projection, all taken from one source
 snapshot. A client never combines a projection from one read with a revision from another; this
 is the rule [Provider management](provider-management.md#31-read-models) states for the sole
 edit-view read.
+
+Creation has no entry to read yet, so `mcp.save` takes its token from the source revisions
+`mcp.catalog` returns: `userRevision` for a user entry, `projectRevision` for a project one. That
+is those two fields' only remaining use; a client editing an existing entry takes the token from
+the entry read.
 
 `mcp.catalog` stays the list read: no entry configuration and no per-entry revision, because a
 list of entries and a token for writing one answer different questions. `mcp.inspect` stays the
@@ -78,14 +78,15 @@ client must not write its values back.
 Every configuration a client reads for editing, patches, or submits in a draft is the declared
 entry. The daemon applies its own resolution when it runs an entry or inspects a running one.
 Echoing a read value back therefore changes nothing, and no host path enters a source through an
-edit: a project entry's `cwd` is returned as the file declares it (absent when the file declares
+edit: a project entry's `cwd` is returned as the file declares it (`null` when the file declares
 none), and a patch that does not mention `cwd` leaves the file's `cwd` as it was.
 
-The one field whose value is not the source's is `enabled`: for a project entry it is the user's
-record, which project files cannot set. It is returned because it is what the entry runs with,
-and it is written only by `mcp.set_enabled`. Enablement and credentials therefore change without
-a configuration write (`mcp.set_enabled`, `mcp.auth.*`); a client never rewrites an entry to
-change either.
+The one field whose value is not the source's is `enabled`, and it is returned beside the
+configuration, never inside it: a user or plugin entry is enabled unless its own `enabled` field
+is `false`, and a project entry is enabled exactly when the user's local record names it, since
+project files cannot set it (ADR 003 D3). It is written only by `mcp.set_enabled`. Enablement
+and credentials therefore change without a configuration write (`mcp.set_enabled`, `mcp.auth.*`);
+a client never rewrites an entry to change either.
 
 ### D3. Redaction covers every value a client does not need
 
@@ -155,15 +156,17 @@ listed in §6 and keep their references: `mcp.catalog`, `mcp.inspect`, `mcp.test
 [MCP configuration reference](../../../crates/dim-app-server/README.md#mcp-configuration-management),
 `mcp.auth.*` in [MCP OAuth §9.1](mcp-oauth.md#91-management-methods-namespace-mcp-local-transports-only),
 and `mcp.temporary.capabilities` in [TemporaryMcp](../plugins/TemporaryMcp.md). §3 D5 states the
-revision every write takes.
+revision every write takes. `mcp.test` probes a draft configuration; [#452](https://github.com/arcships/dim/issues/452)
+extends its reply, so this document does not state that reply and is the document that will state
+it.
 
 ### 4.1 Entry read (`mcp.configuration`)
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `revision` | string, absent for a plugin entry | The source document's revision, the token `expectedVersion` takes (D5) |
-| `enabled` | boolean | The enablement the entry runs with; for a project entry the user's record |
-| `configuration` | `Configuration` | The declared configuration projection below |
+| `enabled` | boolean | The enablement the entry runs with: for a user or plugin entry its own field, enabled when absent; for a project entry the user's record (D2) |
+| `configuration` | `Configuration` | The declared configuration projection below; `enabled` is reported above and is not part of it |
 
 ```text
 client                                  Mcp (process)                     Settings
@@ -191,7 +194,7 @@ The declared entry's projection. A stdio entry:
 | `type` | `"stdio"` | Transport |
 | `command` | string | The executable as declared |
 | `argsCount` | integer ≥ 0 | How many declared arguments are stored; the values are withheld |
-| `cwd` | string, absent when none | The declared working directory; a project or plugin entry's relative path, not a resolved one |
+| `cwd` | string or `null` | The declared working directory; a project or plugin entry's relative path, not a resolved one, and `null` when the source declares none |
 | `envNames` | string[] | Declared environment names, ascending; values withheld |
 
 A remote entry:
@@ -235,10 +238,10 @@ would refuse, including one that sets `oauth` beside static credentials.
 | `appError` | When |
 | --- | --- |
 | `mcp_unknown_server` | The target source holds no entry with that id, for a read or a write |
-| `mcp_invalid_config` | The patched or saved document, the entry's id on a write, or an unauthorized workspace is refused |
+| `mcp_invalid_config` | The patched or saved document, an empty `id`, or an unauthorized workspace is refused |
 | `mcp_settings_conflict` | `expectedVersion` is not the source's current revision (D5) |
 | `mcp_settings_read` | The source could not be read |
-| `invalid_params` (`-32602`) | A field of the wrong transport, an empty id on a read, a project target without `cwd` |
+| `invalid_params` (`-32602`) | A field of the wrong transport, a project target without `cwd`, or a write to a plugin entry, which answers `plugin MCP entries change through their plugin` |
 | `local_transport_required` | The connection is not local |
 | `service_reloading` / `service_unavailable` | Mcp or its row is not serving; from [management methods](management-methods.md#dispatch-and-lifecycle) |
 
@@ -246,11 +249,15 @@ A read serves a disabled entry: enablement is a field, not a condition for readi
 
 ## 5. What changes for a client
 
-- The edit flow is `mcp.configuration` then `mcp.update` with the returned `revision`. No second
-  call is needed to obtain the token (D1).
-- The reply of `mcp.configuration` gains a wrapper: `{revision?, enabled, configuration}`. The
-  Web settings page reads and writes the projection through it; the native CLI, which lists and
-  toggles entries only, is unaffected.
+- The reply of `mcp.configuration` stops being the bare projection and becomes
+  `{revision?, enabled, configuration}`. That is a breaking change on protocol v3 for any client
+  that decodes the old reply: the projection is now under `configuration`. This repository's Web
+  settings page changes in the same implementation; the native CLI decodes `mcp.catalog` only and
+  is unaffected; every other client sees the projection replaced by the wrapper.
+- An empty `id` on the entry read answers `mcp_invalid_config`, the code `mcp.save` already
+  returns, instead of `invalid_params`.
+- The edit flow is `mcp.configuration` then `mcp.update` with the returned `revision`; creating an
+  entry takes the token from `mcp.catalog`'s source revision (D1).
 - A client renders `command`, `cwd` and `endpoint`, the name lists and the counts, and offers
   replace-or-keep for `args`, environment values, header values, the bearer token, the URL and
   the metadata URL. It shows `argsCount`, `envNames` and `headerNames` as the fields that a
@@ -302,8 +309,8 @@ Flow level, reusing the existing MCP flows:
 
 | File | What it protects |
 | --- | --- |
-| `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source, a write with it succeeds and a repeat write with the same token is `mcp_settings_conflict`, a plugin entry's read has no revision and refuses a write, a project entry's read returns its declared `cwd`, and no withheld value appears in the read, including after an edit |
-| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a project entry patched on one field leaves `.mcp.json` unchanged otherwise, with no resolved `cwd` and no `enabled` field written, while the effective configuration a connection runs still resolves the workspace; a user entry's read and patch round-trip |
+| `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key; and no withheld value appears in the read, including after an edit |
+| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd`; a user entry's read carries its declared configuration and revision |
 | `crates/dim-app-server/tests/mcp_oauth_flow.rs` | Existing evidence, unchanged: `mcp.inspect` and `mcp.update` keep their replies for an OAuth entry |
 
 The redaction assertions of
