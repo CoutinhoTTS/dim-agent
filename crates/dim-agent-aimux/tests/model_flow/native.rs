@@ -1741,7 +1741,9 @@ async fn anthropic_requests_mark_the_system_and_the_conversation_tail_for_cache(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_system_breakpoints_stay_within_the_four_breakpoint_limit() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        for breaks in [2usize, 4] {
+        for breaks in [2usize, 4, 5] {
+            let emitted = breaks.min(4);
+            let message_mark = usize::from(breaks < 4);
             let server = NativeServer::start("anthropic").await;
             let models = server.models();
             let mut builder = builder(models.clone(), Arc::new(MockTools));
@@ -1762,27 +1764,52 @@ async fn explicit_system_breakpoints_stay_within_the_four_breakpoint_limit() {
                 .unwrap();
             session.idle("main").await.unwrap();
             let events = session.history("main", None).await.unwrap();
-            assert!(
-                matches!(
-                    events.last().unwrap().kind,
-                    EventKind::TurnEnd(TurnEndData {
-                        outcome: TurnOutcome::Completed { .. },
-                        ..
-                    })
-                ),
-                "breaks {breaks}: {events:?}"
-            );
+            let last = &events.last().unwrap().kind;
+            if breaks < 5 {
+                assert!(
+                    matches!(
+                        last,
+                        EventKind::TurnEnd(TurnEndData {
+                            outcome: TurnOutcome::Completed { .. },
+                            ..
+                        })
+                    ),
+                    "breaks {breaks}: {events:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        last,
+                        EventKind::TurnEnd(TurnEndData {
+                            outcome: TurnOutcome::Failed { error, .. },
+                            ..
+                        }) if error.contains("cacheControl breakpoint limit")
+                    ),
+                    "breaks {breaks}: the dropped mark is reported as unsupported: {events:?}"
+                );
+            }
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert!(!requests.is_empty(), "breaks {breaks}");
             for (_, _, request) in &requests {
                 let system = request["system"].as_array().unwrap();
                 assert_eq!(system.len(), breaks, "breaks {breaks}: {request}");
-                for part in system {
-                    assert_eq!(part["cache_control"], json!({"type": "ephemeral"}));
+                for (index, part) in system.iter().enumerate() {
+                    if index < emitted {
+                        assert_eq!(
+                            part["cache_control"],
+                            json!({"type": "ephemeral"}),
+                            "breaks {breaks}: {request}"
+                        );
+                    } else {
+                        assert!(
+                            part.get("cache_control").is_none(),
+                            "breaks {breaks}: {request}"
+                        );
+                    }
                 }
                 assert_eq!(
                     request.to_string().matches("\"cache_control\"").count(),
-                    breaks + usize::from(breaks < 4),
+                    emitted + message_mark,
                     "breaks {breaks}: {request}"
                 );
             }
