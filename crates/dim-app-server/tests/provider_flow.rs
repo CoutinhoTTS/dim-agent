@@ -6820,6 +6820,7 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
                  CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0));
                  INSERT INTO agent_sessions(session_id, config, created_at_ms) SELECT session_id, config, created_at_ms FROM sessions_rows;
                  DROP TABLE sessions_rows;
+                 DROP TABLE session_grants;
                  DROP TABLE agent_store_format;
                  CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 25));
                  INSERT INTO agent_store_format VALUES (25);",
