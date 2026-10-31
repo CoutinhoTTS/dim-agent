@@ -429,7 +429,7 @@ The App Server already owns everything needed to decide tool calls: a branch pre
 at `session.create {permissionPolicy}` and changed with `session.permission.get/update`
 (versioned per branch), and the user's command rules read and replaced with
 `permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)).
-Session file grants are stored by the App Server's `session.grants.*` methods under
+Session file grants are stored by the App Server's `session.grants.add/remove` methods under
 [ADR 012](../../adr/012-session-grants.md). The CLI only answered each approval once with `y`.
 This section adds CLI entry points over those contracts and the
 [F2 §5.4](appserver/permission-command-rules.md#54-always-allow-client-flow) client flow.
@@ -750,12 +750,12 @@ filter.
 
 ### "Allow for this session"
 
-For `read`, `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
+For `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
 session` (ADR 012). The CLI sends the tool's path unchanged to `session.grants.add
-{sessionId, path, kind: "file", mode}`: the mode is `read` for `read` and `write` otherwise.
-The daemon resolves `~`, a relative path, `..` and symlinks against the Session workspace and
-stores the canonical path; a new file is resolved by its parent and final name. The CLI decides
-no path or kind locally.
+{sessionId, path, kind: "file", mode: "write"}`. Reads never ask, so they have no grant to
+offer. The daemon resolves `~`, a relative path, `..` and symlinks against the Session workspace
+and stores the canonical path; a new file is resolved by its parent and final name. The CLI
+decides no path or kind locally.
 
 ```text
 [approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
@@ -766,9 +766,9 @@ no path or kind locally.
 `Allow for this session` writes the grant first, then answers `approval.respond allow`; the
 recheck sees the grant. If the write fails, the CLI shows `Grant not saved: <error>` and still
 allows the call once, as the user asked, so no failed store write blocks the turn. This prompt
-does not list or remove grants; `session.grants.remove/list/lookup` are the contract for a
-client that does. A grant is consulted only at the `Ask` step, a `read` grant never authorizes a
-write, and a fork starts without the source's grants.
+does not list or remove grants; revocation has no client surface yet. A grant is consulted only
+at the `Ask` step, a `read` grant never authorizes a write, and a fork starts without the
+source's grants.
 
 ### Decisions
 
