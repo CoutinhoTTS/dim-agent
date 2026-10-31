@@ -1566,64 +1566,11 @@ async fn plugin_content_follows_the_record_over_restarts() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// §3.7: a content file PluginManager cannot parse is its own refusal, not
-/// only the reply's: `plugin.list` shows it right after the install and
-/// after a restart, while a reload of the fixed file clears it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn plugin_mcp_document_that_does_not_parse_stays_refused() {
-    let home = home();
-    let config = config(&home);
-    let source = home.join("src/kit");
-    let absent = json!({"tool": {"command": "dim-test-absent-mcp-server"}});
-    write_content_plugin(&source, "kit", &["kit"], absent.clone());
-    std::fs::write(
-        source.join("mcp.json"),
-        r#"{"mcpServers": {"tool": {"command": "dim-test-absent-mcp-server"},},}"#,
-    )
-    .unwrap();
-
-    let (server, _, _) = start(config.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    let installed = call(
-        &mut client,
-        "plugin.install",
-        json!({"source":{"path":source}}),
-    )
-    .await;
-    assert_eq!(
-        installed["result"]["refused"][0]["kind"], "mcp",
-        "{installed}"
-    );
-    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:kit"]);
-    assert!(mcp_ids(&mut client).await.is_empty());
-    let list = call(&mut client, "plugin.list", json!({})).await;
-    assert_eq!(item(&list, "kit")["refused"][0]["kind"], "mcp", "{list}");
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-
-    let (server, _, _) = start(config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    let list = call(&mut client, "plugin.list", json!({})).await;
-    assert_eq!(item(&list, "kit")["refused"][0]["kind"], "mcp", "{list}");
-    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:kit"]);
-    assert!(mcp_ids(&mut client).await.is_empty());
-
-    write_content_plugin(&source, "kit", &["kit"], absent);
-    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
-    assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
-    let list = call(&mut client, "plugin.list", json!({})).await;
-    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
-    assert_eq!(mcp_ids(&mut client).await, ["kit:tool"]);
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-    std::fs::remove_dir_all(home).unwrap();
-}
-
-/// §3.7: a content path that exists but cannot be read is refused the same
-/// way as a document that does not parse; a missing file is still refused
-/// at install as `invalid_manifest`.
+/// §3.7: a content file PluginManager cannot read — not JSON, or a directory
+/// in its place — is its own refusal, not only the reply's: `plugin.list`
+/// shows it right after the install and after a restart, while a reload of
+/// the fixed file clears it. A missing file is still refused at install as
+/// `invalid_manifest`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plugin_mcp_document_that_cannot_be_read_stays_refused() {
     let home = home();
@@ -1646,25 +1593,31 @@ async fn plugin_mcp_document_that_cannot_be_read_stays_refused() {
     .await;
     assert_eq!(app_error(&refused), "invalid_manifest", "{refused}");
 
-    let source = home.join("src/docs");
     let absent = json!({"tool": {"command": "dim-test-absent-mcp-server"}});
-    write_content_plugin(&source, "docs", &["docs"], absent.clone());
-    std::fs::remove_file(source.join("mcp.json")).unwrap();
-    std::fs::create_dir(source.join("mcp.json")).unwrap();
-    let installed = call(
-        &mut client,
-        "plugin.install",
-        json!({"source":{"path":source}}),
-    )
-    .await;
-    assert_eq!(
-        installed["result"]["refused"][0]["kind"], "mcp",
-        "{installed}"
-    );
-    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:docs:docs"]);
-    assert!(mcp_ids(&mut client).await.is_empty());
+    let unreadable = [
+        write_unreadable_mcp_plugin(&home.join("src"), "kit", false),
+        write_unreadable_mcp_plugin(&home.join("src"), "docs", true),
+    ];
+    for source in &unreadable {
+        let installed = call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":source}}),
+        )
+        .await;
+        assert_eq!(
+            installed["result"]["refused"][0]["kind"], "mcp",
+            "{installed}"
+        );
+    }
     let list = call(&mut client, "plugin.list", json!({})).await;
-    assert_eq!(item(&list, "docs")["refused"][0]["kind"], "mcp", "{list}");
+    for name in ["kit", "docs"] {
+        assert_eq!(item(&list, name)["refused"][0]["kind"], "mcp", "{list}");
+    }
+    let mut skills = plugin_skill_ids(&mut client).await;
+    skills.sort();
+    assert_eq!(skills, ["plugin:docs:docs", "plugin:kit:kit"]);
+    assert!(mcp_ids(&mut client).await.is_empty());
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -1672,17 +1625,29 @@ async fn plugin_mcp_document_that_cannot_be_read_stays_refused() {
     let (server, _, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let list = call(&mut client, "plugin.list", json!({})).await;
-    assert_eq!(item(&list, "docs")["refused"][0]["kind"], "mcp", "{list}");
-    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:docs:docs"]);
+    for name in ["kit", "docs"] {
+        assert_eq!(item(&list, name)["refused"][0]["kind"], "mcp", "{list}");
+    }
+    let mut skills = plugin_skill_ids(&mut client).await;
+    skills.sort();
+    assert_eq!(skills, ["plugin:docs:docs", "plugin:kit:kit"]);
     assert!(mcp_ids(&mut client).await.is_empty());
 
-    std::fs::remove_dir(source.join("mcp.json")).unwrap();
-    write_content_plugin(&source, "docs", &["docs"], absent);
-    let reloaded = call(&mut client, "plugin.reload", json!({"name":"docs"})).await;
-    assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+    for (name, source) in [("kit", &unreadable[0]), ("docs", &unreadable[1])] {
+        if source.join("mcp.json").is_dir() {
+            std::fs::remove_dir(source.join("mcp.json")).unwrap();
+        }
+        write_content_plugin(source, name, &[name], absent.clone());
+        let reloaded = call(&mut client, "plugin.reload", json!({"name":name})).await;
+        assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+    }
     let list = call(&mut client, "plugin.list", json!({})).await;
-    assert!(item(&list, "docs").get("refused").is_none(), "{list}");
-    assert_eq!(mcp_ids(&mut client).await, ["docs:tool"]);
+    for name in ["kit", "docs"] {
+        assert!(item(&list, name).get("refused").is_none(), "{list}");
+    }
+    let mut ids = mcp_ids(&mut client).await;
+    ids.sort();
+    assert_eq!(ids, ["docs:tool", "kit:tool"]);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -1747,14 +1712,7 @@ async fn plugin_broken_manifest_runs_none_of_its_content() {
 async fn plugin_refusal_is_kept_once_its_owner_is_present() {
     let home = home();
     let config = config(&home);
-    let source = home.join("src/kit");
-    write_content_plugin(
-        &source,
-        "kit",
-        &["kit"],
-        json!({"tool": {"command": "dim-test-absent-mcp-server"}}),
-    );
-    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {},}"#).unwrap();
+    let source = write_unreadable_mcp_plugin(&home.join("src"), "kit", false);
     let (server, _, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(&call(&mut client, "plugin.disable", json!({"name":"Mcp"})).await);
@@ -1784,14 +1742,7 @@ async fn plugin_refusal_is_kept_once_its_owner_is_present() {
 async fn plugin_refusal_is_cleared_when_the_kind_is_withdrawn() {
     let home = home();
     let config = config(&home);
-    let source = home.join("src/kit");
-    write_content_plugin(
-        &source,
-        "kit",
-        &["kit"],
-        json!({"tool": {"command": "dim-test-absent-mcp-server"}}),
-    );
-    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {},}"#).unwrap();
+    let source = write_unreadable_mcp_plugin(&home.join("src"), "kit", false);
     let (server, _, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let installed = call(
@@ -1948,6 +1899,182 @@ async fn plugin_broken_manifest_content_stops_on_the_next_change() {
     let mut skills = plugin_skill_ids(&mut client).await;
     skills.sort();
     assert_eq!(skills, ["plugin:extra:extra", "plugin:kit:kit"]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.7: removing a refused plugin drops its entry and its refusal; the same
+/// id installed again with a readable document shows none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_refusal_goes_with_the_removed_plugin() {
+    let home = home();
+    let config = config(&home);
+    let source = write_unreadable_mcp_plugin(&home.join("src"), "kit", false);
+    let absent = json!({"tool": {"command": "dim-test-absent-mcp-server"}});
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(
+        installed["result"]["refused"][0]["kind"], "mcp",
+        "{installed}"
+    );
+
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id":"kit"})).await);
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(
+        list["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{list}"))
+            .iter()
+            .all(|item| item["name"] != "kit"),
+        "{list}"
+    );
+
+    write_content_plugin(&source, "kit", &["kit"], absent);
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
+    assert_eq!(mcp_ids(&mut client).await, ["kit:tool"]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.7: switching a name away from a refused plugin withdraws its content
+/// and its refusal; the plugin switched to shows none, and switching back
+/// while the owner is off reads nothing and shows none either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_refusal_does_not_follow_a_switch() {
+    let home = home();
+    let config = config(&home);
+    let refused = write_unreadable_mcp_plugin(&home.join("src"), "kit", false);
+    let clean = home.join("src/b");
+    write_content_plugin(
+        &clean,
+        "kit",
+        &["kit2"],
+        json!({"tool": {"command": "dim-test-absent-mcp-server"}}),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":refused}}),
+    )
+    .await;
+    assert_eq!(
+        installed["result"]["refused"][0]["kind"], "mcp",
+        "{installed}"
+    );
+
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":clean}, "id":"kit2"}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
+    assert_eq!(mcp_ids(&mut client).await, ["kit2:tool"]);
+
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name":"Mcp"})).await);
+    let enabled = call(
+        &mut client,
+        "plugin.enable",
+        json!({"name":"kit", "use":"kit"}),
+    )
+    .await;
+    assert_eq!(enabled["result"]["skipped"][0], "mcp", "{enabled}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
+
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name":"Mcp"})).await);
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "kit")["refused"][0]["kind"], "mcp", "{list}");
+    assert!(mcp_ids(&mut client).await.is_empty());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.7: an owner's refusal shows while the document the owner read stands;
+/// once the file cannot be read, PluginManager's own refusal replaces it.
+/// The client boundary masks both texts, so the `plugin` tool's `list`
+/// result names them; a readable document clears both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_refusal_replaces_the_owner_refusal() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let source = home.join("src/kit");
+    let absent = json!({"tool": {"command": "dim-test-absent-mcp-server"}});
+    write_content_plugin(&source, "kit", &["kit"], json!({"tool": {"command": ""}}));
+    let server = serve(product_builder(), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let full = json!({"preset": "full-access", "allowedTools": [], "disallowedTools": []});
+    let created = client
+        .rpc("session.create", session_with(full, &work))
+        .await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let listed = |list: Value| -> String {
+        let item = list
+            .as_array()
+            .unwrap_or_else(|| panic!("{list}"))
+            .iter()
+            .find(|item| item["name"] == "kit")
+            .unwrap_or_else(|| panic!("{list}"));
+        item["refused"][0]["error"].as_str().unwrap().to_owned()
+    };
+
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(
+        installed["result"]["refused"][0]["kind"], "mcp",
+        "{installed}"
+    );
+    let owner = listed(plugin_reply(&mut client, &server, &session, "list").await);
+    assert!(!owner.is_empty());
+
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {},}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"][0]["kind"], "mcp",
+        "{reloaded}"
+    );
+    let manager = listed(plugin_reply(&mut client, &server, &session, "list").await);
+    assert_ne!(manager, owner);
+
+    write_content_plugin(&source, "kit", &["kit"], absent);
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
+    assert_eq!(mcp_ids(&mut client).await, ["kit:tool"]);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
