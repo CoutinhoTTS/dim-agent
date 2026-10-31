@@ -126,6 +126,21 @@ impl HistoryRenderer {
         Ok(snapshot)
     }
 
+    pub fn snapshot_from_checkpoint(
+        &self,
+        checkpoint: &dim_agent_types::ProjectionCheckpoint,
+        anchor: &AgentEvent,
+    ) -> Result<RecoverySnapshot, String> {
+        let mut snapshot = RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: self.checkpoint_interpreter.into(),
+            state: String::new(),
+        };
+        snapshot.state = (self.encode_checkpoint)(&snapshot, checkpoint)?;
+        Ok(snapshot)
+    }
+
     /// The context at `through` alone, for readers that inspect events instead
     /// of rendering them. A checkpoint is validated by rendering it once and
     /// discarding that render; without a checkpoint no render is made, and a
@@ -365,11 +380,17 @@ struct Projection {
 
 /// One batch of a streaming projection.
 #[derive(Debug, Clone)]
+pub struct StreamedState {
+    pub resume_event: String,
+    pub state: ProjectionCheckpointState,
+}
+
 pub struct ProjectedBatch {
     pub history: Vec<HistoryEntry>,
     pub state: ProjectionCheckpointState,
     pub compacted: bool,
     pub compaction: Option<Arc<AgentEvent>>,
+    pub checkpoint: Option<StreamedState>,
 }
 
 /// Projects one contiguous event batch from `initial` without retaining the
@@ -387,6 +408,7 @@ pub fn project_batch(
                 if matches!(data.outcome, ContextCompactionResult::Completed { .. })
         )
     });
+    let mut checkpoint = None;
     if let Some(event) = compaction
         && let EventKind::ContextCompaction(data) = &event.kind
         && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
@@ -402,6 +424,7 @@ pub fn project_batch(
                 state: projection.state,
                 compacted: true,
                 compaction: None,
+                checkpoint: None,
             });
         };
         let kept = projection
@@ -413,6 +436,15 @@ pub fn project_batch(
                     .is_some_and(|index| *index >= cut)
             })
             .unwrap_or(projection.history.len());
+        checkpoint = projection.history.get(kept).and_then(|entry| {
+            let resume = order.get(entry.source.as_str()).copied()?;
+            let mut state = replay(events[..resume].as_ref(), initial).ok()?.state;
+            state.retain_from = retain_from.clone();
+            Some(StreamedState {
+                resume_event: entry.source.clone(),
+                state,
+            })
+        });
         projection.history.drain(..kept);
         projection.state.retain_from = retain_from.clone();
     }
@@ -421,6 +453,7 @@ pub fn project_batch(
         state: projection.state,
         compacted: compaction.is_some(),
         compaction: compaction.cloned(),
+        checkpoint,
     })
 }
 
