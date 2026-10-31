@@ -72,6 +72,9 @@ Assembly graphs and crate dependencies are computed from the actual code by `xta
 | `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, that `crates.*` / `modules.*` under `generated/` match the code (read-only: a stale file fails and names it; only `graph` writes them), that `catalog.md` matches the real assembly, and that `npm/branch-services.d.ts` matches the services marked `#[rutis::service]` |
 | `cargo run --locked -p xtask -- types` | Regenerate `npm/branch-services.d.ts`, the TypeScript declarations of the services marked `#[rutis::service]`, after changing one of them or a type it uses |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
+| `cargo run --release --locked -p xtask -- context-replay` | Opt-in context memory baseline: 100 mock turns against a temporary SQLite store |
+| `cargo run --release --locked -p xtask -- restore-replay DB SESSION` | Restore a stored session and measure restore/prepare/close memory |
+| `cargo run --release --locked -p xtask -- context-breakdown DB SESSION` | Split one prepare into read/project/messages/request memory |
 
 Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it, and fails when the generated service catalog is stale; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
 

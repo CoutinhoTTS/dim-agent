@@ -10,8 +10,9 @@ use super::{
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
+    AgentError, BoxFuture, BranchRecord, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow,
+    PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineStore,
+    TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
@@ -1881,6 +1882,280 @@ fn indexed(row: Fetched) -> Result<StoredEvent> {
     Ok(record)
 }
 
+fn is_tool_result(event: &AgentEvent) -> bool {
+    matches!(&event.kind, EventKind::ToolResult(_))
+}
+
+fn is_window_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::TurnStart(_) | EventKind::InputMessage(_) | EventKind::InputConsumed(_)
+    )
+}
+
+fn is_policy_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::ContextConfigured(_)
+            | EventKind::ContextCompaction(_)
+            | EventKind::ContextBudget(_)
+            | EventKind::ModelUsage(_)
+            | EventKind::ModelCall(_)
+            | EventKind::TurnStart(_)
+            | EventKind::InputMessage(_)
+            | EventKind::InputConsumed(_)
+    )
+}
+
+fn window_rows(
+    connection: &Connection,
+    key: &TimelineKey,
+    through: u64,
+    turn_id: &str,
+    cut: &str,
+) -> Result<Vec<(i64, i64)>> {
+    let mut rows = Vec::new();
+    let anchor: Option<(i64, i64)> = connection
+        .prepare(
+            "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 AND sequence<=?4",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, cut, through as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(anchor) = anchor {
+        rows.push(anchor);
+    }
+    let turn: Option<(i64, i64)> = connection
+        .prepare(
+            "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind='turn/start' \
+             AND json_extract(body, '$.record.event.data.turn_id')=?4 \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, through as i64, turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let previous_cut: Option<String> = connection
+        .prepare(
+            "SELECT json_extract(body, '$.record.event.data.retain_from') \
+             FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+             AND kind='context/compaction' \
+             AND json_extract(body, '$.record.event.data.retain_from') IS NOT NULL \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, through as i64],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let tool_start = match previous_cut {
+        Some(cut) => connection
+            .prepare(
+                "SELECT sequence FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 AND sequence<=?4",
+            )
+            .map_err(error)?
+            .query_row(
+                params![key.session_id, key.branch_id, cut, through as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .unwrap_or(1),
+        None => 1,
+    };
+    rows.extend(
+        connection
+            .prepare(
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence>=?4 AND sequence<=?3 \
+                 AND kind='step/tool-result' ORDER BY sequence",
+            )
+            .map_err(error)?
+            .query_map(
+                params![key.session_id, key.branch_id, through as i64, tool_start],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(error)?,
+    );
+    if let Some(turn) = turn {
+        rows.push(turn);
+        rows.extend(
+            connection
+                .prepare(
+                    "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                     WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 AND sequence<=?4 \
+                     AND kind IN ('turn/start','input/message','input/consumed') \
+                     ORDER BY sequence",
+                )
+                .map_err(error)?
+                .query_map(
+                    params![key.session_id, key.branch_id, turn.0, through as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(error)?,
+        );
+        let mut consumed = connection
+            .prepare(
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence<=?4 \
+                 AND kind='input/message' AND event_id IN (\
+                   SELECT json_extract(body, '$.record.event.data.input_id') \
+                   FROM timeline_events WHERE session_id=?1 AND branch_id=?2 \
+                   AND sequence>=?3 AND sequence<=?4 AND kind='input/consumed') \
+                 ORDER BY sequence",
+            )
+            .map_err(error)?;
+        rows.extend(
+            consumed
+                .query_map(
+                    params![key.session_id, key.branch_id, turn.0, through as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(error)?,
+        );
+    }
+    Ok(rows)
+}
+
+fn policy_rows(
+    connection: &Connection,
+    key: &TimelineKey,
+    through: u64,
+    turn_id: &str,
+) -> Result<Vec<(i64, i64)>> {
+    let mut rows = Vec::new();
+    for kind in ["context/configured", "context/compaction"] {
+        let row: Option<(i64, i64)> = connection
+            .prepare(
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind=?4 \
+                 AND (?4 != 'context/compaction' OR \
+                   json_extract(body, '$.record.event.data.status')='completed') \
+                 ORDER BY sequence DESC LIMIT 1",
+            )
+            .map_err(error)?
+            .query_row(
+                params![key.session_id, key.branch_id, through as i64, kind],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some(row) = row {
+            rows.push(row);
+        }
+    }
+    let usage: Option<(i64, i64, Option<String>)> = connection
+        .prepare(
+            "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)), \
+             json_extract(body, '$.record.event.data.request_id') \
+             FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind='model/usage' \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, through as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some((sequence, last_sequence, Some(request_id))) = usage {
+        rows.push((sequence, last_sequence));
+        let call: Option<(i64, i64)> = connection
+            .prepare(
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+                 AND kind='model/call' \
+                 AND json_extract(body, '$.record.event.data.request_id')=?4 \
+                 ORDER BY sequence DESC LIMIT 1",
+            )
+            .map_err(error)?
+            .query_row(
+                params![key.session_id, key.branch_id, through as i64, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some(call) = call {
+            rows.push(call);
+        }
+    }
+    let turn: Option<i64> = connection
+        .prepare(
+            "SELECT sequence FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind='turn/start' \
+             AND json_extract(body, '$.record.event.data.turn_id')=?4 \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, through as i64, turn_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    if let Some(turn) = turn {
+        let mut query = connection
+            .prepare(
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence>=?4 AND sequence<=?3 \
+                 AND kind IN ('turn/start','input/message','input/consumed','context/budget') \
+                 ORDER BY sequence",
+            )
+            .map_err(error)?;
+        rows.extend(
+            query
+                .query_map(
+                    params![key.session_id, key.branch_id, through as i64, turn],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(error)?,
+        );
+        let mut consumed = connection
+            .prepare(
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence<=?4 \
+                 AND kind='input/message' AND event_id IN (\
+                   SELECT json_extract(body, '$.record.event.data.input_id') \
+                   FROM timeline_events WHERE session_id=?1 AND branch_id=?2 \
+                   AND sequence>=?3 AND sequence<=?4 AND kind='input/consumed') \
+                 ORDER BY sequence",
+            )
+            .map_err(error)?;
+        rows.extend(
+            consumed
+                .query_map(
+                    params![key.session_id, key.branch_id, turn, through as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(error)?,
+        );
+    }
+    Ok(rows)
+}
 impl TimelineStore for SqliteTimelineStore {
     fn create_session<'a>(
         &'a self,
@@ -2055,6 +2330,161 @@ impl TimelineStore for SqliteTimelineStore {
             }
             self.finish(reader);
             Ok(events)
+        })
+    }
+
+    fn policy_order<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+    ) -> BoxFuture<'a, Result<PolicyOrder>> {
+        Box::pin(async move {
+            let rows = {
+                let guard = self.db.connection.lock().unwrap();
+                let connection = guard
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
+                let mut query = connection
+                    .prepare(
+                        "SELECT event_id, kind, sequence, \
+                         json_extract(body, '$.record.event.data.through') \
+                         FROM timeline_events \
+                         WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+                         AND event_id IS NOT NULL \
+                         ORDER BY sequence",
+                    )
+                    .map_err(error)?;
+                query
+                    .query_map(
+                        params![key.session_id, key.branch_id, through as i64],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(error)?
+            };
+            Ok(PolicyOrder {
+                through,
+                events: rows
+                    .into_iter()
+                    .map(|(id, kind, sequence, through)| PolicyOrderEvent {
+                        id,
+                        branch_id: key.branch_id.clone(),
+                        sequence: sequence as u64,
+                        turn_start: kind == "turn/start",
+                        compaction_start: (kind == "context/compaction-start")
+                            .then_some(through.map(|value| value as u64))
+                            .flatten(),
+                    })
+                    .collect(),
+            })
+        })
+    }
+
+    fn policy_window<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        turn_id: &'a str,
+        cut: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyWindow>> {
+        Box::pin(async move {
+            let rows = {
+                let guard = self.db.connection.lock().unwrap();
+                let connection = guard
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
+                window_rows(connection, key, through, turn_id, cut)?
+            };
+            let mut rows = rows;
+            rows.sort_unstable();
+            let mut ranges: Vec<(String, RangeInclusive<u64>)> = Vec::new();
+            for (sequence, last_sequence) in rows {
+                let sequence = sequence as u64;
+                let last_sequence = last_sequence as u64;
+                if let Some((_, range)) = ranges.last_mut()
+                    && *range.end() + 1 >= sequence
+                {
+                    *range = *range.start()..=last_sequence.max(*range.end());
+                    continue;
+                }
+                ranges.push((key.branch_id.clone(), sequence..=last_sequence));
+            }
+            let mut events = Vec::new();
+            let mut tool_results = Vec::new();
+            for event in self
+                .read_segments(&key.session_id, ranges)
+                .await?
+                .into_iter()
+                .flatten()
+                .map(|record| record.event)
+                .filter(|event| event.sequence <= through)
+            {
+                if is_tool_result(&event) {
+                    tool_results.push(event.clone());
+                }
+                if event.id == cut || is_window_event(&event) {
+                    events.push(event);
+                }
+            }
+            let cut_sequence = events
+                .iter()
+                .find(|event| event.id == cut)
+                .map_or(0, |event| event.sequence);
+            Ok(PolicyWindow {
+                through,
+                cut: cut.to_owned(),
+                cut_sequence,
+                events,
+                tool_results,
+            })
+        })
+    }
+
+    fn policy_facts<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        turn_id: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyFacts>> {
+        Box::pin(async move {
+            let rows = {
+                let guard = self.db.connection.lock().unwrap();
+                let connection = guard
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
+                policy_rows(connection, key, through, turn_id)?
+            };
+            let mut rows = rows;
+            rows.sort_unstable();
+            let mut ranges: Vec<(String, RangeInclusive<u64>)> = Vec::new();
+            for (sequence, last_sequence) in rows {
+                let sequence = sequence as u64;
+                let last_sequence = last_sequence as u64;
+                if let Some((_, range)) = ranges.last_mut()
+                    && *range.end() + 1 >= sequence
+                {
+                    *range = *range.start()..=last_sequence.max(*range.end());
+                    continue;
+                }
+                ranges.push((key.branch_id.clone(), sequence..=last_sequence));
+            }
+            let events = self
+                .read_segments(&key.session_id, ranges)
+                .await?
+                .into_iter()
+                .flatten()
+                .map(|record| record.event)
+                .filter(|event| event.sequence <= through && is_policy_event(event))
+                .collect();
+            Ok(PolicyFacts { through, events })
         })
     }
     fn read_segments<'a>(

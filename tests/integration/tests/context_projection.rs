@@ -45,8 +45,8 @@ fn texts(events: &[Arc<AgentEvent>]) -> Vec<String> {
     project_history(events)
         .unwrap()
         .into_iter()
-        .map(|entry| match entry.message.content {
-            MessageContent::Text(text) => text,
+        .map(|entry| match &entry.message.content {
+            MessageContent::Text(text) => text.clone(),
             other => panic!("expected text, got {other:?}"),
         })
         .collect()
@@ -85,7 +85,10 @@ fn a_retired_key_leaves_the_baseline_after_its_block_is_delivered() {
     events.extend(input(3, "", vec![retire("<b-ended/>".into(), "b".into())]));
     let history = project_history(&events).unwrap();
     let last = history.last().unwrap();
-    assert_eq!(last.message, Message::text(Role::User, "<b-ended/>"));
+    assert_eq!(
+        last.message.as_ref().clone(),
+        Message::text(Role::User, "<b-ended/>")
+    );
     assert_eq!(
         last.baseline
             .iter()
@@ -114,7 +117,7 @@ fn the_baseline_keeps_each_live_key_at_its_first_delivery_with_its_latest_block(
             .unwrap()
             .baseline
             .iter()
-            .map(|entry| entry.message.clone())
+            .map(|entry| entry.message.as_ref().clone())
             .collect::<Vec<_>>(),
         [
             Message::text(Role::User, "<b-2/>"),
@@ -267,7 +270,10 @@ fn input_consumed_during_a_failed_model_output_keeps_its_position() {
             ("event-5:0", Role::ToolResult)
         ]
     );
-    assert_eq!(history[0].message, Message::text(Role::User, "next turn"));
+    assert_eq!(
+        history[0].message.as_ref().clone(),
+        Message::text(Role::User, "next turn")
+    );
 }
 
 #[test]
