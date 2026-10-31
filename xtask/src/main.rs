@@ -16,10 +16,23 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
 unsafe extern "C" {
     fn malloc_trim(pad: usize) -> i32;
+    fn mallopt(param: i32, value: i32) -> i32;
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        mallopt(-3, 128 * 1024);
+        mallopt(-8, 2);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
