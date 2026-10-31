@@ -18395,8 +18395,10 @@
       "to": "dim_app_server::mcp::server",
       "references": [
         "path McpServer",
+        "path McpServerError",
         "path McpServerPlugin::new",
         "use super::server::McpServer",
+        "use super::server::McpServerError",
         "use super::server::McpServerPlugin"
       ]
     },

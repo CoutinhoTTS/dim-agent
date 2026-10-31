@@ -298,6 +298,8 @@ try:
             continue
         if message['method'] == 'initialize':
             result = {'protocolVersion': message['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'probe', 'version': '1'}}
+        elif len(sys.argv) > 2 and sys.argv[2] == 'bad-schema':
+            result = {'tools': [{'name': 'broken', 'description': 'Broken', 'inputSchema': {'type': 'object', 'properties': {'x': {'type': ['string', 'file']}}}}]}
         elif len(sys.argv) > 2:
             print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'error': {'code': -32603, 'message': 'discovery-secret-failure'}}), flush=True)
             continue
@@ -380,6 +382,17 @@ finally:
     assert!(
         marker.with_extension("closed").exists(),
         "failed discovery closes its spawned child before returning"
+    );
+    std::fs::remove_file(marker.with_extension("closed")).unwrap();
+    let refused = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"bad-schema"]}})).await;
+    assert_eq!(refused["error"]["data"]["appError"], "mcp_unavailable");
+    assert_eq!(
+        refused["error"]["message"],
+        "invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
+    );
+    assert!(
+        marker.with_extension("closed").exists(),
+        "a refused tool list closes its spawned child before returning"
     );
     let after = client.rpc("mcp.catalog", json!({})).await;
     assert_eq!(

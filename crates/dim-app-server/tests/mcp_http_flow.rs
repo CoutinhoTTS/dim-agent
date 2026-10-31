@@ -462,7 +462,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     remote.repeating.store(true, Ordering::SeqCst);
     assert!(matches!(
         connection.tools(&cancel).await,
-        Err(McpServerError::InvalidResponse)
+        Err(McpServerError::InvalidResponse(_))
     ));
     let cancelled = CancellationToken::new();
     let worker = {
