@@ -233,9 +233,11 @@ impl HooksRuntime {
                 PromptDecision::Blocked { message } => {
                     return Ok(SubmitCheckReply::Block { message });
                 }
-                PromptDecision::Context(context) => {
-                    blocks.push(element("dim-hooks", &[("kind", "prompt-submit")], &context))
-                }
+                PromptDecision::Context(context) => blocks.push(element(
+                    "dim-hooks",
+                    &[("kind", "prompt-submit")],
+                    &escaped(&[context]),
+                )),
                 PromptDecision::None => {}
             }
         }

@@ -155,6 +155,7 @@ reported by `hooks.catalog` rather than at the hook point.
 `the_session_start_block_is_still_in_context_after_compaction`,
 `post_tool_use_follows_the_protocol_for_success_block_and_failure`,
 `a_hook_context_cannot_close_its_runtime_block`,
+`a_prompt_context_cannot_close_its_runtime_block`,
 `post_tool_use_failure_runs_only_for_error_results`,
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
