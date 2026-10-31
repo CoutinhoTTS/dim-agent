@@ -4,6 +4,8 @@ Status: Draft。交付状态在 issue，不在本文。
 Issue: #708。
 
 Scope: branch。
+业务需求与技术需求的边界见[上下文拼装与识别：业务需求与技术需求](context-assembly-requirements.md)。
+
 Rules: [design rules](../architecture/rust-agent/principles.md)、[ADR 002](../adr/002-plugin-scope.md)。
 
 ## 1. 范围与非目标
