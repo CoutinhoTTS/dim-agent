@@ -735,6 +735,25 @@ impl Timeline {
         let end = self.through(Some(end))?;
         self.records(&self.0.key.branch_id, start, end).await
     }
+    /// Reads complete batches after `after`, targeting `limit` events and
+    /// never ending inside an atomic batch.
+    #[service(skip)]
+    pub async fn stored_page(
+        &self,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let through = self.through(Some(through))?;
+        Ok(self
+            .0
+            .store
+            .read_page(&self.0.key, after, limit, through)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
     /// A local event range read from the store, bypassing the hot cache.
     #[service(skip)]
     pub async fn stored_local<R: RangeBounds<u64> + Send>(

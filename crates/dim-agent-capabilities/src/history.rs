@@ -170,8 +170,10 @@ impl HistoryRenderer {
         let mut state: Option<ProjectionCheckpointState> = None;
         let mut start = 1;
         while start <= through {
-            let end = (start + batch - 1).min(through);
-            let events = timeline.stored_local(start..=end).await?;
+            let events = timeline
+                .stored_page(start.saturating_sub(1), batch as usize, through)
+                .await?;
+            let end = events.last().map_or(start, |event| event.sequence);
             if let Some(index) = events.iter().position(|event| event.id == retain_from) {
                 let mut state = replay(&events[..index], state.as_ref())
                     .map_err(|error| AgentError::fault("History", error))?
@@ -263,11 +265,13 @@ impl HistoryRenderer {
         let mut streamed_state = None;
         let mut start = 1;
         while start <= through {
-            let end = (start + batch - 1).min(through);
-            let events = timeline.stored_local(start..=end).await?;
+            let events = timeline
+                .stored_page(start.saturating_sub(1), batch as usize, through)
+                .await?;
             if events.is_empty() {
                 return Ok(StreamedContext::fallback());
             }
+            let end = events.last().map_or(start, |event| event.sequence);
             let projected = project_batch(&events, state.as_ref())
                 .map_err(|error| AgentError::fault("History", error))?;
             if projected.compacted

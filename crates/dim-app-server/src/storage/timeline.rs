@@ -1907,7 +1907,7 @@ fn window_rows(
     let mut rows = Vec::new();
     let anchor: Option<(i64, i64)> = connection
         .prepare(
-            "SELECT sequence, last_sequence FROM timeline_events \
+            "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
              WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 AND sequence<=?4",
         )
         .map_err(error)?
@@ -1922,7 +1922,7 @@ fn window_rows(
     }
     let turn: Option<(i64, i64)> = connection
         .prepare(
-            "SELECT sequence, last_sequence FROM timeline_events \
+            "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
              WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind='turn/start' \
              AND json_extract(body, '$.record.event.data.turn_id')=?4 \
              ORDER BY sequence DESC LIMIT 1",
@@ -1969,7 +1969,7 @@ fn window_rows(
     rows.extend(
         connection
             .prepare(
-                "SELECT sequence, last_sequence FROM timeline_events \
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence>=?4 AND sequence<=?3 \
                  AND kind='step/tool-result' ORDER BY sequence",
             )
@@ -1987,7 +1987,7 @@ fn window_rows(
         rows.extend(
             connection
                 .prepare(
-                    "SELECT sequence, last_sequence FROM timeline_events \
+                    "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                      WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 AND sequence<=?4 \
                      AND kind IN ('turn/start','input/message','input/consumed') \
                      ORDER BY sequence",
@@ -2003,7 +2003,7 @@ fn window_rows(
         );
         let mut consumed = connection
             .prepare(
-                "SELECT sequence, last_sequence FROM timeline_events \
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence<=?4 \
                  AND kind='input/message' AND event_id IN (\
                    SELECT json_extract(body, '$.record.event.data.input_id') \
@@ -2036,7 +2036,7 @@ fn policy_rows(
     for kind in ["context/configured", "context/compaction"] {
         let row: Option<(i64, i64)> = connection
             .prepare(
-                "SELECT sequence, last_sequence FROM timeline_events \
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind=?4 \
                  AND (?4 != 'context/compaction' OR \
                    json_extract(body, '$.record.event.data.outcome.status')='completed') \
@@ -2055,7 +2055,7 @@ fn policy_rows(
     }
     let usage: Option<(i64, i64, Option<String>)> = connection
         .prepare(
-            "SELECT sequence, last_sequence, \
+            "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)), \
              json_extract(body, '$.record.event.data.request_id') \
              FROM timeline_events \
              WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND kind='model/usage' \
@@ -2072,7 +2072,7 @@ fn policy_rows(
         rows.push((sequence, last_sequence));
         let call: Option<(i64, i64)> = connection
             .prepare(
-                "SELECT sequence, last_sequence FROM timeline_events \
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
                  AND kind='model/call' \
                  AND json_extract(body, '$.record.event.data.request_id')=?4 \
@@ -2106,7 +2106,7 @@ fn policy_rows(
     if let Some(turn) = turn {
         let mut query = connection
             .prepare(
-                "SELECT sequence, last_sequence FROM timeline_events \
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence>=?4 AND sequence<=?3 \
                  AND kind IN ('turn/start','input/message','input/consumed','context/budget') \
                  ORDER BY sequence",
@@ -2124,7 +2124,7 @@ fn policy_rows(
         );
         let mut consumed = connection
             .prepare(
-                "SELECT sequence, last_sequence FROM timeline_events \
+                "SELECT sequence, MAX(last_sequence, COALESCE(json_extract(body, '$.record.batch_end'), last_sequence)) FROM timeline_events \
                  WHERE session_id=?1 AND branch_id=?2 AND sequence<=?4 \
                  AND kind='input/message' AND event_id IN (\
                    SELECT json_extract(body, '$.record.event.data.input_id') \

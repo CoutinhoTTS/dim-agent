@@ -5642,3 +5642,93 @@ async fn policy_facts_keeps_a_queued_input_consumed_after_turn_start() {
     assert!(ids.contains(&"event-3"), "{ids:?}");
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn streamed_context_reads_complete_batches_across_the_window() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut singles: Vec<_> = (1..=254).map(|sequence| text(sequence, "line")).collect();
+    append(&store, key("session", "main"), singles.drain(..).collect())
+        .await
+        .unwrap();
+    let mut batch = vec![text(255, "a"), text(256, "b"), text(257, "c")];
+    for record in &mut batch {
+        record.batch_end = 257;
+    }
+    append(&store, key("session", "main"), batch).await.unwrap();
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let streamed = HistoryRenderer::default()
+        .rendered_stream(&timeline, 257, 256)
+        .await
+        .unwrap();
+    assert!(!streamed.fallback);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_facts_ranges_end_at_the_atomic_batch() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut batch = vec![
+        text(1, "prefix"),
+        text(2, "prefix"),
+        record(
+            3,
+            EventKind::InputMessage(InputMessageData::text("a", Some(InputMode::Queue))),
+        ),
+        record(
+            4,
+            EventKind::InputMessage(InputMessageData::text("b", Some(InputMode::Queue))),
+        ),
+        text(5, "anchor"),
+    ];
+    for record in &mut batch {
+        record.batch_end = 5;
+    }
+    append(&store, key("session", "main"), batch).await.unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                6,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            record(
+                7,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-3".into(),
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let facts = store
+        .policy_facts(&key("session", "main"), 7, "turn")
+        .await
+        .unwrap();
+    let ids: Vec<_> = facts.events.iter().map(|event| event.id.as_str()).collect();
+    assert!(ids.contains(&"event-3"), "{ids:?}");
+    assert!(ids.contains(&"event-4"), "{ids:?}");
+    db.close().await.unwrap();
+}
