@@ -59,10 +59,11 @@ impl Native {
         })?;
         let (checked, version) = SqliteStorage::open_read_only(path.clone()).map_err(failure)?;
         checked.close().await.map_err(failure)?;
-        if version != 23 {
-            return Err(Error::Target(
-                "Migration requires native storage format 23; target preserved".into(),
-            ));
+        if version != dim_app_server::storage::STORE_FORMAT {
+            return Err(Error::Target(format!(
+                "Migration requires native storage format {}; target preserved",
+                dim_app_server::storage::STORE_FORMAT
+            )));
         }
         let db = Connection::open(path).map_err(failure)?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")

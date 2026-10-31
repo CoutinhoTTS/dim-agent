@@ -3,7 +3,7 @@
 use super::config::{self, McpPluginServers, McpProjectEnablement, McpServerSettings, McpSettings};
 use super::{
     McpAuth, McpConnection, McpError, McpSource, Result,
-    server::{McpServer, McpServerError, McpServerPlugin, McpServerState},
+    server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
 };
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_runtime::{
@@ -123,6 +123,11 @@ enum Command {
         id: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    Inspect {
+        source: McpSource,
+        id: String,
+        reply: oneshot::Sender<Result<Vec<McpRuntime>>>,
+    },
     /// Replies after a refresh, so a write's withdrawals are settled.
     Settle { reply: oneshot::Sender<Result<()>> },
 }
@@ -193,6 +198,17 @@ impl Publication {
     ) -> Result<()> {
         let (reply, received) = oneshot::channel();
         self.request(Command::Disconnect { source, id, reply }, received, cancel)
+            .await
+    }
+
+    pub(super) async fn inspect(
+        &self,
+        source: McpSource,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<McpRuntime>> {
+        let (reply, received) = oneshot::channel();
+        self.request(Command::Inspect { source, id, reply }, received, cancel)
             .await
     }
 }
@@ -286,6 +302,15 @@ impl Worker {
                 Some(Command::Disconnect { source, id, reply }) => {
                     let result = projection.disconnect(source, id).await;
                     let _ = reply.send(result);
+                }
+                Some(Command::Inspect { source, id, reply }) => {
+                    let snapshots = projection
+                        .generations
+                        .values()
+                        .filter(|generation| generation.source == source && generation.id == id)
+                        .map(|generation| generation.service.snapshot())
+                        .collect();
+                    let _ = reply.send(Ok(snapshots));
                 }
                 Some(Command::Settle { reply }) => {
                     let _ = reply.send(Ok(()));

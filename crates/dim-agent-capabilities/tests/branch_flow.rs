@@ -8,8 +8,10 @@ use dim_agent_capabilities::{
         ModelHost, ModelStopReason, ModelStream, PrepareContextHost, ResolveContextModel,
         StrategyDiagnostics, StrategyOutcome, ToolHost,
     },
-    timeline_tree::TreeCommands,
+    timeline_tree::{BranchToolConfig, TreeCommands},
+    workspace_tools::{file_reads::FileReads, files::FileTools},
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -143,6 +145,8 @@ struct Probe {
     commands: Mutex<Option<Arc<TreeCommands>>>,
     /// main's Timeline as its capabilities receive it, for direct writes.
     main_timeline: Mutex<Option<Arc<Timeline>>>,
+    /// A line's own Timeline: the binding its file tools keep reads in.
+    child_timeline: Mutex<Option<Arc<Timeline>>>,
     /// When set, main's apply reads its first atomic batch while it opens,
     /// after a rebuild read; the outcomes go to `opening_reads`.
     read_while_opening: AtomicBool,
@@ -218,6 +222,7 @@ impl DynPlugin for ProbePlugin {
                     probe.opening_reads.lock().unwrap().push(reads);
                 }
             } else {
+                *probe.child_timeline.lock().unwrap() = Some(timeline.clone());
                 probe.child_builds.fetch_add(1, Ordering::SeqCst);
                 let cleanups = probe.child_cleanups.clone();
                 ctx.effect(|| async move {
@@ -225,9 +230,13 @@ impl DynPlugin for ProbePlugin {
                     Ok(())
                 })?;
                 probe.child_entered.notify_one();
+                // Holds the child's build open until the test releases it, then
+                // fails the apply: creation fails in debug and release alike.
                 if probe.delay_child.load(Ordering::SeqCst) {
                     tokio::select! { _ = probe.child_release.notified() => {}, _ = ctx.cancelled() => {} }
-                    ctx.provide(Arc::new("late child binding"))?;
+                    return Err(rutis::Error::from(ErrorKind::PluginFailed(
+                        "test.branch-probe: the held child fails its apply".into(),
+                    )));
                 }
                 if probe.fail_child.load(Ordering::SeqCst) {
                     tokio::select! { _ = probe.writer_ready.notified() => {}, _ = ctx.cancelled() => {} }
@@ -337,14 +346,28 @@ impl DynPlugin for CleanupWriter {
         })
     }
 }
-fn setup(probe: &Arc<Probe>) -> Agent {
-    builder(probe).build()
+async fn setup(probe: &Arc<Probe>) -> MinimalHost {
+    MinimalHost::start(&builder(probe)).await.unwrap()
 }
 fn builder(probe: &Arc<Probe>) -> AgentBuilder {
+    builder_with(probe, defaults::install)
+}
+
+/// [`builder`] with the branch texts at a candidate's factory configuration
+/// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)):
+/// #636 evaluates the roster's closing sentence, which BranchLine reads from
+/// its member.
+fn builder_with_branch_config(probe: &Arc<Probe>, config: BranchToolConfig) -> AgentBuilder {
+    builder_with(probe, move |builder| {
+        defaults::install_with_branch_config(builder, config)
+    })
+}
+
+fn builder_with(probe: &Arc<Probe>, install: impl FnOnce(&mut AgentBuilder)) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     mock_hosts(&mut builder);
-    defaults::install(&mut builder);
+    install(&mut builder);
     let writer = probe.clone();
     builder.require_feature(
         Feature::new("test.cleanup-writer").branch("test.cleanup-writer", move |names| {
@@ -550,7 +573,7 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         Ok(vec![2]),
     ];
     for _ in 0..2 {
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = soon(agent.restore_session("saved".into())).await.unwrap();
         soon(session.idle("main")).await.unwrap();
         let opening = probe.opening_reads.lock().unwrap().pop().unwrap();
@@ -707,7 +730,7 @@ async fn a_restart_completes_an_end_without_its_result() {
     let probe = Arc::new(Probe::default());
     let mut builder = builder(&probe);
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     soon(session.idle("main")).await.unwrap();
     assert_eq!(
@@ -883,7 +906,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
     }
     let mut builder = builder(&Arc::new(Probe::default()));
     builder.timeline_store(store);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     soon(session.idle("main")).await.unwrap();
     assert_eq!(
@@ -1083,7 +1106,7 @@ async fn an_end_at_load_finds_the_restored_line_published() {
             )?))
         },
     ));
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     soon(session.idle("main")).await.unwrap();
     soon(async {
@@ -1128,7 +1151,7 @@ async fn an_end_at_load_finds_the_restored_line_published() {
 async fn an_end_refuses_a_line_that_is_still_opening() {
     let probe = Arc::new(Probe::default());
     probe.delay_child.store(true, Ordering::SeqCst);
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1194,7 +1217,7 @@ async fn a_line_that_is_ending_opens_no_more_lines() {
     let probe = Arc::new(Probe::default());
     let mut builder = builder(&probe);
     builder.timeline_store(store.clone());
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1277,7 +1300,7 @@ async fn wait_create(session: &Session, after: u64) -> Arc<AgentEvent> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1398,7 +1421,7 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1501,7 +1524,7 @@ async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ancestors_end_names_itself_on_every_descendant() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1557,7 +1580,7 @@ async fn an_ancestors_end_names_itself_on_every_descendant() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_line_that_ended_itself_names_itself_on_its_descendants() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1640,7 +1663,7 @@ async fn a_line_that_ended_itself_names_itself_on_its_descendants() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_line_cannot_open_under_an_ending_ancestor() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1722,7 +1745,7 @@ async fn a_line_cannot_open_under_an_ending_ancestor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ending_a_line_waits_for_a_child_still_building() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1797,7 +1820,7 @@ async fn a_failed_child_of_an_ended_parent_stays_unknown_after_a_restart() {
     let probe = Arc::new(Probe::default());
     let mut build = builder(&probe);
     build.timeline_store(store.clone());
-    let agent = build.build();
+    let agent = MinimalHost::start(&build).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1859,7 +1882,7 @@ async fn a_failed_child_of_an_ended_parent_stays_unknown_after_a_restart() {
     let probe = Arc::new(Probe::default());
     let mut build = builder(&probe);
     build.timeline_store(store);
-    let agent = build.build();
+    let agent = MinimalHost::start(&build).await.unwrap();
     let session = soon(agent.restore_session(id)).await.unwrap();
     assert_eq!(session.ended_head(&child), None);
     let commands = probe.commands.lock().unwrap().clone().unwrap();
@@ -1870,7 +1893,7 @@ async fn a_failed_child_of_an_ended_parent_stays_unknown_after_a_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1921,7 +1944,7 @@ async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
             Ok(Box::new(ProbePlugin::new(names, writer.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -1968,7 +1991,7 @@ async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
             Ok(Box::new(ProbePlugin::new(names, writer.clone())?))
         }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.restore_session(id)).await.unwrap();
     assert_eq!(source(session.branches(), &child), Some(host));
     assert_eq!(source(session.branches(), "main"), None);
@@ -1990,7 +2013,7 @@ async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2051,7 +2074,7 @@ async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2168,7 +2191,7 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2222,7 +2245,7 @@ async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_releases_an_unconsumed_create_without_waiting_for_dispatch() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2262,7 +2285,7 @@ async fn close_releases_an_unconsumed_create_without_waiting_for_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parent_close_waits_for_dispatch_before_releasing_branch_reservations() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2324,7 +2347,7 @@ async fn parent_close_waits_for_dispatch_before_releasing_branch_reservations() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2398,7 +2421,7 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn candidates_remain_private_until_the_initial_input_is_accepted() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2447,7 +2470,7 @@ async fn candidates_remain_private_until_the_initial_input_is_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_batch_cut_settles_creation_without_faulting_the_session() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2495,7 +2518,7 @@ async fn invalid_batch_cut_settles_creation_without_faulting_the_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_output_cannot_be_inherited_as_an_asymmetric_prefix() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2541,8 +2564,8 @@ async fn model_output_cannot_be_inherited_as_an_asymmetric_prefix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tool_call_on_main_opens_a_line_before_its_own_request() {
     let probe = Arc::new(Probe::default());
-    let root = support::root();
-    let agent = builder(&probe).build_in(&root);
+    let agent = MinimalHost::start(&builder(&probe)).await.unwrap();
+    let root = agent.root().clone();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2709,7 +2732,7 @@ fn blocks_with(events: &[Arc<AgentEvent>], marker: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_branch_call_writes_nothing() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2852,7 +2875,7 @@ async fn a_refused_branch_call_writes_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_close_cancels_an_active_build_and_waits_for_rollback() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2899,7 +2922,7 @@ async fn open_line(session: &Session, purpose: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn main_lists_its_open_tool_lines_under_one_key() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -2916,6 +2939,13 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
     assert!(text.contains(&format!("\n- {second}: second purpose\n")));
     assert!(!text.contains("more detail"));
     assert!(text.ends_with("</dim-branch-lines>"));
+    assert!(
+        text.contains(
+            "\nThey message you when they find something, need you, or end. Use the branch \
+             tool to message or read them, and wait to wait for them.\n"
+        ),
+        "the built-in closing sentence is unchanged: {text}"
+    );
     let history = session.history(&first, None).await.unwrap();
     let (identity, retired) = line_block(&history).unwrap();
     assert!(!retired);
@@ -2935,12 +2965,90 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
     soon(agent.close()).await.unwrap();
 }
 
+/// #636: the roster's closing sentence is the factory member
+/// `BranchToolConfig::roster_closing`, and a configured value reaches the
+/// roster byte for byte in place of the built-in sentence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_roster_closing_reaches_the_roster() {
+    let closing = "Configured: report once and end your wait when nothing is left to tell.";
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            roster_closing: Some(closing.into()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    let events = until_events(&session, "main", |events| {
+        line_block(events).is_some_and(|(text, retired)| !retired && text.contains(&child))
+    })
+    .await;
+    let (text, retired) = line_block(&events).unwrap();
+    assert!(!retired);
+    assert!(
+        text.ends_with(&format!("\n{closing}\n</dim-branch-lines>")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("They message you when they find something"),
+        "the built-in closing sentence is replaced: {text}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// #549: a description set at the declaring owner's factory configuration
+/// reaches the model request byte for byte, carried through ToolRegistry and
+/// ToolBinding by the shipped assembly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_description_reaches_the_request_declaration() {
+    let description =
+        "Work with the other lines of this session. Configured for the #549 flow test.";
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            description: Some(description.into()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("hello".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let tools = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.clone(),
+            _ => None,
+        })
+        .expect("the request carries the declarations");
+    let branch = tools
+        .iter()
+        .find(|tool| tool.name == "branch")
+        .expect("the branch tool is declared");
+    assert_eq!(branch.description, description);
+    soon(agent.close()).await.unwrap();
+}
+
 /// #552: `<dim-branch-line>` is written by the Session part TimelineTree, so
 /// its guide entry is registered there, at the Session, and a line carries it
 /// even where no branch part is loaded. `<dim-branch-lines>` stays with
 /// BranchLine, which writes the roster.
 const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 fn system_text(prompt: &SystemPrompt) -> String {
     match prompt {
@@ -2974,7 +3082,7 @@ async fn last_system(session: &Session, branch: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3000,13 +3108,90 @@ async fn each_line_carries_the_entry_of_the_marker_its_part_writes() {
     soon(agent.close()).await.unwrap();
 }
 
+/// #637: the workspace rule names the stale copy in the words the result
+/// carries. The tool's side is a write through the line's own read binding,
+/// the guard the design relies on (§8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_names_the_stale_file_failure_the_way_the_tool_reports_it() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    let history = session.history(&child, None).await.unwrap();
+    let (identity, _) = line_block(&history).unwrap();
+    assert!(
+        identity.contains(
+            "If edit or write fails because the file was modified after it was last read"
+        ),
+        "{identity:?}"
+    );
+
+    let root = std::env::temp_dir().join(format!("dim-branch-workspace-{}", uuid::Uuid::new_v4()));
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let tools = FileTools::new(work.clone(), root.clone(), root.join("outputs"));
+    let timeline = probe
+        .child_timeline
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the line's Timeline");
+    let reads = FileReads::new(timeline);
+    std::fs::write(work.join("shared.txt"), "first\n").unwrap();
+    let read = file_call(
+        &tools,
+        &reads,
+        "read",
+        serde_json::json!({"path": "shared.txt"}),
+    )
+    .await;
+    assert_eq!(read.is_error, None, "{:?}", read.content);
+    std::fs::write(work.join("shared.txt"), "changed elsewhere\n").unwrap();
+    let stale = file_call(
+        &tools,
+        &reads,
+        "write",
+        serde_json::json!({"path": "shared.txt", "content": "mine\n"}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    assert_eq!(
+        stale.content,
+        ToolContent::Text(
+            "File was modified after it was last read. Use the read tool again before writing."
+                .into()
+        )
+    );
+    soon(agent.close()).await.unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn file_call(
+    tools: &FileTools,
+    reads: &FileReads,
+    name: &str,
+    input: serde_json::Value,
+) -> ToolResult {
+    let call = ToolCall {
+        id: "call".into(),
+        name: name.into(),
+        input: input.as_object().unwrap().clone(),
+    };
+    tools
+        .execute(&call, reads, CancellationToken::new())
+        .await
+        .unwrap()
+}
+
 /// #552: the branch tool's actions, modes and schema are protocol, so they
 /// are asserted here; the description's policy sentences are judged by the
 /// §12.3 evaluation instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_branch_tool_declares_its_actions_and_modes() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3076,7 +3261,7 @@ async fn the_branch_tool_declares_its_actions_and_modes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_branch_tool_reports_invalid_arguments() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3104,7 +3289,7 @@ async fn the_branch_tool_reports_invalid_arguments() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3269,7 +3454,7 @@ async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3332,7 +3517,7 @@ async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_that_steered_main_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3367,7 +3552,7 @@ async fn a_turn_that_steered_main_writes_no_idle_notice() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3425,7 +3610,7 @@ async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3532,7 +3717,7 @@ async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_end_in_the_same_turn_writes_no_second_final_message() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3598,7 +3783,7 @@ async fn a_second_end_in_the_same_turn_writes_no_second_final_message() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_lines_end_says_nothing_to_main() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3629,7 +3814,7 @@ async fn a_host_lines_end_says_nothing_to_main() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_end_from_outside_a_tool_line_wakes_main_with_a_notice() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3775,7 +3960,7 @@ async fn the_roster_and_the_identity_replay_after_a_compaction() {
             }),
         );
     defaults::install(&mut builder);
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3878,7 +4063,7 @@ async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancella
                 Ok(Box::new(CaptureTreeDispatch::new(names, captured.clone())?))
             }),
     );
-    let agent = builder.build();
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -3916,7 +4101,7 @@ fn interrupt() -> EventKind {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe);
+    let agent = setup(&probe).await;
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4024,7 +4209,7 @@ fn gated(probe: &Arc<Probe>, gate: &Arc<Gate>) -> AgentBuilder {
 async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     let probe = Arc::new(Probe::default());
     let gate = Arc::new(Gate::default());
-    let agent = gated(&probe, &gate).build();
+    let agent = MinimalHost::start(&gated(&probe, &gate)).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4081,11 +4266,11 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     gate.release.notify_one();
-    let outcome = tokio::time::timeout(Duration::from_secs(8), ender).await;
-    assert!(
-        outcome.is_ok(),
-        "the ancestor's end waited for the line's own turn"
-    );
+    tokio::time::timeout(Duration::from_secs(8), ender)
+        .await
+        .expect("the ancestor's end waited for the line's own turn")
+        .unwrap()
+        .unwrap();
     assert!(
         session.ended_head(&child).is_some(),
         "the line is recorded as ended"
@@ -4093,6 +4278,32 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     let events = local_events(&session, &child).await;
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Cancelled { .. }))));
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnd(data) => Some((event.sequence, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 1, "the committed end is not replaced");
+    let results: Vec<_> = local_events(&session, &ancestor)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) if data.branch == child => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [BranchEndedData {
+            branch: child,
+            end_event: ends[0].0,
+            source: ends[0].1.source.clone(),
+            ancestor: ends[0].1.ancestor.clone(),
+        }],
+        "cancellation preserves the line's committed end and records its result once"
+    );
     soon(agent.close()).await.unwrap();
 }
 
@@ -4150,7 +4361,7 @@ async fn a_turn_spanning_a_restart_after_a_steer_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
     let mut builder1 = builder(&probe);
     builder1.timeline_store(first.clone());
-    let agent = builder1.build();
+    let agent = MinimalHost::start(&builder1).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -4186,7 +4397,7 @@ async fn a_turn_spanning_a_restart_after_a_steer_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
     let mut builder2 = builder(&probe);
     builder2.timeline_store(second);
-    let agent = builder2.build();
+    let agent = MinimalHost::start(&builder2).await.unwrap();
     let session = soon(agent.restore_session(id)).await.unwrap();
     soon(session.idle(&child)).await.unwrap();
     soon(session.idle("main")).await.unwrap();

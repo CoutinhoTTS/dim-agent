@@ -26,6 +26,7 @@ http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [dev-dependencies]
+dim-agent-runtime = { workspace = true, features = ["testing"] }
 axum = { workspace = true, features = ["json"] }
 futures = "0.3"
 wiremock = "0.6"

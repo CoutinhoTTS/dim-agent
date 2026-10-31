@@ -1,20 +1,25 @@
-use dim_agent_runtime::{AgentError, Result};
+use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use std::{
     fs::File,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 23;
+pub const FORMAT: u32 = 26;
+const LEGACY_BY_END: (&str, &str) = (
+    "timeline_events_by_end",
+    "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
+);
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 26))",
     ),
     (
         "settings_documents",
@@ -69,10 +74,6 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id)",
     ),
     (
-        "timeline_events_by_end",
-        "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
-    ),
-    (
         "timeline_events_by_id",
         "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
     ),
@@ -112,7 +113,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 9] = [
+const UPGRADES: [(u32, &[&str]); 12] = [
     (
         13,
         &[
@@ -145,6 +146,14 @@ const UPGRADES: [(u32, &[&str]); 9] = [
             "session_catalog_with_preview",
         ],
     ),
+    // #555: a configuration's `system_source`, which a v23 daemon cannot
+    // decode; the marker only.
+    (23, &[]),
+    (24, &[]),
+    // #522: model limits that only a declaration writes, which a v25
+    // daemon cannot decode; the marker only, and the Provider-owned
+    // rewriter runs at this step.
+    (25, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -153,10 +162,11 @@ fn format_table(version: u32) -> String {
     )
 }
 /// The exact schema of a format this daemon opens or upgrades: `SCHEMA`
-/// without the entries of the steps from `version` on, with its marker.
+/// without later additions, with its marker and the index removed after v24.
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
+        .chain((version <= 24).then_some(&LEGACY_BY_END))
         .filter(|(name, _)| {
             !UPGRADES
                 .iter()
@@ -317,12 +327,21 @@ impl SqliteStorage {
                 tx.execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
-                for (_, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
+                for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
                         tx.execute_batch(sql).map_err(storage)?;
                     }
+                    if *from == 22 {
+                        super::catalog::backfill(&tx)?;
+                    }
+                    if *from == 24 {
+                        tx.execute_batch("DROP INDEX timeline_events_by_end")
+                            .map_err(storage)?;
+                    }
+                    if *from == 25 {
+                        crate::provider::rewrite_stored_limits(&tx)?;
+                    }
                 }
-                super::catalog::backfill(&tx)?;
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
                 upgraded_from = Some(version);
@@ -423,15 +442,61 @@ impl SqliteStorage {
         }
         let admitted = Operation(self.clone());
         tokio::task::spawn_blocking(move || {
-            let mut guard = admitted.0.connection.lock().unwrap();
+            let mut guard = admitted
+                .0
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
-            operation(connection)
+            match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
+                Ok(result) => result,
+                Err(panic) => {
+                    let failure = storage(format!(
+                        "SQLite operation panicked: {}",
+                        panic_message(panic)
+                    ));
+                    if !connection.is_autocommit()
+                        && let Err(cleanup) = connection.execute_batch("ROLLBACK")
+                    {
+                        return Err(failure.with_cleanup(storage(cleanup)));
+                    }
+                    Err(failure)
+                }
+            }
         })
         .await
         .map_err(storage)?
     }
+    pub(crate) async fn run_cancellable<T: Send + 'static>(
+        self: &Arc<Self>,
+        cancel: tokio_util::sync::CancellationToken,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run(move |connection| {
+            if cancel.is_cancelled() {
+                return Err(AgentError::Cancelled("session catalog".into()));
+            }
+            let interrupt = cancel.clone();
+            connection
+                .progress_handler(1000, Some(move || interrupt.is_cancelled()))
+                .map_err(storage)?;
+            let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+            connection
+                .progress_handler(0, None::<fn() -> bool>)
+                .map_err(storage)?;
+            match result {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(_) if cancel.is_cancelled() => {
+                    Err(AgentError::Cancelled("session catalog".into()))
+                }
+                Ok(result) => result,
+            }
+        })
+        .await
+    }
+
     pub async fn close(self: &Arc<Self>) -> Result<()> {
         self.admission.lock().unwrap().closed = true;
         let db = self.clone();
@@ -446,7 +511,10 @@ impl SqliteStorage {
                 idle.await;
             }
             tokio::task::spawn_blocking(move || {
-                let mut guard = db.connection.lock().unwrap();
+                let mut guard = db
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(connection) = guard.take()
                     && let Err((connection, failure)) = connection.close()
                 {

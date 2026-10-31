@@ -8,6 +8,34 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 多行/粘贴编辑器、无头 exec 的图片参数、剪贴板/文件插入、补全和拖入路径已实现。附件合同记录了
 各原生平台的验收证据和尚未完成的检查。
 
+## 命令菜单
+
+scrollback 与 fullscreen TUI 都按分类分组，分类及分类内的命令名按其英文标识的字母顺序排列。
+搜索时匹配程度优先，同等匹配按分类和命令名排序。
+退出和挂起必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
+完整输入的命令（包括隐藏命令）仍走各自的处理流程。
+菜单中的权限入口为 `/approvals`；`/approval` 隐藏，但完整输入后仍可打开自己的菜单。
+菜单只列出斜杠命令，移除中断、steer、选择较早消息、滚动到顶部或底部等仅由按键触发的操作。
+`/keys` 仍列出这些快捷键：两种模式均支持 `Esc` 和 `Ctrl+S`；fullscreen 还支持
+`Tab`、`Home`、`End`，其中 `Home/End` 仅在草稿为空时滚动历史。
+
+```text
+Commands
+  app     /exit        exit
+  app     /keys        show the key bindings
+  model   /approvals   set the session's permission preset
+
+/ + Enter          -> /exit (completion only)
+/exit + Enter      -> exit
+/approval + Enter  -> Ask / Full access menu
+
+Esc     interrupt the run
+Ctrl+S  steer with the next queued message
+Tab     pick an earlier message to edit or quote (fullscreen)
+Home    scroll to the top (fullscreen, empty draft)
+End     scroll to the bottom (fullscreen, empty draft)
+```
+
 ## 命令隔离设置
 
 现有 `/settings` 面板在 Permissions 下、`Tool approvals` 旁增加独立的 `Command isolation` 行。
@@ -257,7 +285,7 @@ $ dimcode exec resume <session-id> --permission read-only -p 'Summarize'
 ```
 
 新 Session 在 `session.create` 中收到完整策略 `{preset}`：不带工具列表，这是产品配置的形式。Agent
-成员复制这份创建时策略（见分支语义）。恢复时该参数只替换预设，保留已存储的
+新成员按[权限继承设计](../../design/subagent-tool-approval.md#2-permission-inheritance)采样发起分支的当前策略（见分支语义）。恢复时该参数只替换预设，保留已存储的
 `allowedTools`/`disallowedTools`。更新发生在 attach 之前，所以本次调用提交的回合不会在旧预设下运行。
 不给参数时，`session.create` 不带策略，恢复的 Session 保持自己的策略。守护进程没有声明
 `session.permission.update` 时，恢复时的参数在 attach 之前失败。这里重试冲突是正确的：要设置的预设
@@ -292,25 +320,32 @@ Assistant: ...
 ### 分支语义
 
 一个分支的 Permission 状态是 `SessionConfig.permissionPolicy` 依次叠加祖先前缀和自身的
-`permission/changed` 事件。CLI 只写 `main`，也就是它提交输入、等待空闲和导出的分支。
+`permission/changed` 事件。CLI 的权限入口只写 `main`；分支交互见 [Timeline branches](../../design/timeline-branches.md)。
 
 ```text
-session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
-        |                                         |
-        v                                         v  创建成员时复制
- main: permission/changed（按版本 CAS）     agent 成员 Session（Collaboration）
-   ^  由恢复时的 --permission
-   |  和 /approval 或 /approvals 写入
-   +-- 分支点 --> 子分支（branch 工具）：分支点处 main 的策略，
-                   之后是它自己的修改
+Session 创建配置 --> main 当前策略 --分支点--> 子分支策略
+                         |                       |
+                         +--新成员请求采样        +--新成员请求采样
+                         v                       v
+                    新成员权限               新成员权限
+
+后续修改不更新已有子分支或成员。
 ```
 
 - branch 工具在修改之后创建的子分支继承该修改。已有子分支保持自己的策略；CLI 不枚举也不更新它们。
   它们的审批请求仍像现在一样按各自的分支 id 回答。
-- Agent 成员复制领导者 Session 的创建时策略。新 Session 上的 `--permission` 会传到成员；之后对
-  `main` 的修改不会。切换的确认信息会说明这一点，下文的需求 R2 请 Collaboration 改为复制领导者分支的
-  当前策略。
+- 新成员复制发起分支在采样点已派发的完整权限；已有成员保留自身权限，复用时也不刷新。
+  采样顺序、失败和复用行为由[权限继承设计](../../design/subagent-tool-approval.md#2-permission-inheritance)定义。
+  权限切换确认须说明其影响后续从该分支创建的成员，不更新已有成员；交付跟踪在 #257。
 - 分叉复制源 Session 的事实，所以分叉从源 Session 当前的 `main` 策略开始（#26）。
+
+### 子 agent 工具审批
+
+审批转交、权限继承和取消恢复见 [Collaboration 设计](../../design/subagent-tool-approval.md)。
+`ask` 的完整终端交互以 [CLI 审批设计](../../design/cli-commands.md#subagent-tool-approval)为准：
+成员请求交给发起委派的 leader 分支；leader 的允许工具需要审批时，展示成员身份、双方分支、
+原始工具和完整参数、原因，只提供允许一次或拒绝。详情从服务端读取，加载失败不能允许；
+成员详情面板仍然只读，不直接回答成员请求。这是设计要求，不代表当前二进制已实现。
 
 ### `/approval`
 
@@ -359,7 +394,7 @@ Switch the main branch to full-access? [y/N]
 Preset unchanged: workspace-write
 
 > /approvals read-only
-Preset (main branch): read-only. Child branches created later inherit it; agent members keep the Session's starting preset.
+Preset (main branch): read-only. Child branches and members created later from main inherit it; existing branches and members keep their policies.
 
 > /approvals deny prefix git push
 Rule already present: deny prefix `git push`
@@ -487,14 +522,9 @@ CLI 报告规则的结果，不发送回答。Ctrl+C 之后不再发起新的写
   [#257](https://github.com/arcships/dim/issues/257)。
 
 **R2. Agent 成员跟随领导者分支的当前策略。**
-- 受阻："成员在领导者的策略下工作"只在领导者修改预设之前成立。Collaboration 复制领导者 Session 的
-  `SessionConfig.permissionPolicy`，所以执行 `/approvals read-only` 之后，新成员仍以创建时的预设启动。
-- 考虑过：由 CLI 更新每个成员（它看不到成员的创建，并会与之竞争）；只通过参数创建 Session（覆盖不了
-  之后的修改）。
-- 需要：Collaboration 创建成员时，复制领导者分支已派发的 `PermissionState.policy`（Permission 的公开
-  状态），而不是创建时的配置。
-- 顺序：成员采用其创建时已派发的策略；领导者之后的修改不影响已有成员，与子分支相同。
-- 所有者：Collaboration（App Server）；跟踪于 [#257](https://github.com/arcships/dim/issues/257)。
+- 所有者：Collaboration；跟踪于 [#257](https://github.com/arcships/dim/issues/257)。
+- 合同、采样顺序、失败和复用行为由[权限继承设计](../../design/subagent-tool-approval.md#2-permission-inheritance)拥有。
+- CLI 只更新目标分支，不枚举成员或传播策略；确认文案须说明对新成员和已有成员的不同影响。
 
 ## 问题
 

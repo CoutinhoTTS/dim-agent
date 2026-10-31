@@ -527,10 +527,10 @@ fn html_fragment_to_markdown(html: &str, base: &Url) -> String {
                 continue;
             }
         }
-        let next_tag = html[i + 1..]
-            .find('<')
-            .map(|rel| i + 1 + rel)
-            .unwrap_or(len);
+        // The text branch can be reached with the current byte `<` when no `>` follows or the
+        // candidate tag name is invalid; skip that one byte so a literal `<` makes progress.
+        let from = if bytes[i] == b'<' { i + 1 } else { i };
+        let next_tag = html[from..].find('<').map(|rel| from + rel).unwrap_or(len);
         let text_slice = &html[i..next_tag];
         let decoded = html_escape::decode_html_entities(text_slice);
         if in_pre {

@@ -142,7 +142,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 只设计了滚动式界面；只有全屏才有的项目（回滚、鼠标、`/stats`）不在范围内 | [总体设计](overview.md)第 15 行、附录 A | 全屏终端界面、它的鼠标模式和 `/tui` 都已实现，并写在[原生 CLI 契约](../../../crates/dim-cli/README.md)里；回滚和 `/stats` 没有实现 |
 | F6 不实现全屏界面 | [CLI 命令](cli-commands.md) | 同上 |
 | `/web` 是 RemoteGateway 的新工作 | [总体设计](overview.md)附录 A | 已由第一阶段的 web 入口交付 |
-| 远程入口从不提供管理方法；入口表里没有 web 入口 | [Session 边界](contracts/session-boundary.md) A.3、[RemoteGateway](plugins/RemoteGateway.md) | web 入口提供只读的 `provider.list`、`provider.catalog`、`provider.selection`（[Web 工作区 §2.5](../../design/web-workspace.md)） |
+| 远程入口从不提供管理方法；入口表里没有 web 入口 | [Session 边界](contracts/session-boundary.md) A.3、[RemoteGateway](plugins/RemoteGateway.md) | web 入口提供[Web 工作区 §2.5](../../design/web-workspace.md#25-protocol-on-the-entry) 定义的只读模型发现方法 |
 | RemoteGateway 没有引用已经实现了它一部分的 web 入口 | [RemoteGateway](plugins/RemoteGateway.md) | [Web 工作区](../../design/web-workspace.md) §2.6 列出了两者的差别 |
 
 ## 5. 本仓库与 Desktop

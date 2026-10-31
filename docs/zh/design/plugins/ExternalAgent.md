@@ -365,7 +365,7 @@ Collaboration 的成员目前是 dim Session：每个操作都经过成员的 `S
 
 ### 9.3 成员审批路径接受提供方的询问
 
-#19 已决定成员审批通过 Collaboration 工具到达 leader 的模型，该调用经过 leader 的 Approval 和 Permission（[overview 附录 B](../overview.md#附录-b-现有插件的补充)；尚未详细设计）。对于提供方成员，该路径从提供方 `run` 的事件（`ask`、`askEnded`）接收询问，并通过提供方的 `answer` 按 `extSessionId` 返回决定。其设计的约束：allow 决定必须携带 Permission 风险，使 ReadOnly 拒绝、WorkspaceWrite 询问（工具风险是静态的，所以 allow 和 reject 是分开的工具，或决定工具按 allow 级别分类）。
+leader 侧的转交、决策工具和用户展示要求见 [Collaboration 成员审批设计](../../../design/subagent-tool-approval.md)。对于提供方成员，该路径从提供方 `run` 的事件（`ask`、`askEnded`）接收询问，并通过提供方的 `answer` 按 `extSessionId` 返回决定。允许和拒绝使用该路径定义的工具与风险分类；本文仅定义提供方的询问和回答如何接入。
 
 ### 9.4 链路断开期间导入的服务保持登记（#5）
 
@@ -387,7 +387,7 @@ Collaboration 的成员目前是 dim Session：每个操作都经过成员的 `S
 | --- | --- |
 | 接受 §9.2：成员提供方、提供方侧关系、按 `requestId` 取消、配置的 kinds；leader 关闭不做提供方清理 | Collaboration 所有者 |
 | 接受 §9.5：把 TypeScript 进程行的 `collaborationMembers:*` 原生投影，并把配置的 kinds 传给 Collaboration | App Server 装配所有者（#4 绑定） |
-| 接受 §9.3 并设计成员审批路径（#19），本设计使用它 | Collaboration 所有者 |
+| 按 §9.3 接入[成员审批路径](../../../design/subagent-tool-approval.md)（#19）；原生成员的权限继承不配置外部提供方 | Collaboration 所有者 |
 | 接受 §9.1（TypeScript `notify` 绑定） | Session 通知所有者（dim runtime） |
 | 客户端按 `agentId` 识别外部成员，只在提供方视图中使用 `extSessionId`，绝不把它当 dim Session（[§6](#6-接口摘要)，“客户端”） | 客户端所有者 |
 | 每个受支持的接入都实现 ACP `session/load` 或 CLI resume；不做运行时能力检查 | ExternalAgent 接入所有者 |

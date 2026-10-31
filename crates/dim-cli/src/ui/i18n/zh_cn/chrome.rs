@@ -174,10 +174,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell 输出未记录：{reason}",
         "Shell: {reason}" => "Shell：{reason}",
         "Reading clipboard…" => "正在读取剪贴板…",
+        "Reading image…" => "正在读取图片…",
+        "Wait for the image insertion before sending" => "请等待图片插入后再发送",
+        "The image could not be read" => "无法读取该图片",
+        "An image is still being inserted; paste again when it is in" => {
+            "图片正在插入，请稍后再粘贴"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "剪贴板内容正在插入，请稍后再粘贴"
+        }
         "Clipboard: {reason}" => "剪贴板：{reason}",
         "Wait for clipboard insertion before sending" => "请等待剪贴板内容插入后再发送",
         "A submission accepts at most 20 images" => "一次提交最多 20 张图片",
         "[Image #{index}]" => "[图片 #{index}]",
+        "[Image #{index}{details}]" => "[图片 #{index}{details}]",
+        "first frame" => "仅首帧",
+        "re-encoded" => "已重新编码",
         "The current model does not accept images; remove {label} to send" => {
             "当前模型不支持图片输入；删除 {label} 后再发送"
         }
@@ -341,6 +353,44 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} 个模型不可用 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：1 个模型需要窗口 · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：{count} 个模型需要窗口 · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}：没有模型 · dimcode models {id} --refresh"
+        }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}：没有模型 · 用 provider.models.create 添加模型"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}：{unavailable} 个不可用、{disabled} 个已禁用 · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}：无法读取 catalog · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限未声明的模型无法选择；用 dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N 声明。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "用 dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N 声明。"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "没有缓存的 catalog。请登录并运行 models PROVIDER --refresh。"
+        }
+        "Saved model preferences cleared" => "已清除保存的模型偏好",
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}：1 个模型已禁用 · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}：{count} 个模型已禁用 · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "没有模型。运行 dimcode models {id} --refresh 查看。"
+        }
+        "No models. The provider listed none." => "没有模型。该 Provider 没有列出任何模型。",
         "Enter select · Esc back" => "Enter 选择 · Esc 返回",
         "Subagent models" => "子代理模型",
         "Subagent models: {policy}" => "子代理模型：{policy}",
@@ -374,8 +424,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }
         "Fullscreen" => "全屏",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑，q 引用"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 (草稿为空时) · Tab 选择消息，e 编辑，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滚轮滚动 · 拖动选择并复制 · 点击链接打开，点击工具组展开"

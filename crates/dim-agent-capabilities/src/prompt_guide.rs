@@ -6,12 +6,14 @@
 //! with it
 //! ([rutis usage R6](../../../docs/design/rutis-usage.md#r6-contributions-register-with-their-owner)).
 use dim_agent_runtime::{Names, Registrations, SESSION_GROUP, names::name_of};
+use dim_agent_types::{SystemPrompt, SystemPromptPart};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
 use rutis::{Ctx, Error};
 use rutis_bridge::exports::failure;
 use rutis_bridge::session::{Error as BridgeError, HostDispatch, Reply, Value, host_key_in};
 use serde_json::{Value as Json, json};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 /// Longest entry text, in bytes: the guide is part of every request's
 /// prefix, and an entry that large is a design smell as much as a cost.
@@ -203,6 +205,31 @@ impl GuideEntries {
         );
         parts.extend(FRAME_TAIL);
         parts.join("\n\n")
+    }
+
+    /// Changes with every registration and withdrawal, for the parts that
+    /// adopt a composition over the entries in force.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.entries.changes()
+    }
+
+    /// The System for `branch`: `base` text followed by the guide composed
+    /// for the entries in force. A missing or empty base is the guide alone,
+    /// and a `Parts` base gains the guide as one more text part.
+    pub fn compose_system(&self, branch: &str, base: Option<SystemPrompt>) -> SystemPrompt {
+        let guide = self.compose(branch);
+        match base {
+            None => SystemPrompt::Text(guide),
+            Some(SystemPrompt::Text(text)) if text.is_empty() => SystemPrompt::Text(guide),
+            Some(SystemPrompt::Text(text)) => SystemPrompt::Text(format!("{text}\n\n{guide}")),
+            Some(SystemPrompt::Parts(mut parts)) => {
+                parts.push(SystemPromptPart::Text {
+                    text: guide,
+                    cache_control: None,
+                });
+                SystemPrompt::Parts(parts)
+            }
+        }
     }
 }
 

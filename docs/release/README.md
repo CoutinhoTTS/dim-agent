@@ -14,6 +14,15 @@ The public host does not migrate or rewrite the account-owned `auth.json` when r
 
 Release cloning supplies its Git authentication header through process-local Git environment configuration, with shell tracing disabled. The credential is absent from Git arguments and is unset before checkout and build commands. Release jobs continue to use self-hosted runners isolated from PR jobs.
 
+## Member-approval client compatibility
+
+Upgrade the CLI, bundled Web workspace and ACP gateway together when enabling native member
+approval forwarding. Older protocol-v3 clients can display `member_approval_allow` as an
+ordinary tool request containing only an opaque route id. They do not retrieve or review the
+original member action. Protocol-v3 compatibility alone does not guarantee that review UI;
+use a client implementing `session.collaboration.approval.get` before approving member actions.
+Updated clients disable Allow when the original action cannot be reviewed and keep Reject available.
+
 ## Runner setup
 
 Workflows use GitHub's [default self-hosted OS and architecture labels](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow). Register runners with these labels and grant this repository access to their runner group:

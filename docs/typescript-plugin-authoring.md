@@ -130,9 +130,9 @@ Which names a part declares:
   needs no service name.
 - **Provided without declaring it** (an undeclared `ctx.provide`, as an unmodified Cordis plugin
   does): rutis publishes it under its plain name for the whole process. Inside a Session or branch
-  that is one process-wide service: a second copy fails with rutis's duplicate-provider error, and a
-  debug build of the host refuses the Session at once (`scoped service provided without an instance
-  key`).
+  that is one process-wide service: a second copy fails with rutis's duplicate-provider error, and
+  the host's assembly check reports the Session (`scoped service provided without an instance key`)
+  when a test runs it.
 
 One provider per name per instance: of two parts that provide the same name in one Session or
 branch, the second fails with rutis's duplicate-provider error.
@@ -549,6 +549,39 @@ throw without a `code` is a binding failure. Handoff and connection-bound notifi
 this binding. On unload, C1 stops admission and settles accepted calls before the
 JavaScript part unloads: `report` replies with interruption, while `drain` preserves
 the provider's reply. No business task in this example runs during `apply`.
+
+**Your declaration is yours to mark.** The model reads your tool's declaration and
+results exactly as you write them: Dim carries them and owns none of their words.
+The description's guidance is policy; its schema, its result format and its
+refusal codes are protocol ([model-facing prompts §4](design/model-prompts.md#4-protocol-and-policy)).
+A protocol change lands with the behaviour and the flow that asserts it; a policy
+change is judged against the current text ([model-facing prompts §8](design/model-prompts.md#8-judging-a-change)).
+Where your plugin ships a policy text, make it an optional field of the row's
+`code.config`; when the field is absent the plugin uses its built-in text from
+code, byte for byte, so a candidate replaces it through the shipped assembly
+without an evaluation-only path. A built-in Rust part follows the same rule from
+its side, so a profile that places it without configuring it keeps the built-in
+text: Collaboration and Skills read the configuration as a Session value that
+their install call registers and provides ([rutis usage A.2](design/rutis-usage.md#a2-the-binding)),
+and ContextCompaction's summary strategy takes it through its factory
+constructor.
+
+### Markers and the input guide
+
+A part that writes a tag into a Session's input contributes the guide entry that
+explains it. Inject `guideEntries` and call
+`register(scope, {markers, order, text})` from `apply`, where `scope` is
+`'session'` or `{branch: '<branch id>'}`; the call resolves with no value and
+throws a `GuideEntryError` whose `code` names the refusal
+([Prompt §2 and §6.1](design/plugins/Prompt.md#2-the-entry-route)). The entry is in
+force while the calling row is loaded, and a marker has one entry per composition.
+
+The registration belongs to the part that is loaded wherever the marker is written.
+A plugin whose process row writes into a Session another row of the same plugin
+serves registers the entry from that Session part, not from the process row: the
+Session part is what is loaded there. Its text is yours and stays in your code;
+the protocol sentences name your marker, and the policy sentences are yours to
+evaluate.
 
 ## Session observation
 

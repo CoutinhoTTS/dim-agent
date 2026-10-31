@@ -16,6 +16,7 @@ use dim_agent_capabilities::{
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
     timeline_tree::TreeCommands,
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -345,7 +346,7 @@ impl DynPlugin for LifecycleProbePlugin {
 
 pub struct Env {
     pub root: rutis::Ctx,
-    pub agent: Agent,
+    pub agent: MinimalHost,
     pub model: Arc<ScriptedModel>,
     pub gate: Arc<Gate>,
     pub today: Arc<Mutex<String>>,
@@ -374,6 +375,13 @@ pub struct Options {
     pub timezone: &'static str,
     pub hold: Option<Arc<AssemblyHold>>,
     pub probe: Option<Arc<LifecycleProbe>>,
+    /// Skills' factory configuration: the text replacing the built-in
+    /// instructions.
+    pub instructions: Option<Arc<str>>,
+    /// Register the Skills parts in the profile without installing the
+    /// capability, as a host whose profile takes them by name does: the
+    /// catalog plugin registers them either way.
+    pub require_without_install: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -384,18 +392,17 @@ impl Default for Options {
             timezone: "Asia/Shanghai",
             hold: None,
             probe: None,
+            instructions: None,
+            require_without_install: false,
         }
     }
 }
 
 /// The product profile: PromptSources and Skills with scripted hosts.
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
-    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
     let mut host = platform(&dirs.home);
     host.timezone = Some(options.timezone.into());
-    root.provide_as::<HostPlatform>(Arc::new(host)).unwrap();
-    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(options.settings.clone())))
-        .unwrap();
+    let settings = options.settings.clone();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -424,7 +431,20 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(move || today.lock().unwrap().clone()),
         std::time::Duration::from_millis(10),
     );
-    skills::install(&mut builder);
+    if options.require_without_install {
+        for part in ["Skills", "SkillsBranch"] {
+            builder.require_part(part);
+        }
+    } else if let Some(instructions) = options.instructions {
+        skills::install_with_config(
+            &mut builder,
+            skills::SkillsConfig {
+                instructions: Some(instructions),
+            },
+        );
+    } else {
+        skills::install(&mut builder);
+    }
     if let Some(hold) = options.hold {
         builder.require_feature(
             Feature::new("AssemblyHold").session("AssemblyHold", move |_| {
@@ -440,11 +460,16 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         );
     }
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-    let agent = builder.build_in(&root);
-    agent.start().await.unwrap();
+    let agent = MinimalHost::start_with(&builder, move |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(host))?;
+        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings)))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     Env {
+        root: agent.root().clone(),
         agent,
-        root,
         model,
         gate,
         today: options.today,
@@ -568,4 +593,192 @@ pub async fn run(session: &Session, text: &str) {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
+}
+
+/// The in-memory store, holding the publication of one batch until the test
+/// releases it: a window inside an adoption, after it composed what it
+/// publishes and before it returned.
+pub struct HoldingStore {
+    memory: MemoryTimelineStore,
+    selected: Mutex<Option<String>>,
+    held: Mutex<Option<PublishCallback>>,
+    /// The branch whose read is held, and how many matching reads pass
+    /// before it; `None` when no read hold is armed.
+    read_branch: Mutex<Option<(String, usize)>>,
+    /// The ordinal of the read to hold on the branch the next `BranchCreate`
+    /// names, while the flow has not created it yet.
+    next_branch_read: Mutex<Option<usize>>,
+    gate: tokio::sync::Semaphore,
+    /// The segments of every read, by branch.
+    reads: Mutex<Vec<(String, std::ops::RangeInclusive<u64>)>>,
+    /// Notified when a batch is held.
+    pub entered: Notify,
+    /// Notified when a held read starts.
+    pub read_entered: Notify,
+}
+
+impl Default for HoldingStore {
+    fn default() -> Self {
+        Self {
+            memory: MemoryTimelineStore::default(),
+            selected: Mutex::new(None),
+            held: Mutex::new(None),
+            read_branch: Mutex::new(None),
+            next_branch_read: Mutex::new(None),
+            gate: tokio::sync::Semaphore::new(0),
+            reads: Mutex::new(Vec::new()),
+            entered: Notify::new(),
+            read_entered: Notify::new(),
+        }
+    }
+}
+
+impl HoldingStore {
+    /// Holds the next batch on `branch` that carries a `context/configured`.
+    pub fn hold_next_configuration_on(&self, branch: &str) {
+        *self.selected.lock().unwrap() = Some(branch.to_string());
+    }
+    /// Holds the `nth` read of `branch`'s segments from now (1 is the next):
+    /// the caller parks inside an adoption, after it started reading and
+    /// before it composed.
+    ///
+    /// This keys the hold on the reads' order, not on which read it is: the
+    /// store sees a read as its branch and a range, and reads a flow makes
+    /// of one branch are not distinguishable by those, so a flow holds a
+    /// read by its position in the branch's read order. A fresh branch's
+    /// open composes nothing, so the branch's first read is its guide
+    /// adoption's, and a flow that means that read arms 1; the close flow
+    /// holds the next read of its branch while the read it means is the next
+    /// one. An unrelated read of the same branch would take the hold
+    /// instead; the flows contain that: their assertions still demand the
+    /// entry the branch ran with, so a hold an unrelated read took fails the
+    /// flow rather than passing it.
+    pub fn hold_read_of(&self, branch: &str, nth: usize) {
+        *self.read_branch.lock().unwrap() = Some((branch.to_string(), nth.max(1)));
+    }
+    /// Holds the next read of `branch`'s segments.
+    pub fn hold_next_read_of(&self, branch: &str) {
+        self.hold_read_of(branch, 1);
+    }
+    /// Holds the `nth` read of the branch the next `BranchCreate` names: a
+    /// fork's child is created inside the call, so its id does not exist
+    /// when the hold is armed. The store learns the id from the batch that
+    /// creates the branch; reads of other branches pass untouched.
+    pub fn hold_read_of_the_next_branch(&self, nth: usize) {
+        *self.next_branch_read.lock().unwrap() = Some(nth.max(1));
+    }
+    /// Publishes the held batch; the test calls it once the work it wants
+    /// inside the adoption's window is done.
+    pub fn release(&self) {
+        if let Some(publish) = self.held.lock().unwrap().take() {
+            publish(Ok(()));
+        }
+    }
+    /// Lets the held read continue.
+    pub fn release_read(&self) {
+        self.gate.add_permits(1);
+    }
+    /// The segments read since the last call, by branch.
+    pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
+    }
+}
+
+impl TimelineStore for HoldingStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        if let Some(created) = events.iter().find_map(|event| match &event.event.kind {
+            EventKind::BranchCreate(data) => Some(data.branch.clone()),
+            _ => None,
+        }) && let Some(nth) = self.next_branch_read.lock().unwrap().take()
+        {
+            self.hold_read_of(&created, nth);
+        }
+        let hold = {
+            let mut selected = self.selected.lock().unwrap();
+            let hold = selected.as_deref() == Some(key.branch_id.as_str())
+                && events
+                    .iter()
+                    .any(|event| matches!(event.event.kind, EventKind::ContextConfigured(_)));
+            if hold {
+                selected.take();
+            }
+            hold
+        };
+        if !hold {
+            return self.memory.append(key, events, publish);
+        }
+        self.memory.append(key, events, Box::new(|_| ()))?;
+        *self.held.lock().unwrap() = Some(publish);
+        self.entered.notify_one();
+        Ok(())
+    }
+    fn read_segments<'a>(
+        &'a self,
+        id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        let hold = {
+            let mut selected = self.read_branch.lock().unwrap();
+            let mut hold = false;
+            if let Some((branch, skip)) = selected.as_mut()
+                && segments.iter().any(|(read, _)| read == branch)
+            {
+                if *skip <= 1 {
+                    hold = true;
+                } else {
+                    *skip -= 1;
+                }
+            }
+            if hold {
+                *selected = None;
+            }
+            hold
+        };
+        self.reads.lock().unwrap().extend(segments.iter().cloned());
+        Box::pin(async move {
+            if hold {
+                self.read_entered.notify_one();
+                self.gate
+                    .acquire()
+                    .await
+                    .expect("the read gate stays open")
+                    .forget();
+            }
+            self.memory.read_segments(id, segments).await
+        })
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
 }

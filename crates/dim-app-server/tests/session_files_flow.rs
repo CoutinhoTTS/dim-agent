@@ -348,7 +348,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         permission::PermissionState,
         workspace_tools::WorkspaceToolsConfig,
     };
-    use dim_agent_runtime::{AgentBuilder, AgentConfig};
+    use dim_agent_runtime::{AgentBuilder, AgentConfig, testing::MinimalHost};
     use dim_agent_types::{EventKind, InputMode, PermissionPolicy, PermissionPreset};
 
     let home = Home::new();
@@ -361,10 +361,6 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
     })
     .unwrap();
     platform.home = home.0.clone();
-    store
-        .root
-        .provide_as::<HostPlatform>(Arc::new(platform))
-        .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store.sessions.timeline_store());
     defaults::install(&mut builder);
@@ -375,7 +371,12 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
             output_root: home.0.join("command-output"),
         },
     );
-    let agent = builder.build_in(&store.root);
+    let agent = MinimalHost::start_with(&builder, |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(platform))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
 
     for preset in [PermissionPreset::WorkspaceWrite, PermissionPreset::ReadOnly] {
         let session = agent

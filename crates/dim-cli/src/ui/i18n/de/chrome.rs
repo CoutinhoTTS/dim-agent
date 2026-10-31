@@ -209,10 +209,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Shell output was not recorded: {reason}" => "Shell-Ausgabe nicht gespeichert: {reason}",
         "Shell: {reason}" => "Shell: {reason}",
         "Reading clipboard…" => "Lese Zwischenablage…",
+        "Reading image…" => "Lese Bild…",
+        "Wait for the image insertion before sending" => {
+            "Vor Senden auf das Einfügen des Bildes warten"
+        }
+        "The image could not be read" => "Das Bild konnte nicht gelesen werden",
+        "An image is still being inserted; paste again when it is in" => {
+            "Ein Bild wird noch eingefügt; fügen Sie danach erneut ein"
+        }
+        "The clipboard is still being inserted; paste again when it is in" => {
+            "Die Zwischenablage wird noch eingefügt; fügen Sie danach erneut ein"
+        }
         "Clipboard: {reason}" => "Zwischenablage: {reason}",
         "Wait for clipboard insertion before sending" => "Vor Senden auf Zwischenablage warten",
         "A submission accepts at most 20 images" => "Pro Sendung höchstens 20 Bilder",
         "[Image #{index}]" => "[Bild #{index}]",
+        "[Image #{index}{details}]" => "[Bild #{index}{details}]",
+        "first frame" => "nur erstes Einzelbild",
+        "re-encoded" => "neu kodiert",
         "The current model does not accept images; remove {label} to send" => {
             "Modell akzeptiert keine Bilder; {label} entfernen"
         }
@@ -407,6 +421,46 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} Modelle nicht verfügbar · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 1 Modell braucht ein Fenster · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: {count} Modelle brauchen ein Fenster · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: no models · dimcode models {id} --refresh" => {
+            "{provider}: keine Modelle · dimcode models {id} --refresh"
+        }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}: keine Modelle · mit provider.models.create ein Modell hinzufügen"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}: {unavailable} nicht verfügbar und {disabled} deaktiviert · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}: Katalog nicht lesbar · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Ein Modell ohne deklarierte Grenzen kann nicht ausgewählt werden; deklariere sie mit dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Deklariere sie mit dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "Kein zwischengespeicherter Katalog. Melde dich an und führe models PROVIDER --refresh aus."
+        }
+        "Saved model preferences cleared" => "Gespeicherte Modellpräferenzen gelöscht",
+        "{provider}: 1 model disabled · dimcode models {id}" => {
+            "{provider}: 1 Modell deaktiviert · dimcode models {id}"
+        }
+        "{provider}: {count} models disabled · dimcode models {id}" => {
+            "{provider}: {count} Modelle deaktiviert · dimcode models {id}"
+        }
+        "No models. Run dimcode models {id} --refresh to list them." => {
+            "Keine Modelle. Mit dimcode models {id} --refresh auflisten."
+        }
+        "No models. The provider listed none." => {
+            "Keine Modelle. Der Anbieter hat keine aufgelistet."
+        }
         "Enter select · Esc back" => "Enter wählen · Esc zurück",
         "Subagent models" => "Subagent-Modelle",
         "Subagent models: {policy}" => "Subagent-Modelle: {policy}",
@@ -444,8 +498,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"
         }
         "Fullscreen" => "Vollbild",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
-            "PageUp/PageDown scrollen · Home/End Anfang/Ende · Tab Nachricht wählen, e bearbeiten, q zitieren"
+        "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown scrollen · Home/End Anfang/Ende (bei leerem Entwurf) · Tab Nachricht wählen, e bearbeiten, q zitieren"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "Mausrad scrollen · ziehen markiert+kopiert · Klick öffnet Link, klappt Tool-Gruppe aus"

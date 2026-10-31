@@ -14,6 +14,7 @@ pub mod managed_provider;
 pub mod mcp;
 pub mod methods;
 pub mod model_catalog;
+pub mod model_log;
 mod outbound;
 pub mod permission_rules;
 #[cfg(windows)]
@@ -40,7 +41,8 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, Modules, SessionConfig, register_part, wait_active,
+    Agent, AgentBuilder, AgentError, Modules, SessionConfig, StartupProgress, register_part,
+    wait_active,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
@@ -77,6 +79,7 @@ pub struct ServerConfig {
     pub session_defaults: SessionConfig,
     pub hello_timeout: Duration,
     pub write_timeout: Duration,
+    /// Maximum time without an opening process row becoming Active.
     pub startup_timeout: Duration,
     /// Grace period `G` of idle unload: with a native store, Agents unloads a
     /// loaded Session that no lease has held for at least this long.
@@ -276,8 +279,27 @@ impl Processes {
         std::iter::once(self.view.clone()).chain(rows).collect()
     }
 
+    fn roots(&self) -> Vec<rutis::host::PluginId> {
+        std::iter::once(self.view.id)
+            .chain(
+                self.loader
+                    .entries()
+                    .into_iter()
+                    .filter(|entry| entry.parent.is_none() && entry.instance.is_none())
+                    .filter_map(|entry| entry.view.map(|view| view.id)),
+            )
+            .collect()
+    }
+
     async fn wait_active(&self, root: &Ctx, timeout: Duration) -> dim_agent_runtime::Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let mut progress = StartupProgress::new(root, timeout)?;
+        match progress.wait(self.ready(root), || self.roots()).await {
+            Some(result) => result,
+            None => Err(self.timed_out(root).await),
+        }
+    }
+
+    async fn ready(&self, root: &Ctx) -> dim_agent_runtime::Result<()> {
         loop {
             let views = self.views();
             let mut ready = true;
@@ -293,28 +315,37 @@ impl Processes {
                     _ => ready = false,
                 }
             }
-            let unpublished = self
+            ready &= self
                 .runtime_rows
                 .iter()
-                .find(|key| root.get_at(key).is_none());
-            ready &= unpublished.is_none();
+                .all(|key| root.get_at(key).is_some());
             if ready {
                 return Ok(());
             }
-            if tokio::time::Instant::now() >= deadline {
-                if let Some(key) = unpublished {
-                    return Err(AgentError::Build(format!(
-                        "runtime row declarations were not published: {:?}",
-                        key.erase()
-                    )));
-                }
-                return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
-            }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
-            )
-            .await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn timed_out(&self, root: &Ctx) -> AgentError {
+        if let Some(key) = self
+            .runtime_rows
+            .iter()
+            .find(|key| root.get_at(key).is_none())
+        {
+            return AgentError::Build(format!(
+                "runtime row declarations were not published: {:?}",
+                key.erase()
+            ));
+        }
+        wait_active(
+            root,
+            &self.views(),
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| AgentError::Build("process assembly timed out".into()))
     }
 }
 
@@ -575,10 +606,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(managed_provider::ManagedProvidersPlugin::new(
-            names,
-        )?))
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(managed_provider::ManagedProvidersPlugin))
     })?);
     if let Some(home_root) = plugin_root {
         rows.push(register_part(
@@ -592,6 +621,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         )?);
     }
     if let Some(home_root) = product_root {
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(
+                managed_provider::ManagedProviderMethodsPlugin::new(names)?,
+            ))
+        })?);
         if let Some(provider) = &config.managed_provider {
             rows.push((provider.0)(&mut builtins, home_root));
             rows.push(register_part(&mut builtins, builder.catalog(), |names| {
@@ -644,6 +678,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(web::WebPlugin::new(names)?))
         })?);
+        if config.model_catalog.is_some() || product_root.is_some() {
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| Ok(Box::new(model_log::ModelLogPlugin::new(names, home_root)?)),
+            )?);
+        }
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
@@ -992,60 +1033,44 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ..Default::default()
         }],
     );
-    let deadline = tokio::time::Instant::now() + config.startup_timeout;
-    let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
-    let started = tokio::time::timeout_at(deadline, async {
-        wait_active(
-            &root,
-            std::slice::from_ref(&processes.view),
-            remaining(),
-            &CancellationToken::new(),
-        )
-        .await?;
-        let layers = std::iter::once(assembly.clone())
-            .chain(plugin_layer.clone())
-            .collect();
-        let reconcile = processes.loader.reconcile(layers, None);
-        let report = match tokio::time::timeout_at(deadline, reconcile).await {
-            Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
-            Err(_) => {
+    let mut progress = StartupProgress::new(&root, config.startup_timeout)?;
+    let started = progress
+        .wait(
+            async {
                 wait_active(
                     &root,
-                    &processes.views(),
-                    Duration::ZERO,
+                    std::slice::from_ref(&processes.view),
+                    config.startup_timeout,
                     &CancellationToken::new(),
                 )
                 .await?;
-                return Err(AgentError::Build("process assembly timed out".into()));
-            }
-        };
-        let failures: Vec<_> = report
-            .failures
-            .iter()
-            .filter(|failure| processes.required.contains(&failure.id))
-            .collect();
-        if !failures.is_empty() || !report.issues.is_empty() {
-            return Err(AgentError::Build(format!(
-                "process assembly: {:?} {:?}",
-                failures, report.issues
-            )));
-        }
-        processes.wait_active(&root, remaining()).await
-    })
-    .await;
-    let started = match started {
-        Ok(result) => result,
-        Err(_) => match wait_active(
-            &root,
-            &processes.views(),
-            Duration::ZERO,
-            &CancellationToken::new(),
+                let layers = std::iter::once(assembly.clone())
+                    .chain(plugin_layer.clone())
+                    .collect();
+                let report = processes
+                    .loader
+                    .reconcile(layers, None)
+                    .await
+                    .map_err(|error| AgentError::Build(error.to_string()))?;
+                let failures: Vec<_> = report
+                    .failures
+                    .iter()
+                    .filter(|failure| processes.required.contains(&failure.id))
+                    .collect();
+                if !failures.is_empty() || !report.issues.is_empty() {
+                    return Err(AgentError::Build(format!(
+                        "process assembly: {:?} {:?}",
+                        failures, report.issues
+                    )));
+                }
+                processes.ready(&root).await
+            },
+            || processes.roots(),
         )
-        .await
-        {
-            Err(error) => Err(error),
-            Ok(()) => Err(AgentError::Build("process assembly timed out".into())),
-        },
+        .await;
+    let started = match started {
+        Some(result) => result,
+        None => Err(processes.timed_out(&root).await),
     };
     if let Err(error) = started {
         startup.armed = false;

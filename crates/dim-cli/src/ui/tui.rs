@@ -41,7 +41,7 @@ use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{
     InputEvent, KeyCode, KeyEvent, Modifiers, Terminal, TerminalError, Wait,
 };
-use crate::ui::text::{display_width, truncate_cells};
+use crate::ui::text::{RUNNING_MARK, STATUS_MARK, display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
@@ -63,8 +63,6 @@ use crate::ui::transcript::tool_group::{
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
 
-/// The stop reason and the note committed when the user interrupts a run.
-pub const INTERRUPT_REASON: &str = "User interrupted the run.";
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
 /// `config.json` key of the tool detail toggle, shared with the TS CLI.
@@ -722,7 +720,7 @@ struct App {
     question_stash: Option<AskUserPrompt>,
     /// Requests already answered here: the projection keeps listing them
     /// until the daemon's confirmation arrives.
-    answered: HashSet<String>,
+    answered: HashSet<(String, String)>,
     notice: Option<(String, Instant)>,
     exit_armed_until: Option<Instant>,
     run_started: Option<Instant>,
@@ -830,6 +828,8 @@ struct App {
     shell: Option<crate::ui::shell::Running>,
     /// A Ctrl+V clipboard read in progress.
     clipboard: Option<ClipboardRead>,
+    /// A pasted image path being read and scaled off the interface thread.
+    image_read: Option<ImageRead>,
     /// Ctrl+V reads through the terminal (OSC 5522) instead of natively.
     terminal_clipboard: bool,
     /// Clipboard reads started, numbering their request ids.
@@ -886,6 +886,13 @@ const HISTORY_WINDOW: usize = 100;
 enum ClipboardRead {
     Native(std::sync::mpsc::Receiver<crate::Result<crate::clipboard::Source>>),
     Terminal(crate::clipboard::terminal::Read),
+}
+
+/// A pasted group whose image paths a thread is reading; the tokens go in
+/// at the cursor when its result arrives.
+struct ImageRead {
+    plan: Vec<crate::ui::composer::PlannedFile>,
+    receive: std::sync::mpsc::Receiver<Result<Vec<Option<crate::images::Attached>>, String>>,
 }
 
 enum Prompt {
@@ -991,6 +998,7 @@ impl App {
             branch: git_branch().unwrap_or_else(|| t("Not available").into()),
             shell: None,
             clipboard: None,
+            image_read: None,
             terminal_clipboard: false,
             clipboard_reads: 0,
             terminal_requests: Vec::new(),
@@ -1173,10 +1181,11 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let approval = snapshot
-            .approvals
-            .iter()
-            .find(|a| !self.answered.contains(&a.request_id));
+        let approval = snapshot.approvals.iter().find(|a| {
+            !self
+                .answered
+                .contains(&(a.branch_id.clone(), a.request_id.clone()))
+        });
         let question = snapshot.questions.first();
         match &self.prompt {
             Some(Prompt::Exit(_))
@@ -1195,21 +1204,25 @@ impl App {
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
-                if approval.is_some_and(|a| a.request_id == p.request_id) => {}
+                if approval.is_some_and(|a| {
+                    a.request_id == p.request_id && a.branch_id == p.branch_id
+                }) => {}
             Some(Prompt::Ask(p)) if question.is_some_and(|q| q == &p.call) => {}
             _ => {
                 if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
                     self.upgrade = Some(dialog);
                 }
                 self.prompt = if let Some(a) = approval {
-                    Some(Prompt::Permission(PermissionPrompt::new(
+                    let mut prompt = PermissionPrompt::new(
                         a.request_id.clone(),
                         a.branch_id.clone(),
                         a.reason.clone(),
                         a.tool_name.clone(),
                         a.tool_input.clone(),
                         a.always.is_some(),
-                    )))
+                    );
+                    prompt.set_member(a.member.clone());
+                    Some(Prompt::Permission(prompt))
                 } else {
                     question.map(|q| {
                         let held = self.question_stash.take().filter(|held| held.call == *q);
@@ -1217,6 +1230,11 @@ impl App {
                     })
                 };
             }
+        }
+        if let Some(Prompt::Permission(prompt)) = &mut self.prompt
+            && let Some(approval) = approval
+        {
+            prompt.set_member(approval.member.clone());
         }
         self.reopen_upgrade();
     }
@@ -1278,6 +1296,29 @@ impl App {
         if let Some(source) = finished {
             self.clipboard = None;
             self.paste_clipboard(source);
+            changed = true;
+        }
+        let read = match &self.image_read {
+            Some(read) => match read.receive.try_recv() {
+                Ok(result) => Some(Ok(result)),
+                // The thread ended without a result: a decoder panicked, or
+                // the send failed. Leaving the read pending would refuse
+                // every later paste, so it is a failed read.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        if let Some(read) = read {
+            let pending = self.image_read.take().expect("pending image read");
+            match read {
+                Ok(Ok(images)) => {
+                    self.composer.insert_files(pending.plan, images);
+                    self.notice = None;
+                }
+                Ok(Err(reason)) => self.set_notice(reason),
+                Err(()) => self.set_notice(t("The image could not be read")),
+            }
             changed = true;
         }
         if self.running() && self.prompt.is_none() {
@@ -1456,6 +1497,7 @@ impl App {
                                 &[("title", title)],
                             )),
                         }
+                        self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
                     }
                     self.approvals = mode;
                 }
@@ -1537,6 +1579,11 @@ impl App {
                     panel.set_models(models);
                 }
             }
+            Update::ModelsRefilled => {
+                if matches!(self.prompt, Some(Prompt::Models(_))) {
+                    self.host.send(Command::ListModels);
+                }
+            }
             Update::Isolation(result) => {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_snapshot(result);
@@ -1578,6 +1625,13 @@ impl App {
                     }
                     _ => self.notices.push(UpgradeDialog::outcome(&version, &result)),
                 }
+            }
+            Update::ApprovalPending {
+                branch_id,
+                request_id,
+            } => {
+                self.answered
+                    .remove(&(branch_id.clone(), request_id.clone()));
             }
             Update::Failed(message) => {
                 self.failure = Some(message);
@@ -1749,7 +1803,14 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Enter if key.mods.0 == 0 && self.clipboard.is_some() => {
+                if self.composer.mention_key(key).is_some() {
+                    return Outcome::Continue;
+                }
                 self.set_notice(t("Wait for clipboard insertion before sending"));
+                return Outcome::Continue;
+            }
+            KeyCode::Enter if key.mods.0 == 0 && self.image_read.is_some() => {
+                self.set_notice(t("Wait for the image insertion before sending"));
                 return Outcome::Continue;
             }
             KeyCode::Char('s') if ctrl => {
@@ -1855,19 +1916,68 @@ impl App {
             None => crate::attachments::pasted_entries(&text, base),
         };
         match paths {
-            Some(paths) => {
-                if let Err(error) = self.composer.attach_files(&paths) {
-                    self.set_notice(error);
-                }
-            }
+            Some(paths) => self.attach_paths(&paths),
             None => self.composer.paste(&text),
         }
+    }
+
+    /// Attaches a pasted group. The image paths are read and scaled off the
+    /// interface thread; their tokens go in at the cursor when the read
+    /// returns, so the frame never waits for a decode.
+    fn attach_paths(&mut self, paths: &[std::path::PathBuf]) {
+        if self.image_read.is_some() {
+            self.set_notice(t(
+                "An image is still being inserted; paste again when it is in",
+            ));
+            return;
+        }
+        // A clipboard read can still attach its image, which would take the
+        // group past the count it was planned against.
+        if self.clipboard.is_some() {
+            self.set_notice(t(
+                "The clipboard is still being inserted; paste again when it is in",
+            ));
+            return;
+        }
+        let plan = match self.composer.plan_files(paths) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.set_notice(error);
+                return;
+            }
+        };
+        if plan.iter().any(|planned| planned.read) {
+            let (send, receive) = std::sync::mpsc::channel();
+            let reading = plan.clone();
+            let started = std::thread::Builder::new()
+                .name("dim-images".into())
+                .spawn(move || {
+                    let _ = send.send(crate::ui::composer::read_planned(&reading));
+                });
+            match started {
+                Ok(_) => {
+                    self.image_read = Some(ImageRead { plan, receive });
+                    self.set_notice(t("Reading image…"));
+                }
+                Err(error) => self.set_notice(error.to_string()),
+            }
+            return;
+        }
+        let images = vec![None; plan.len()];
+        self.composer.insert_files(plan, images);
+        self.notice = None;
     }
 
     /// Ctrl+V: reads the native clipboard off the interface thread, or asks
     /// the terminal for its clipboard when the native one is out of reach.
     fn read_clipboard(&mut self) {
         if self.clipboard.is_some() {
+            return;
+        }
+        if self.image_read.is_some() {
+            self.set_notice(t(
+                "An image is still being inserted; paste again when it is in",
+            ));
             return;
         }
         if self.terminal_clipboard {
@@ -1905,18 +2015,19 @@ impl App {
 
     fn paste_clipboard(&mut self, source: crate::Result<crate::clipboard::Source>) {
         use crate::clipboard::Source;
-        let inserted = match source {
+        match source {
             Ok(Source::Text(text)) => {
+                self.notice = None;
                 self.paste(text);
-                Ok(())
             }
-            Ok(Source::Files(paths)) => self.composer.attach_files(&paths),
-            Ok(Source::Image(image)) => self.composer.attach_image(image),
-            Err(error) => Err(error.to_string()),
-        };
-        match inserted {
-            Ok(()) => self.notice = None,
-            Err(reason) => self.set_notice(tf("Clipboard: {reason}", &[("reason", &reason)])),
+            Ok(Source::Files(paths)) => self.attach_paths(&paths),
+            Ok(Source::Image(image)) => match self.composer.attach_image(image) {
+                Ok(()) => self.notice = None,
+                Err(reason) => self.set_notice(tf("Clipboard: {reason}", &[("reason", &reason)])),
+            },
+            Err(error) => {
+                self.set_notice(tf("Clipboard: {reason}", &[("reason", &error.to_string())]))
+            }
         }
     }
 
@@ -2005,8 +2116,6 @@ impl App {
         Outcome::Continue
     }
 
-    /// Stops the run and records it at once: the note lands in the transcript
-    /// ahead of whatever the interrupted answer still commits.
     fn interrupt(&mut self) {
         if let Some(Prompt::Ask(prompt)) = &self.prompt {
             self.host.send(Command::StopQuestion {
@@ -2017,7 +2126,7 @@ impl App {
         } else {
             self.host.stop();
         }
-        self.notices.push(t(INTERRUPT_REASON).to_owned());
+        self.set_notice(t("Stopping"));
     }
 
     fn place_label(&self) -> String {
@@ -2168,13 +2277,25 @@ impl App {
                     Err(error) => self.notices.push(error.to_string()),
                 }
             }
+            Effect::RetryApproval {
+                request_id,
+                branch_id,
+            } => {
+                self.answered
+                    .remove(&(branch_id.clone(), request_id.clone()));
+                self.host.send(Command::RetryApproval {
+                    request_id,
+                    branch_id,
+                });
+            }
             Effect::Approval {
                 request_id,
                 branch_id,
                 allow,
                 remember,
             } => {
-                self.answered.insert(request_id.clone());
+                self.answered
+                    .insert((branch_id.clone(), request_id.clone()));
                 self.host.send(Command::Approval {
                     request_id,
                     branch_id,
@@ -2252,12 +2373,20 @@ impl App {
                         snapshot
                             .approvals
                             .iter()
-                            .filter(|a| !self.answered.contains(&a.request_id))
+                            .filter(|a| {
+                                a.tool_name != dim_agent_types::MEMBER_APPROVAL_ALLOW
+                                    && !self
+                                        .answered
+                                        .contains(&(a.branch_id.clone(), a.request_id.clone()))
+                            })
                             .map(|a| (a.request_id.clone(), a.branch_id.clone())),
                     );
                 }
                 for (request_id, branch_id) in pending {
-                    if !self.answered.insert(request_id.clone()) {
+                    if !self
+                        .answered
+                        .insert((branch_id.clone(), request_id.clone()))
+                    {
                         continue;
                     }
                     self.host.send(Command::Approval {
@@ -2471,7 +2600,11 @@ impl App {
         let pending = snapshot
             .approvals
             .iter()
-            .find(|a| !self.answered.contains(&a.request_id))
+            .find(|a| {
+                !self
+                    .answered
+                    .contains(&(a.branch_id.clone(), a.request_id.clone()))
+            })
             .map(|a| (a.request_id.clone(), Event::Permission(a.tool_name.clone())))
             .or_else(|| {
                 snapshot.questions.first().map(|q| {
@@ -2508,6 +2641,21 @@ impl App {
     fn topic(&self) -> Option<String> {
         let snapshot = self.snapshot.as_ref()?;
         crate::ui::title::topic(snapshot.main_topic.as_deref()?)
+    }
+
+    /// Opens `/settings`: the panel, or a second-level switch it carries.
+    fn settings(&mut self, args: &str) {
+        let mut words = args.split_whitespace();
+        match (words.next(), words.next(), words.next()) {
+            (None, _, _) => self.open_settings(Setting::Theme),
+            (Some("recording"), None, None) => {
+                self.host.send(Command::Recording(String::new()));
+            }
+            (Some("recording"), Some(on @ ("on" | "off")), None) => {
+                self.host.send(Command::Recording(on.to_owned()));
+            }
+            _ => self.set_notice("Usage: /settings [recording [on|off]]".to_owned()),
+        }
     }
 
     /// Opens `/settings` with `select` picked, showing the current values.
@@ -2810,7 +2958,7 @@ impl App {
                 Outcome::Continue
             }
             "settings" => {
-                self.open_settings(Setting::Theme);
+                self.settings(args);
                 Outcome::Continue
             }
             "language" => {
@@ -2982,19 +3130,9 @@ impl App {
             }
         }
         for notice in std::mem::take(&mut self.notices) {
-            let interrupted = notice == t(INTERRUPT_REASON);
-            let tone = if interrupted {
-                &self.palette.warning
-            } else {
-                &self.palette.muted
-            };
-            let rows = gutter_text("◦", &notice, width, tone);
+            let rows = gutter_text(STATUS_MARK, &notice, width, &self.palette.muted);
             let text = chunk(&rows);
-            let tone = if interrupted {
-                Tone::Warning
-            } else {
-                Tone::Muted
-            };
+            let tone = Tone::Muted;
             self.record(Block::Status { text: notice, tone });
             frame.commits.push(text);
         }
@@ -3004,7 +3142,7 @@ impl App {
                 Tone::Warning => &self.palette.warning,
                 Tone::Danger => &self.palette.danger,
             };
-            let rows = gutter_text("◦", &text, width, color);
+            let rows = gutter_text(STATUS_MARK, &text, width, color);
             let chunk_text = chunk(&rows);
             self.record(Block::Status { text, tone });
             frame.commits.push(chunk_text);
@@ -3064,7 +3202,18 @@ impl App {
         }
         frame.dock = live.len();
         if self.prompt.is_none() {
-            let queued = self.queued();
+            let queued: Vec<_> = self
+                .snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|snapshot| &snapshot.queued)
+                .map(|input| {
+                    (
+                        input.id.clone(),
+                        input.display.as_deref().unwrap_or(&input.text).to_owned(),
+                    )
+                })
+                .collect();
             // An empty queue draws no strip; the composer keeps its row and
             // the strip's rows are given back above it.
             self.queue_rows = if queued.is_empty() {
@@ -3329,7 +3478,7 @@ impl App {
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Permission(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             None => self
                 .composer
@@ -3470,7 +3619,6 @@ impl App {
                         settled.push((index, row.row_id.clone()));
                     }
                 },
-                RowKind::Status if text == INTERRUPT_REASON => {}
                 _ => settled.push((index, row.row_id.clone())),
             }
         }
@@ -3640,7 +3788,7 @@ impl App {
                         &project_group(&group_rows(&snapshot.rows, *index), detail_of(*index)),
                         width,
                         p,
-                        "·",
+                        RUNNING_MARK,
                     )
                 }
                 LiveItem::Row(index) => render_block(
@@ -3920,6 +4068,7 @@ impl App {
                     text,
                     cut,
                     pending: true,
+                    ..
                 }) = index
                     .checked_sub(self.dropped)
                     .and_then(|at| self.history.get(at))
@@ -3938,12 +4087,8 @@ impl App {
             let Some(at) = index.checked_sub(self.dropped) else {
                 continue;
             };
-            if let Some(Block::User { text, cut, .. }) = self.history.get(at).cloned() {
-                self.history[at] = Block::User {
-                    text,
-                    cut,
-                    pending: false,
-                };
+            if let Some(Block::User { pending, .. }) = self.history.get_mut(at) {
+                *pending = false;
                 self.mark_rewritten(index);
             }
         }
@@ -4853,6 +4998,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_clipboard_allows_file_selection_but_waits_before_submission() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("first.txt"), "").unwrap();
+        std::fs::write(home.path().join("second.txt"), "").unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            home.path().to_string_lossy().into_owned(),
+        );
+        typed(&mut app, "@first");
+        let started = Instant::now();
+        while !app
+            .frame((80, 24))
+            .live
+            .iter()
+            .any(|row| row.contains("@first.txt"))
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "file picker did not populate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer.text(), "@first.txt ");
+
+        let (send, receive) = std::sync::mpsc::channel();
+        app.clipboard = Some(ClipboardRead::Native(receive));
+        typed(&mut app, "compare with @second");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.composer.text(), "@first.txt compare with @second.txt ");
+        assert!(sent.borrow().is_empty(), "file selection must not submit");
+
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            sent.borrow().is_empty(),
+            "submission waits for clipboard data"
+        );
+        typed(&mut app, "@missing");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            sent.borrow().is_empty(),
+            "an empty picker must not bypass the clipboard wait"
+        );
+        for _ in 0.."@missing".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        send.send(Ok(crate::clipboard::Source::Text(" appended".into())))
+            .unwrap();
+        app.tick();
+        let expected = app.composer.expanded_text().trim().to_owned();
+        assert!(expected.ends_with(" appended"));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(sent.borrow().as_slice(), [Command::Submit(text)] if text == &expected));
+    }
+
+    #[test]
     fn a_termux_keyboard_toggle_uses_the_frame_path() {
         assert!(termux_height_only(80, (80, 20), true));
         assert!(!termux_height_only(80, (100, 20), true));
@@ -5199,6 +5405,7 @@ mod tests {
                 row_id: text.into(),
                 kind,
                 text: text.into(),
+                display: None,
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
@@ -5437,6 +5644,7 @@ mod tests {
                         row_id: (*id).into(),
                         kind: RowKind::AssistantMessage,
                         text: (*text).into(),
+                        display: None,
                         streaming: false,
                         elapsed_ms: None,
                         tone: None,
@@ -5464,6 +5672,91 @@ mod tests {
                 ..ViewSnapshot::default()
             })));
             self.draw();
+        }
+    }
+
+    #[test]
+    fn escape_commits_the_interrupt_after_the_answer_tail_and_before_stopped() {
+        use crate::model::view::INTERRUPT_REASON;
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 40), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let mut projection = Projection::default();
+            let event: crate::wire::Event = serde_json::from_value(json!({
+                "sequence": 1, "create_at": 1, "type": "step", "name": "text",
+                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Answer tail."}
+            }))
+            .unwrap();
+            projection.apply("main", &event);
+            projection.set_running(true);
+            let publish = |drawn: &mut Drawn, projection: &Projection| {
+                let mut snapshot = projection.snapshot();
+                snapshot.session_id = "s1".into();
+                snapshot.focus = "main".into();
+                snapshot.history_complete = true;
+                drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+            };
+            publish(&mut drawn, &projection);
+            drawn.draw();
+            drawn.key(KeyCode::Esc);
+            drawn.key(KeyCode::Esc);
+            assert_eq!(
+                drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(t("Stopping"))
+            );
+            assert!(!drawn.transcript().contains(INTERRUPT_REASON));
+
+            for value in [
+                json!({
+                    "sequence": 2, "create_at": 2, "type": "step", "name": "model-output-end",
+                    "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled", "reason": INTERRUPT_REASON}
+                }),
+                json!({
+                    "sequence": 3, "create_at": 3, "type": "turn", "name": "end",
+                    "data": {"turn_id": "t1", "status": "cancelled", "reason": INTERRUPT_REASON}
+                }),
+            ] {
+                projection.apply("main", &serde_json::from_value(value).unwrap());
+            }
+            projection.set_running(false);
+            publish(&mut drawn, &projection);
+            for (_, shown) in drawn.app.revealed.values_mut() {
+                *shown = 0;
+            }
+            let (commits, _, _) = drawn.app.transcript(97);
+            assert!(
+                commits.is_empty(),
+                "the answer is still revealing: {commits:?}"
+            );
+
+            let now = Instant::now();
+            for (pace, shown) in drawn.app.revealed.values_mut() {
+                *shown = pace.advance(now + Duration::from_secs(1), "Answer tail.".len(), true);
+            }
+            drawn.draw();
+            drawn.draw();
+            let text = drawn.transcript();
+            let answer = text.find("Answer tail.").unwrap();
+            let interrupt = text.find(INTERRUPT_REASON).unwrap();
+            let stopped = text.find("stopped").unwrap();
+            assert!(answer < interrupt && interrupt < stopped, "{text}");
+            assert_eq!(text.matches(INTERRUPT_REASON).count(), 1, "{text}");
+
+            let mut resumed = Drawn::new((100, 40), None, true);
+            publish(&mut resumed, &projection);
+            resumed.draw();
+            let text = resumed.transcript();
+            assert!(
+                text.find("Answer tail.").unwrap() < text.find(INTERRUPT_REASON).unwrap(),
+                "{text}"
+            );
+            assert!(
+                text.find(INTERRUPT_REASON).unwrap() < text.find("stopped").unwrap(),
+                "{text}"
+            );
         }
     }
 
@@ -5574,6 +5867,7 @@ mod tests {
                 row_id: "r1".into(),
                 kind: RowKind::UserMessage,
                 text: "line work".into(),
+                display: None,
                 streaming: false,
                 elapsed_ms: None,
                 tone: None,
@@ -5641,6 +5935,7 @@ mod tests {
                     row_id: format!("u{n}"),
                     kind: RowKind::UserMessage,
                     text: format!("ask {n}"),
+                    display: None,
                     streaming: false,
                     elapsed_ms: None,
                     tone: None,
@@ -5674,6 +5969,7 @@ mod tests {
     /// gives it.
     fn message(pending: bool) -> std::sync::Arc<ViewRow> {
         std::sync::Arc::new(ViewRow {
+            display: None,
             row_id: "u1".into(),
             kind: RowKind::UserMessage,
             text: "find the leak".into(),
@@ -5699,6 +5995,7 @@ mod tests {
     /// The status row a cancelled turn settles after a stop.
     fn stopped() -> std::sync::Arc<ViewRow> {
         std::sync::Arc::new(ViewRow {
+            display: None,
             row_id: "stopped-1".into(),
             kind: RowKind::Status,
             text: "stopped".into(),
@@ -5816,11 +6113,16 @@ mod tests {
             let frame = drawn.app.frame(size);
             full.render(&frame, size, &drawn.app.palette, &drawn.app)
         };
-        show(&mut drawn, vec![message(true)]);
+        let displayed = |pending| {
+            let mut row = message(pending);
+            std::sync::Arc::make_mut(&mut row).display = Some("find the leak [Image #1]".into());
+            row
+        };
+        show(&mut drawn, vec![displayed(true)]);
         assert!(
             drawn.app.history.iter().any(|block| matches!(
                 block,
-                Block::User { text, pending: true, .. } if text == "find the leak"
+                Block::User { text, display, pending: true, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
             )),
             "fullscreen commits the message where it was said"
         );
@@ -5828,11 +6130,11 @@ mod tests {
             !paint(&mut drawn, &mut full).is_empty(),
             "the pending row is painted"
         );
-        show(&mut drawn, vec![message(false)]);
+        show(&mut drawn, vec![displayed(false)]);
         assert!(
             drawn.app.history.iter().any(|block| matches!(
                 block,
-                Block::User { text, pending: false, .. } if text == "find the leak"
+                Block::User { text, display, pending: false, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
             )),
             "fullscreen rewrites the same row once the model reads it"
         );
@@ -5937,6 +6239,92 @@ mod tests {
         assert_eq!(
             drawn.app.jump,
             Some(Jump::Block(drawn.app.dropped + picked))
+        );
+    }
+
+    #[test]
+    fn image_markers_stay_out_of_reused_message_drafts() {
+        let mut projection = crate::projection::Projection::default();
+        let input: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "image", "sequence": 1, "create_at": 1, "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "look [Image #7]"},
+                {"type": "image", "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"}},
+            ]}, "mode": "queue"},
+        })).unwrap();
+        projection.apply("main", &input);
+        for (sequence, name) in [(2, "applied"), (3, "consumed")] {
+            let control = serde_json::from_value(serde_json::json!({
+                "id": format!("image-{name}"), "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": name, "data": {"input_id": "image"},
+            }))
+            .unwrap();
+            projection.apply("main", &control);
+        }
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        assert!(drawn.transcript().contains("[Image #1]"));
+        let row_id = drawn.app.snapshot.as_ref().unwrap().rows[0].row_id.clone();
+        let message = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .unwrap();
+        assert_eq!(
+            Document::message(&drawn.app, message),
+            Some("look [Image #7]")
+        );
+        for action in [
+            TimelineAction::Edit,
+            TimelineAction::Quote,
+            TimelineAction::Branch,
+            TimelineAction::Fork,
+        ] {
+            drawn.app.composer.clear();
+            drawn.app.line_draft = None;
+            drawn.app.timeline(&row_id, action);
+            if action == TimelineAction::Fork {
+                drawn.key(KeyCode::Char('y'));
+                drawn.app.apply(Update::Switched {
+                    session_id: "forked".into(),
+                    kind: SwitchKind::Forked,
+                });
+            }
+            assert!(drawn.app.composer.text().contains("look [Image #7]"));
+            assert!(!drawn.app.composer.text().contains("[Image #1]"));
+            drawn.key(KeyCode::Enter);
+            match sent.borrow().last().unwrap() {
+                Command::Submit(text) => assert!(!text.contains("[Image #1]")),
+                Command::OpenLine { prompt, .. } => assert_eq!(prompt, "look [Image #7]"),
+                _ => panic!("message reuse must submit text or open a line"),
+            }
+        }
+        projection.set_running(true);
+        let mut queued = input;
+        queued.id = "queued-image".into();
+        queued.sequence = 2;
+        projection.apply("main", &queued);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.app.composer.clear();
+        drawn.key(KeyCode::Up);
+        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
+        );
+        drawn.key(KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Submit(text)) if text == "look [Image #7]")
         );
     }
 
@@ -6646,5 +7034,169 @@ mod tests {
             ),
             _ => panic!("the answer carries the path"),
         }
+    }
+
+    #[test]
+    fn settings_recording_sends_its_words() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.run_command("settings", "recording on");
+        assert!(matches!(sent.borrow().last(), Some(Command::Recording(words)) if words == "on"));
+        app.run_command("settings", "recording");
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Recording(words)) if words.is_empty())
+        );
+    }
+
+    fn image_app(work: &std::path::Path) -> (App, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            work.to_str().unwrap().into(),
+        );
+        (app, home)
+    }
+
+    fn wide_png(path: &std::path::Path, width: u32) {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(width, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(path, png.into_inner()).unwrap();
+    }
+
+    /// A pasted image path is read off the interface thread: the paste
+    /// returns at once, and the token goes in when its result arrives.
+    #[test]
+    fn a_pasted_image_path_inserts_its_token_after_the_read() {
+        use dim_agent_capabilities::images::MAX_EDGE;
+        let width = MAX_EDGE * 2;
+        let work = tempfile::tempdir().unwrap();
+        let image = work.path().join("wide.png");
+        wide_png(&image, width);
+        let (mut app, _home) = image_app(work.path());
+        app.handle(InputEvent::Paste(image.display().to_string()));
+        assert_eq!(app.composer.text(), "");
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Reading image…")
+        );
+        assert!(app.image_read.is_some());
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while app.image_read.is_some() {
+            assert!(Instant::now() < deadline, "the read did not return");
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            app.composer.text(),
+            format!("[wide.png · {width}×2 → {MAX_EDGE}×1]")
+        );
+        assert!(app.notice.is_none());
+    }
+
+    /// A paste while an image read runs is refused, and the pending group
+    /// still lands on its own.
+    #[test]
+    fn a_paste_during_an_image_read_is_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let image = work.path().join("wide.png");
+        wide_png(&image, 4096);
+        let (mut app, _home) = image_app(work.path());
+        let (send, receive) = std::sync::mpsc::channel();
+        app.image_read = Some(ImageRead {
+            plan: Vec::new(),
+            receive,
+        });
+        app.handle(InputEvent::Paste(image.display().to_string()));
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("An image is still being inserted; paste again when it is in")
+        );
+        assert_eq!(app.composer.text(), "");
+        drop(send);
+    }
+
+    /// A reader thread that ends without a result is a failed read: the
+    /// pending state clears, the notice says so, and the next paste works.
+    #[test]
+    fn a_reader_thread_that_dies_fails_the_read() {
+        let work = tempfile::tempdir().unwrap();
+        let image = work.path().join("wide.png");
+        wide_png(&image, 4096);
+        let (mut app, _home) = image_app(work.path());
+        let (send, receive) = std::sync::mpsc::channel();
+        drop(send);
+        app.image_read = Some(ImageRead {
+            plan: Vec::new(),
+            receive,
+        });
+        app.tick();
+        assert!(app.image_read.is_none());
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("The image could not be read")
+        );
+        assert_eq!(app.composer.text(), "");
+        app.handle(InputEvent::Paste(image.display().to_string()));
+        assert!(
+            app.image_read.is_some(),
+            "the next paste starts its own read"
+        );
+    }
+
+    /// Ctrl+V during an image read says why it waits, the notice a path
+    /// paste shows, instead of doing nothing.
+    #[test]
+    fn a_clipboard_paste_during_an_image_read_is_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let (mut app, _home) = image_app(work.path());
+        let (send, receive) = std::sync::mpsc::channel();
+        app.image_read = Some(ImageRead {
+            plan: Vec::new(),
+            receive,
+        });
+        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Char('v'),
+            Modifiers::CTRL,
+        )));
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("An image is still being inserted; paste again when it is in")
+        );
+        assert!(app.clipboard.is_none());
+        drop(send);
+    }
+
+    /// A path paste waits for a pending clipboard read: its image could still
+    /// land and take the group past the count it was planned against.
+    #[test]
+    fn a_paste_during_a_clipboard_read_is_refused() {
+        let work = tempfile::tempdir().unwrap();
+        let image = work.path().join("wide.png");
+        wide_png(&image, 4096);
+        let (mut app, _home) = image_app(work.path());
+        let (send, receive) = std::sync::mpsc::channel();
+        app.clipboard = Some(ClipboardRead::Native(receive));
+        app.handle(InputEvent::Paste(image.display().to_string()));
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("The clipboard is still being inserted; paste again when it is in")
+        );
+        assert_eq!(app.composer.text(), "");
+        assert!(app.image_read.is_none());
+        drop(send);
     }
 }

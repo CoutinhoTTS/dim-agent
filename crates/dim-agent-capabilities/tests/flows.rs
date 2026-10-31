@@ -1,28 +1,22 @@
 use dim_agent_capabilities::{defaults, history::project_messages};
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::time::Duration;
 mod support;
 use support::Events;
 
-fn agent() -> Agent {
+async fn agent() -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.build()
-}
-/// An Agent on a root the test listens on.
-fn agent_in(root: &rutis::Ctx) -> Agent {
-    let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::mock_hosts(&mut builder);
-    defaults::install(&mut builder);
-    builder.build_in(root)
+    MinimalHost::start(&builder).await.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn echo_tools_and_observable_state_follow_the_public_flow() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         session.submit("hello".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
@@ -46,8 +40,8 @@ async fn echo_tools_and_observable_state_follow_the_public_flow() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_ends_the_turn_and_a_waiting_queue_input_runs_next() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let root = support::root();
-        let agent = agent_in(&root);
+        let agent = agent().await;
+        let root = agent.root().clone();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -106,7 +100,7 @@ async fn stop_ends_the_turn_and_a_waiting_queue_input_runs_next() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn branch_tool_reuses_capabilities_without_replaying_ancestor_inputs() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let agent = agent();
+        let agent = agent().await;
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -174,7 +168,7 @@ async fn closed_default_memory_sessions_release_history_but_shared_stores_retain
         if shared {
             builder.timeline_store(std::sync::Arc::new(MemoryTimelineStore::default()));
         }
-        let agent = builder.build();
+        let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -203,12 +197,12 @@ async fn closed_default_memory_sessions_release_history_but_shared_stores_retain
 async fn repeated_idle_release_checks_never_reject_a_running_turn() {
     const TURNS: usize = 60;
     tokio::time::timeout(Duration::from_secs(20), async {
-        let root = support::root();
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder.timeline_store(std::sync::Arc::new(MemoryTimelineStore::default()));
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let root = agent.root().clone();
         let session = agent
             .create_session(SessionConfig::default())
             .await
@@ -280,12 +274,12 @@ async fn repeated_idle_release_checks_never_reject_a_running_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_idle_release_reopens_the_branch_for_the_running_turn() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let root = support::root();
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder.timeline_store(std::sync::Arc::new(MemoryTimelineStore::default()));
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let root = agent.root().clone();
         let session = agent
             .create_session(SessionConfig::default())
             .await

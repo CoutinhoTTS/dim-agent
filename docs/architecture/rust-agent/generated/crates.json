@@ -48,6 +48,10 @@
     "to": "rutis"
   },
   {
+    "from": "dim-agent-aimux",
+    "to": "dim-agent-runtime"
+  },
+  {
     "from": "dim-agent-attachments",
     "to": "dim-agent-capabilities"
   },
@@ -74,6 +78,10 @@
   {
     "from": "dim-agent-questions",
     "to": "rutis"
+  },
+  {
+    "from": "dim-agent-questions",
+    "to": "dim-agent-runtime"
   },
   {
     "from": "dim-app-server",
@@ -214,6 +222,10 @@
   {
     "from": "dimcode",
     "to": "dim-oauth"
+  },
+  {
+    "from": "dimcode",
+    "to": "dim-agent-capabilities"
   },
   {
     "from": "dimcode",

@@ -22,6 +22,7 @@ use dim_agent_capabilities::{
         exec::{Decoder, truncate_preview},
     },
 };
+use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{alive, gone, pid_in};
@@ -136,6 +137,25 @@ impl Plugin for PlatformPlugin {
         Ok(())
     }
 }
+/// `platform` provided by [`PlatformPlugin`], a row of the harness's host.
+fn test_platform(platform: HostPlatform) -> impl FnOnce(&mut AgentBuilder) {
+    let platform = Arc::new(platform);
+    move |builder| {
+        builder.plugin(move |_| Ok(Box::new(PlatformPlugin(platform.clone()))));
+    }
+}
+/// FileStorage over `home` and the HostPlatform plugin reading `config`
+/// there, rows of the harness's host.
+fn configured_platform(
+    home: PathBuf,
+    config: HostPlatformConfig,
+) -> impl FnOnce(&mut AgentBuilder) {
+    move |builder| {
+        let files = FileStoragePlugin::new(vec![home]);
+        builder.plugin(move |_| Ok(Box::new(files.clone())));
+        builder.plugin(move |names| Ok(Box::new(HostPlatformPlugin::new(names, config.clone())?)));
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hook {
@@ -243,7 +263,7 @@ impl DynPlugin for Probe {
 struct Harness {
     root: Ctx,
     store: Arc<MemoryTimelineStore>,
-    agent: Agent,
+    agent: MinimalHost,
     model: Arc<Script>,
     cwd: PathBuf,
     output_root: PathBuf,
@@ -283,48 +303,39 @@ impl Harness {
         platform.home = cwd.clone();
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        Self::with_platform_context(root, view, hook, cwd, compacting).await
+        Self::with_platform_context(test_platform(platform), hook, cwd, compacting).await
     }
     async fn with_platform(
-        root: Ctx,
-        view: rutis::host::FiberView,
+        platform: impl FnOnce(&mut AgentBuilder),
         hook: Hook,
         cwd: PathBuf,
     ) -> Self {
-        Self::with_platform_context(root, view, hook, cwd, false).await
+        Self::with_platform_context(platform, hook, cwd, false).await
     }
+    /// A host whose `platform` rows provide HostPlatform, Active before the
+    /// harness runs.
     async fn with_platform_context(
-        root: Ctx,
-        view: rutis::host::FiberView,
+        platform: impl FnOnce(&mut AgentBuilder),
         hook: Hook,
         cwd: PathBuf,
         compacting: bool,
     ) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
         let output_root = scratch("output");
-        wait_active(
-            &root,
-            &[view],
-            Duration::from_secs(5),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
         let model = Arc::new(Script::default());
         let seen = Seen::default();
         let mut builder = AgentBuilder::new(AgentConfig::default());
+        platform(&mut builder);
         builder
             .timeline_store(store.clone())
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(compacting.then(|| {
-                Arc::new(compaction_support::Window) as Arc<dyn ResolveContextModel>
+                Arc::new(compaction_support::Window::default()) as Arc<dyn ResolveContextModel>
             }))))
             .session_value(Arc::new(CompactionStrategyHost(compacting.then(|| {
-                Arc::new(compaction_support::Window) as Arc<dyn CompactionStrategy>
+                Arc::new(compaction_support::Window::default()) as Arc<dyn CompactionStrategy>
             }))))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
@@ -360,9 +371,24 @@ impl Harness {
         builder.require_feature(Feature::new("Probe").branch("Probe", move |names| {
             Ok(Box::new(Probe::new(names, hook, probes.clone())?))
         }));
-        let agent = builder.build_in(&root);
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let process: Vec<_> = agent
+            .loader()
+            .entries()
+            .into_iter()
+            .filter(|row| row.instance.is_none())
+            .filter_map(|row| row.view)
+            .collect();
+        wait_active(
+            agent.root(),
+            &process,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         Self {
-            root,
+            root: agent.root().clone(),
             store,
             agent,
             model,
@@ -374,7 +400,7 @@ impl Harness {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            tools: Some(vec!["exec".into(), "wait".into()]),
+            tools: Some(vec!["exec".into(), "exec_stop".into(), "wait".into()]),
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
                 ..Default::default()
@@ -395,7 +421,6 @@ impl Harness {
     }
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
-        self.root.shutdown().await.unwrap();
     }
 }
 
@@ -492,6 +517,30 @@ fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
     count(events, "step/tool-result")
 }
 
+/// The local execution profile is sound once its Session and a branch are
+/// live: the assembly check reports nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_local_execution_assembly_passes_the_assembly_check() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            BranchOptions {
+                prompt: "check".into(),
+                source: BranchSource::Host {
+                    operation_id: "check".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let findings = harness.agent.check_assembly().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+    harness.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd() {
     let home = scratch("isolation-policy");
@@ -503,23 +552,18 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
         r#"{"version":1,"executablePath":"/bin/bash"}"#,
     )
     .unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 isolation_file: Some((0, "host-isolation.json".into())),
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        ),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let session = harness.session().await;
     std::os::unix::fs::symlink(&secret, harness.cwd.join("escape-link")).unwrap();
     for (command, cwd, succeeds) in [
@@ -784,9 +828,7 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
             command_line_tools.as_os_str().into(),
         ));
     }
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let harness = Harness::with_platform(test_platform(platform), Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     let host_tmp = PathBuf::from("/tmp").join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
     let service_tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
@@ -964,9 +1006,8 @@ async fn default_macos_isolation_reads_git_global_configuration_but_not_other_ho
                 .env
                 .push(("XDG_CONFIG_HOME".into(), config.as_os_str().into()));
         }
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(PlatformPlugin(Arc::new(platform)));
-        let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        let harness =
+            Harness::with_platform(test_platform(platform), Hook::None, scratch("cwd")).await;
         let session = harness.session().await;
         for (command, succeeds) in [
             (
@@ -1024,23 +1065,18 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
         r#"{"version":1,"executablePath":"/bin/bash"}"#,
     )
     .unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 isolation_file: Some((0, "host-isolation.json".into())),
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        ),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let session = harness.session().await;
     let defaults: Vec<_> = [
         "/usr",
@@ -1145,23 +1181,18 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
         json!({"version": 1, "executablePath": shell}).to_string(),
     )
     .unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 isolation_file: Some((0, "host-isolation.json".into())),
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        ),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let session = harness.session().await;
     let noted =
         |result: &ToolResult| {
@@ -1282,23 +1313,18 @@ async fn local_isolation_policy_controls_native_sockets() {
         r#"{"version":1,"executablePath":"/bin/bash"}"#,
     )
     .unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 isolation_file: Some((0, "host-isolation.json".into())),
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        ),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let session = harness.session().await;
     for (address, family) in [("127.0.0.1", "-4"), ("::1", "-6")] {
         let tcp = TcpListener::bind((address, 0)).await.unwrap();
@@ -1538,22 +1564,18 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let home = scratch("shell-config");
     let config = home.join("exec-shell.json");
     std::fs::write(&config, "invalid json").unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 ..HostPlatformConfig::default()
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        ),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let platform = harness.root.get::<HostPlatform>().unwrap();
     let session = harness.session().await;
 
@@ -2160,6 +2182,78 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_model_stops_its_detached_exec_and_keeps_an_already_ended_result() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let pid_file = harness.cwd.join("model-stop.pid");
+    harness.run(&session, &[("exec", json!({"command":format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display()),"runInBackground":true,"timeoutMs":-1}))]).await;
+    let events = until(&session, "detached task", |events| {
+        count(events, "turn/end") == 1
+    })
+    .await;
+    let task = task_of(&results(&events)[0]);
+    assert!(text(&results(&events)[0]).contains("exec_stop"));
+    let pid = pid_in(&pid_file).await;
+    harness
+        .run(&session, &[("exec_stop", json!({"taskId":task}))])
+        .await;
+    let events = until(&session, "model stop", |events| results(events).len() == 2).await;
+    let stopped = &results(&events)[1];
+    assert_ne!(stopped.is_error, Some(true));
+    let terminal: ExecEndedData = serde_json::from_str(text(stopped)).unwrap();
+    assert_eq!(terminal.task_id, task);
+    assert_eq!(terminal.status, ExecStatus::Cancelled);
+    assert!(gone(&pid).await);
+    assert_eq!(ended(&events).len(), 1);
+    session.idle("main").await.unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec_stop", json!({"taskId":"member-session"}))],
+        )
+        .await;
+    let events = until(&session, "invalid target", |events| {
+        results(events).len() == 3
+    })
+    .await;
+    assert_eq!(code(&results(&events)[2]), Some("exec_task_unknown"));
+    assert!(text(&results(&events)[2]).contains("No command was stopped"));
+    assert_eq!(ended(&events).len(), 1);
+    session.idle("main").await.unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command":"echo already-done","runInBackground":true}),
+            )],
+        )
+        .await;
+    let events = until(&session, "completed command", |events| {
+        ended(events).len() == 2
+    })
+    .await;
+    let completed = ended(&events)[1].1.clone();
+    assert_eq!(completed.status, ExecStatus::Completed);
+    session.idle("main").await.unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec_stop", json!({"taskId":completed.task_id}))],
+        )
+        .await;
+    let events = until(&session, "already ended stop", |events| {
+        results(events).len() == 5
+    })
+    .await;
+    let again: ExecEndedData = serde_json::from_str(text(&results(&events)[4])).unwrap();
+    assert_eq!(again, completed);
+    assert_eq!(ended(&events).len(), 2);
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_and_completion_settle_once_in_dispatch_order() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
@@ -2724,6 +2818,77 @@ fn wait_texts(events: &[Arc<AgentEvent>]) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_publishes_and_accepts_its_exact_timeout_boundaries() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[
+                ("wait", json!({"timeoutMs":0})),
+                ("wait", json!({"timeoutMs":1.5})),
+                ("wait", json!({"timeoutMs":300001})),
+            ],
+        )
+        .await;
+    let events = until(&session, "invalid wait timeouts", |events| {
+        results(events).len() == 3
+    })
+    .await;
+    assert!(
+        results(&events)
+            .iter()
+            .all(|result| result.is_error == Some(true))
+    );
+    assert!(text(&results(&events)[2]).contains("less than or equal to 300000"));
+    let tool = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(call) => call
+                .request
+                .tools
+                .as_ref()?
+                .iter()
+                .find(|tool| tool.name == "wait"),
+            _ => None,
+        })
+        .unwrap();
+    let timeout = &tool.input_schema.properties.as_ref().unwrap()["timeoutMs"];
+    assert_eq!(timeout.schema_type, Some(SchemaType::Integer));
+    assert_eq!(timeout.extensions["minimum"], 1);
+    assert_eq!(timeout.extensions["maximum"], 300000);
+    assert_eq!(timeout.extensions["default"], 300000);
+    session.idle("main").await.unwrap();
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs":1}))])
+        .await;
+    let events = until(&session, "minimum timeout", |events| {
+        results(events).len() == 4
+    })
+    .await;
+    assert_eq!(text(&results(&events)[3]), "wait ended: timeout");
+    session.idle("main").await.unwrap();
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs":300000}))])
+        .await;
+    until(&session, "maximum wait started", |events| {
+        count(events, "step/tool-call") == 3
+    })
+    .await;
+    session
+        .submit("continue now".into(), InputMode::Steer, "main")
+        .await
+        .unwrap();
+    let events = until(&session, "maximum wait steered", |events| {
+        results(events).len() == 5
+    })
+    .await;
+    assert_eq!(text(&results(&events)[4]), "wait ended: steer");
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_turn() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
@@ -2820,23 +2985,18 @@ async fn exec_sandbox_requests_follow_the_nodes_escalation_policy() {
         r#"{"version":1,"executablePath":"/bin/bash"}"#,
     )
     .unwrap();
-    let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    (&storage).await.unwrap();
-    let view = root.plugin(
-        HostPlatformPlugin::new(
-            &Names::copy(
-                &dim_agent_capabilities::catalog(),
-                &rutis_loader::resolve::Build::default(),
-            ),
+    let harness = Harness::with_platform(
+        configured_platform(
+            home.clone(),
             HostPlatformConfig {
                 exec_shell_file: Some((0, "exec-shell.json".into())),
                 isolation_file: Some((0, "host-isolation.json".into())),
             },
-        )
-        .unwrap(),
-    );
-    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+        ),
+        Hook::None,
+        scratch("cwd"),
+    )
+    .await;
     let session = harness.session().await;
     let command = format!(
         "printf escaped > '{}'; cat '{}'",

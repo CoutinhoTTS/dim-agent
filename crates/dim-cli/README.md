@@ -43,17 +43,28 @@ $ dimcode exec --image before.png --image after.png -p 'Compare these images'
 $ dimcode exec resume <session-id> --image screenshot.png --json > run.jsonl
 $ printf 'Describe this\n' | dimcode exec --image screenshot.png
 
-local files -> bounded read/header checks -> user.content -> session.submit
+local files -> shared image scaling -> user.content -> session.submit
 ```
 
-The CLI reads and checks all local images before connecting: at most 20 images,
-5 MiB of image-file bytes each, and 8000 pixels per side. Format comes from bytes,
-including when a filename has another extension. Invalid/truncated headers fail;
-pixels are not resized or rewritten. The `image` dependency enables only these
-four formats and reads dimensions without decoding pixels. Local symbolic links
-are followed, and file type is checked on the opened file. The combined base64
-size is checked before connecting; the final encoded request, including its JSON
-envelope and text, must still fit 16 MiB.
+The CLI reads, scales and checks all local images before connecting with the same
+rule `read` uses, written once in
+[WorkspaceTools § read results and images](../../docs/architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images):
+an image is made acceptable within that rule's longest-edge and encoded-size
+limits (for example 2048 px and 5,000,000 bytes of base64 today), a PNG kept while its scaled PNG fits
+and JPEG otherwise, the EXIF orientation applied, and an animation sent as its
+first frame. The only size refusal is that rule's pixel guard, which names the
+dimensions; invalid or truncated data and unsupported formats fail. Format comes
+from bytes, including when a filename has another extension. The `image` dependency
+enables the four input formats; TIFF and BMP are decoded only as macOS and Windows
+clipboard bitmaps. Local symbolic links are followed, and file type is checked on
+the opened file. At most 20 images are accepted. The combined base64 size is
+checked before connecting; the final encoded request, including its JSON envelope
+and text, must still fit 16 MiB. An image whose sent form differs from its file
+adds one line to stderr before the run, as in
+`Scaled photo.jpg from 8064×6048 to 2048×1536 px (image/jpeg)` or, when only the
+encoding changed,
+`Re-encoded shot.png as image/jpeg (1500×1500 px)`; an animation says only its
+first frame is sent. stdout carries only the reply or the JSON stream.
 
 An error reply to `session.submit` can follow an already queued input. The CLI
 reports uncertainty for publication failures and unclassified errors and exits
@@ -121,9 +132,17 @@ image markers even with another filename extension. Other ordinary files produce
 references, which the model can read with its existing tool. Image data is captured at
 insertion; removing a marker never deletes the original file. A rejected file group
 leaves the draft unchanged. File references retain separate ordered text content blocks.
+An image whose sent form differs gives both sizes when the size changed,
+`[Image 1: screen.png · 8064×6048 → 2048×1536]`, both media types when the re-encode
+changed the type, `[Image 1: screen.png · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image
+sent as it is keeps the plain marker.
+A path attached while the model takes images is read and scaled at insertion,
+and a model that takes no images still receives the link.
 
 Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
-macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+macOS uses AppKit and resolves native file-reference URLs to real paths before image
+classification or file linking; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
 X11. Missing or failed clipboard access reports an inline error and retains the draft.
 The CLI reads only on that action and never changes the clipboard. A terminal that
 intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while
@@ -353,9 +372,15 @@ At the idle prompt, `/approvals` (alias `/permissions`) shows the `main` preset 
 command rules. `/approvals PRESET` switches `main`; `full-access` asks `[y/N]` and only `y`/`yes`
 confirms. `/approvals allow|deny exact|prefix COMMAND` adds a rule and `/approvals remove N`
 removes rule N of the list printed last; both print the new numbered list. A preset or rule list
-that changed since it was shown is reported and nothing is written. Child branches created later inherit a switch; agent members keep the
-Session's starting preset. Rules are user scope and apply in every Session: a deny rule under
+that changed since it was shown is reported and nothing is written. Child branches and native members created later from the changed branch inherit its current policy;
+existing branches and members retain their own policies, including when a member is reused. Rules are user scope and apply in every Session: a deny rule under
 every preset, an allow rule only where the preset would ask.
+
+Member tool approvals are routed through the branch that delegated the work. When the leader's
+allow decision needs approval, the prompt shows the original member, Session/branch, tool,
+arguments and reason from the server. It offers only Allow once and Reject, and cannot allow
+until details load. Details can be retried; rejection remains available during loading. The
+member conversation panel stays read-only. See the [member approval contract](../../docs/design/subagent-tool-approval.md).
 
 For a simple `exec`/`execute` command (no `;` `&` `|` `` ` `` `(` `)` `<` `>` `$` or line
 break), the approval prompt also offers `a`:
@@ -697,6 +722,14 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
 
+Interrupting a turn immediately shows a transient `Stopping` notice in the status slot. The transcript records the user-interruption note from the confirmed cancellation, after the answer has finished revealing and immediately before `stopped`, once per cancelled turn. Reopening preserves this order for turns interrupted by this version of the TUI. Older cancellations and cancellations from the line client retain their existing `stopped` display.
+
+```text
+answer text (including its retained streaming tail)
+· User interrupted the run.
+· stopped
+```
+
 The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
 The context reading is the estimate the next request sends against its window, and a compaction threshold the server returned with it. It is read when a session is entered, after a model switch, when a run on `main` ends, and when a compaction result arrives on `main`, so a compaction outside a run does not leave it stale. At or above 90% of that threshold — the interface's `CONTEXT_WARNING_PERCENT`, applied to the returned `thresholdTokens` — the reading is drawn as a warning and says `near the compaction threshold`. The client never computes the threshold itself; the formula belongs to compaction.
@@ -727,7 +760,7 @@ A context compaction has a row of its own in the transcript. `context/compaction
 
 `✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. The text a completed compaction wrote in place of the cut history is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). The detail is split where the record says it is: with `replacement_parts`, the strategy's messages are the summary, the digest the runtime recorded from the effects tools declared follows under `Tool effects`, and the inputs the compaction pinned follow under `Kept verbatim`; a record without the field shows the whole replacement as the summary, with no digest and nothing pinned. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
 
-`/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry; preferences are never silently discarded.
+`/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry, and the reread lands before that notice, so a retry uses the record's current version; preferences are never silently discarded.
 
 Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval prompts, question prompts and the exit confirmation take the composer's place until they are answered, in both modes: there is nothing to type into meanwhile. A question is the exception: while its free-text answer is not being edited, `/`, `Ctrl+O` and `Ctrl+P` open the palette over it (see [Questions in the terminal UI](#questions-in-the-terminal-ui)). The live tail above (the tool group waiting on the answer, a running thought) stays where it is. Every panel is framed the same way: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count; the query is a line editor like the composer's (cursor keys, Home/End, Delete, pastes).
 
@@ -744,7 +777,11 @@ Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/l
                       ╰────────────────────────────────────╯
 ```
 
-The palette lists what the interface runs: each row reads category, the action (a `/command` and its description, or an action a key reaches), and at the right edge the key that runs it (`Esc` interrupt, `Ctrl+S` steer, `Home` / `End` scroll, `Tab` pick a message, `Ctrl+C Ctrl+C` exit). An action that cannot run now (no session yet, nothing running, no queued message) is faint and marked `(unavailable)`; fullscreen-only actions are left out of the scrollback palette. Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count.
+Both scrollback and fullscreen palettes list slash commands, grouped by category and sorted alphabetically by canonical English category and command name. Each row shows its category, `/command`, description and any command shortcut. Commands requiring a session are faint and marked `(unavailable)` until one exists. Keyboard-only actions are omitted from both menus; `/keys` lists `Esc` interrupt, `Ctrl+S` steer, and the fullscreen `Home` / `End` scroll and `Tab` message picker bindings.
+
+`/approvals` is the visible permission entry; the hidden `/approval` still opens its own menu when typed exactly. Selecting an incomplete `exit` or `suspend` match only fills the command name; its exact name or alias is required before dispatch. Thus `/` + Enter completes `/exit` without quitting, and another Enter executes the completed command.
+
+Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count. Equally ranked matches use the category/name order. See the [command menu design](../../docs/design/cli-commands.md#command-menu).
 
 `/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`: expanded by default in both modes; collapsed shows each tool group as its header, folds thoughts and closes a compaction row's summary, digest and kept input, and `/tools` flips it too), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), tool approvals and the model. Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once.
 
@@ -970,9 +1007,9 @@ The terminal UI reaches the same Session methods as the line client:
 | `/plugins` (`/plugin`) | Lists every plugin name from `plugin.list` (built-in, default, installed): the candidate in use, its state, whether it is locked, and for the selected one its candidates and any error, wait or refused content. `Enter` turns an off plugin on (`plugin.enable`) or, after a confirmation, turns it off (`plugin.disable`); a locked one says why it cannot be turned off. `r` reloads it (`plugin.reload`), `Ctrl+R` lists again. The list is read again after each change, and a failed call shows the method's message |
 | `/plugins install PATH` | Installs and turns on the plugin directory at `PATH`, relative to the workspace (`plugin.install`), then opens the list with the outcome, including when a restart is required. Git installs, update and remove are `dimcode plugin ...` |
 | `/login` | Opens the Dim sign-in panel. It shows the account from `account.status` as a status line; signed out, its entries are browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below), each entering its own flow (`Esc` after a failure returns to the entries); signed in, it shows the account's name and email, its plan, credits, token windows and feature meters from `account.usage` (`Ctrl+R` asks again; a plugin without the method shows why), and its entries open `/models`, open the plan page at the account directory's `/console/subscription` in the browser, or sign out with `account.logout`, after which the panel shows the sign-in entries again. Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
-| `/connect` | Reads safe connection snapshots with `provider.management`. `Test + apply` probes the unsaved draft, then updates only changed fields at the form's original version with `provider.update`; unsupported model listing still permits saving and reports that the key was not tested. Other probe failures keep the draft. `Disconnect` atomically clears credentials and disables the record; Enable/Disable update only that flag. `Add custom provider` probes a Name, Base URL and API Key draft, then calls `provider.create` with the form's retained UUID and discovered defaults. IDs never derive from names. Failures retain edits; rereads update the safe status/version and require confirmation before retrying. `Ctrl+R` rereads without discarding the draft. Fields and filters use the composer's line editor. Account sign-in retains its existing owner |
-| `/resume` | Lists saved Sessions across workspaces, 50 at a time through `session.catalog`; moving near the end loads the next page. The filter searches the server after 150 ms, including Sessions not loaded yet. Ctrl+R refreshes; closing drops the pending read. Older daemons use `session.summaries` and local filtering |
-| `/models` | Lists enabled, executable models from `provider.list`/`provider.catalog`; a provider that lists models but has none selectable keeps a muted row naming it, how many of its models are unavailable and `dimcode models PROVIDER` for the reasons. An explicit pick sends the saved effort/tier preferences for that exact `{providerId, modelId}` with `session.create` or `session.model.update`, then saves the scoped default with `provider.select`. The adopted model stays in effect even when saving the default fails; the failure is reported as a notice. Unsupported saved preferences are reported and retained for the user to edit or clear; there is no silent fallback. When the daemon advertises `collaboration.model_policy`/`collaboration.set_model_policy`, a "Subagent models" row chooses Agent choice, Inherit requesting branch or a fixed model (from the same model list) for new Collaboration members; it writes only `collaboration.set_model_policy` with the revision it read, and after a revision conflict the next choice rereads before saving ([subagent model policy](../../docs/design/subagent-model-policy.md#5-native-cli-interaction)) |
+| `/connect` | Reads safe connection snapshots with `provider.management`. `Test + apply` probes the unsaved draft, then updates only changed fields at the form's original version with `provider.update`; a record whose models are its own has them replaced by the new endpoint's listing in that same write when the edit changes `baseUrl`, `credential` or `headers`, so the catalog follows the new endpoint, while a proxy or timeout edit saves alone and a builtin whose models are the bundled catalog's keeps them; unsupported model listing still permits saving and reports that the key was not tested. Other probe failures keep the draft. `Disconnect` atomically clears credentials and disables the record, and a catalog of the record's own goes with it, because the listing taken with that key is that key's view; the next connect lists the endpoint again. Enable/Disable update only that flag. `Add custom provider` probes a Name, Base URL and API Key draft, then calls `provider.create` with the form's retained UUID and discovered defaults. IDs never derive from names. Failures retain edits; rereads update the safe status/version and require confirmation before retrying. `Ctrl+R` rereads without discarding the draft. Fields and filters use the composer's line editor. Account sign-in retains its existing owner |
+| `/resume` | Lists saved Sessions across workspaces, 50 at a time through `session.catalog`; moving near the end loads the next page. The filter searches the server after 150 ms, including Sessions not loaded yet. Ctrl+R refreshes; closing, refreshing or replacing a search cancels the pending read when the daemon advertises `session.catalog.cancel`. Older daemons use `session.summaries` and local filtering |
+| `/models` | Lists enabled, executable models from `provider.list`/`provider.catalog`; a model whose context window or maximum output no source declares is not offered. Every provider with such a model keeps one muted row after its models, counting them and naming `dimcode models PROVIDER --set-missing-limits`; when the provider has nothing selectable, that row replaces its empty-provider row. A static provider whose catalog holds no models is asked to fill it with `provider.refresh` once per catalog version in a connection when the daemon says its models can be listed, and the picker shows what the catalog then holds, because the Provider owner decides what a catalog holds; a successful refresh records the version it wrote, so a listing that comes back empty is not asked for again, and a write to the record asks once more; the picker re-reads the list when such a refresh returns while it is open, and a reply that arrives after it closed is shown by the next open. A provider that offers nothing selectable keeps a muted row saying why: no models with `dimcode models PROVIDER --refresh` when the daemon says its models can be listed, no models with `provider.models.create` when it cannot, an unreadable catalog, or how many models are unavailable, disabled, or both, and `dimcode models PROVIDER` for the details. An explicit pick sends the saved effort/tier preferences for that exact `{providerId, modelId}` with `session.create` or `session.model.update`, then saves the scoped default with `provider.select`. The adopted model stays in effect even when saving the default fails; the failure is reported as a notice. Unsupported saved preferences are reported and retained for the user to edit or clear; there is no silent fallback. When the daemon advertises `collaboration.model_policy`/`collaboration.set_model_policy`, a "Subagent models" row chooses Agent choice, Inherit requesting branch or a fixed model (from the same model list) for new Collaboration members; it writes only `collaboration.set_model_policy` with the revision it read, and after a revision conflict the next choice rereads before saving ([subagent model policy](../../docs/design/subagent-model-policy.md#5-native-cli-interaction)) |
 | `/lines` | Lists `main` and every line under the line it was opened from, ordered by where it was cut and labelled `after message N`, each with its state (working, waiting, ended itself, ended by an operation, creation failed); while a line is shown the composer's bottom border names its path from `main` (`line main ▸ b-91 · after message 4`); Enter shows the selected line's conversation in place of `main`'s, and the composer, `!command` and the interrupt then address that line; `x`, then `y`, ends the selected line through `session.branch_end`, refused on `main` |
 | `/timeline` | Lists the shown line's user messages, oldest first, numbered, each with the first text of its answer, the newest selected. Typing does not filter: `e`, `q`, `b` and `f` act on the selected message as on a pick. `Enter` jumps: fullscreen picks the message (drawing from it first when it is earlier history), so the pick keys apply; scrollback draws a message it has not drawn yet, and everything after it up to what is drawn, as an earlier-history page, and otherwise says `/tui` can jump to it ([timeline UI §4.6](../../docs/design/timeline-ui.md#46-timeline-jumping-to-a-message)) |
 | `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` asks, then forks `main` there with `TEXT` in the fork's composer |
@@ -1042,7 +1079,7 @@ dimcode --home /path/to/plugin-home --provider PROVIDER --model MODEL_ID
 
 Device login prints the verification address and device code, then polls the attempt. `Ctrl+C` cancels it. Account output is a non-secret identity view; the CLI never requests token/credential lease APIs. An already accepted browser exchange is owned by the plugin: if the waiter leaves during settlement, inspect it with `account PROVIDER` before starting another login.
 
-`models PROVIDER` reads the cached catalog; `--refresh` obtains and persists a fresh catalog through the provider. Each line contains the model ID, display name and `available`, `disabled` or `unavailable`, separated by tabs. Credential/account fields and private failure details are not printed. A missing cached catalog gives sign-in and refresh guidance. Select an available model with `--provider PROVIDER --model MODEL_ID` for a new session.
+`models PROVIDER` reads the cached catalog; `--refresh` obtains and persists a fresh catalog through the provider. Each line contains the model ID, display name and `available`, `disabled`, `unavailable` or `undeclared`, separated by tabs; `undeclared` means no source declares the model's context window or maximum output, either of which keeps it from being selected. `--set-limits MODEL --context-window N --max-output-tokens N` declares both for one model, and `--set-missing-limits --context-window N --max-output-tokens N` declares them for every model the list marks `undeclared` — an enabled model whose missing limits are its only blocker, so a disabled model or one unavailable for another reason is not written; both named values are required with either form, both write through `models.edit` at the current record version, and both print the catalog afterwards. When a listed model still needs a window, the command names the declaration below its rows. Credential/account fields and private failure details are not printed. A missing cached catalog gives sign-in and refresh guidance, and a cached catalog that holds no models is named on standard error with the refresh command that fills it; a `--refresh` that lists nothing says the provider listed none. Select an available model with `--provider PROVIDER --model MODEL_ID` for a new session.
 
 An existing shared daemon of the CLI's own version is reused. A daemon of another version that this executable would start (one left running across an upgrade) is stopped with verified shutdown and replaced, which disconnects other clients attached to it; one without verified shutdown is reported for `dimcode daemon stop` from its matching CLI. A `--server PATH` daemon is reused whatever its version. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
 
@@ -1064,6 +1101,8 @@ When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface regi
 
 The default product home is `~/.dimcode`, or `~/.dimcode-alpha` for an alpha build so it never shares state with a release; `DIMCODE_HOME` or `--home PATH` overrides it. Native state and the daemon endpoint/log live in `<home>/rust`. No existing home, auth file or database is automatically migrated. Use an isolated home for development and acceptance.
 
+`<home>/config.json` holds the interface settings and `<home>/input-history.json` the prompt history of each working directory; a write replaces either file whole and never edits it in place. A writer takes an exclusive lock on `<file>.lock` beside the path it was given, then follows that path when it is a symbolic link: the temp file, the rename and the directory sync go beside the resolved file, so a linked `config.json` keeps its link and its target takes the write, and no lock is left in the linked directory. The new bytes go to a synced temp file that is renamed over the file, so two `dimcode` processes sharing a home keep each other's keys and entries, and a reader takes no lock and sees the old file or the new one. A writer waits at most two seconds for another one, then reports that another `dimcode` is updating the file; a lock that cannot be taken at all is reported with its error and the file is left alone, since a home whose filesystem refuses locks cannot hold the `dimcode.sqlite` beside it either. A `config.json` that exists but does not hold a JSON object is left as it is and the parse error is returned, while an `input-history.json` that does not parse is replaced by one holding the submitted entry. The `.lock` file stays beside the named path, and a write that fails before the rename leaves the old file and removes its temp file.
+
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dimcode app-server --connect-pipe` bridge (or `--server PATH --connect-pipe`), which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
 The daemon startup wait allows a newly spawned, current-user Unix socket to become private
@@ -1084,6 +1123,17 @@ JSON escaping can make a prompt exceed this limit even when its original text fi
 | `2` | Model or turn failed |
 | `3` | Interactive approval or answer required |
 | `130` | Interrupted noninteractive turn or login |
+
+When a model reaches `max_tokens`, the CLI names its provider/model and asks for
+a larger output token limit. The turn fails with exit code `2`; the Session stays
+usable. Model request failures are also recorded in the private daemon log with their
+Session, turn and request identities.
+
+```text
+exec -> [failed] local: Model local/model stopped at max_tokens. Increase the output token limit and retry.
+TUI  -> model failed: Model local/model stopped at max_tokens. Increase the output token limit and retry.
+ACP  -> stopReason: max_tokens -> next prompt on the same Session
+```
 
 ## Focused checks
 

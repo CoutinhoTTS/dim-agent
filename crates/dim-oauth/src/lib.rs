@@ -19,8 +19,9 @@ use dim_app_server::{
         ManagedModel, ManagedProvider, ManagedProviderRow, ProviderDescriptor, WebSearchHit,
         WebSearchRequest, WebSearchResponse,
         management::{
-            BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
-            ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
+            ApplyReset, BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
+            ManagedBrowserLoginComplete, ManagedLoginAttempt, Referral, ResetApplied, ResetBatches,
+            Usage,
         },
     },
     model_catalog::BundledCatalog,
@@ -791,7 +792,7 @@ impl Inner {
 
     async fn usage(self: Arc<Self>, provider: String) -> Result<Usage> {
         input(&provider)?;
-        let (_, status, body) = self
+        let (grant, status, body) = self
             .authorized(
                 |c, t| c.get(format!("{}/api/me/usage", trimmed(t.str("issuer")))),
                 None,
@@ -803,7 +804,70 @@ impl Inner {
         if !status.is_success() {
             return Err(rejected(status, &body));
         }
-        usage::project_usage(&body)
+        let mut usage = usage::project_usage(&body)?;
+        let issuer = trimmed(grant.tokens.str("issuer"));
+        usage.subscription_url = Some(format!("{issuer}/console/subscription"));
+        usage.pricing_url = Some(format!("{issuer}/console/pricing"));
+        Ok(usage)
+    }
+
+    async fn referral(self: Arc<Self>, provider: String) -> Result<Referral> {
+        input(&provider)?;
+        let (grant, status, body) = self
+            .authorized(
+                |c, t| c.get(format!("{}/api/me/referral", trimmed(t.str("issuer")))),
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(rejected(status, &body));
+        }
+        usage::project_referral(&body, grant.tokens.str("issuer"))
+    }
+
+    async fn reset_batches(self: Arc<Self>, provider: String) -> Result<ResetBatches> {
+        input(&provider)?;
+        let (_, status, body) = self
+            .authorized(
+                |c, t| c.get(format!("{}/api/me/usage-resets", trimmed(t.str("issuer")))),
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(rejected(status, &body));
+        }
+        usage::project_batches(&body)
+    }
+
+    async fn apply_reset(self: Arc<Self>, params: ApplyReset) -> Result<ResetApplied> {
+        input(&params.provider_id)?;
+        if params.subscription_id == 0
+            || params.subscription_id > http::MAX_SAFE_INTEGER
+            || params.idempotency_key.trim().is_empty()
+            || params.idempotency_key.len() > 128
+        {
+            return Err(ManagedError::InvalidInput);
+        }
+        let (_, status, body) = self
+            .authorized(
+                |c, t| {
+                    c.post(format!(
+                        "{}/api/me/usage-resets/apply",
+                        trimmed(t.str("issuer"))
+                    ))
+                    .json(&json!({"subscription_id":params.subscription_id,
+                    "reset_type":params.reset_type,"idempotency_key":params.idempotency_key}))
+                },
+                None,
+            )
+            .await?;
+        if status == StatusCode::FORBIDDEN {
+            return Err(ManagedError::ResetDenied);
+        }
+        if !status.is_success() {
+            return Err(rejected(status, &body));
+        }
+        usage::project_applied(&body)
     }
 
     async fn web_search(
@@ -927,6 +991,7 @@ impl ManagedProvider for DimOAuth {
             provider_id: PROVIDER_ID.into(),
             display_name: "Dim OAuth".into(),
             login_methods: vec!["browser".into(), "device".into()],
+            default_directory: Some(http::default_directory().into()),
         }]
     }
     fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
@@ -985,6 +1050,17 @@ impl ManagedProvider for DimOAuth {
     fn usage(&self, provider: &str) -> ManagedFuture<Usage> {
         let provider = provider.to_owned();
         self.owned(|inner| inner.usage(provider))
+    }
+    fn referral(&self, provider: &str) -> ManagedFuture<Referral> {
+        let provider = provider.to_owned();
+        self.owned(|inner| inner.referral(provider))
+    }
+    fn reset_batches(&self, provider: &str) -> ManagedFuture<ResetBatches> {
+        let provider = provider.to_owned();
+        self.owned(|inner| inner.reset_batches(provider))
+    }
+    fn apply_reset(&self, request: ApplyReset) -> ManagedFuture<ResetApplied> {
+        self.owned(|inner| inner.apply_reset(request))
     }
     fn web_search(
         &self,

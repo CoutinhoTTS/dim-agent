@@ -4,8 +4,8 @@ use crate::model_catalog::{MAX_MODEL_TOKENS, ModelEntry};
 use dim_agent_capabilities::host::ModelProtocol;
 use dim_agent_runtime::Names;
 use management::{
-    BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
-    ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
+    ApplyReset, BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
+    ManagedBrowserLoginComplete, ManagedLoginAttempt, Referral, ResetApplied, ResetBatches, Usage,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -22,6 +22,8 @@ pub struct ProviderDescriptor {
     pub provider_id: String,
     pub display_name: String,
     pub login_methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_directory: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -103,6 +105,7 @@ impl From<ManagedError> for ManagedSearchError {
             | ManagedError::AttemptClosed
             | ManagedError::ServiceReloading
             | ManagedError::InvalidInput
+            | ManagedError::ResetDenied
             | ManagedError::UnknownModel
             | ManagedError::LeaseNotFound
             | ManagedError::LeaseCapacity => Self::SearchFailed,
@@ -123,6 +126,7 @@ pub enum ManagedError {
     IdentityRejected,
     TokenMissing,
     RefreshRejected,
+    ResetDenied,
     Transient,
     ConfigError,
     InvalidResponse,
@@ -219,6 +223,17 @@ pub trait ManagedProvider: Send + Sync + 'static {
     fn cancel_attempt(&self, attempt: ManagedLoginAttempt) -> ManagedFuture<()>;
     fn logout(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
     fn usage(&self, provider: &str) -> ManagedFuture<Usage>;
+    fn referral(&self, _provider: &str) -> ManagedFuture<Referral> {
+        Box::pin(async { Err(ManagedError::InvalidInput) })
+    }
+    fn reset_batches(&self, _provider: &str) -> ManagedFuture<ResetBatches> {
+        Box::pin(async { Err(ManagedError::InvalidInput) })
+    }
+    /// Applies one credit with a caller-stable idempotency key. Retrying the
+    /// same action must retain that key, including after a lost reply.
+    fn apply_reset(&self, _request: ApplyReset) -> ManagedFuture<ResetApplied> {
+        Box::pin(async { Err(ManagedError::InvalidInput) })
+    }
     /// `cancel` releases the relay request; a token refresh it started still
     /// completes.
     fn web_search(
@@ -281,6 +296,10 @@ impl From<ManagedError> for ManagedProviderError {
             }
             ManagedError::AttemptNotFound => ("login_attempt_unknown", "Login attempt is unknown"),
             ManagedError::AttemptClosed => ("login_attempt_closed", "Login attempt is closed"),
+            ManagedError::ResetDenied => (
+                "account_reset_denied",
+                "No applicable usage reset credit is available",
+            ),
             ManagedError::InvalidResponse => (
                 "account_invalid_response",
                 "Managed provider returned an invalid response",
@@ -451,6 +470,27 @@ impl ManagedProviders {
     ) -> Result<Usage, ManagedProviderError> {
         Ok(self.provider(cancel)?.usage(id).await?)
     }
+    pub async fn referral(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Referral, ManagedProviderError> {
+        Ok(self.provider(cancel)?.referral(id).await?)
+    }
+    pub async fn reset_batches(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<ResetBatches, ManagedProviderError> {
+        Ok(self.provider(cancel)?.reset_batches(id).await?)
+    }
+    pub async fn apply_reset(
+        &self,
+        request: ApplyReset,
+        cancel: &CancellationToken,
+    ) -> Result<ResetApplied, ManagedProviderError> {
+        Ok(self.provider(cancel)?.apply_reset(request).await?)
+    }
     pub async fn search(
         &self,
         request: WebSearchRequest,
@@ -459,8 +499,7 @@ impl ManagedProviders {
         let provider = self
             .provider(cancel)
             .map_err(|_| ManagedSearchError::Unavailable)?;
-        let response = provider.web_search(request, cancel.clone()).await?;
-        checked_search(response).map_err(|_| ManagedSearchError::SearchFailed)
+        Ok(provider.web_search(request, cancel.clone()).await?)
     }
     pub async fn catalog(
         &self,
@@ -513,16 +552,6 @@ impl ManagedProviders {
     }
 }
 
-fn checked_search(response: WebSearchResponse) -> Result<WebSearchResponse, ManagedProviderError> {
-    if response.results.iter().any(|hit| {
-        hit.title.trim().is_empty()
-            || !url::Url::parse(&hit.url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
-    }) {
-        return Err(invalid());
-    }
-    Ok(response)
-}
-
 fn invalid() -> ManagedProviderError {
     ManagedError::InvalidResponse.into()
 }
@@ -555,6 +584,16 @@ fn valid_descriptors(providers: &[ProviderDescriptor]) -> bool {
             && p.login_methods
                 .iter()
                 .all(|m| matches!(m.as_str(), "browser" | "device"))
+            && p.default_directory.as_ref().is_none_or(|directory| {
+                url::Url::parse(directory).is_ok_and(|url| {
+                    matches!(url.scheme(), "http" | "https")
+                        && url.has_host()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                })
+            })
     })
 }
 fn valid_catalog(catalog: &ManagedCatalog) -> bool {
@@ -566,12 +605,9 @@ fn valid_catalog(catalog: &ManagedCatalog) -> bool {
                 && ids.insert(&m.entry.model_id)
                 && !m.entry.display_name.trim().is_empty()
                 && supported(m.protocol)
-                && [
-                    m.entry.capabilities.context_window,
-                    m.entry.capabilities.max_output_tokens,
-                ]
-                .iter()
-                .all(|n| (1..=MAX_MODEL_TOKENS).contains(n))
+                && crate::model_catalog::limits_valid(&m.entry.capabilities)
+                && (m.entry.capabilities.missing_limits().is_empty()
+                    || m.unavailable_reason.is_some())
         })
 }
 /// A lease that fails the checks is dropped, which releases it.
@@ -600,26 +636,13 @@ fn checked_lease(lease: CredentialLease) -> Result<CredentialLease, ManagedProvi
     Ok(lease)
 }
 
-pub struct ManagedProvidersPlugin {
-    methods: Key<crate::methods::ManagementMethods>,
-}
-impl ManagedProvidersPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
-        Ok(Self {
-            methods: names.key()?,
-        })
-    }
-}
+pub struct ManagedProvidersPlugin;
 impl DynPlugin for ManagedProvidersPlugin {
     fn name(&self) -> &str {
         "ManagedProviders"
     }
-    fn injects(&self) -> Vec<TypeKey> {
-        vec![self.methods.erase()]
-    }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let methods = ctx.require_at(&self.methods)?;
             let service = Arc::new(ManagedProviders {
                 provider: Mutex::new(None),
                 stop: CancellationToken::new(),
@@ -629,8 +652,36 @@ impl DynPlugin for ManagedProvidersPlugin {
                 owner.stop.cancel();
                 Ok(())
             })?;
-            management::provide(ctx, &methods, service.clone())?;
             ctx.provide_as::<ManagedProviders>(service)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+/// Process owner of the `account` management namespace.
+pub struct ManagedProviderMethodsPlugin {
+    owner: Key<ManagedProviders>,
+    methods: Key<crate::methods::ManagementMethods>,
+}
+impl ManagedProviderMethodsPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            owner: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ManagedProviderMethodsPlugin {
+    fn name(&self) -> &str {
+        "ManagedProviderMethods"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.owner.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let owner = ctx.require_at(&self.owner)?;
+            let methods = ctx.require_at(&self.methods)?;
+            management::provide(ctx, &methods, owner)?;
             Ok(Effect::Done)
         })
     }

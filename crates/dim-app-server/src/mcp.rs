@@ -461,6 +461,38 @@ impl McpService {
         .await
     }
 
+    async fn test(
+        &self,
+        ctx: Ctx,
+        id: String,
+        configuration: McpServerSettings,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<server::McpTool>> {
+        self.run(cancel, move |_, cancel| async move {
+            let key = Key::<McpServer>::dynamic(format!("mcp-test:{}", uuid::Uuid::new_v4()))
+                .instance(ctx.instance());
+            let plugin = server::McpServerPlugin::new(&id, configuration, key.clone())?;
+            let view = ctx.plugin(plugin);
+            let operation = async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(McpError::Cancelled),
+                    loaded = &view => loaded.map_err(|_| McpError::Unavailable)?,
+                }
+                let service = ctx.get_at(&key).ok_or(McpError::Unavailable)?;
+                service.tools(&cancel).await.map_err(McpError::from)
+            };
+            let result = tokio::time::timeout(std::time::Duration::from_secs(30), operation)
+                .await
+                .unwrap_or(Err(McpServerError::Timeout.into()));
+            if view.shutdown().await.is_err() || view.state().error.is_some() {
+                return Err(McpServerError::Cleanup.into());
+            }
+            result
+        })
+        .await
+    }
+
     /// Mutate exactly one persisted source, not the merged effective view.
     /// Concurrent edits fail CAS rather than overwriting another server.
     /// Returns the revision of `source` after the change.

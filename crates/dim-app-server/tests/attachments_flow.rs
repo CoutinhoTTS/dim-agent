@@ -11,10 +11,11 @@ use dim_agent_capabilities::{
     adapters::MockTools,
     defaults,
     file_storage::FileStoragePlugin,
+    host::SessionFilesHost,
     methods::{MethodProvider, RpcError, SessionMethods},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
-use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig, testing::MinimalHost};
 use dim_agent_types::EventKind;
 use dim_app_server::{
     RunningServer, ServerConfig, serve,
@@ -386,11 +387,13 @@ async fn a_host_without_native_storage_answers_unknown_method() {
 }
 
 /// The native store and an Agent with Attachments in one process, without
-/// Rpc, so a test controls the calling load's token.
+/// Rpc, so a test controls the calling load's token. `root` holds the store
+/// and the node's FileStorage; the Agent's host has the store's
+/// `sessionFiles` as a process value.
 struct Contract {
     root: rutis::Ctx,
     store: Arc<SessionStore>,
-    agent: dim_agent_runtime::Agent,
+    agent: MinimalHost,
 }
 impl Contract {
     async fn mount(home: &Home, file_storage: bool) -> Self {
@@ -415,7 +418,8 @@ impl Contract {
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
         dim_agent_attachments::install(&mut builder);
-        let agent = builder.build_in(&root);
+        builder.process_value(root.get::<SessionFilesHost>().unwrap());
+        let agent = MinimalHost::start(&builder).await.unwrap();
         Self { root, store, agent }
     }
     async fn session(&self) -> (String, Arc<MethodProvider>) {

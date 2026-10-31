@@ -35,11 +35,33 @@ pub(crate) async fn session_cwd(cwd: &str) -> Result<String, RpcError> {
         .map_err(|_| RpcError::invalid("cwd must be UTF-8"))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(untagged)]
 pub enum RequestId {
     Number(serde_json::Number),
     String(String),
+}
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::String(value) => Ok(Self::String(value)),
+            Value::Number(number) => {
+                let value = number.as_f64().expect("finite JSON number");
+                Ok(Self::Number(
+                    if value.fract() == 0.0 && value >= 0.0 && value < u64::MAX as f64 {
+                        serde_json::Number::from(value as u64)
+                    } else if value.fract() == 0.0 && value < 0.0 && value >= i64::MIN as f64 {
+                        serde_json::Number::from(value as i64)
+                    } else {
+                        serde_json::Number::from_f64(value).expect("finite JSON number")
+                    },
+                ))
+            }
+            _ => Err(serde::de::Error::custom(
+                "Expected a numeric or string request identity",
+            )),
+        }
+    }
 }
 
 /// The error of an unknown or closed Agent.
@@ -79,6 +101,7 @@ pub enum Call {
     List(SessionList),
     Summaries(SessionList),
     Catalog(Catalog),
+    CatalogCancel(CatalogCancel),
     Attach(Attach),
     Detach(SessionId),
     Submit(Submit),
@@ -161,10 +184,89 @@ pub const UI_HOST_METHODS: [&str; 6] = [
     "ui.replace",
 ];
 
-/// Management reads served to web entry connections besides the Session
-/// methods; their replies carry no credentials.
-pub const WEB_READABLE_METHODS: [&str; 3] =
-    ["provider.list", "provider.catalog", "provider.selection"];
+/// Management methods available to authenticated loopback Web clients.
+/// Replies contain account metadata and credential presence, never credentials.
+pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
+    "provider.management",
+    "provider.create",
+    "provider.update",
+    "provider.probe",
+    "provider.models.create",
+    "provider.models.delete",
+    "provider.preferences.update",
+    "provider.list",
+    "provider.catalog",
+    "provider.refresh",
+    "provider.models.set_enabled",
+    "provider.models.edit",
+    "provider.models.reset",
+    "provider.selection",
+    "provider.select",
+    "provider.delete",
+    "account.providers",
+    "account.status",
+    "account.recover",
+    "account.login.begin",
+    "account.login.browser.begin",
+    "account.login.browser.complete",
+    "account.login.status",
+    "account.login.cancel",
+    "account.logout",
+    "account.usage",
+    "account.referral",
+    "account.reset_batches",
+    "account.apply_reset",
+    "account.codex.status",
+    "account.codex.recover",
+    "account.codex.login.browser.begin",
+    "account.codex.login.browser.complete",
+    "account.codex.login.status",
+    "account.codex.login.cancel",
+    "account.codex.logout",
+    "account.grok.status",
+    "account.grok.recover",
+    "account.grok.login.begin",
+    "account.grok.login.status",
+    "account.grok.login.cancel",
+    "account.grok.logout",
+    "settings.read",
+    "settings.update",
+    "skills.catalog",
+    "skills.set_enabled",
+    "skills.refresh",
+    "permission.rules",
+    "permission.set_rules",
+    "collaboration.model_policy",
+    "collaboration.set_model_policy",
+    "host.isolation.get",
+    "host.isolation.update",
+    "host.isolation.reset",
+    "host.exec_shell.get",
+    "host.exec_shell.update",
+    "mcp.catalog",
+    "mcp.configuration",
+    "mcp.inspect",
+    "mcp.test",
+    "mcp.update",
+    "mcp.temporary.capabilities",
+    "mcp.save",
+    "mcp.remove",
+    "mcp.set_enabled",
+    "mcp.disconnect",
+    "mcp.auth.start",
+    "mcp.auth.complete",
+    "mcp.auth.cancel",
+    "mcp.auth.logout",
+    "plugin.list",
+    "plugin.install",
+    "plugin.enable",
+    "plugin.disable",
+    "plugin.reload",
+    "plugin.update",
+    "plugin.remove",
+];
+
+pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log"];
 
 pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.permission.get",
@@ -355,6 +457,11 @@ pub struct CatalogResult {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogCancel {
+    pub request_id: RequestId,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionId {
     pub session_id: String,
 }
@@ -456,7 +563,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 34] = [
+const BUILTIN_METHODS: [&str; 35] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -474,6 +581,7 @@ const BUILTIN_METHODS: [&str; 34] = [
     "session.list",
     "session.summaries",
     "session.catalog",
+    "session.catalog.cancel",
     "session.attach",
     "session.detach",
     "session.submit",
@@ -512,22 +620,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
     };
     let id = obj
         .remove("id")
-        .and_then(|id| serde_json::from_value::<RequestId>(id).ok())
-        .map(|id| match id {
-            RequestId::Number(number) => {
-                let number = number.as_f64().expect("finite JSON number");
-                RequestId::Number(
-                    if number.fract() == 0.0 && number >= 0.0 && number < (u64::MAX as f64) {
-                        serde_json::Number::from(number as u64)
-                    } else if number.fract() == 0.0 && number < 0.0 && number >= i64::MIN as f64 {
-                        serde_json::Number::from(number as i64)
-                    } else {
-                        serde_json::Number::from_f64(number).expect("finite JSON number")
-                    },
-                )
-            }
-            id => id,
-        });
+        .and_then(|id| serde_json::from_value::<RequestId>(id).ok());
     if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || id.is_none() {
         return Err((id, RpcError::wire(-32600, "Invalid JSON-RPC envelope")));
     }
@@ -554,6 +647,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.list" => Call::List(params(raw_params)?),
             "session.summaries" => Call::Summaries(params(raw_params)?),
             "session.catalog" => Call::Catalog(params(raw_params)?),
+            "session.catalog.cancel" => Call::CatalogCancel(params(raw_params)?),
             "session.attach" => Call::Attach(params(raw_params)?),
             "session.detach" => Call::Detach(params(raw_params)?),
             "session.submit" => Call::Submit(params(raw_params)?),

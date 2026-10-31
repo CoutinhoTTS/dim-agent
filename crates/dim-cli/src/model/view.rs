@@ -4,6 +4,9 @@
 //! read them without backend handles. Questions reuse the shared client
 //! contract in `question`; the session worker and wire decoder own backend I/O.
 
+/// The cancellation reason used when the terminal user interrupts a turn.
+pub const INTERRUPT_REASON: &str = "User interrupted the run.";
+
 /// The kind of one transcript row, as far as drawing is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -39,7 +42,6 @@ impl RowKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowTone {
     Danger,
-    #[allow(dead_code)]
     Warning,
 }
 
@@ -47,6 +49,8 @@ pub enum RowTone {
 pub struct ViewRow {
     pub row_id: String,
     pub kind: RowKind,
+    /// Presentation of an image message; `text` remains editable text only.
+    pub display: Option<String>,
     pub text: String,
     pub streaming: bool,
     /// A settled thought: how long it ran, in milliseconds.
@@ -196,6 +200,9 @@ pub enum LineState {
 /// A tool call that asks the user for permission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalView {
+    pub member: Option<
+        Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+    >,
     pub request_id: String,
     pub branch_id: String,
     pub reason: String,
@@ -211,6 +218,8 @@ pub struct ApprovalView {
 pub struct QueuedInput {
     pub id: String,
     pub text: String,
+    /// Presentation of an image message; never restored into a draft.
+    pub display: Option<String>,
 }
 
 /// Work of the session that runs apart from the turn: a command the `exec`

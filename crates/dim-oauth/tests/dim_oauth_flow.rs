@@ -100,7 +100,7 @@ async fn process(home: &Path) -> Process {
     root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
     let views = [
         root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()])),
-        root.plugin(ManagedProvidersPlugin::new(&names).unwrap()),
+        root.plugin(ManagedProvidersPlugin),
         root.plugin(DimOAuthPlugin::new(&names, 0, ids).unwrap()),
         root.plugin(ManagedProviderBinding::new(&names).unwrap()),
         root.plugin(Capture::new(&names, captured.clone()).unwrap()),
@@ -156,13 +156,13 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
     let fixture = oauth::start().await;
     let home = home();
     let Process { root, providers } = process(&home).await;
-    let ids: Vec<_> = providers
-        .providers(&cancel())
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|p| p.provider_id)
-        .collect();
+    let descriptors = providers.providers(&cancel()).await.unwrap();
+    let directory = match std::env::var("DIMCODE_NPM_PACKAGE").as_deref() {
+        Ok("dimagent") => "https://dimagent.com",
+        _ => "https://dimagent.cn",
+    };
+    assert_eq!(descriptors[0].default_directory.as_deref(), Some(directory));
+    let ids: Vec<_> = descriptors.into_iter().map(|p| p.provider_id).collect();
     assert_eq!(ids, [PROVIDER]);
     let signed_out = providers.status(PROVIDER, &cancel()).await.unwrap();
     assert!(signed_out.account.is_none());
@@ -212,7 +212,7 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
     assert_eq!(chat.unavailable_reason, None);
     assert!(chat.zdr);
     assert_eq!(chat.entry.display_name, "Fixture model");
-    assert_eq!(chat.entry.capabilities.context_window, 32000);
+    assert_eq!(chat.entry.capabilities.context_window, Some(32000));
     assert!(chat.entry.capabilities.reasoning);
     assert_eq!(model("fixture-claude").protocol, ModelProtocol::Anthropic);
     assert_eq!(model("fixture-claude").unavailable_reason, None);
@@ -239,10 +239,18 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
     assert_eq!(lease.account, account);
 
     let usage = providers.usage(PROVIDER, &cancel()).await.unwrap();
-    assert_eq!(usage.plan.unwrap().name.as_deref(), Some("Fixture plan"));
+    let plan = usage.plan.unwrap();
+    assert_eq!(plan.name.as_deref(), Some("Fixture plan"));
+    assert_eq!(plan.cancel_at_period_end, Some(true));
+    assert_eq!(
+        plan.current_term_start.as_deref(),
+        Some("2026-09-28T00:00:00Z")
+    );
+    assert_eq!(plan.last_term_status.as_deref(), Some("expired"));
     let credits = usage.credits.unwrap();
     assert_eq!(credits.total_units, Some(300000));
-    assert_eq!(credits.remaining_units, None);
+    assert_eq!(credits.remaining_units, Some(275000));
+    assert_eq!(credits.resets_at.as_deref(), Some("2026-10-28T00:00:00Z"));
     // Incomplete windows and meters without a key are skipped.
     assert_eq!(usage.windows.len(), 1);
     assert_eq!(usage.features.len(), 1);
@@ -280,6 +288,151 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
         .unwrap();
     assert_eq!(required.code, "account_required");
     drop(lease);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_referrals_and_credit_resets_stay_with_the_authenticated_owner() {
+    use dim_app_server::managed_provider::management::{ApplyReset, ResetType};
+
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    let account = login(&providers, &fixture.base).await;
+    let usage = providers.usage(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(usage.subscription_id, Some(42));
+    assert_eq!(usage.resets.unwrap().window.available_count, 2);
+    assert_eq!(
+        usage.subscription_url.unwrap(),
+        format!("{}/console/subscription", fixture.base)
+    );
+    assert_eq!(
+        usage.pricing_url.unwrap(),
+        format!("{}/console/pricing", fixture.base)
+    );
+    let referral = providers.referral(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(referral.reward_granted_units, Some(12000));
+    let invite = url::Url::parse(referral.invite_url.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        invite.query_pairs().collect::<Vec<_>>(),
+        [("aff".into(), "FRIEND +&".into())]
+    );
+    assert!(
+        !serde_json::to_string(&referral)
+            .unwrap()
+            .contains("private-service-secret")
+    );
+    let batches = providers.reset_batches(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(batches.window[0].grant_id, 7);
+    assert_eq!(batches.window[0].subscription_id, Some(42));
+    assert!(batches.monthly_full.is_empty());
+    assert!(
+        !serde_json::to_string(&batches)
+            .unwrap()
+            .contains("private-service-secret")
+    );
+    fixture
+        .service
+        .rejected
+        .lock()
+        .unwrap()
+        .push("access-0".into());
+    let request = || ApplyReset {
+        provider_id: PROVIDER.into(),
+        subscription_id: 42,
+        reset_type: ResetType::Window,
+        idempotency_key: "same-confirmed-action".into(),
+    };
+    let applied = providers.apply_reset(request(), &cancel()).await.unwrap();
+    assert!(!applied.replayed);
+    assert_eq!(applied.windows[0].token_used, 0);
+    assert_eq!(applied.resets.window.available_count, 1);
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 1);
+    assert!(
+        !serde_json::to_string(&applied)
+            .unwrap()
+            .contains("private-service-secret")
+    );
+    let replayed = providers.apply_reset(request(), &cancel()).await.unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(
+        fixture.service.reset_keys.lock().unwrap().as_slice(),
+        ["same-confirmed-action"]
+    );
+    fixture
+        .service
+        .reset_forbidden
+        .store(true, Ordering::SeqCst);
+    let denied = providers
+        .apply_reset(request(), &cancel())
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, "account_reset_denied");
+    assert!(!denied.message.contains("private-service-secret"));
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        providers.status(PROVIDER, &cancel()).await.unwrap(),
+        account
+    );
+    let mut invalid = request();
+    invalid.idempotency_key.clear();
+    assert_eq!(
+        providers
+            .apply_reset(invalid, &cancel())
+            .await
+            .unwrap_err()
+            .code,
+        "account_invalid_input"
+    );
+    assert_eq!(fixture.service.calls("POST /api/me/usage-resets/apply"), 4);
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(
+        providers
+            .referral(PROVIDER, &cancel())
+            .await
+            .unwrap_err()
+            .code,
+        "account_required"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_model_without_declared_limits_is_published_as_undeclared() {
+    let fixture = oauth::start().await;
+    *fixture.service.models.lock().unwrap() = Some(json!({"data":[
+        {"id":"zzzz-relay-undisclosed","dim":{"id":"zzzz-relay-undisclosed","endpoint_type":"openai"}},
+        {"id":"zzzz-relay-declared","dim":{"id":"zzzz-relay-declared","endpoint_type":"openai",
+            "contextWindow":64000,"maxOutputTokens":8000}}
+    ]}));
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    login(&providers, &fixture.base).await;
+    let catalog = providers.catalog(PROVIDER, &cancel()).await.unwrap();
+    let model = |id: &str| {
+        catalog
+            .models
+            .iter()
+            .find(|model| model.entry.model_id == id)
+            .unwrap()
+            .clone()
+    };
+    // No relay value and no bundled match: the limit stays absent and the
+    // model keeps a reason instead of being given a substitute window.
+    let undeclared = model("zzzz-relay-undisclosed");
+    assert_eq!(
+        undeclared.entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    assert_eq!(
+        undeclared.unavailable_reason.as_deref(),
+        Some("limits_undeclared")
+    );
+    let declared = model("zzzz-relay-declared");
+    assert!(declared.entry.capabilities.missing_limits().is_empty());
+    assert_eq!(declared.unavailable_reason, None);
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

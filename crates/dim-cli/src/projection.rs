@@ -74,6 +74,7 @@ pub struct Projection {
     background: HashMap<TaskTarget, String>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
+    presented_failure: Option<String>,
     /// The call row carrying each delegation's card, by request event id.
     cards: HashMap<String, usize>,
     /// Native Agent names from `agent.list`, by Agent id.
@@ -577,8 +578,25 @@ impl Projection {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
-                if let ModelOutputOutcome::Failed { error, .. } = &data.outcome {
-                    self.push_error(format!("model failed: {error}"));
+                if let ModelOutputOutcome::Failed {
+                    error,
+                    presentation,
+                    ..
+                } = &data.outcome
+                {
+                    let message = presentation
+                        .as_ref()
+                        .and_then(|value| value.server_message.as_deref())
+                        .unwrap_or(error);
+                    let action = presentation
+                        .as_ref()
+                        .and_then(|value| value.action.as_deref())
+                        .map(|action| format!(". {action}"))
+                        .unwrap_or_default();
+                    self.push_error(format!("model failed: {message}{action}"));
+                    if presentation.is_some() {
+                        self.presented_failure = Some(error.clone());
+                    }
                 }
             }
             EventContent::TurnEnd(data) => {
@@ -620,12 +638,23 @@ impl Projection {
     }
 
     fn turn_end(&mut self, sequence: u64, outcome: &TurnOutcome) {
+        let presented = self.presented_failure.take();
         let end = match outcome {
             TurnOutcome::Failed { error } => {
-                self.push_error(format!("turn failed: {error}"));
+                if presented.as_deref() != Some(error.as_str()) {
+                    self.push_error(format!("turn failed: {error}"));
+                }
                 TurnEnd::Failed
             }
-            TurnOutcome::Cancelled { .. } => {
+            TurnOutcome::Cancelled { reason } => {
+                if reason == crate::model::view::INTERRUPT_REASON {
+                    let index = self.push(
+                        format!("interrupted-{sequence}"),
+                        RowKind::Status,
+                        reason.clone(),
+                    );
+                    self.row(index).tone = Some(RowTone::Warning);
+                }
                 self.push(
                     format!("stopped-{sequence}"),
                     RowKind::Status,
@@ -656,6 +685,7 @@ impl Projection {
         let index = self.push(format!("user-{sequence}"), kind, text);
         let row = self.row(index);
         row.cut = Some(submitted.saturating_sub(1));
+        row.display = image_text(&user.content);
         row.pending = kind == RowKind::UserMessage;
         self.input_rows.insert(input_id.to_owned(), index);
     }
@@ -677,10 +707,18 @@ impl Projection {
         reason: String,
         always: Option<String>,
     ) {
+        if self
+            .approvals
+            .iter()
+            .any(|approval| approval.branch_id == branch_id && approval.request_id == request_id)
+        {
+            return;
+        }
         if let Some(index) = self.tool_rows.get(&request_id).copied() {
             self.row(index).parked = true;
         }
         self.approvals.push(ApprovalView {
+            member: None,
             request_id,
             branch_id,
             reason,
@@ -691,17 +729,35 @@ impl Projection {
     }
 
     /// The command an "always" answer to `request_id` saves a rule for.
-    pub fn approval_always(&self, request_id: &str) -> Option<String> {
+    pub fn approval_always(&self, branch_id: &str, request_id: &str) -> Option<String> {
         self.approvals
             .iter()
-            .find(|approval| approval.request_id == request_id)?
+            .find(|approval| approval.branch_id == branch_id && approval.request_id == request_id)?
             .always
             .clone()
     }
 
-    pub fn remove_approval(&mut self, request_id: &str) {
-        self.approvals
-            .retain(|approval| approval.request_id != request_id);
+    pub fn member_approval(
+        &mut self,
+        branch_id: &str,
+        request_id: &str,
+        detail: Option<
+            Result<dim_agent_types::MemberApprovalDescriptor, crate::member_approval::DetailError>,
+        >,
+    ) {
+        if let Some(approval) = self
+            .approvals
+            .iter_mut()
+            .find(|approval| approval.branch_id == branch_id && approval.request_id == request_id)
+        {
+            approval.member = detail;
+        }
+    }
+
+    pub fn remove_approval(&mut self, branch_id: &str, request_id: &str) {
+        self.approvals.retain(|approval| {
+            approval.branch_id != branch_id || approval.request_id != request_id
+        });
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
@@ -716,6 +772,7 @@ impl Projection {
                     .map(|(id, _, user)| QueuedInput {
                         id: id.clone(),
                         text: text_of(&user.content),
+                        display: image_text(&user.content),
                     })
                     .collect()
             } else {
@@ -994,6 +1051,7 @@ impl Projection {
             row_id,
             kind,
             text,
+            display: None,
             streaming: false,
             elapsed_ms: None,
             tone: None,
@@ -1278,6 +1336,28 @@ fn text_of(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn image_text(blocks: &[ContentBlock]) -> Option<String> {
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+    {
+        return None;
+    }
+    let mut images = 0;
+    let text = blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Image { .. } => {
+                images += 1;
+                format!("[Image #{images}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(text)
 }
 
 #[cfg(test)]
@@ -1677,6 +1757,85 @@ mod tests {
                 .any(|row| row.text == "This line ended (with b-7c)"),
             "a cascaded line's own transcript names its ancestor"
         );
+    }
+
+    #[test]
+    fn image_messages_remain_visible_in_history_queue_and_transcript() {
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"},
+        });
+        let input = |sequence, id, content| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": content}, "mode": "queue"},
+            })
+        };
+        let history = input(1, "history-image", serde_json::json!([image]));
+        let mixed = input(
+            4,
+            "mixed-images",
+            serde_json::json!([
+                {"type": "text", "text": "Compare"}, image,
+                {"type": "text", "text": "with"}, image,
+            ]),
+        );
+        let applied = serde_json::json!({
+            "id": "applied", "sequence": 5, "create_at": 5,
+            "type": "input", "name": "applied", "data": {"input_id": "mixed-images"},
+        });
+        let history_applied = serde_json::json!({
+            "id": "history-applied", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied", "data": {"input_id": "history-image"},
+        });
+        let history_consumed = serde_json::json!({
+            "id": "history-consumed", "sequence": 3, "create_at": 3,
+            "type": "input", "name": "consumed", "data": {"input_id": "history-image"},
+        });
+        let mut live = Projection::default();
+        apply(
+            &mut live,
+            &[
+                history.clone(),
+                history_applied.clone(),
+                history_consumed.clone(),
+            ],
+        );
+        assert!(live.snapshot().rows[0].text.is_empty());
+        assert_eq!(
+            live.snapshot().rows[0].display.as_deref(),
+            Some("[Image #1]")
+        );
+        live.set_running(true);
+        apply(&mut live, std::slice::from_ref(&mixed));
+        let expected = "Compare\n[Image #1]\nwith\n[Image #2]";
+        assert_eq!(live.snapshot().queued[0].text, "Compare\nwith");
+        assert_eq!(live.snapshot().queued[0].display.as_deref(), Some(expected));
+        assert_eq!(
+            serde_json::to_value(live.held_input("mixed-images").unwrap()).unwrap(),
+            mixed["data"]["user"],
+            "display markers preserve the original queued image blocks"
+        );
+        apply(&mut live, std::slice::from_ref(&applied));
+        assert!(live.snapshot().queued.is_empty());
+        assert_eq!(live.snapshot().rows[1].text, "Compare\nwith");
+        assert_eq!(live.snapshot().rows[1].display.as_deref(), Some(expected));
+        let previous = crate::ui::i18n::active();
+        crate::ui::i18n::set(crate::ui::i18n::Locale::ZhCn);
+        let mut replay = Projection::default();
+        apply(
+            &mut replay,
+            &[history, history_applied, history_consumed, mixed, applied],
+        );
+        assert!(replay.snapshot().rows[0].text.is_empty());
+        assert_eq!(
+            replay.snapshot().rows[0].display.as_deref(),
+            Some("[Image #1]")
+        );
+        assert_eq!(replay.snapshot().rows[1].text, "Compare\nwith");
+        assert_eq!(replay.snapshot().rows[1].display.as_deref(), Some(expected));
+        crate::ui::i18n::set(previous);
     }
 
     #[test]

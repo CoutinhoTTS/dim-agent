@@ -12,7 +12,7 @@ async fn compact_after_small_turns(
     block: InputBlock,
     replacement: Option<f64>,
 ) -> (Vec<Arc<AgentEvent>>, usize) {
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
@@ -20,8 +20,9 @@ async fn compact_after_small_turns(
             replacement,
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -128,15 +129,16 @@ async fn a_tail_that_cannot_fit_the_bound_is_replaced_entirely() {
     // input leave only a small part of the `0.5 × B` bound, and every kept
     // tail is larger: the compaction keeps no verbatim tail and the request
     // is the resident parts alone (ContextCompaction §5.3).
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
             threshold: Some(3_600.),
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -270,7 +272,9 @@ impl ModelDriver for ReportedPrompt {
 async fn recovery_compares_the_provider_baseline_estimate_with_the_input_budget() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for (prompt, recovers) in [(4_000., true), (2_000., false)] {
-            let agent = builder(Arc::new(ReportedPrompt(prompt))).build();
+            let agent = MinimalHost::start(&builder(Arc::new(ReportedPrompt(prompt))))
+                .await
+                .unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
                 .await
@@ -342,15 +346,16 @@ async fn recovery_compares_the_provider_baseline_estimate_with_the_input_budget(
 /// not trigger it (ContextCompaction §5.6, acceptance 11).
 #[tokio::test]
 async fn automatic_compaction_waits_for_a_quarter_of_the_budget_of_new_history() {
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
             threshold: Some(900.),
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -410,7 +415,7 @@ async fn compact_marked(
     block: usize,
     keyed: bool,
 ) -> Vec<Arc<AgentEvent>> {
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
@@ -419,8 +424,9 @@ async fn compact_marked(
             output,
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -496,7 +502,7 @@ async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
     // fails with the recovery error naming the summary, no second compaction
     // runs, and the failed request carries the budget facts (§5.3).
     let budget = 8_192. - 2_048.;
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
@@ -505,8 +511,9 @@ async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
             summary: Some(Box::leak("s".repeat(6_000).into_boxed_str())),
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -575,7 +582,7 @@ async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
 /// context's own order (ContextCompaction §5.6, acceptance 11).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_branch_regrows_from_its_own_history() {
-    let agent = builder_with_context(
+    let agent = MinimalHost::start(&builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer::default(),
         Context {
@@ -583,8 +590,9 @@ async fn a_child_branch_regrows_from_its_own_history() {
             summary: Some(Box::leak("s".repeat(1_100).into_boxed_str())),
             ..Context::default()
         },
-    )
-    .build();
+    ))
+    .await
+    .unwrap();
     let session = agent
         .create_session(SessionConfig::default())
         .await

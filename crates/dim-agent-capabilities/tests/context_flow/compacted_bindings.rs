@@ -10,7 +10,6 @@ use dim_agent_capabilities::{
     host_platform::{HostPlatform, ShellStatus},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
-use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -163,10 +162,9 @@ impl ModelDriver for Script {
 }
 
 struct Files {
-    root: Ctx,
     dir: PathBuf,
     model: Arc<Script>,
-    agent: Agent,
+    agent: MinimalHost,
 }
 
 impl Files {
@@ -174,14 +172,12 @@ impl Files {
         let dir = std::env::temp_dir().join(format!("dim-compacted-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
-        let root = Ctx::root_with(tokio::runtime::Handle::current());
         let mut platform = HostPlatform::current(ShellStatus::Unavailable {
             code: "COMPACTED_BINDINGS_TEST",
             reason: "The file tools run no command here.".into(),
         })
         .unwrap();
         platform.home = dir.clone();
-        root.provide_as::<HostPlatform>(Arc::new(platform)).unwrap();
         let model = Arc::new(Script::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
@@ -216,13 +212,13 @@ impl Files {
                 output_root: dir.join("output"),
             },
         );
-        let agent = builder.build_in(&root);
-        Self {
-            root,
-            dir,
-            model,
-            agent,
-        }
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<HostPlatform>(Arc::new(platform))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        Self { dir, model, agent }
     }
     async fn session(&self) -> Session {
         self.agent
@@ -275,7 +271,6 @@ impl Files {
     }
     async fn shutdown(self) {
         self.agent.close().await.unwrap();
-        self.root.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

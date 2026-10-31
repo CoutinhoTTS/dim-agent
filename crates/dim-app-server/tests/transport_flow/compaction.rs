@@ -203,11 +203,7 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         .unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
-            ..Default::default()
-        };
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(4_000, 200);
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
@@ -228,9 +224,11 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert_eq!(usage["result"]["outputTokens"], 200.0);
         assert_eq!(usage["result"]["thresholdTokens"], 3800.0 - 0.2 * 3800.0);
         assert_eq!(usage["result"]["baselineSource"], "full_estimate");
+        let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(overhead > 0.);
-        let size = 600.;
+        // One turn stays below the threshold; two cross it.
+        let size = (threshold - overhead) / 2.;
         let missing = client
             .rpc("session.context.compact", json!({"sessionId":sid}))
             .await;
@@ -240,6 +238,18 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         let events = loop {
             turn(&mut client, &sid, &big(index, size)).await;
             index += 1;
+            if index == 1 {
+                let after = client
+                    .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
+                    .await;
+                assert_ok(&after);
+                assert!(
+                    after["result"]["estimatedInputTokens"].as_f64().unwrap()
+                        < after["result"]["thresholdTokens"].as_f64().unwrap(),
+                    "one turn already crosses the threshold: {}",
+                    after["result"]
+                );
+            }
             let events = history(&mut client, &sid).await;
             if events.iter().any(|event| is(event, "context/compaction")
                 && event["data"]["status"] == "completed")
@@ -611,11 +621,9 @@ async fn summary_reasoning_comes_from_factory_configuration() {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
+        let capabilities = dim_agent_types::CatalogCapabilities {
             reasoning: true,
-            ..Default::default()
+            ..dim_agent_types::CatalogCapabilities::with_limits(4_000, 200)
         };
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","displayName":"Reasoning","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"thinking","displayName":"thinking","status":"active","capabilities":capabilities,"metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}}}}],"enabled":true})).await);
         assert_ok(
@@ -672,6 +680,129 @@ async fn summary_reasoning_comes_from_factory_configuration() {
         assert_eq!(completed["data"]["diagnostics"]["strategy"]["reasoning"], "off");
         assert!(completed["data"]["diagnostics"]["strategy"].get("targetTokens").is_none());
 
+        server.child.kill().await.unwrap();
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A branch whose fixed request alone crosses the threshold has no cut that
+/// removes more than the strategy's planned replacement: the automatic
+/// threshold trigger records the existing skip with no summarizer request,
+/// while a manual `/compact` on the same history still calls the summarizer
+/// and reports its own outcome (ContextCompaction §5.2, §5.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_replacement() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let provider = Arc::new(Provider::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(completion))
+            .with_state(provider.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = std::path::PathBuf::from("/tmp")
+            .join(format!("dim-compaction-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(directory.join("home")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            directory.join("home"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let mut server = launch_binary(&directory).await;
+        let mut client = connect(&server).await;
+        // The fixed request, the shell-input guide entry included, crosses the
+        // threshold at 0.8 × (window − output) while the window still leaves
+        // room for the requested output, so the turn meets no output-budget
+        // recovery and the threshold skip is what it measures.
+        let (context_window, max_output_tokens) = (2_900, 200);
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(
+            context_window,
+            max_output_tokens,
+        );
+        assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000006","displayName":"Tight","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
+        assert_ok(
+            &client
+                .rpc("provider.select", json!({"providerId":"018ec73f-0000-7000-8000-000000000006","modelId":"small"}))
+                .await,
+        );
+        let created = client
+            .rpc("session.create", json!({"cwd":directory,"tools":[]}))
+            .await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].clone();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+        let usage = client
+            .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
+            .await;
+        assert_ok(&usage);
+        let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
+        let budget = (context_window - max_output_tokens) as f64;
+        // ContextModel::threshold_tokens (context_model.rs:78-83): the trigger
+        // leaves 10% of the input budget, at least 16000 tokens and at most
+        // 20% of it.
+        let reserve = (0.10 * budget).max(16_000.).min(0.20 * budget);
+        assert_eq!(threshold, budget - reserve);
+        let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
+        assert!(
+            overhead > threshold,
+            "the fixed request alone crosses the threshold: {overhead}"
+        );
+
+        turn(&mut client, &sid, "first").await;
+        let events = history(&mut client, &sid).await;
+        let results: Vec<_> = events
+            .iter()
+            .filter(|event| is(event, "context/compaction"))
+            .collect();
+        // The threshold trigger records the first request's own estimate. It
+        // must leave room for the output the model asks for, or the turn would
+        // meet provider-output-budget recovery instead of this skip.
+        let request = results
+            .first()
+            .and_then(|event| event["data"]["diagnostics"]["estimatedInputTokens"].as_f64())
+            .expect("the threshold compaction records the request estimate");
+        assert!(
+            request + max_output_tokens as f64 <= context_window as f64,
+            "the request leaves no room for the requested output: {request} + {} > {}",
+            max_output_tokens, context_window
+        );
+        assert_eq!(provider.summaries(), 0);
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|event| is(event, "context/compaction-start"))
+            .collect();
+        assert_eq!(starts.len(), 1, "{events:?}");
+        assert_eq!(starts[0]["data"]["trigger"], "threshold");
+        assert_eq!(results.len(), 1, "{events:?}");
+        assert_eq!(results[0]["data"]["status"], "skipped");
+        assert_eq!(results[0]["data"]["reason"], "nothing_to_compact");
+        assert_eq!(results[0]["data"]["start"], starts[0]["sequence"]);
+        assert_eq!(results[0]["data"]["diagnostics"]["modelCallCount"], 0);
+        assert_eq!(results[0]["data"]["diagnostics"]["entriesReplaced"], 0);
+
+        let reply = client
+            .rpc("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
+            .await;
+        assert_eq!(reply["error"]["data"]["appError"], "compaction_failed");
+        assert_eq!(
+            reply["error"]["message"],
+            "Compacted context does not reduce input within the model budget."
+        );
+        assert_eq!(provider.summaries(), 1);
+        let events = history(&mut client, &sid).await;
+        let manual = events
+            .iter()
+            .rev()
+            .find(|event| is(event, "context/compaction"))
+            .unwrap();
+        assert_eq!(manual["data"]["status"], "failed");
+        assert_eq!(manual["data"]["diagnostics"]["trigger"], "manual");
+        assert_eq!(manual["data"]["diagnostics"]["modelCallCount"], 1);
+        assert!(manual["data"]["command"].is_u64());
         server.child.kill().await.unwrap();
         http.abort();
         std::fs::remove_dir_all(directory).unwrap();

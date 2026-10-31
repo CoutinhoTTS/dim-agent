@@ -34,6 +34,7 @@ const linesBusy = computed(() => {
   return view.value?.lines.some((line) => line.id !== MAIN_BRANCH && (line.state.kind === "working" || approvals.some((request) => request.branchId === line.id))) ?? false
 })
 const branchable = computed(() => connection.supports("session.branch_end") && view.value?.status === "ready")
+const canNewLine = computed(() => connection.supports("session.branch_create") && view.value?.status === "ready")
 
 function send(text: string): Promise<void> {
   return chat.submit(props.sessionId, MAIN_BRANCH, text)
@@ -54,6 +55,13 @@ function openLine(branchId: string): void {
 
 function branch(text: string, cut: number): void {
   ui.requestNewLine({ sessionId: props.sessionId, parentBranchId: MAIN_BRANCH, at: cut, text })
+}
+
+async function createBranch(prompt: string): Promise<void> {
+  const at = view.value?.lastTurnEnd
+  if (at === undefined) throw new Error(t("lines.noFinishedTurn"))
+  const branchId = await chat.createLine(props.sessionId, MAIN_BRANCH, at, prompt)
+  ui.openLine(props.sessionId, branchId)
 }
 </script>
 
@@ -112,7 +120,7 @@ function branch(text: string, cut: number): void {
       @quote="composer?.quote($event)"
     />
     <div v-if="approval" class="composer-panel">
-      <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
+      <ApprovalPrompt :key="JSON.stringify([approval.branchId, approval.requestId])" :session-id="sessionId" :request="approval" :keyboard="approvalKeyboard" />
     </div>
     <ComposerPanel
       v-else
@@ -124,6 +132,8 @@ function branch(text: string, cut: number): void {
       :stop="stop"
       :model-selectable="connection.supports('session.model.update')"
       :select-model="selectModel"
+      :create-branch="canNewLine ? createBranch : undefined"
+      :open-lines="branchable ? () => ui.openLines(sessionId) : undefined"
     />
   </section>
 </template>

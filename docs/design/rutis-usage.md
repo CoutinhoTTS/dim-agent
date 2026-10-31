@@ -48,17 +48,18 @@ Which scope a part belongs in is Dim's decision ([plugin contract §3](plugin-co
 generation unloads, however it ends. A generator's dependencies are checked against its scope when an
 instance mounts it, so a part that names a group outside its scope fails there.
 
-**Where plugins run.** The App Server places plugins as process rows of its loader and provides the
-registry to them by the process name `partRegistry`. A library host or a test adds plugins to the Agent
-builder (`AgentBuilder::plugin`), and an Agent that places itself mounts them in its own loader. The
-registry belongs to a placement: an Agent that places itself mounts only the parts its own plugins
-register, so two Agents built from one builder do not mount each other's parts.
+**Where plugins run.** A host has one loader, and its Agents are built in it
+(`AgentBuilder::build(loader, anchor)`). The App Server places plugins as process rows of its loader
+and provides the registry to them by the process name `partRegistry`. Tests, examples and `xtask` are
+hosts like the App Server: the minimal host (`dim_agent_runtime::testing::MinimalHost`) assembles one
+root and its loader the same way, with the plugins added to the Agent builder (`AgentBuilder::plugin`)
+as process rows. Each minimal host has a registry of its own, so two Agents built from one builder in
+two hosts do not mount each other's parts.
 
 **Isolation labels.** A label that separates rows is numbered by one process-wide counter, not one per
 loader or builder. A per-builder counter restarts at 1, so two Agents built from one builder isolate
-their values under the same label, and generated descriptions of the assembly change between runs. A
-label derived per loader lets two Agents sharing a host give their loader, part registry and language
-mounter one label, so they mount each other's parts. Numbering in the process prevents both.
+their values under the same label, and generated descriptions of the assembly change between runs.
+Numbering in the process prevents this.
 
 **Mounting.** Every Session and branch instance holds two mounter rows, the only rows of its group
 besides the scope's own mechanisms.
@@ -117,14 +118,14 @@ name-bound (#391, #392, #396–#398, #400).
   `AgentBuilder::feature`, or its own plugin added with `AgentBuilder::plugin`. The install functions,
   which are the profiles, require the parts they install by name (`require_feature`,
   `require_part`). The App Server places the builder's plugins as process rows and provides
-  `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself
-  mounts them in its own loader with a registry of its own. A required part nothing has registered
+  `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); the minimal host does the
+  same with a registry of its own. A required part nothing has registered
   yet holds an instance's creation as a required row does. A feature that owns process state
   registers its parts from the row that holds it: Mcp, Collaboration, Agents, SkillsCatalog and
   WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
   PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
-  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. An Agent
-  placing itself starts its plugins with its first Session or `Agent::start`.
+  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. The
+  minimal host starts its plugins when it starts.
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
@@ -449,9 +450,9 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 The required mounter mounts the parts the profile requires (`AgentBuilder::require_part`) and hands
 them to the instance's publication with its required rows; a required part nothing has registered
 yet holds the creation until it is, within the creation's deadline. The builder's registry
-(`AgentBuilder::parts`) serves the Agents a host places (`build_at`), which provides it to its
-process plugins as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself creates a
-registry of its own for the plugins it mounts. A registration is an effect of the caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
+(`AgentBuilder::parts`) serves the Agents the host builds (`AgentBuilder::build`), which provides it
+to its process plugins as `partRegistry` (`AgentBuilder::plugin_rows`); the minimal host creates a
+registry of its own. A registration is an effect of the caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
 already failed is not reported again when its instance closes, and `SessionLoader` creates instances
 from its instance's Session scope row, since the loader places an instance only from a row's
 context.
@@ -463,8 +464,7 @@ A dependency the configuration enables is an `Option<Key<T>>` the factory fills 
 A value the host configures for a process name, such as a scripted `ModelHost`, is
 `AgentBuilder::process_value`. The Agent group row (`AgentBuilder::agent_row`) holds its provider and
 isolates the name per Agent instance, so neither Agents sharing a host nor the host's own provider of the
-name collide with it. An Agent hosting itself places that row; a host using `build_at` places it in its
-loader, whose catalog is the builder's. `session_value` stays for Session names.
+name collide with it. The host places that row in its loader, whose catalog is the builder's. `session_value` stays for Session names.
 
 ### A.3 Settled questions
 
@@ -478,11 +478,16 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   gates when chosen (an `Option<Key<T>>` the factory fills), and the composition check covers it then;
   one used only if present is read with `get_at` and not listed in `injects`. Its name must still be
   registered.
-- **Startup deadline.** One deadline covers loader startup, reconcile and rows becoming Active. At the
-  deadline the creation fails and its rollback cancels the rows; rutis waits for a cancelled `apply` to
-  return and never aborts it, so `apply` returns once `ctx.cancelled()` resolves. A test injects a row
-  that waits in `apply` until then (`tests/integration/tests/named_parts.rs`). Failing on no progress
-  instead of a total deadline is [#387](https://github.com/arcships/dim/issues/387).
+- **Startup progress.** `startup_timeout` bounds an interval without progress, across loader startup,
+  reconcile, required rows becoming Active and opening replay. A row's first activation during the
+  opening, advancement of its branch's dispatch sequence, or completion of an opening receipt resets
+  that interval. Restarting the same row does not renew it; activity in another Session does not.
+  There is no fixed total startup deadline. The
+  same rule applies to Session and branch opening, process startup and restart. A branch waiting for
+  its parent follows that parent's bounded opening rather than imposing another total deadline.
+  A stalled opening fails with its inactive rows and unmet dependencies, and rollback cancels them.
+  A composition error or failed required provider fails immediately. Rutis never aborts `apply`:
+  rollback waits for it to return after `ctx.cancelled()` resolves.
 
 ## Appendix B: TypeScript and Python binding
 

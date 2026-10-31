@@ -34,6 +34,10 @@ pub enum Command {
         allow: bool,
         remember: bool,
     },
+    RetryApproval {
+        request_id: String,
+        branch_id: String,
+    },
     AskAnswers {
         session_id: String,
         call: crate::question::Call,
@@ -177,6 +181,8 @@ pub enum Command {
     },
     /// `/mcp ...`: the words after the command.
     Mcp(String),
+    /// `/settings recording ...`: the words after the command.
+    Recording(String),
     /// List the plugins of the `/plugins` panel (`plugin.list`).
     ListPlugins,
     /// Change one plugin; the worker lists the plugins again after it.
@@ -396,6 +402,7 @@ pub struct ModelItem {
     pub provider_version: u32,
     pub model_id: String,
     pub display_name: String,
+    pub zdr: bool,
     /// Advertised reasoning efforts, in cycle order. Empty when the model
     /// offers no choice.
     pub efforts: Vec<String>,
@@ -405,13 +412,37 @@ pub struct ModelItem {
     pub saved_effort: Option<String>,
 }
 
-/// A usable provider with unavailable models and none selectable.
+/// Why a usable provider contributes no selectable model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EmptyReason {
+    /// It lists no models: none discovered yet, or none at all. `listable`
+    /// is whether `provider.refresh` can ask it for a listing.
+    NoModels { listable: bool },
+    /// Some models are unavailable and some are disabled.
+    Mixed { unavailable: usize, disabled: usize },
+    /// Every model it lists is unavailable.
+    Unavailable { count: usize },
+    /// Every model it lists is disabled.
+    Disabled { count: usize },
+    /// Its catalog could not be read, so nothing is known about its models.
+    Unreadable,
+}
+
+/// A usable provider with no selectable model.
 #[derive(Debug, Clone)]
 pub struct EmptyProvider {
     pub provider_id: String,
     pub provider_name: String,
-    /// How many of its models it lists as unavailable.
-    pub unavailable: usize,
+    pub reason: EmptyReason,
+}
+
+/// A usable provider whose catalog holds models no source declares a
+/// context window or maximum output for.
+#[derive(Debug, Clone)]
+pub struct NeedsLimitsProvider {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub count: usize,
 }
 
 /// Which model new Collaboration members use (`collaboration.model_policy`).
@@ -443,9 +474,12 @@ pub enum ModelPolicyUpdate {
 pub struct ModelList {
     pub models: Vec<ModelItem>,
     pub current: Option<(String, String)>,
-    /// The providers with unavailable models and none selectable, so the
-    /// picker can say why they are missing.
+    /// The usable providers that offer no selectable model, with why, so the
+    /// picker can name them.
     pub empty: Vec<EmptyProvider>,
+    /// The usable providers whose models include ones with undeclared
+    /// limits, with how many.
+    pub limits: Vec<NeedsLimitsProvider>,
 }
 
 /// One stored session as the picker shows it.
@@ -503,6 +537,10 @@ pub enum Update {
         service_tiers: bool,
     },
     Snapshot(Box<ViewSnapshot>),
+    ApprovalPending {
+        branch_id: String,
+        request_id: String,
+    },
     QuestionReply {
         session_id: String,
         call: crate::question::Call,
@@ -546,6 +584,9 @@ pub enum Update {
         result: Result<(), String>,
     },
     Models(Result<ModelList, String>),
+    /// A catalog `models()` asked `provider.refresh` to fill holds models
+    /// now: a picker that is still open reads the list again.
+    ModelsRefilled,
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
     Isolation(Result<dim_agent_types::isolation::IsolationPolicySnapshot, String>),

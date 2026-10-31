@@ -167,7 +167,7 @@ async fn session_methods_does_not_list_a_name_management_holds() {
                         "auth":{"type":"anonymous"}
                     },
                     "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
-                        "capabilities":dim_agent_types::ModelCapabilities::default()}],
+                        "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],
                     "enabled":true
                 }),
             )
@@ -279,15 +279,14 @@ impl rutis::host::DynPlugin for NotesOwner {
     ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
             let methods = ctx.require_at(&self.methods)?;
-            let view = ctx.plugin(NotesProvider {
-                methods,
-                notes: self.notes.clone(),
-            });
-            (&view).await.map_err(|error| {
-                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
-                    format!("Notes provider failed: {error}").into(),
-                ))
-            })?;
+            let view = dim_agent_runtime::mount_active(
+                ctx,
+                NotesProvider {
+                    methods,
+                    notes: self.notes.clone(),
+                },
+            )
+            .await?;
             self.notes.0.views.lock().unwrap().push(view);
             Ok(rutis::host::Effect::Done)
         })
@@ -406,6 +405,7 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             {"name": "notes.stream", "mutating": false},
             {"name": "notes.wait", "mutating": true},
             {"name": "session.agent.update", "mutating": true},
+            {"name": "session.collaboration.approval.get", "mutating": false},
             {"name": "session.input.withdraw", "mutating": true},
         ]})
     );
@@ -486,7 +486,7 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         client
             .rpc("session.methods", json!({"sessionId": sid}))
             .await["result"],
-        json!({"methods": [{"name": "session.agent.update", "mutating": true}, {"name": "session.input.withdraw", "mutating": true}]})
+        json!({"methods": [{"name": "session.agent.update", "mutating": true}, {"name": "session.collaboration.approval.get", "mutating": false}, {"name": "session.input.withdraw", "mutating": true}]})
     );
     gate.notify_one();
     restart.await.unwrap();
