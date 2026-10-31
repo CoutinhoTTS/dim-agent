@@ -887,12 +887,12 @@ impl ContextPolicy {
         let input = match prepared {
             Some(input) => input,
             None => {
-                let context = self
-                    .history
-                    .context(&self.timeline, self.timeline.committed())
+                let facts = self
+                    .timeline
+                    .policy_facts(self.timeline.committed(), "")
                     .await
-                    .map_err(|e| HostError::failed(e.to_string()))?;
-                self.estimate(&request, model.as_ref(), &context.events)?
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                self.estimate(&request, model.as_ref(), &facts.events)?
                     .input
             }
         };
