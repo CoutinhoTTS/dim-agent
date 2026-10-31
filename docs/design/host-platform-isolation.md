@@ -164,6 +164,13 @@ without a backend fails as `isolation_unavailable` — on Windows always, on Lin
 on the captured `PATH`. Nothing starts a payload at a weaker boundary; there is no implicit
 fallback. A denied write or a refused socket reaches the command as an ordinary error.
 
+The same backend state is readable before a process starts. `HostPlatform::sandbox_backend()`
+reports `Available`, or `Unavailable` with the reason the preparation failure would use; the App
+Server's `ExecutionBackend` part exposes it as `host.execution.backend` to the Execution row. The
+Linux answer comes from the same captured-`PATH` bubblewrap resolution preparation uses, so a host
+that reports the reason cannot start a different boundary. ADR 010 D1 keeps the preparation failure
+as the enforcement; the row only names it earlier.
+
 ## Visibility
 
 **Tool declarations.** On macOS and Linux, the `exec` and persistent-shell `execute` declarations

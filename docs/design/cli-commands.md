@@ -87,6 +87,7 @@ sandbox is in `/settings > Execution`; the sandbox is not another Permission pre
 ```text
 Settings > Execution
   Applies to new processes and persistent shells.
+  Sandbox is unavailable on this host: <reason>   shown only when the host has no backend
   Sandbox             off  >                    toggle off | on
   Network             off  >                    ignored while Sandbox is off, and shown as
                                                 "off (ignored while Sandbox is off)"
@@ -96,7 +97,12 @@ Settings > Execution
 ```
 
 Opening the panel reads `{source: "execution", scope: "user"}` and keeps the returned revision with
-the draft, not as a user-entered field. ↑↓ move, Enter or Space toggles the selected row, Esc
+the draft, not as a user-entered field. When the daemon advertises `host.execution.backend`, the
+panel also reads `{}` from it: `{available: true}` or `{available: false, reason}`. The reason is
+the text the next process start would use; the panel shows it and leaves both switches editable.
+The Web Permissions page reads the same method and shows the same reason. Neither client infers the
+platform or the backend from its own environment.
+↑↓ move, Enter or Space toggles the selected row, Esc
 closes the panel and asks before discarding edits. Save submits both switches with the inspected
 revision; Reset to defaults asks for confirmation, then writes both switches off with that
 revision. Neither action retries a stale revision automatically: a conflict keeps the draft and
@@ -106,15 +112,22 @@ Sandbox is turned on can be read. Loading disables mutation, and a daemon withou
 methods displays an unsupported-daemon error instead of falling back to the host.
 
 The row reports the stored switches, not the boundary of a running command: a running process,
-including a persistent shell, keeps the boundary it started with. A platform without a sandbox
-backend is reported by the next process start as `isolation_unavailable`; showing that state on
-the row is [#691](https://github.com/arcships/dim/issues/691)'s item.
+including a persistent shell, keeps the boundary it started with. On a platform with no sandbox
+backend — Windows, or Linux without `bwrap` — the row names the reason, and the next process start
+still fails as `isolation_unavailable`; showing the state does not weaken that refusal.
+
+The switches are stored configuration. A model that can write the source — under `full-access`, or
+through an approved outside write under `workspace-write` — changes the value for the next process.
+That write has the same authority as changing the row, creates no grant and does not change a
+running process; a user who wants a boundary does not approve such a write
+([ADR 011 D2](../adr/011-execution-settings.md)).
 
 Verification covers what the row shows and what the daemon does with it: the read, the toggle that
-keeps the stored Network value visible while Sandbox is off, the CAS conflict, and a save followed
-by `exec` under the new boundary, where a write outside the workspace fails while the sandbox is on
-and succeeds once it is off. Reset, reload after an external edit, the unsupported-daemon branch
-and a persistent shell started before the change have no flow coverage yet.
+keeps the stored Network value visible while Sandbox is off, the CAS conflict, the backend reason,
+and a save followed by `exec` under the new boundary, with Network off and with Network on, where a
+write outside the workspace fails while the sandbox is on and succeeds once it is off. Reset,
+reload after an external edit, the unsupported-daemon branch and a persistent shell started before
+the change have no flow coverage yet.
 
 ## Commands
 

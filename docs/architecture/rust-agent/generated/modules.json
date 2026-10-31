@@ -536,6 +536,7 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "cfg",
         "format",
@@ -1771,6 +1772,7 @@
       "file": "crates/dim-app-server/src/execution_settings.rs",
       "unexpandedMacros": [
         "json",
+        "unreachable",
         "vec"
       ]
     },
@@ -8343,7 +8345,9 @@
       "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_capabilities::host_platform::isolation",
       "references": [
-        "mod isolation"
+        "mod isolation",
+        "path isolation::BWRAP_UNAVAILABLE",
+        "path isolation::bubblewrap"
       ]
     },
     {
@@ -8427,10 +8431,12 @@
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
+        "path HostPlatform::current",
         "path Isolation",
         "path ProcessSpec",
         "path ProcessSpecError",
         "path TemporaryDirectory",
+        "path super::ShellStatus::Unavailable",
         "path super::path_entries",
         "use super::HostPlatform",
         "use super::Isolation",
@@ -14477,6 +14483,7 @@
       "to": "dim_app_server::execution_settings",
       "references": [
         "mod execution_settings",
+        "path execution_settings::ExecutionBackendPlugin::new",
         "path execution_settings::ExecutionSettingsPlugin::new"
       ]
     },
@@ -17313,6 +17320,29 @@
     },
     {
       "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path SandboxBackend::Available",
+        "path SandboxBackend::Unavailable",
+        "use dim_agent_capabilities::host_platform::HostPlatform",
+        "use dim_agent_capabilities::host_platform::SandboxBackend"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope::User",
@@ -17325,6 +17355,22 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
       ]
     },
     {
@@ -25109,6 +25155,7 @@
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
+        "path SandboxBackend",
         "path SessionItem",
         "path SessionPort",
         "path SubagentModelPolicy",
@@ -25123,6 +25170,7 @@
         "path Update::Context",
         "path Update::Failed",
         "path Update::Isolation",
+        "path Update::IsolationBackend",
         "path Update::Login",
         "path Update::ModelFeatures",
         "path Update::ModelPolicy",
@@ -25170,6 +25218,7 @@
         "use crate::model::session::PluginReply",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry",
+        "use crate::model::session::SandboxBackend",
         "use crate::model::session::SessionItem",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SubagentModelPolicy",
@@ -27018,7 +27067,10 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ExecutionSnapshot",
-        "use crate::model::session::ExecutionSnapshot"
+        "path SandboxBackend",
+        "path SandboxBackend::Unavailable",
+        "use crate::model::session::ExecutionSnapshot",
+        "use crate::model::session::SandboxBackend"
       ]
     },
     {
@@ -30876,6 +30928,7 @@
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Isolation",
+        "path Update::IsolationBackend",
         "path Update::Login",
         "path Update::MemberConversation",
         "path Update::ModelFeatures",
@@ -33860,6 +33913,14 @@
     {
       "module": "dim_cli::mcp_command",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::model::session",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_cli::model::session",
+      "path": "Reply::deserialize"
     },
     {
       "module": "dim_cli::plugin_command::tests",

@@ -198,6 +198,12 @@ export function readExecutionSettings(value: unknown): ExecutionSettings {
   return { revision: string(source.revision), sandbox: boolean(document.sandbox), network: boolean(document.network) }
 }
 
+export type SandboxBackend = { available: true } | { available: false; reason: string }
+export function readSandboxBackend(value: unknown): SandboxBackend {
+  const source = object(value)
+  return boolean(source.available) ? { available: true } : { available: false, reason: string(source.reason) }
+}
+
 export type ModalityModel = { id: string; name: string; vision: boolean; toolCalling: boolean; modalities: string[] }
 export type ModalityCatalog = { version: number; models: ModalityModel[] }
 export function readModalityCatalog(value: unknown): ModalityCatalog | undefined {
