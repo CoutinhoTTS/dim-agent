@@ -370,10 +370,15 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 | `toolRegistry.register` | async | `ToolDeclaration`、`execute` | 注册完成时无返回值；被拒绝时返回错误 |
 | `execute`（注册部件自己的函数） | async | `ToolCall`、`cancelled` | `ToolResult` |
 
-`inputSchema` 节点可以省略 `type`，例如由 `oneOf` 表达约束时。保留提供的关键字和
-`type` 是否存在；工具注册和模型请求准备都不为这类节点补造类型。
-持久化声明遵守[原生 v22 格式决定](../../../design/appserver/native-storage-format.md#580-v22-格式决定)；
-v21 读取器无法解码省略 `type` 的节点。
+`inputSchema` 节点可以省略 `type`，例如由 `oneOf` 表达约束时。
+节点的 `type` 是名称数组时按规范形式存储：一个名称写成 `"type": T`；
+两个及以上则去掉 `type`，按送达顺序加入 `anyOf: [{"type": T1}, …]`，
+节点已有 `anyOf` 时置于新增的 `allOf` 下。两种形式接受同一组实例。
+格式将其作为子 schema 的位置（`properties` 的值与 `items`）允许布尔形式：
+`true` 存为 `{}`，`false` 存为 `{"not": {}}`。
+格式未定义的关键字，包括 `anyOf` 分支与 `$defs`，按到达原样保存、从不改写。
+工具注册和模型请求准备都不为省略的节点补造类型，也不改动已有的关键字。
+持久化声明是当前存储格式下不变的 v22 形状；v21 读取器无法解码省略 `type` 的节点。
 
 ```text
 // ToolDeclaration

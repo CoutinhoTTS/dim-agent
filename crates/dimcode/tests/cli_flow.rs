@@ -4276,6 +4276,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
         ]));
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"image-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":submit["params"]["user"],"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"image-applied","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"image-input","mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -7350,6 +7351,7 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.quiet(Duration::from_millis(200));
 
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-9","sequence":10,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"both allowed"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-9-applied","sequence":11,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-9","mode":"queue"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();

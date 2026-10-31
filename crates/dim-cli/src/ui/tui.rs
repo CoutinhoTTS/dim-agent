@@ -602,11 +602,7 @@ fn run_terminal(
                     } else {
                         screen = Screen::new(terminal.size(), synchronized);
                     }
-                    app.fullscreen = entering;
-                    if entering {
-                        app.redraw_window();
-                    }
-                    app.request_reflow();
+                    app.set_fullscreen(entering);
                     dirty = true;
                 }
                 Outcome::Suspend => {
@@ -790,6 +786,9 @@ struct App {
     /// Committed groups (history ids) whose delegation cards still change:
     /// fullscreen redraws them from the snapshot.
     card_blocks: Vec<usize>,
+    /// Committed user rows (history ids) the model had not consumed yet:
+    /// fullscreen redraws them once it does.
+    message_blocks: Vec<usize>,
     /// The second their running time was last drawn for.
     card_second: u64,
     session_id: String,
@@ -1006,6 +1005,7 @@ impl App {
             rewrites: 0,
             rewrite_log: Default::default(),
             card_blocks: Vec::new(),
+            message_blocks: Vec::new(),
             card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
@@ -1387,7 +1387,7 @@ impl App {
     }
 
     /// Queued inputs, oldest first: submitted while a turn was already
-    /// running, not yet consumed.
+    /// running, without their `input/applied` yet.
     fn queued(&self) -> Vec<(String, String)> {
         self.snapshot
             .as_ref()
@@ -3118,6 +3118,7 @@ impl App {
                 frame.commits.push(text);
             }
         }
+        self.refresh_messages();
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
             if let Block::ToolGroup(group) = &source
@@ -3125,6 +3126,11 @@ impl App {
                 && self.fullscreen
             {
                 self.card_blocks.push(self.dropped + self.history.len());
+            }
+            if let Block::User { pending: true, .. } = &source
+                && self.fullscreen
+            {
+                self.message_blocks.push(self.dropped + self.history.len());
             }
             match placement {
                 Placement::New => self.record(source),
@@ -3612,12 +3618,13 @@ impl App {
             Text(String),
             Thinking(String),
             Tool(usize),
-            Compaction(usize),
+            Row(usize),
         }
         let mut live_text: Vec<TextBlock> = Vec::new();
         let mut live_items: Vec<LiveItem> = Vec::new();
         let mut settled_assistant: Vec<TextBlock> = Vec::new();
-        let mut settled_ids: Vec<String> = Vec::new();
+        let mut settled: Vec<(usize, String)> = Vec::new();
+        let mut pending_messages: Vec<(usize, String)> = Vec::new();
         let mut held = false;
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < floor || held {
@@ -3651,7 +3658,11 @@ impl App {
                         .as_ref()
                         .is_some_and(|c| c.state == CompactionState::Running) =>
                 {
-                    live_items.push(LiveItem::Compaction(index));
+                    live_items.push(LiveItem::Row(index));
+                }
+                RowKind::UserMessage if row.pending && !self.fullscreen => {
+                    live_items.push(LiveItem::Row(index));
+                    pending_messages.push((index, row.row_id.clone()));
                 }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
@@ -3667,12 +3678,27 @@ impl App {
                             id: &row.row_id,
                             text,
                         });
-                        settled_ids.push(row.row_id.clone());
+                        settled.push((index, row.row_id.clone()));
                     }
                 },
-                _ => settled_ids.push(row.row_id.clone()),
+                _ => settled.push((index, row.row_id.clone())),
             }
         }
+
+        // The live tail is drawn after everything committed, so it can hold
+        // only the newest rows. A pending message with a settled row after it
+        // is committed in Timeline order instead, in its final colour: a
+        // committed row cannot take the hint back (timeline UI §4.8).
+        let mut forced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        if let Some(last) = settled.last().map(|(index, _)| *index) {
+            for (index, id) in pending_messages.iter().filter(|(index, _)| *index < last) {
+                live_items.retain(|item| !matches!(item, LiveItem::Row(at) if at == index));
+                settled.push((*index, id.clone()));
+                forced.insert(*index);
+            }
+        }
+        settled.sort_by_key(|(index, _)| *index);
+        let settled_ids: Vec<String> = settled.into_iter().map(|(_, id)| id).collect();
 
         let markdown = &self.markdown;
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
@@ -3719,7 +3745,12 @@ impl App {
                 }
                 (RowKind::AssistantMessage, Some(batch)) => streamed(batch),
                 _ => {
-                    let block = project_row(&snapshot.rows, index, detail_of(index));
+                    let mut block = project_row(&snapshot.rows, index, detail_of(index));
+                    if forced.contains(&index)
+                        && let Block::User { pending, .. } = &mut block
+                    {
+                        *pending = false;
+                    }
                     let lines = render_block(&block, width, p, markdown);
                     if lines.is_empty() {
                         return (String::new(), None);
@@ -3822,7 +3853,7 @@ impl App {
                         RUNNING_MARK,
                     )
                 }
-                LiveItem::Compaction(index) => render_block(
+                LiveItem::Row(index) => render_block(
                     &project_row(&snapshot.rows, *index, detail_of(*index)),
                     width,
                     p,
@@ -3855,6 +3886,7 @@ impl App {
         self.line_draft = None;
         self.fork_confirm = None;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3906,6 +3938,7 @@ impl App {
             self.composer.set_draft(&text);
         }
         self.card_blocks.clear();
+        self.message_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -4012,6 +4045,7 @@ impl App {
         self.history_request = None;
         self.load_more = true;
         self.card_blocks.clear();
+        self.message_blocks.clear();
         self.dropped += self.history.len();
         self.history.clear();
         self.stream_block = None;
@@ -4076,6 +4110,89 @@ impl App {
         if self.rewrite_log.len() > REWRITE_LOG {
             self.rewrite_log.pop_front();
         }
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        if on {
+            self.redraw_window();
+        } else {
+            self.settle_committed_messages();
+        }
+        self.request_reflow();
+    }
+
+    /// Scrollback cannot recolour a row it printed, so a pending message
+    /// committed in fullscreen is settled before the history goes there
+    /// (timeline UI §4.8).
+    fn settle_committed_messages(&mut self) {
+        for index in std::mem::take(&mut self.message_blocks) {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            let Some(Block::User {
+                text, display, cut, ..
+            }) = self.history.get(at).cloned()
+            else {
+                continue;
+            };
+            self.history[at] = Block::User {
+                text,
+                display,
+                cut,
+                pending: false,
+            };
+        }
+    }
+
+    /// Fullscreen redraws a committed user row the model has consumed since;
+    /// scrollback keeps what it printed (timeline UI §4.8).
+    fn refresh_messages(&mut self) {
+        if !self.fullscreen || self.message_blocks.is_empty() {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let settled: Vec<usize> = self
+            .message_blocks
+            .iter()
+            .copied()
+            .filter(|index| {
+                let Some(Block::User {
+                    text,
+                    cut,
+                    pending: true,
+                    ..
+                }) = index
+                    .checked_sub(self.dropped)
+                    .and_then(|at| self.history.get(at))
+                else {
+                    return false;
+                };
+                snapshot.rows.iter().any(|row| {
+                    row.kind == RowKind::UserMessage
+                        && row.cut == *cut
+                        && row.text == *text
+                        && !row.pending
+                })
+            })
+            .collect();
+        for index in settled {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            if let Some(Block::User { pending, .. }) = self.history.get_mut(at) {
+                *pending = false;
+                self.mark_rewritten(index);
+            }
+        }
+        self.message_blocks.retain(|index| {
+            index
+                .checked_sub(self.dropped)
+                .and_then(|at| self.history.get(at))
+                .is_some_and(|block| matches!(block, Block::User { pending: true, .. }))
+        });
     }
 
     /// Fullscreen redraws committed delegation cards as their facts and
@@ -6051,6 +6168,226 @@ mod tests {
         drawn.draw();
     }
 
+    /// The user message the transcript tests draw, in the state `pending`
+    /// gives it.
+    fn message(pending: bool) -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            display: None,
+            row_id: "u1".into(),
+            kind: RowKind::UserMessage,
+            text: "find the leak".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    /// The status row a cancelled turn settles after a stop.
+    fn stopped() -> std::sync::Arc<ViewRow> {
+        std::sync::Arc::new(ViewRow {
+            display: None,
+            row_id: "stopped-1".into(),
+            kind: RowKind::Status,
+            text: "stopped".into(),
+            streaming: false,
+            elapsed_ms: None,
+            tone: None,
+            tool_name: None,
+            tool_input: None,
+            batch: None,
+            pending: false,
+            parked: false,
+            result_text: None,
+            result_is_error: false,
+            diff: None,
+            exit_code: None,
+            member: None,
+            cut: None,
+            line: None,
+            compaction: None,
+        })
+    }
+
+    fn show(drawn: &mut Drawn, rows: Vec<std::sync::Arc<ViewRow>>) {
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+    }
+
+    fn attached() -> Drawn {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        drawn
+    }
+
+    #[test]
+    fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.transcript().contains("find the leak"),
+            "a pending message is drawn"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { .. })),
+            "scrollback prints a message only once it has settled"
+        );
+        show(&mut drawn, vec![message(false)]);
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { text, .. } if text == "find the leak")),
+            "a consumed message settles into scrollback"
+        );
+    }
+
+    #[test]
+    fn scrollback_settles_a_pending_message_before_rows_that_came_after_it() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true), stopped()]);
+        let text = drawn.transcript();
+        assert!(
+            text.find("find the leak") < text.find("stopped"),
+            "the message stays where it was said, above the stop: {text}"
+        );
+        let user = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .expect("the message is committed");
+        let stop = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::Status { text, .. } if text == "stopped"))
+            .expect("the stop is committed");
+        assert!(user < stop, "the message is committed before the stop");
+        assert!(
+            matches!(drawn.app.history[user], Block::User { pending: false, .. }),
+            "a committed row cannot keep the pending hint"
+        );
+        show(&mut drawn, vec![message(false), stopped()]);
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "consuming the message does not commit a second copy"
+        );
+    }
+
+    #[test]
+    fn fullscreen_settles_a_committed_message_in_place() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        let size = (80, 40);
+        let mut full = FullScreen::new(size, false);
+        let paint = |drawn: &mut Drawn, full: &mut FullScreen| {
+            let frame = drawn.app.frame(size);
+            full.render(&frame, size, &drawn.app.palette, &drawn.app)
+        };
+        let displayed = |pending| {
+            let mut row = message(pending);
+            std::sync::Arc::make_mut(&mut row).display = Some("find the leak [Image #1]".into());
+            row
+        };
+        show(&mut drawn, vec![displayed(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, display, pending: true, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
+            )),
+            "fullscreen commits the message where it was said"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the pending row is painted"
+        );
+        show(&mut drawn, vec![displayed(false)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, display, pending: false, .. } if text == "find the leak" && display.as_deref() == Some("find the leak [Image #1]")
+            )),
+            "fullscreen rewrites the same row once the model reads it"
+        );
+        assert!(
+            !paint(&mut drawn, &mut full).is_empty(),
+            "the settled row is painted again"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { pending: true, .. })),
+            "no pending copy is left behind"
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_prints_a_pending_message_settled() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: true, .. } if text == "find the leak"
+            )),
+            "fullscreen commits the pending row"
+        );
+        drawn.app.set_fullscreen(false);
+        drawn.draw();
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: false, .. } if text == "find the leak"
+            )),
+            "scrollback prints the row it cannot recolour"
+        );
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "the hint is dropped, not printed a second time"
+        );
+    }
+
     #[test]
     fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
         let mut drawn = Drawn::new((80, 40), None, true);
@@ -6152,6 +6489,14 @@ mod tests {
             ]}, "mode": "queue"},
         })).unwrap();
         projection.apply("main", &input);
+        for (sequence, name) in [(2, "applied"), (3, "consumed")] {
+            let control = serde_json::from_value(serde_json::json!({
+                "id": format!("image-{name}"), "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": name, "data": {"input_id": "image"},
+            }))
+            .unwrap();
+            projection.apply("main", &control);
+        }
         let mut snapshot = projection.snapshot();
         snapshot.session_id = "s1".into();
         snapshot.focus = "main".into();

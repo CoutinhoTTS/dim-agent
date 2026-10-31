@@ -1449,7 +1449,12 @@
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
       "file": "crates/dim-agent-types/src/tool.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
+        "vec",
+        "write"
+      ]
     },
     {
       "id": "dim_agent_types::v1",
@@ -5905,8 +5910,15 @@
       "from": "dim_agent_aimux::request::tests",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path ProviderKind",
+        "path ProviderKind::Anthropic",
+        "path ProviderKind::Bedrock",
+        "path ProviderKind::Gemini",
         "path ProviderKind::OpenaiChat",
-        "path ProviderKind::OpenaiCompatible"
+        "path ProviderKind::OpenaiCompatible",
+        "path ProviderKind::OpenaiResponses",
+        "path ProviderKind::Xai",
+        "path ProviderKind::XaiResponses"
       ]
     },
     {
@@ -6859,7 +6871,8 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
-        "path ToolResult::error"
+        "path ToolResult::error",
+        "path kind"
       ]
     },
     {
@@ -7437,7 +7450,8 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_types::tool",
       "references": [
-        "path ToolDefinition"
+        "path ToolDefinition",
+        "path kind"
       ]
     },
     {
@@ -8090,7 +8104,8 @@
       "references": [
         "path ToolCall",
         "path ToolDefinition",
-        "path ToolResult"
+        "path ToolResult",
+        "path kind"
       ]
     },
     {
@@ -8745,6 +8760,7 @@
       "references": [
         "path ToolCall",
         "path ToolResult::error",
+        "path kind",
         "path tool"
       ]
     },
@@ -10762,7 +10778,8 @@
         "path ToolDefinition",
         "path ToolResult",
         "path ToolResult::error",
-        "path ToolResult::text"
+        "path ToolResult::text",
+        "path child"
       ]
     },
     {
@@ -10791,7 +10808,8 @@
       "from": "dim_agent_capabilities::timeline_tree::tests",
       "to": "dim_agent_types::tool",
       "references": [
-        "path ToolCall"
+        "path ToolCall",
+        "path kind"
       ]
     },
     {
@@ -11637,6 +11655,7 @@
         "path ToolResult::default",
         "path ToolResult::error",
         "path ToolResult::text",
+        "path kind",
         "path tool"
       ]
     },
@@ -13765,7 +13784,8 @@
       "references": [
         "path ToolCall",
         "path ToolEffect",
-        "path ToolResult"
+        "path ToolResult",
+        "path kind"
       ]
     },
     {
@@ -13848,7 +13868,8 @@
       "from": "dim_agent_types::tool",
       "to": "dim_agent_types",
       "references": [
-        "path JsonObject"
+        "path JsonObject",
+        "path JsonObject::new"
       ]
     },
     {
@@ -15892,6 +15913,7 @@
         "path ToolResult",
         "path ToolResult::error",
         "path ToolResult::text",
+        "path kind",
         "path tool"
       ]
     },
@@ -18365,8 +18387,10 @@
       "to": "dim_app_server::mcp::server",
       "references": [
         "path McpServer",
+        "path McpServerError",
         "path McpServerPlugin::new",
         "use super::server::McpServer",
+        "use super::server::McpServerError",
         "use super::server::McpServerPlugin"
       ]
     },
@@ -19238,6 +19262,13 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::codex_oauth",
       "references": [
         "path OpenAICodexOAuthService",
@@ -19665,6 +19696,13 @@
       "references": [
         "path ModelPreferences",
         "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::legacy",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
       ]
     },
     {
@@ -23831,7 +23869,6 @@
         "path ExecStatus::Completed",
         "path ExecStatus::Failed",
         "path InputMode",
-        "path InputMode::Append",
         "path InputMode::Steer",
         "path ModelOutputOutcome::Failed",
         "path ReplacementParts",
@@ -31166,6 +31203,7 @@
         "path LineState::Waiting",
         "path LineState::Working",
         "path RowKind::AssistantMessage",
+        "path RowKind::Status",
         "path RowKind::UserMessage",
         "path SideLine",
         "path ViewRow",
@@ -31191,6 +31229,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::render::fullscreen",
       "references": [
+        "path FullScreen",
         "path FullScreen::new"
       ]
     },
@@ -32121,7 +32160,8 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
-        "path ToolResult"
+        "path ToolResult",
+        "path kind"
       ]
     },
     {
@@ -32838,6 +32878,10 @@
       "path": "S::Ok"
     },
     {
+      "module": "dim_agent_types::tool",
+      "path": "D::Error"
+    },
+    {
       "module": "dim_agent_types::v1",
       "path": "S::Error"
     },
@@ -33507,7 +33551,7 @@
     },
     {
       "module": "dim_cli::ui::tui",
-      "path": "LiveItem::Compaction"
+      "path": "LiveItem::Row"
     },
     {
       "module": "dim_cli::ui::tui",
