@@ -742,15 +742,16 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     terminal.write(b"\x18\x18");
     terminal.until("Stop-all requests are already in progress");
     terminal.write(b"\x1b[27uleader stays usable\r");
-    if !terminal
-        .transcript
-        .contains("leader notification while stop waits")
-    {
-        terminal.until("leader notification while stop waits");
+    for expected in [
+        "leader notification while stop waits",
+        "command main/main-command:",
+        "first stop failed",
+        "attempted 3, errors 1, unavailable 1",
+    ] {
+        if !terminal.transcript.contains(expected) {
+            terminal.until(expected);
+        }
     }
-    terminal.until("command main/main-command:");
-    terminal.until("first stop failed");
-    terminal.until("attempted 3, errors 1, unavailable 1");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/tasks\r");
     terminal.until("arrived after stop admission");
