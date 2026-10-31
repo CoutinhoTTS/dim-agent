@@ -216,10 +216,10 @@ Session 保留 Approval 现有的所有者侧策略（#98 D10）。`--permission
 仍需审批的调用照样被拒绝（[无头执行](#无头执行)）。其他退出码保持原生 CLI 合同，包括回合失败为 2、
 中断为 130。传输失败不重试提交。重复的 `--image` 参数遵循无头附件合同：先文本，再按参数顺序放入
 经过校验的原始图片字节，路径相对于调用进程。只有图片的调用是有效的。连接仍在时，提交错误保持
-"结果不确定"的诊断/退出路径，除非其 `error.data.appError` 是六种
+"结果不确定"的诊断/退出路径，除非其 `error.data.appError` 是七种
 [保证在提交前拒绝](../../../crates/dim-app-server/README.md#session-submission-errors)之一：
 `invalid_params`、`session_invalid_input`、`session_closed`、`session_build_failed`、
-`service_reloading` 或 `unknown_method`。这些保留普通的错误诊断。其他错误，包括
+`service_reloading`、`unknown_method` 或 `input_blocked`。这些保留普通的错误诊断。其他错误，包括
 `submission_unknown` 和不透明的发布/存储失败，都可能发生在提交之后，不得触发再次发送。
 
 JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进程现有的 `method` 和 `params`。只输出

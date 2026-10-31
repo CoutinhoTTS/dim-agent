@@ -358,9 +358,9 @@ Repeated `--image` arguments follow the headless attachment contract: text first
 then validated original image bytes in argument order, with paths relative to the
 invoking process. An image-only invocation is valid. A submission error on a live
 connection keeps the uncertain-outcome diagnostic/exit path unless its `error.data.appError`
-is one of the six [guaranteed pre-commit rejections](../../crates/dim-app-server/README.md#session-submission-errors):
+is one of the seven [guaranteed pre-commit rejections](../../crates/dim-app-server/README.md#session-submission-errors):
 `invalid_params`, `session_invalid_input`, `session_closed`, `session_build_failed`,
-`service_reloading` or `unknown_method`. Those retain their ordinary error diagnostics.
+`service_reloading`, `unknown_method` or `input_blocked`. Those retain their ordinary error diagnostics.
 Every other error, including `submission_unknown` and opaque publication/storage failures,
 can follow commit and must not trigger another send.
 

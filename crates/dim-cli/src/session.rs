@@ -874,7 +874,7 @@ async fn wait_turn(
             Message::Response { id, result } if Some(id) == submit => {
                 if let Err(error) = result {
                     match error.data.as_ref().and_then(|data| data.get("appError")).and_then(Value::as_str) {
-                        Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method") => return Err(error.into()),
+                        Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method" | "input_blocked") => return Err(error.into()),
                         _ => return Err(format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again").into()),
                     }
                 }
