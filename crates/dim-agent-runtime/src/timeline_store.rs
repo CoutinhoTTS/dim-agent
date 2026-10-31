@@ -53,7 +53,10 @@ pub struct PolicyOrder {
 #[derive(Debug, Clone)]
 pub struct PolicyOrderEvent {
     pub id: String,
+    pub branch_id: String,
+    pub sequence: u64,
     pub turn_start: bool,
+    pub compaction_start: Option<u64>,
 }
 
 fn window_event(event: &AgentEvent) -> bool {
@@ -225,13 +228,20 @@ pub trait TimelineStore: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<PolicyOrder>> {
         Box::pin(async move {
             let records = self.read(key, 1..=through).await?;
+            let branch_id = key.branch_id.clone();
             Ok(PolicyOrder {
                 through,
                 events: records
                     .into_iter()
                     .map(|record| PolicyOrderEvent {
                         turn_start: matches!(&record.event.kind, EventKind::TurnStart(_)),
+                        compaction_start: match &record.event.kind {
+                            EventKind::ContextCompactionStart(data) => Some(data.through),
+                            _ => None,
+                        },
                         id: record.event.id.clone(),
+                        branch_id: branch_id.clone(),
+                        sequence: record.event.sequence,
                     })
                     .collect(),
             })

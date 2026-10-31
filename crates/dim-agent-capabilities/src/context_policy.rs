@@ -373,8 +373,14 @@ impl ContextPolicy {
                 .into(),
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
+        let policy_order = self
+            .timeline
+            .policy_order(source.through)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
         if source.recovery.is_none()
-            && (estimate.input < model.threshold_tokens() || !regrown(&view, model.as_ref()))
+            && (estimate.input < model.threshold_tokens()
+                || !regrown(&view, &policy_order, model.as_ref()))
         {
             return Ok((view.prepared, estimate.input));
         }
@@ -1467,23 +1473,22 @@ fn truncate_pin(id: Option<&str>, text: &str, share: f64, model: &dyn ContextMod
 /// and an entry is new when its own event follows that one in the context's
 /// order: a child branch's smaller local sequences are still new after an
 /// inherited attempt.
-fn regrown(view: &View, model: &dyn ContextModel) -> bool {
-    let context = &view.context;
-    let Some(start) = context
+fn regrown(view: &View, order: &PolicyOrder, model: &dyn ContextModel) -> bool {
+    let Some(start) = order
         .events
         .iter()
-        .rposition(|event| matches!(&event.kind, EventKind::ContextCompactionStart(_)))
+        .rposition(|event| event.compaction_start.is_some())
     else {
         return true;
     };
-    let EventKind::ContextCompactionStart(data) = &context.events[start].kind else {
-        unreachable!("matched a start")
+    let Some(through) = order.events[start].compaction_start else {
+        return true;
     };
-    let branch = &context.positions[start].branch_id;
-    let boundary = context.positions[..start]
+    let branch = &order.events[start].branch_id;
+    let boundary = order.events[..start]
         .iter()
-        .rposition(|position| position.branch_id == *branch && position.sequence <= data.through);
-    let order: HashMap<&str, usize> = context
+        .rposition(|event| event.branch_id == *branch && event.sequence <= through);
+    let positions: HashMap<&str, usize> = order
         .events
         .iter()
         .enumerate()
@@ -1495,7 +1500,7 @@ fn regrown(view: &View, model: &dyn ContextModel) -> bool {
         .history
         .iter()
         .filter(|entry| {
-            order
+            positions
                 .get(entry.source.as_str())
                 .is_some_and(|index| match boundary {
                     Some(boundary) => *index > boundary,

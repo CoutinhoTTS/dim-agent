@@ -2304,7 +2304,9 @@ impl TimelineStore for SqliteTimelineStore {
                     .ok_or_else(|| AgentError::Storage("storage connection is closed".into()))?;
                 let mut query = connection
                     .prepare(
-                        "SELECT event_id, kind FROM timeline_events \
+                        "SELECT event_id, kind, sequence, \
+                         json_extract(body, '$.record.event.data.through') \
+                         FROM timeline_events \
                          WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
                          ORDER BY sequence",
                     )
@@ -2312,7 +2314,14 @@ impl TimelineStore for SqliteTimelineStore {
                 query
                     .query_map(
                         params![key.session_id, key.branch_id, through as i64],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                            ))
+                        },
                     )
                     .map_err(error)?
                     .collect::<rusqlite::Result<Vec<_>>>()
@@ -2322,9 +2331,14 @@ impl TimelineStore for SqliteTimelineStore {
                 through,
                 events: rows
                     .into_iter()
-                    .map(|(id, kind)| PolicyOrderEvent {
+                    .map(|(id, kind, sequence, through)| PolicyOrderEvent {
                         id,
+                        branch_id: key.branch_id.clone(),
+                        sequence: sequence as u64,
                         turn_start: kind == "turn/start",
+                        compaction_start: (kind == "context/compaction-start")
+                            .then_some(through.map(|value| value as u64))
+                            .flatten(),
                     })
                     .collect(),
             })
