@@ -369,7 +369,7 @@ WorkspaceTools 不变。
 
 ### 12.3 评估场景
 
-场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：七个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，用模型自己的窗口运行；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，用一个声明窗口为 16,000 tokens 的模型运行，以便发生压缩。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：七个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
 
 | 场景 | 场景目录 | 关注什么 |
 | --- | --- | --- |

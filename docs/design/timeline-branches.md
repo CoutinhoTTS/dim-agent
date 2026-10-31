@@ -369,7 +369,7 @@ The requirements that answer these items are in [Model-facing prompts](model-pro
 
 ### 12.3 Evaluation scenarios
 
-The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: seven under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), run with the model's own window, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), run with a model whose declared window is 16,000 tokens, so that compaction happens. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
+The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: seven under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 16,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
 
 | Scenario | Scenario directory | Watch for |
 | --- | --- | --- |
