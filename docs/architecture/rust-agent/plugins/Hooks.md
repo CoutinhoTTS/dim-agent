@@ -184,7 +184,9 @@ reported by `hooks.catalog` rather than at the hook point.
 `a_source_input_runs_no_prompt_hook`,
 `an_unload_settles_a_pending_prompt_check_by_on_failure`,
 `an_unload_with_the_default_on_failure_writes_the_input`,
-`the_handlers_after_the_first_block_are_terminated`;
+`the_handlers_after_the_first_block_are_terminated`,
+`two_proceeding_handlers_keep_their_contexts_in_catalog_order`,
+`a_failure_finishing_after_a_later_result_blocks_by_its_own_handler`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
 `a_live_request_registers_its_token_before_its_task_starts`,

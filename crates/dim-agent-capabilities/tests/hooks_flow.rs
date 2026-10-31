@@ -2162,6 +2162,131 @@ async fn the_handlers_after_the_first_block_are_terminated() {
     env.close().await;
 }
 
+/// A.5: each handler's result stays at its own catalog position when the
+/// first finishes before the second, so both contexts arrive in catalog
+/// order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_proceeding_handlers_keep_their_contexts_in_catalog_order() {
+    let env = Env::new().await;
+    // The second handler waits for the first one's last act, so the first
+    // result is ready first.
+    let first_done = env.path("first-done");
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [{
+            "hooks": [
+                {"type": "command", "command": format!(
+                    "printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"first context\"}}}}'; \
+                     printf done > {}", first_done.display())},
+                {"type": "command", "command": format!(
+                    "while [ ! -e {} ]; do sleep 0.05; done; \
+                     printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"second context\"}}}}'",
+                    first_done.display())},
+            ],
+        }],
+    })));
+    let session = env.session().await;
+    let reply = withdraw(
+        &session,
+        serde_json::json!({"sessionId": session.id(), "branchId": "main",
+            "inputId": "unknown", "steer": {"content": [{"type": "text", "text": "new"}]}}),
+    )
+    .await
+    .unwrap();
+    let steer = reply["steer"]["inputId"].as_str().unwrap();
+    let event = session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.id == steer)
+        .expect("the steer input was written");
+    let EventKind::InputMessage(data) = &event.kind else {
+        panic!("the steer input is an input message");
+    };
+    let user = data
+        .user
+        .as_ref()
+        .expect("the steer keeps its user content");
+    assert_eq!(
+        user.content.len(),
+        3,
+        "both contexts follow the operator's content: {user:?}"
+    );
+    let text = |index: usize| match &user.content[index] {
+        ContentBlock::Text { text } => text.as_str(),
+        block => panic!("block {index} is not text: {block:?}"),
+    };
+    assert_eq!(text(0), "new");
+    assert!(text(1).contains("first context"), "{user:?}");
+    assert!(text(2).contains("second context"), "{user:?}");
+    env.close().await;
+}
+
+/// A.5: with handlers A, B and C in catalog order finishing in the order
+/// A, C, B, each result is still read against its own handler: B's failure
+/// blocks by B's `onFailure`, and the message names B's source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failure_finishing_after_a_later_result_blocks_by_its_own_handler() {
+    let env = Env::new().await;
+    let first_done = env.path("first-done");
+    let third_done = env.path("third-done");
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [command(serde_json::json!({
+            "type": "command", "onFailure": "continue", "command": format!(
+                "printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"first context\"}}}}'; \
+                 printf done > {}", first_done.display()),
+        }))],
+    })));
+    // B and C are plugin sources in registration order after the user's, so
+    // the catalog order is the user's handler, B's, then C's.
+    env.sources.set_plugin(
+        "second",
+        &env.path("plugin-second"),
+        document(serde_json::json!({
+            "UserPromptSubmit": [command(serde_json::json!({
+                "type": "command", "onFailure": "block", "command": format!(
+                    "while [ ! -e {first} ] || [ ! -e {third} ]; do sleep 0.05; done; exit 1",
+                    first = first_done.display(), third = third_done.display()),
+            }))],
+        })),
+    );
+    env.sources.set_plugin(
+        "third",
+        &env.path("plugin-third"),
+        document(serde_json::json!({
+            "UserPromptSubmit": [command(serde_json::json!({
+                "type": "command", "onFailure": "continue", "command": format!(
+                    "while [ ! -e {} ]; do sleep 0.05; done; \
+                     printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"third context\"}}}}'; \
+                     printf done > {}",
+                    first_done.display(), third_done.display()),
+            }))],
+        })),
+    );
+    let session = env.session().await;
+    let refused = withdraw(
+        &session,
+        serde_json::json!({"sessionId": session.id(), "branchId": "main",
+            "inputId": "unknown", "steer": {"content": [{"type": "text", "text": "new"}]}}),
+    )
+    .await
+    .expect_err("the second handler blocks");
+    assert_eq!(app_error(&refused), "input_blocked");
+    assert_eq!(refused.message, "Hook plugin:second did not finish");
+    assert!(
+        session
+            .local("main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| !matches!(&event.kind,
+                EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| matches!(
+                    user.content.first(), Some(ContentBlock::Text { text }) if text == "new")))),
+        "a blocked submission wrote the steer input"
+    );
+    env.close().await;
+}
+
 /// Runs `command` and waits until it has written `started` and its pid; the
 /// handler then blocks until the test ends or the part unloads.
 fn blocking_prompt(started: &Path, pid_file: &Path, on_failure: Option<&str>) -> serde_json::Value {

@@ -90,6 +90,9 @@ pub struct HookRun {
     pub on_failure: OnFailure,
 }
 
+/// One running prompt handler: its catalog position, then its result.
+type PendingPrompt = Pin<Box<dyn Future<Output = (usize, HookResult)> + Send>>;
+
 /// The Session service that reads the sources and runs commands.
 pub struct HooksRuntime {
     sources: Arc<HookSourcesHost>,
@@ -250,7 +253,10 @@ impl HooksRuntime {
     ) -> Vec<PromptDecision> {
         let mut running: Vec<HookHandler> = Vec::new();
         let mut tokens: Vec<CancellationToken> = Vec::new();
-        let mut pending: Vec<Pin<Box<dyn Future<Output = HookResult> + Send>>> = Vec::new();
+        // Each future carries its handler's catalog position in `running`,
+        // which is also its slot: `select_all` reorders the pending futures
+        // as each one finishes, so its own index is not a catalog position.
+        let mut pending: Vec<PendingPrompt> = Vec::new();
         for handler in handlers {
             let mut fields = payload.clone();
             fields.insert(
@@ -262,13 +268,15 @@ impl HooksRuntime {
                 self.spawn_async(handler.clone(), stdin, cancel.clone());
                 continue;
             }
+            let position = running.len();
             let token = cancel.child_token();
             tokens.push(token.clone());
             let owner = self.clone();
             let owned = handler.clone();
             let future_handler = owned.clone();
             pending.push(Box::pin(async move {
-                owner.run_one(&future_handler, stdin, &token).await
+                let result = owner.run_one(&future_handler, stdin, &token).await;
+                (position, result)
             }));
             running.push(owned);
         }
@@ -276,12 +284,15 @@ impl HooksRuntime {
         let mut decisions = Vec::new();
         let mut blocked = None;
         for next in 0..running.len() {
+            // `pending` holds exactly the futures whose result has not
+            // arrived. Every slot from `next` on is either filled or owned by
+            // one of them, so the loop never selects on an empty list.
             while slots[next].is_none() {
-                let (result, index, rest) = futures_util::future::select_all(pending).await;
+                let ((position, result), _, rest) = futures_util::future::select_all(pending).await;
                 pending = rest;
-                slots[index] = Some(HookRun {
+                slots[position] = Some(HookRun {
                     result,
-                    on_failure: running[index].on_failure,
+                    on_failure: running[position].on_failure,
                 });
             }
             let run = slots[next].take().expect("the slot was just filled");
