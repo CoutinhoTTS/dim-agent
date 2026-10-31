@@ -124,7 +124,7 @@ Issue：[#593](https://github.com/arcships/dim/issues/593)。本节拥有一次�
 
 ### 6.6 这次删掉什么
 
-- Collaboration 的临时 Agent 记账：内存里的 `temporary` 表、`release_temporary`、关闭观察里的临时 Agent 统计，以及“两个成员同时结束会残留一个 Agent”的已知问题（[空闲卸载 §7](../appserver/idle-unload.md#7-竞争与交互)）。没有打开 Session 的被拥有 Agent 交给 Agents 自己的装载与卸载规则。
+- Collaboration 的临时 Agent 记账：内存里的 `temporary` 表、`release_temporary`、关闭观察里的临时 Agent 统计，以及“两个成员同时结束会残留一个 Agent”的已知问题（[空闲卸载 §7](../appserver/idle-unload.md#7-竞争与交互)）。没有打开 Session 的被拥有 Agent 在成员行存在期间保持装载；没有存储的进程在没有任何打开 Session 时关闭它。
 - 启动时把每个被存储的 Agent 都当公开 Agent 装载：被拥有的按被拥有装载，未完成的被清理。
 - “未知 id 就是公开”：缺失的关系是拒绝。
 - 关系表的进程内存权威：Collaboration 装载时从存储的 leader 重建。

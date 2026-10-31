@@ -4405,6 +4405,100 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
 }
 
 #[test]
+fn fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_close() {
+    const MOUSE_ON: &str = "\x1b[?1002h\x1b[?1006h";
+    const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1002l";
+    const URL: &str = "https://fixture.invalid/authorize";
+
+    for mouse in ["on", "off"] {
+        let home = Home::new();
+        fs::write(
+            home.0.join("config.json"),
+            json!({"locale":"en","tuiMouseMode":mouse}).to_string(),
+        )
+        .unwrap();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([{"providerId":"dimcode-api-oauth","displayName":"DimAgent","loginMethods":["browser"]}]));
+            let status = wire.read("account.status");
+            assert_eq!(status["params"], json!({"providerId":"dimcode-api-oauth"}));
+            wire.reply(&status, json!({"account":null}));
+            let begin = wire.read("account.login.browser.begin");
+            assert_eq!(begin["params"]["providerId"], "dimcode-api-oauth");
+            wire.reply(&begin, json!({"attemptId":"attempt","authorizationUrl":URL,"expiresAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() + 60_000}));
+            let cancel = wire.read("account.login.cancel");
+            assert_eq!(cancel["params"], json!({"providerId":"dimcode-api-oauth","attemptId":"attempt"}));
+            wire.reply(&cancel, json!({}));
+            wire.hold();
+        });
+        let mut command = home.command();
+        command.arg("--fullscreen").env("DIMCODE_OAUTH_MANUAL", "1");
+        command.env("SSH_CONNECTION", "fixture");
+        sized(&mut command, 100, 32);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        assert_eq!(
+            terminal.transcript.rfind(MOUSE_ON) > terminal.transcript.rfind(MOUSE_OFF),
+            mouse == "on"
+        );
+        terminal.write(b"/login\r");
+        terminal.until("Not signed in");
+        let menu_end = terminal.consumed;
+        if mouse == "on" {
+            assert!(!terminal.transcript[..menu_end].contains(MOUSE_OFF));
+        }
+        terminal.write(b"\r");
+        terminal.until(URL);
+        let link_end = terminal.consumed;
+        let selection_start = if mouse == "on" {
+            menu_end
+                + terminal.transcript[menu_end..link_end]
+                    .find(MOUSE_OFF)
+                    .expect("The OAuth link appeared without releasing mouse reporting")
+                + MOUSE_OFF.len()
+        } else {
+            menu_end
+        };
+        terminal.write(b"\t");
+        terminal.paste("callback-redraw-one");
+        terminal.until("callback-redraw-one");
+        terminal.paste("-two");
+        terminal.until("callback-redraw-one-two");
+        let redraw_end = terminal.consumed;
+        assert!(
+            !terminal.transcript[selection_start..redraw_end].contains(MOUSE_ON),
+            "Redrawing the OAuth dialog re-enabled mouse reporting: {}",
+            terminal.transcript
+        );
+        terminal.write(b"\x1b[27u");
+        if mouse == "on" {
+            terminal.until(MOUSE_ON);
+        }
+        terminal.write(b"after-login-close");
+        terminal.until("after-login-close");
+        if mouse == "off" {
+            assert!(
+                !terminal.transcript[menu_end..].contains(MOUSE_ON),
+                "Closing OAuth ignored the configured mouse-off preference: {}",
+                terminal.transcript
+            );
+        }
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

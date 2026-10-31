@@ -73,6 +73,7 @@ impl Theme {
             on_accent: own(entry.background),
             user: own(entry.accent),
             keybind: own(entry.func),
+            activity: palette::terminal_palette(mode, appearance).activity,
             text: own(entry.text),
             text_soft: own(entry.text_soft),
             muted: own(entry.muted),
@@ -151,6 +152,7 @@ fn with_floors(palette: Palette, background: contrast::Rgb) -> Palette {
         on_accent: palette.on_accent,
         user: lift_text(&palette.user, COLORED_TEXT),
         keybind: lift_text(&palette.keybind, COLORED_TEXT),
+        activity: lift_text(&palette.activity, COLORED_TEXT),
         text: lift_text(&palette.text, TEXT),
         text_soft: lift_text(&palette.text_soft, TEXT),
         muted: lift_text(&palette.muted, TEXT),
@@ -204,6 +206,7 @@ mod tests {
             &theme.palette.accent,
             &theme.palette.highlight,
             &theme.palette.keybind,
+            &theme.palette.activity,
             &theme.code.number,
         ] {
             let color = parse_hex(role).expect("hex role on a light terminal");
@@ -214,6 +217,22 @@ mod tests {
         assert_eq!(theme.palette.on_accent, "#ffffff");
         let few = Theme::system(ColorMode::Ansi16, Appearance::Light, None);
         assert_eq!(few.palette.accent, "ansi:3");
+        assert_eq!(few.palette.activity, "ansi:12");
+        for mode in [ColorMode::TrueColor, ColorMode::Ansi256] {
+            for id in ["system", "dim-light", "monokai-light"] {
+                for background in ["#ffffff", "#f5f5f5", "#d0d0d0"] {
+                    let theme = Theme::named(id, mode, Appearance::Light, Some(background));
+                    let blue = parse_hex(&theme.palette.activity).unwrap();
+                    let background = parse_hex(background).unwrap();
+                    assert!(contrast::contrast_ratio(blue, background) >= COLORED_TEXT.ratio);
+                    assert!(contrast::apca_lightness_contrast(blue, background) >= COLORED_TEXT.lc);
+                    assert!(
+                        blue[2] > blue[1] && blue[1] > blue[0],
+                        "activity stays blue"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -227,5 +246,7 @@ mod tests {
         let white = parse_hex("#ffffff").unwrap();
         let accent = parse_hex(&theme.palette.accent).unwrap();
         assert!(contrast::contrast_ratio(accent, white) >= 4.5);
+        let activity = parse_hex(&theme.palette.activity).unwrap();
+        assert!(contrast::contrast_ratio(activity, white) >= COLORED_TEXT.ratio);
     }
 }

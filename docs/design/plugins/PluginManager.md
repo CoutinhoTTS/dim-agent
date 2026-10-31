@@ -17,7 +17,7 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | Agent tools through a Session part (§6) | yes | |
 | The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler, plugin-authoring) | yes | |
 | Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
-| Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time | hooks (Hooks is M2) |
+| Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time; hooks (Hooks is M1) | |
 
 M1's acceptance is: a user or the agent writes a TypeScript plugin, installs it from a local path, uses its tools, edits it and reloads it, and the change takes effect without a restart; the default CLI starts with the default plugins loaded. Plugin code needs its runtime, which [#476](https://github.com/arcships/dim/issues/476) supplies.
 
@@ -312,7 +312,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.19.1.
 | Effect on sequence, batch, interrupt, reload | No Timeline effect. A reload registers again from the new generation. |
 | Owner and issue | Settings (App Server); to be filed with #384. |
 
-**R2. SkillsCatalog, Mcp, Hooks: register plugin content and keep it (M1 for SkillsCatalog and Mcp if they land in time; Hooks M2).**
+**R2. SkillsCatalog, Mcp, Hooks: register plugin content and keep it (M1 for all three; SkillsCatalog and Mcp if they land in time).**
 
 | Item | Content |
 | --- | --- |

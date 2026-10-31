@@ -53,17 +53,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Email" => "Email",
         "Continue" => "Lanjut",
         "Browser login" => "Masuk via browser",
-        "Print verification URL + pairing code again" => {
-            "Cetak ulang URL verifikasi + kode pasangan"
-        }
         "Restart device login" => "Ulangi masuk perangkat",
-        "Print OAuth URL again" => "Cetak ulang URL OAuth",
+        "Select to copy · Enter opens link" => "Pilih untuk menyalin · Enter buka tautan",
+        "Link shortened · Enter opens link" => "Tautan dipendekkan · Enter buka",
         "Callback URL" => "URL callback",
         "Submit callback" => "Kirim callback",
         "The browser could not be opened. Open the link manually, then return here." => {
             "Browser tak bisa dibuka. Buka tautan manual, lalu kembali ke sini."
         }
-        "Enter code {code} at {url}" => "Masukkan kode {code} di {url}",
         "Waiting for authorization" => "Menunggu otorisasi",
         "{name} device login" => "Masuk perangkat {name}",
         "Open this URL: {url}" => "Buka URL ini: {url}",

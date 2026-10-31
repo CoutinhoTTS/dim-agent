@@ -1460,7 +1460,7 @@ async fn create_instance(
         })
         .collect();
     let mut created = Created {
-        children: rows(&loader.entries(), &created.view, None),
+        children: rows(loader, &created.view, None),
         view: created.view,
     };
     if let Err(error) = AgentError::aggregate(failures) {
@@ -1474,7 +1474,7 @@ async fn create_instance(
         .wait(active_rows(&group, cancel), || vec![created.view.id])
         .await
         .unwrap_or_else(|| Err(timed_out(ctx, &group)));
-    let mut waiting = rows(&loader.entries(), &created.view, Some(&required));
+    let mut waiting = rows(loader, &created.view, Some(&required));
     if ready.is_ok() {
         ready = progress
             .wait(active_rows(&waiting, cancel), || vec![created.view.id])
@@ -1489,7 +1489,7 @@ async fn create_instance(
             .await
             .unwrap_or_else(|| Err(timed_out(ctx, &parts)));
     }
-    created.children = rows(&loader.entries(), &created.view, None);
+    created.children = rows(loader, &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
     }
@@ -1522,23 +1522,21 @@ async fn create_instance(
         Err(error) => Err((error, Some(created))),
     }
 }
-/// Candidate rows, including nested extensions. Main and child branches do
-/// not exist until Session publication and have their own assembly snapshots.
-fn rows(
-    entries: &[EntryInfo],
-    instance: &FiberView,
-    required: Option<&[String]>,
-) -> Vec<FiberView> {
-    scope_entries(entries, instance, required)
+/// Reads current candidate rows, including nested instances added during readiness waits.
+/// Main and child branches have their own assembly snapshots.
+fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
+    loader
+        .instance_rows(instance.instance())
         .into_iter()
-        .filter_map(|entry| entry.view.clone())
+        .filter(|(id, _)| required.is_none_or(|rows| rows.contains(id)))
+        .map(|(_, view)| view)
         .collect()
 }
 
 /// The rows `instance` holds, the ones `required` names when given, and never
 /// its own row. A row belongs to an instance when its chain of enclosing
-/// instances contains it. Creation and the assembly check both read their
-/// rows here, so the two cannot select differently.
+/// instances contains it. Assembly preflight reads configuration here; runtime
+/// creation reads the same scope's live handles through `Loader::instance_rows`.
 fn scope_entries<'a>(
     entries: &'a [EntryInfo],
     instance: &FiberView,
@@ -1572,7 +1570,7 @@ fn locate(loader: &Loader, ctx: &Ctx, instance: rutis::host::InstanceId) -> Opti
         .id;
     let view = ctx.view(plugin)?;
     Some(Created {
-        children: rows(&loader.entries(), &view, None),
+        children: rows(loader, &view, None),
         view,
     })
 }

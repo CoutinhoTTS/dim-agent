@@ -1,6 +1,6 @@
 # Hooks
 
-Status: Draft, Ready candidate ([#143](https://github.com/arcships/dim/issues/143)); maintainer decisions of 2026-10-22 are applied (§10), and what remains for Ready is §10.2. Overall design: [overview](../overview.md) (Hooks). Phase: M2 (user and project sources); plugin source registered by PluginManager (#3). Language: Rust. Scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session + branch).
+Status: Ready ([#143](https://github.com/arcships/dim/issues/143)); maintainer decisions of 2026-10-22 and 2026-10-31 are applied (§10). Overall design: [overview](../overview.md) (Hooks). Phase: M1 (user, project and plugin sources). Language: Rust. Scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session + branch).
 
 Hooks runs user-configured commands at fixed points of a Session's **business operations** and hands each command's decision to the owner of that operation. Dim reads only its own hooks configuration; it does not load Claude Code or Codex hook files. For easy migration, the document shape (event names, matcher groups, command handlers, `timeout`, `onFailure`) and the script protocol (stdin JSON, exit codes, decision and output fields) follow Claude Code and Codex, so existing scripts and pasted configuration work (Appendix G).
 
@@ -38,7 +38,8 @@ Each hook point was checked against what its owner exposes on `main`:
 ```mermaid
 flowchart LR
   subgraph PROC["Process (App Server)"]
-    HSet["HooksSettings: sources hooks, hooks-projects; hooks.* methods; HookSources port"]:::new
+    HSet["HooksSettings: sources hooks, hooks-projects, hooks-plugins; hooks.* methods; plugin registration; HookSources port"]:::new
+    PMg["PluginManager"]
     Settings["Settings"]
     FS["FileStorage"]
     Rpc["Rpc session.submit, session.branch_create"]
@@ -55,6 +56,7 @@ flowchart LR
     TL["Timeline"]
     DP["Dispatcher"]
   end
+  PMg -->|"register / withdraw / plugins()"| HSet
   HSet --> Settings
   HSet -->|".dimcode/hooks.json under the authorized root"| FS
   HS -->|"HookSources.read(cwd)"| HSet
@@ -74,7 +76,7 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `HooksSettings` | Process, App Server (where Settings and MCP's management live) | Settings (`BusinessDocument` sources `hooks`, user scope only, and `hooks-projects`; the project root it authorizes for a `cwd`); FileStorage (reads `<project>/.dimcode/hooks.json` under that root) | Management methods `hooks.catalog`, `hooks.save`, `hooks.set_enabled` (A.7); the Session port `HookSources` that returns the effective sources for a `cwd` (A.2) |
+| `HooksSettings` | Process, App Server (where Settings and MCP's management live) | Settings (`BusinessDocument` sources `hooks`, user scope only, `hooks-projects` and `hooks-plugins`; the project root it authorizes for a `cwd`); FileStorage (reads `<project>/.dimcode/hooks.json` under that root) | Management methods `hooks.catalog`, `hooks.save`, `hooks.set_enabled` (A.7); the owner operations `register`, `withdraw` and `plugins()` for plugin hook documents ([PluginManager §3.7](PluginManager.md#37-content-registration)); the Session port `HookSources` that returns the effective sources for a `cwd` (A.2) |
 | `HooksSession` | Session (optional; registered by the Hooks plugin while it is enabled) | `HookSources`; HostPlatform; `SessionConfig.cwd`; `submitChecks` (InputQueue's Session part) | Registers the submit check `hooks` with `submitChecks`, which the operator-input entries call (A.6.2); a private catalog and command runner used by `HooksBranch` |
 | `HooksBranch` | Branch (optional; registered by the Hooks plugin while it is enabled) | `HooksSession`'s runner; `Dispatcher`, `Approval`, `Permission`, `Branch::input` | Registers the advisor `hooks` with the branch's Permission (A.6.1); observation and context hooks |
 
@@ -84,7 +86,7 @@ flowchart LR
 
 **Node.** On an offline resource node, spawning fails with `node_unavailable`; each hook point treats that as a hook failure (Appendix C).
 
-**Contracts depended on:** `Approval::admit` and `AdmitCall.source`, `Permission::decide` and the proposed `permission.registerAdvice` (A.6.1); `Approval::respond` and the `approval/request`, `approval/respond`, `approval/cancelled` facts; Rpc `session.submit` and `session.branch_create`, and InputQueue's `session.input.withdraw {steer}`, with the proposed Session table `submitChecks` (A.6.2); `InputMessageData.user` (context appended after the operator's own content); `step/tool-result`, `turn/start`, `turn/end`, `stop/interrupt`, `context/configured` (read only); source input conventions ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)); Settings `BusinessDocument`, `settings.changed` and the authorized project root; FileStorage reads; App Server `ManagementMethods`; HostPlatform `build_process_spec` and process supervision. **Contracts defined here:** the hook document format, the command protocol, the advice and check replies of Hooks' `hooks` registrations, the `hooks.*` methods, `HookSources`, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks declares no event.
+**Contracts depended on:** `Approval::admit` and `AdmitCall.source`, `Permission::decide` and `permission.registerAdvice` (A.6.1); `Approval::respond` and the `approval/request`, `approval/respond`, `approval/cancelled` facts; Rpc `session.submit` and `session.branch_create`, and InputQueue's `session.input.withdraw {steer}`, with the Session table `submitChecks` (A.6.2); `InputMessageData.user` (context appended after the operator's own content); `step/tool-result`, `turn/start`, `turn/end`, `stop/interrupt`, `context/configured` (read only); source input conventions ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)); Settings `BusinessDocument`, `settings.changed` and the authorized project root; FileStorage reads; App Server `ManagementMethods`; HostPlatform `build_process_spec`, process supervision and a process start whose stdin carries the given bytes (A.6.3). **Contracts defined here:** the hook document format, the command protocol, the advice and check replies of Hooks' `hooks` registrations, the `hooks.*` methods, `HookSources`, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks declares no event.
 
 ## 2. Data and state
 
@@ -93,15 +95,17 @@ flowchart TB
   User["Settings source hooks, user scope: hooks, disableAllHooks"]
   Proj["Project file <workspace>/.dimcode/hooks.json, read through FileStorage"]
   Enable["Settings source hooks-projects (user-local): enabled workspaces"]
+  Plug["Settings source hooks-plugins: one {dir, hooks} per plugin id, written by PluginManager"]
   Cat["Catalog (computed per hook point)"]
   TL["Branch Timeline: approval/respond, dim-hooks inputs, hook context blocks on operator inputs"]
   User --> Cat
   Enable --> Cat
   Proj -->|"read per hook point"| Cat
+  Plug --> Cat
   Cat --> TL
 ```
 
-Hooks owns no `StateCell`, declares no event and caches nothing. The catalog is recomputed from `HookSources` at each hook point (A6). Everything else Hooks decides from is a branch fact it consumed through its Dispatcher subscription: approval requests, tool results, turns and interrupts. A blocked submission writes nothing, so it leaves no state. A reloaded `HooksBranch` has no open work to rebuild; commands are side effects and are never re-run.
+Hooks owns no `StateCell`, declares no event and caches nothing. The catalog is recomputed from `HookSources` at each hook point (A6). The one thing Hooks keeps is what PluginManager registered: the Settings source `hooks-plugins`, as Mcp keeps `mcp-plugins` (A.2), so plugin documents survive Hooks' own reload. Everything else Hooks decides from is a branch fact it consumed through its Dispatcher subscription: approval requests, tool results, turns and interrupts. A blocked submission writes nothing, so it leaves no state. A reloaded `HooksBranch` has no open work to rebuild; commands are side effects and are never re-run.
 
 ## 3. Flows
 
@@ -251,7 +255,7 @@ Hook commands run because of configuration, not an agent decision, so they need 
 
 **`PreToolUse` `allow` widens authority, and this is accepted (decision 1).** An `allow` admits a call that Permission's policy would have asked about. That authority comes from configuration the user enabled, not from the agent: a user hook is the user's own rule, like an allow command rule, and a project hook can do it only after the user enabled that workspace's project hooks, which under ADR 003 D3/D4 means trusting that project's configuration. It never overrides a Deny (policy, disallowed tool or command rule), because advice is not asked then, and a `deny` or `ask` from any hook wins over `allow`. Approval and Permission still govern only agent decisions: the call is still the agent's, and the admission is still Permission's decision with the advice it asked for.
 
-`PermissionRequest` answers a question Approval asked, through the same path as the user; Approval still rechecks policy and records the answer as `approval/respond`. `UserPromptSubmit` only blocks a submission or adds attributed blocks; it never edits the user's text. No hook edits tool input (`updatedInput` is ignored). A hook command itself runs with the host's isolation as applied by HostPlatform. stdin contains prompts and tool input; diagnostics keep only source, event, exit status, duration and a bounded stderr excerpt.
+`PermissionRequest` answers a question Approval asked, through the same path as the user; Approval still rechecks policy and records the answer as `approval/respond`. `UserPromptSubmit` only blocks a submission or adds attributed blocks; it never edits the user's text. No hook edits tool input (`updatedInput` is ignored). A hook command is a configuration command ([ADR 003](../../adr/003-approval-scope.md) D2): HostPlatform starts it on the Session's resource node without the agent sandbox, as an MCP stdio server is started. The sandbox setting governs agent-decided commands, `exec` and the persistent shell, not configuration ([ADR 010](../../adr/010-sandbox-opt-in.md) D1). stdin contains prompts and tool input; diagnostics keep only source, event, exit status, duration and a bounded stderr excerpt.
 
 ## 8. Rule check
 
@@ -278,15 +282,18 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None to the runtime or rutis: Hooks needs no infrastructure change and no event or persistence change. It needs two generic capabilities from business owners, stated in A.6 in the five items of §4 rule 8 and listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities):
+None to the runtime or rutis: Hooks needs no infrastructure change and no event or persistence change. It needs three generic capabilities from their owners, stated in A.6 in the five items of §4 rule 8 and listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities):
 
 - Permission and Approval: advisors registered with the branch's Permission (`permission.registerAdvice`) and called during the admission decision, with Approval passing the call's `source` (A.6.1).
 - InputQueue (the Session table `submitChecks` and `InputMethods` for `session.input.withdraw {steer}`), Rpc (`session.submit`, `session.branch_create`) and the native CLI: checks registered with `submitChecks` and called before operator input is written, the `input_blocked` error, and its place among the `session.submit` errors that guarantee nothing was committed (A.6.2).
-AcpGateway already maps `input_blocked` from `session.submit` to the stop reason `refusal` with the message as text (decision 9). Not requirements: the Settings sources `hooks` (user scope only) and `hooks-projects` are `BusinessDocument` sources (existing mechanism, additive `user/<source>` rows in v13); `.dimcode/hooks.json` is a project file in a directory, which its owner reads through FileStorage under the root Settings authorizes, as Workflow's definition files are read ([overview](../overview.md), Configuration); the `hooks.*` methods use the existing `ManagementMethods`; HostPlatform's shell-form `build_process_spec` covers `command` (exec-form `args` is unsupported, Appendix G).
+- HostPlatform: a process start whose stdin receives the given bytes and is then closed (A.6.3).
+AcpGateway already maps `input_blocked` from `session.submit` to the stop reason `refusal` with the message as text (decision 9). Not requirements: the Settings sources `hooks` (user scope only), `hooks-projects` and `hooks-plugins` are `BusinessDocument` sources (existing mechanism, additive `user/<source>` rows in v13), and `hooks-plugins` is written only by the owner operations, never by a `hooks.*` method; `.dimcode/hooks.json` is a project file in a directory, which its owner reads through FileStorage under the root Settings authorizes, as Workflow's definition files are read ([overview](../overview.md), Configuration); the `hooks.*` methods use the existing `ManagementMethods`; HostPlatform's shell-form `build_process_spec` covers `command` (exec-form `args` is unsupported, Appendix G).
 
-## 10. Decisions and what remains
+## 10. Decisions
 
-### 10.1 Maintainer decisions (2026-10-22)
+### 10.1 Maintainer decisions
+
+#### 2026-10-22
 
 | # | Decision |
 | --- | --- |
@@ -296,18 +303,30 @@ AcpGateway already maps `input_blocked` from `session.submit` to the stop reason
 | 1 | `PreToolUse` `allow` admits the call (§7) |
 | 2 | `onFailure` defaults to `continue` |
 | 5 | Configuration owner: `HooksSettings` in App Server with sources `hooks`, `hooks-projects` and `hooks.*` methods, as MCP |
-| 6 | The eight events of the summary table are supported; all others are unsupported |
+| 6 | The eight events of the summary table are supported; all others are unsupported (the reasons are in Appendix G.1) |
 | 7 | A `PermissionRequest` deny shows Approval's generic text; `approval/respond` is unchanged |
 | 8 | stdin `permission_mode` carries Dim's preset value; there is no `transcript_path` |
 | 9 | AcpGateway reports a hook block as `refusal` |
 
-### 10.2 Remaining for Ready
+#### 2026-10-31
 
-| Item | Owner |
+| # | Decision |
 | --- | --- |
-| Accept A.6.1 (advisors registered with Permission, `allow` included) and file its issue | Permission, Approval |
-| Accept A.6.2 (the `submitChecks` table, `input_blocked`, the did-not-commit set) and file its issue | Rpc (App Server), InputQueue, CLI |
-| Plugin source (packages' hook documents) | Registered by PluginManager ([PluginManager §9 R2](PluginManager.md#9-requirements-raised-to-mechanism-owners)) |
+| — | The phase is M1 and covers user, project and plugin sources; A.6.1 and A.6.2 are accepted (§10.2) |
+| — | A hook command is a configuration command: HostPlatform starts it on the Session's resource node without the agent sandbox, as an MCP stdio server is started (§7) |
+| — | Plugin hooks: PluginManager calls Hooks' owner operations `register`, `withdraw` and `plugins()`; Hooks keeps the documents in `hooks-plugins`, lists them in `hooks.catalog` and gives their commands `DIM_PLUGIN_ROOT` (A.2, A.7) |
+| — | The event's stdin object (A.3) goes to a process HostPlatform starts for it, whose stdin is closed after the bytes; the environment adds `DIMCODE_HOME` and `DIM_PLUGIN_ROOT` (A.6.3) |
+| — | A hook reads the Session's Timeline with `dimcode export "$DIM_SESSION_ID"`; there is no `transcript_path` (A.3) |
+| — | `PreCompact`/`PostCompact`, `SessionEnd` and `SubagentStart`/`SubagentStop` stay unsupported, for the reasons in G.1 |
+| — | The native CLI gets `dimcode hooks list` and `dimcode hooks enable\|disable` ([CLI commands](../cli-commands.md#commands)) |
+
+### 10.2 Accepted owner changes
+
+| Item | Owner | Issue |
+| --- | --- | --- |
+| A.6.1: advisors registered with the branch's Permission and called during the admission decision, `allow` included | Permission, Approval | [#758](https://github.com/arcships/dim/issues/758) |
+| A.6.2: the `submitChecks` table, `input_blocked` and its place among the `session.submit` errors that guarantee nothing was committed | Rpc (App Server), InputQueue, CLI | [#757](https://github.com/arcships/dim/issues/757) |
+| Plugin source: the owner operations, `hooks-plugins`, `DIM_PLUGIN_ROOT` ([PluginManager §3.7](PluginManager.md#37-content-registration)) | Hooks, PluginManager | [#756](https://github.com/arcships/dim/issues/756) |
 
 No question in this document is waiting for a maintainer answer.
 
@@ -351,7 +370,9 @@ Project enablement is the user-local source `hooks-projects`: `{ "enabled": ["<w
 | --- | --- | --- |
 | `user` | Settings source `hooks`, user scope | As written |
 | `project` | `<workspace>/.dimcode/hooks.json`, read through FileStorage | When `hooks-projects` lists the workspace |
-| `plugin:<id>` | A plugin package's hook document | Registered by PluginManager ([PluginManager §9 R2](PluginManager.md#9-requirements-raised-to-mechanism-owners)) |
+| `plugin:<id>` | A plugin package's hook document, registered by PluginManager with `register({plugin, dir, document})` | While PluginManager keeps it registered; `withdraw({plugin})` removes it |
+
+Plugin documents are kept in the Settings source `hooks-plugins`, one `{dir, hooks}` entry per plugin id, as Mcp keeps `mcp-plugins`; `plugins()` lists the ids Hooks holds, and Hooks restores them after its own reload. A registered document is validated like any other (A.1): a document Hooks refuses is reported to PluginManager under `refused`, leaves no entry, and none of its hooks run. A plugin source's commands get `DIM_PLUGIN_ROOT` set to `dir` (A.3), and its catalog entry's `path` is that `dir`, with its enabled state.
 
 `HookSources.read(cwd, cancel)` returns, per source, its id, path, enabled state and document or error. The workspace is the project root Settings authorizes for `cwd`, as `mcp.catalog` resolves it; a `cwd` with no project has no project source. Catalog order is the table order, then document order. Handlers with identical `command` strings at one hook point run once. Documents are read at each hook point; a missing project file is empty, an unreadable or invalid one is listed `invalid` with a diagnostic and none of its hooks run.
 
@@ -359,8 +380,8 @@ Project enablement is the user-local source `hooks-projects`: `{ "enabled": ["<w
 
 | Channel | Content |
 | --- | --- |
-| stdin | One UTF-8 JSON object, then EOF. Common: `hook_event_name`, `session_id`, `cwd`, `permission_mode` (Dim preset: `read-only`, `workspace-write`, `full-access`), `turn_id` when turn-scoped, plus Dim fields `branch_id`, `dim_source` (`user` or `project`). No `transcript_path` |
-| Environment | HostPlatform's base environment plus `DIM_PROJECT_DIR`, `DIM_HOOK_EVENT`, `DIM_SESSION_ID` |
+| stdin | One UTF-8 JSON object, then EOF. Common: `hook_event_name`, `session_id`, `cwd`, `permission_mode` (Dim preset: `read-only`, `workspace-write`, `full-access`), `turn_id` when turn-scoped, plus Dim fields `branch_id`, `dim_source` (`user`, `project` or `plugin:<id>`). No `transcript_path` |
+| Environment | HostPlatform's base environment plus `DIM_PROJECT_DIR`, `DIM_HOOK_EVENT`, `DIM_SESSION_ID` and `DIMCODE_HOME`; `DIM_PLUGIN_ROOT` for plugin sources only |
 | Exit 0 | stdout empty, one JSON object (A.4), or plain text (context for `SessionStart` and `UserPromptSubmit`, otherwise ignored) |
 | Exit 2 | Blocking result for the event (A.4); stderr (first 2 KiB) is the reason |
 | Other exit, signal, timeout, spawn failure, stdout over 64 KiB, `node_unavailable` | Failure: diagnostic, then the handler's `onFailure` (A.5) |
@@ -378,6 +399,10 @@ Event fields:
 | `Notification` | `notification_type: "permission_prompt"`, `message` |
 
 `tool_name` is the Dim tool name and `tool_input` is Dim's input; `tool_use_id` is the `call_id` of the call's `source` (`BranchSource::Tool`).
+
+`DIMCODE_HOME` is the product home the App Server that runs the Session is configured with, not the daemon's inherited environment: a product daemon always has one and sets it, while a development profile (`--model-config`, `--mock-model`) has no product home and sets none, so a hook that archives there passes `dimcode export --database PATH` itself. `DIM_PLUGIN_ROOT` is the `dir` a plugin source was registered with (A.2); user and project sources have none.
+
+**Archiving.** A hook that needs the Session's history reads the Session's Timeline with `dimcode export "$DIM_SESSION_ID"` ([Timeline export](../appserver/timeline-export.md)), which reads the home `DIMCODE_HOME` names ([ADR 005](../../adr/005-observability.md) D3). There is no `transcript_path` (decision 8).
 
 ### A.4 Outcomes
 
@@ -416,7 +441,7 @@ Context and reasons are each at most 16 KiB per hook. Fields Dim does not suppor
 | Existing mechanisms considered | Async before on `step/tool-call` (withdrawn, #21); a Dispatcher subscription to `step/tool-call` (runs after the handoff to ToolExecutor, races execution, rule 2); answering `approval/request` (only exists for calls that already ask); `CommandRulesHost` (one Session port bound by the profile, only for commands of `execute_process` calls, and it decides by static rules). Registration with an owner, as tools register with ToolRegistry ([rutis usage R6](../rutis-usage.md#r6-contributions-register-with-their-owner)): reused for the advisors. |
 | Generic capability | Approval's `admit` passes `AdmitCall.source` to Permission for the admission decision; the recheck stays a plain `decide`. Permission keeps the branch's advisors. A branch part registers an advisor with the branch's Permission while it runs: `permission.registerAdvice(name, advise)`. The registration belongs to the calling part and is withdrawn when it unloads; a second advisor of the same name fails. `HooksBranch` registers `hooks`. In the admission decision, after policy and command rules and only when the result is not Deny, Permission calls each advisor registered at that moment, in name order: `advise {source, name, input, risk, decision: "allow" \| "ask"}` → `{advice: "none" \| "allow" \| "ask" \| "deny", reason?}` (async; cancellation = Permission drops the call). Any deny → `Deny {reason}`; else any ask → `Ask {reason}`; else any allow → `Allow`; else Permission's own decision. A provider error counts as `none`. Permission depends on no advisor; `HooksBranch` depends on Permission. No business meaning: any branch part may register an advisor. Advice never overrides a Deny, since it is not asked then. ToolExecutor is unchanged: it already puts the call id in `AdmitCall.source`. |
 | Effect on sequence, batch, interrupt, reload | Sequence and batch: no new event; a denied call's error text is in ToolExecutor's existing batch result; an allowed call writes no `approval/request`. Interrupt: the batch token cancels the decision and so the advice call. Reload: an advisor withdrawn mid-call has its pending advice dropped, counted as `none`; with no advisor registered, Permission decides from policy and command rules alone. Latency of a call's admission grows by the advice time. |
-| Owner and issue | Permission and Approval (`dim-agent-capabilities`); issue to be filed when this design is accepted (§10.2). |
+| Owner and issue | Permission and Approval (`dim-agent-capabilities`); [#758](https://github.com/arcships/dim/issues/758) (§10.2). |
 
 #### A.6.2 Submit check at the operator-input entries
 
@@ -426,8 +451,17 @@ Context and reasons are each at most 16 KiB per hook. Fields Dim does not suppor
 | Existing mechanisms considered | Async before (withdrawn, #21); a synchronous before callback holding the input with a new `hold` field and an `input/release` command (the previous revision: needs InputQueue, history and a persistence-format change, and cannot tell operator input from other inputs except by the absence of a marker); `input/withdraw` after the fact (unreliable once applied); a check inside the client (CLI, gateways: every client would need it and none could be relied on). Registration with an owner, as tools register with ToolRegistry ([rutis usage R6](../rutis-usage.md#r6-contributions-register-with-their-owner)): reused for the checks. |
 | Generic capability | The Session's submit checks are the Session table `submitChecks`, a Session service of InputQueue's Session part, which the operator-input entries read. A Session part registers a check with it while it runs: `submitChecks.register(name, check)`. The registration belongs to the calling part and is withdrawn when it unloads; a second check of the same name fails. `HooksSession` registers `hooks`. Before writing operator input, `session.submit` and `session.branch_create` (Rpc) and `session.input.withdraw` with `steer` (InputQueue's `InputMethods`) call each check registered at that moment, in name order: `check {entry: "submit" \| "branch" \| "steer", branchId, user, mode}` → `{decision: "proceed", blocks?: [text]} \| {decision: "block", message}` (async; the entry's call waits). `session.branch_create` checks its prompt as `{entry: "branch", branchId: parentBranchId, user: {content: [prompt]}, mode: "queue"}`. A caller's disconnect cancels nothing, as for any accepted call ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)); only an interruption of the entry's own call (the Rpc load or the entry's provider unloads, the Session closes) cancels the check, and then nothing is written and the call fails with that interruption's existing error. Any block → the call fails with the app error `input_blocked` (`-32000`, `data.appError` `input_blocked`, message = the reply's `message`) and nothing is written (with `steer`, neither the withdrawal nor the new input; with `branch`, no branch). `input_blocked` joins the protocol v3 `session.submit` errors that guarantee nothing was committed (the App Server README's submission errors and the native CLI's matching list, which otherwise prints that the input may already be queued). Else the entry writes the input with all `blocks` appended to its `user` content as text blocks, in name order, after the operator's own content; the input carries no raw blocks for them, so it stays operator input. `session.branch_create` cannot attach them, since the branch's first input is built from the prompt alone, and creates the branch without them. A provider error counts as proceed. The entries depend on no check; `HooksSession` depends on `submitChecks`. No business meaning: any Session part may register a check. |
 | Effect on sequence, batch, interrupt, reload | Sequence: the input takes its sequence when written, after the check; inputs from other sources are unaffected. Batch: the steer batch stays one batch, written or not. Interrupt: no effect on a running check. Reload: a check withdrawn mid-call answers before it is withdrawn, or its answer is dropped and counts as proceed; with no check registered, the entries write operator input unchecked. Persistence: none; text blocks in `user` content are an existing form. Latency of a submission grows by the check time. |
-| Owner and issue | App Server Rpc (`session.submit`, `session.branch_create`), InputQueue (`submitChecks`, `InputMethods`) and the native CLI (`dim-app-server`, `dim-agent-capabilities`, `dim-cli`); `input_blocked` joins the Rpc error table and the did-not-commit set; issue to be filed when this design is accepted (§10.2). |
+| Owner and issue | App Server Rpc (`session.submit`, `session.branch_create`), InputQueue (`submitChecks`, `InputMethods`) and the native CLI (`dim-app-server`, `dim-agent-capabilities`, `dim-cli`); `input_blocked` joins the Rpc error table and the did-not-commit set; [#757](https://github.com/arcships/dim/issues/757) (§10.2). |
 
+#### A.6.3 Process start with an initial stdin
+
+| Item | Content |
+| --- | --- |
+| Blocked by | A hook command receives one JSON object on stdin, then EOF (A.3). HostPlatform's `spawn` starts a process with its stdin closed, and `ProcessTree` exposes no stdin, so a command cannot be handed the object. |
+| Existing mechanisms considered | A command-line argument: it is visible in the process list, and each shell's quoting changes it. A temporary file the command reads: the protocol changes, and the command needs its path, permissions and cleanup, so a pasted Claude/Codex script is no longer portable (G.3). HostPlatform's `spawn_pty` (`crates/dim-agent-capabilities/src/host_platform.rs:1913`): a terminal, not a pipe, so echo and line discipline alter the bytes and there is no plain EOF. |
+| Generic capability | HostPlatform's process start takes optional stdin bytes: it starts the process, writes the bytes to the child's stdin and closes it. A caller that passes none gets today's behaviour, with stdin closed at start. No business meaning: any caller may start a process with an initial stdin. |
+| Effect on sequence, batch, interrupt, reload | No event, batch or lock is involved; the write happens in the caller's own process task, never in a Dispatcher handler or under the commit lock. A hook's write is bounded by the same wait and cancellation as the run, and terminating the process tree ends it. |
+| Owner and issue | HostPlatform (`dim-agent-capabilities`); part of the core implementation ([#755](https://github.com/arcships/dim/issues/755)). |
 
 ### A.7 Management methods
 
@@ -435,11 +469,11 @@ Context and reasons are each at most 16 KiB per hook. Fields Dim does not suppor
 
 | Method | Parameters | Result |
 | --- | --- | --- |
-| `hooks.catalog` (not mutating) | `{cwd?}` | `userRevision`, `projectsRevision`; per source: `source`, `path?`, `enabled`, `state` (`ok`, `missing`, `invalid` with message); per handler: `event`, `matcher`, `command`, `timeout`, `onFailure`, `async`, `state` (`ok`, `unsupported`, `invalid`); `disableAllHooks` |
+| `hooks.catalog` (not mutating) | `{cwd?}` | `userRevision`, `projectsRevision`; per source: `source`, `path` (`dir` for a plugin source), `enabled`, `state` (`ok`, `missing`, `invalid` with message); per handler: `event`, `matcher`, `command`, `timeout`, `onFailure`, `async`, `state` (`ok`, `unsupported`, `invalid`); `disableAllHooks` |
 | `hooks.save` | `{expectedRevision, document}` | `{revision}`; CAS write of the user scope of `hooks`, validated by its `BusinessDocument` |
 | `hooks.set_enabled` | `{cwd, enabled, expectedRevision}` | `{revision}`; CAS write of `hooks-projects` for the project root Settings authorizes for `cwd` |
 
-The project file is edited in the repository, not through these methods. Hooks has no tool and no agent-reachable path that writes configuration.
+The project file is edited in the repository, not through these methods. `hooks-plugins` is written only by the owner operations (§1), never by a method here. Hooks has no tool and no agent-reachable path that writes configuration. The native CLI is the client surface for `hooks.catalog` and `hooks.set_enabled` ([CLI commands](../cli-commands.md#commands)).
 
 ## Appendix B. Full conflict table
 
@@ -521,6 +555,7 @@ The project file is edited in the repository, not through these methods. Hooks h
 | A7 | `SessionStart` runs only `startup`, for every Session whose `main` has no turn | Dim has no resume/clear/compact start; keyed blocks already survive compaction | More sources |
 | A8 | At most 3 consecutive Stop follow-ups | Goal precedent; Claude's `stop_hook_active` | Unbounded loops |
 | A9 | Submissions and calls while Hooks is unloaded pass without Hooks | Rare structural operation (D3); calls still pass Permission and Approval | Entries refusing input while Hooks reloads |
+| A10 | Reading the Session with `dimcode export` needs the product home on the resource node's host, or a `--database` path the hook passes (A.3) | The node runs the Session and the hook processes | A remote resource node has no such home, and a hook there cannot read the Session |
 
 ## Appendix F. Open questions
 
@@ -529,7 +564,7 @@ The project file is edited in the repository, not through these methods. Hooks h
 | Questions as a notification | Questions asks through the `ask_user` tool call ([Questions](Questions.md)); a Claude `Notification` `elicitation_dialog` analogue would observe that call. Questions is Ready; this analogue is not designed and stays unsupported |
 | pi extensions | pi hooks are TypeScript extension handlers, not commands; running them needs a TypeScript plugin runtime (#4), outside this mechanism |
 
-None of these blocks Ready (§10.2).
+Neither is part of this design, and both stay unsupported.
 
 ## Appendix G. Migrating from Claude Code and Codex
 
@@ -547,7 +582,7 @@ Dim does not read Claude or Codex files and has no import command. To migrate, c
 | `Stop` | `Stop` | `Stop` → Queue follow-up | Bounded (A8) |
 | `SessionStart` | `SessionStart` | `SessionStart` → keyed Append | `startup` only |
 | `Notification` | — | `Notification` on `approval/request` | `permission_prompt` only |
-| `PreCompact`, `PostCompact`, `SessionEnd`, `Subagent*`, others | `PreCompact`, `PostCompact`, `SessionEnd`, `Interrupt`, `Subagent*` | Unsupported | Listed `unsupported` in the catalog |
+| `PreCompact`, `PostCompact`, `SessionEnd`, `Subagent*`, others | `PreCompact`, `PostCompact`, `SessionEnd`, `Interrupt`, `Subagent*` | Unsupported | Listed `unsupported` in the catalog. `PreCompact`/`PostCompact`: blocking would need a compaction-admission port in ContextCompaction; an observation-only form needs no owner change and can be added later. Compaction removes nothing from the Timeline, and `Stop` runs after every completed turn, so archiving loses nothing. `SessionEnd`: Session close is lifecycle, including idle unload, and work must settle before services are removed (AGENTS rule 8); a command at close would delay close. `SubagentStart`/`SubagentStop`: a Collaboration member is its own Session, which gets its own `SessionStart` and `Stop` |
 
 ### G.2 Tool names
 
@@ -574,8 +609,8 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 | `disableAllHooks` | Claude: highest-precedence file wins; a project `false` overrides a user `true` | User document only |
 | Handler types and fields | `command`, `http`, `mcp_tool`, `prompt`, `agent`; `args`, `if` | `command` only; `args`/`if` handlers are not run |
 | Timeouts | Claude: 600 s (30 s for `UserPromptSubmit`); Codex: 600 s | Same as Claude |
-| stdin | `transcript_path`; `permission_mode` (`default`, `plan`, `acceptEdits`, `bypassPermissions`, …); `tool_name` with the product's names | No `transcript_path`; `permission_mode` is `read-only`, `workspace-write` or `full-access`; `tool_name` and `tool_input` are Dim's (G.2), so an MCP tool's `tool_name` is its Dim name, not `mcp__<server>__<tool>` |
-| Environment | `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` | `DIM_PROJECT_DIR`; replace `$CLAUDE_PROJECT_DIR` in pasted commands |
+| stdin | `transcript_path`; `permission_mode` (`default`, `plan`, `acceptEdits`, `bypassPermissions`, …); `tool_name` with the product's names | `transcript_path` is replaced by `dimcode export` reading the Session (A.3); `permission_mode` is `read-only`, `workspace-write` or `full-access`; `tool_name` and `tool_input` are Dim's (G.2), so an MCP tool's `tool_name` is its Dim name, not `mcp__<server>__<tool>` |
+| Environment | `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` | `DIM_PROJECT_DIR`, `DIMCODE_HOME`; replace `$CLAUDE_PROJECT_DIR` in pasted commands. `CLAUDE_PLUGIN_ROOT` and `GROK_PLUGIN_ROOT` are not set, so a pasted command that references them does not resolve; a plugin ships its Dim form with `$DIM_PLUGIN_ROOT` |
 | `PreToolUse` | `allow` skips the prompt; `updatedInput` rewrites input | `allow` skips the question but never overrides a Deny; input is never rewritten |
 | `PermissionRequest` deny | Claude/Codex show `message` | Approval's generic text |
 | `UserPromptSubmit` block | Prompt erased, reason shown | `session.submit` fails with `input_blocked`; ACP `refusal` |
@@ -585,13 +620,14 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 
 | Neutral | Rust |
 | --- | --- |
-| Admission decision | Proposed `Permission::admit_decision(call, source: &BranchSource, risk, cancel)` used by `Approval::admit`; `decide` stays for the recheck |
-| `permission.registerAdvice` | Proposed trait `AdviseTool` with `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`; proposed `Permission::register_advice(ctx, name, Arc<dyn AdviseTool>)` on the branch's `Keyed<Permission>`, kept in a `Registrations` table and withdrawn with the caller; `HooksBranch` registers `hooks`; Permission calls the advisors it holds at each admission (A.6.1) |
-| `submitChecks` | Proposed Session service `SubmitChecks`, a name registered in the Session group and a `PublicService`, so Rpc reads it through `Session::session_service::<SubmitChecks>()`; provided by InputQueue's Session part; `SubmitChecks::register(ctx, name, Arc<dyn CheckSubmission>)` with `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`, kept in a `Registrations` table and withdrawn with the caller; `HooksSession` registers `hooks` through `Keyed<SubmitChecks>`; `Connection::submit`, `Connection::create_branch` and `InputMethods` call the registered checks before `Session::input`, `Session::branch` / the steer batch (A.6.2) |
+| Admission decision | `Permission::admit_decision(call, source: &BranchSource, risk, cancel)` used by `Approval::admit`; `decide` stays for the recheck |
+| `permission.registerAdvice` | Trait `AdviseTool` with `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`; `Permission::register_advice(ctx, name, Arc<dyn AdviseTool>)` on the branch's `Keyed<Permission>`, kept in a `Registrations` table and withdrawn with the caller; `HooksBranch` registers `hooks`; Permission calls the advisors it holds at each admission (A.6.1) |
+| `submitChecks` | Session service `SubmitChecks`, a name registered in the Session group and a `PublicService`, so Rpc reads it through `Session::session_service::<SubmitChecks>()`; provided by InputQueue's Session part; `SubmitChecks::register(ctx, name, Arc<dyn CheckSubmission>)` with `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`, kept in a `Registrations` table and withdrawn with the caller; `HooksSession` registers `hooks` through `Keyed<SubmitChecks>`; `Connection::submit`, `Connection::create_branch` and `InputMethods` call the registered checks before `Session::input`, `Session::branch` / the steer batch (A.6.2) |
 | `input_blocked` | `RpcError::app(-32000, "input_blocked", message)`; `data` is `{appError}` only |
 | `Approval.respond` | `Approval::respond(approval_id, ApprovalDecision)` from `Keyed<Approval>` |
 | `HookSources` | Session port `HookSourcesHost(Arc<dyn ReadHookSources>)`, bound by App Server as `CommandRulesHost` and `SkillSettingsHost` are |
-| `hooks`, `hooks-projects` | `BusinessDocument` types in App Server (`hooks`: `USER_FILE` `hooks.json`, no `PROJECT_FILE`; `hooks-projects`: `USER_FILE` `hooks-projects.json`) |
+| `hooks`, `hooks-projects`, `hooks-plugins` | `BusinessDocument` types in App Server (`hooks`: `USER_FILE` `hooks.json`, no `PROJECT_FILE`; `hooks-projects`: `USER_FILE` `hooks-projects.json`; `hooks-plugins`: `USER_FILE` `hooks-plugins.json`, one `{dir, hooks}` entry per plugin id, as `McpPluginServers` in `mcp/config.rs`) |
 | `.dimcode/hooks.json` | Read by `HooksSettings` through `FileStorage::path(root, ".dimcode/hooks.json")` and `read_limited`, `root` from `SettingsService::project_root(cwd)`, parsed into the `hooks` document type |
+| `register`, `withdraw`, `plugins()` | `HooksService::register_plugin(plugin: String, dir: PathBuf, document: serde_json::Value, cancel: &CancellationToken) -> Result<()>`, `withdraw_plugin(plugin: String, cancel: &CancellationToken) -> Result<()>`, `plugins(cancel: &CancellationToken) -> Result<Vec<String>>` and `plugin_refusal(&self, plugin: &str) -> Option<String>`, as `McpService`'s (`crates/dim-app-server/src/mcp.rs`): a refused document leaves no entry and is remembered for `plugin_refusal`; PluginManager reads the service through `names.key()` in its `Owners`, its `Kind::Hooks` added to `OWNERS` and `CONTENT` ([PluginManager §3.7](PluginManager.md#37-content-registration)) |
 | `hooks.*` | `Keyed<ManagementMethods>`; `methods.register(ctx, "hooks", …)` |
-| Runner | Session service `HooksRuntime`, private to Hooks; processes from `HostPlatform::build_process_spec` and `spawn`, owned by `ctx.effect` |
+| Runner | Session service `HooksRuntime`, private to Hooks; processes from `HostPlatform::build_process_spec` and `spawn`, with the event's stdin object (A.3) as the initial stdin (A.6.3), owned by `ctx.effect` |

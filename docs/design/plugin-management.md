@@ -47,7 +47,7 @@
 - [PluginManager](plugins/PluginManager.md)：按上面的方向于 2026-10-27 重写的设计。旧草案把内容发布为 `pluginContents` 服务、由负责方读取，已废弃；市场推迟到 M1 之后。
 - [#3](https://github.com/arcships/dim/issues/3)：插件记录和 loader 行的管理。早先“loader 的可编辑层作为启用状态的唯一来源”的方向已被取代：记录是 PluginManager 的 `plugins.json`，loader 只负责插件代码的生命周期。
 - [#384](https://github.com/arcships/dim/issues/384)：安装和启用插件，在 #3 之上。
-- [Hooks](plugins/Hooks.md)：草案；插件来源的 hooks 由 PluginManager 调用 Hooks 的登记操作（[PluginManager §9 R2](plugins/PluginManager.md#9-requirements-raised-to-mechanism-owners)）。
+- [Hooks](plugins/Hooks.md)：已 Ready，归 M1；插件来源的 hooks 由 PluginManager 调用 Hooks 的登记操作（[PluginManager §9 R2](plugins/PluginManager.md#9-requirements-raised-to-mechanism-owners)）。
 - [ADR 004](../adr/004-loader-plugin-management.md)、[插件契约](plugin-contract.md)、[How Dim uses rutis](rutis-usage.md)。
 
 需求跟踪：[#432](https://github.com/arcships/dim/issues/432)。
