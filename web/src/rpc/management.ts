@@ -133,10 +133,3 @@ export function readResetBatches(value: unknown): { window: ResetBatch[]; monthl
   const read = (item: unknown): ResetBatch => { const b = object(item); return { grantId: number(b.grantId), remaining: number(b.remaining), expiresAt: string(b.expiresAt), scopeType: string(b.scopeType), subscriptionId: optional(b.subscriptionId, number), sourceType: string(b.sourceType) } }
   return { window: list(v.window, read), monthlyFull: list(v.monthlyFull, read) }
 }
-
- policy: {
-    readOnlyPaths: optional(policy.readOnlyPaths, (value) => list(value, string)),
-    writablePaths: optional(policy.writablePaths, (value) => list(value, string)),
-    environment: optional(policy.environment, (value) => list(value, string)),
-  } }
-}
