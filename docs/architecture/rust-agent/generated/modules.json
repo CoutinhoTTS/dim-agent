@@ -483,6 +483,29 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::hooks",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/hooks/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_capabilities::hooks::document",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::hooks",
+      "file": "crates/dim-agent-capabilities/src/hooks/document.rs",
+      "unexpandedMacros": [
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::hooks::sources",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::hooks",
+      "file": "crates/dim-agent-capabilities/src/hooks/sources.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::host",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -6238,6 +6261,20 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::hooks",
+      "references": [
+        "mod hooks"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::hooks::sources",
+      "references": [
+        "path hooks::HookSourcesHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::host",
       "references": [
         "mod host",
@@ -8005,6 +8042,66 @@
         "path ToolEffect",
         "path ToolEffect::CommandRun",
         "path ToolEffect::FileWritten"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks",
+      "to": "dim_agent_capabilities::hooks::document",
+      "references": [
+        "mod document",
+        "use document::HookEntry",
+        "use document::HookEvent",
+        "use document::HookHandler",
+        "use document::HookState",
+        "use document::HooksDocument",
+        "use document::OnFailure",
+        "use document::entries",
+        "use document::handlers"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks",
+      "to": "dim_agent_capabilities::hooks::sources",
+      "references": [
+        "mod sources",
+        "use sources::HookSourceId",
+        "use sources::HookSourceSnapshot",
+        "use sources::HookSourceState",
+        "use sources::HookSourcesHost",
+        "use sources::HookSourcesSnapshot",
+        "use sources::NoHookSources",
+        "use sources::ReadHookSources"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::document",
+      "to": "dim_agent_capabilities::hooks::sources",
+      "references": [
+        "path HookSourceId",
+        "path HookSourceId::User",
+        "path HookSourceState::Ok",
+        "path HookSourcesSnapshot",
+        "use super::sources::HookSourceId",
+        "use super::sources::HookSourceState",
+        "use super::sources::HookSourcesSnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::sources",
+      "to": "dim_agent_capabilities::hooks::document",
+      "references": [
+        "path HooksDocument",
+        "use super::document::HooksDocument"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::sources",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostFuture",
+        "use crate::host::HostError",
+        "use crate::host::HostFuture"
       ]
     },
     {

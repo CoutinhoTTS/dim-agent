@@ -11,6 +11,7 @@ pub mod defaults;
 pub mod exec_stop;
 pub mod file_storage;
 pub mod history;
+pub mod hooks;
 pub mod host;
 pub mod host_platform;
 pub mod images;
@@ -76,6 +77,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::PromptHost>(catalog, session);
     register::<host::ToolHost>(catalog, session);
     register::<permission::CommandRulesHost>(catalog, session);
+    register::<hooks::HookSourcesHost>(catalog, session);
     register::<methods::SessionMethods>(catalog, session);
     let branch = Some(BRANCH_GROUP);
     register::<input_queue::InputQueue>(catalog, branch);
