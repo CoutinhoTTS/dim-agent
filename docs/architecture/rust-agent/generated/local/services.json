@@ -1946,7 +1946,7 @@
         "removing": false
       },
       {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#loader",
+        "service": "dyn rutis_bridge::session::services::HostDispatch#rutis/loader",
         "provider": 2,
         "generation": 1,
         "removing": false

@@ -342,7 +342,7 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 
 ### 6.3 Multiple nodes
 
-rutis nodes connect through connection rows: a connection hands a channel to a rutis session, and the two kernels greet each other with their ids (`LocalId`). A session exports every process-wide shared name to its far end and announces its listener names, so events reach listeners at either end; a plugin runs on the far end as the loader row `<row>:<plugin>`, where `<row>` is the connection's row. rutis-host's `dial` and `listen` rows are such connections; Dim uses none yet ([rutis 0.19 migration](https://github.com/arcships/rutis/blob/v0.19.2/docs/migration-0.19.en.md), [#5](https://github.com/arcships/dim/issues/5)).
+rutis nodes connect through connection rows: a connection hands a channel to a rutis session, and the two kernels greet each other with their ids (`LocalId`). A session exports every process-wide shared name to its far end and announces its listener names, so events reach listeners at either end; a plugin runs on the far end as the loader row `<row>:<plugin>`, where `<row>` is the connection's row. rutis-host's `dial` and `listen` rows are such connections; Dim uses none yet ([rutis 0.19 migration](https://github.com/arcships/rutis/blob/v0.19.3/docs/migration-0.19.en.md), [#5](https://github.com/arcships/dim/issues/5)).
 
 | Rule | Content |
 | --- | --- |
