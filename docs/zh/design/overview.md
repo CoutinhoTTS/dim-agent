@@ -495,7 +495,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | PromptSources | 补充 | 提示词语言来源 | `/language` |
 | ContextPreparation | 补充 | 用量查询；手动压缩；实现 `ResolveContextModel` 的生产环境压缩宿主 | `/usage`、`/compact` |
 | FileStorage | 补充 | 根目录下的目录列举与删除（S6）；目录创建（S5a，[Session 文件](appserver/session-files.md#7-filestorage-新增操作)） | Session 文件、清理 |
-| HostPlatform | 补充 | 进程启动时的 OS 隔离（macOS seatbelt、Linux bubblewrap、Windows 明确不可用）、按节点的宿主本地配置；exec argv 辅助；每次 spawn 时读取 exec shell（ADR 002）；到控制节点的链接断开时，该节点的 HostPlatform 结束它启动的进程 | 沙箱；ShellInput、Hooks、ExternalAgent |
+| HostPlatform | 补充 | 进程启动时的 OS 隔离只用于 agent 决定的命令（`exec` 与持久 shell；macOS seatbelt、Linux bubblewrap、Windows 明确不可用）、按节点的宿主本地配置；把给定字节写入子进程 stdin 然后关闭的进程启动，用于 Hook 命令这类配置命令，它们不施加 agent 沙箱，与 MCP stdio 服务器相同（[ADR 003](../adr/003-approval-scope.md) D2，[Hooks A.6.3](plugins/Hooks.md#a63-带初始-stdin-的进程启动)）；exec argv 辅助；每次 spawn 时读取 exec shell（ADR 002）；到控制节点的链接断开时，该节点的 HostPlatform 结束它启动的进程 | 沙箱；ShellInput、Hooks、ExternalAgent |
 
 ### B.2 App Server 进程插件
 
