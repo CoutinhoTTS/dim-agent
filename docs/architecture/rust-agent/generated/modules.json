@@ -8326,8 +8326,10 @@
         "path HookEvent::PermissionRequest",
         "path HookEvent::PostToolUse",
         "path HookEvent::PostToolUseFailure",
+        "path HookEvent::PreToolUse",
         "path HookEvent::SessionStart",
         "path HookEvent::Stop",
+        "path HookEvent::UserPromptSubmit",
         "path HookHandler",
         "path OnFailure",
         "path OnFailure::Block",
@@ -8489,7 +8491,10 @@
       "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_capabilities::hooks::document",
       "references": [
+        "path HookEvent::Notification",
+        "path HookEvent::SessionStart",
         "path HooksDocument",
+        "path handlers",
         "use crate::hooks::HooksDocument"
       ]
     },
@@ -8499,6 +8504,7 @@
       "references": [
         "path FOLLOWED_EVENTS",
         "path HookResult::Failed",
+        "path HookRun",
         "path HooksRuntime",
         "path Pending::default",
         "path View::default",

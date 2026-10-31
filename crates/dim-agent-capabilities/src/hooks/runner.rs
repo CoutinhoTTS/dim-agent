@@ -257,9 +257,7 @@ impl HooksRuntime {
                 if overflow {
                     failed("stdout exceeded 64 KiB", &stderr)
                 } else if status.code() == Some(2) {
-                    HookResult::Blocked {
-                        reason: String::from_utf8_lossy(&stderr).into_owned(),
-                    }
+                    exit_two(handler.event, &stderr)
                 } else if status.success() {
                     HookResult::Success {
                         stdout: String::from_utf8_lossy(&bytes).into_owned(),
@@ -351,6 +349,27 @@ fn failed(reason: impl Into<String>, stderr: &[u8]) -> HookResult {
     }
 }
 
+/// What exit 2 means at each event (A.4's Exit 2 column). Every event names
+/// its own meaning, so adding one is a choice and never a fall-through to a
+/// default; `UserPromptSubmit` blocks, as its A.4 row says.
+fn exit_two(event: HookEvent, stderr: &[u8]) -> HookResult {
+    match event {
+        // A.4 marks these as failure: the run is the failure `report` logs,
+        // with the stderr excerpt, and the point contributes nothing (A.5,
+        // "diagnostic only" for observation hooks).
+        HookEvent::SessionStart | HookEvent::Notification => failed("exited with 2", stderr),
+        // Every other event keeps its blocking meaning (A.4's Exit 2 column).
+        HookEvent::PreToolUse
+        | HookEvent::UserPromptSubmit
+        | HookEvent::PermissionRequest
+        | HookEvent::PostToolUse
+        | HookEvent::PostToolUseFailure
+        | HookEvent::Stop => HookResult::Blocked {
+            reason: String::from_utf8_lossy(stderr).into_owned(),
+        },
+    }
+}
+
 /// A hook point's own text, escaped for the runtime block it goes into. The
 /// cap is applied to the hook's text before this (A.4 bounds the context and
 /// the reason, not their escaped form), so escaping never eats into what a
@@ -379,11 +398,9 @@ fn capped(text: &str) -> Option<String> {
 fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
     match &run.result {
         HookResult::Failed { .. } => None,
-        HookResult::Blocked { reason } => match event {
-            // A blocking result is not that event's protocol (§A.4).
-            HookEvent::SessionStart | HookEvent::Notification => None,
-            _ => capped(reason),
-        },
+        // The observation hooks' exit 2 is a failure (`exit_two`), so a
+        // blocking result here is always the event's own protocol (A.4).
+        HookResult::Blocked { reason } => capped(reason),
         HookResult::Success { stdout } => {
             let trimmed = stdout.trim();
             if trimmed.is_empty() {
@@ -1328,6 +1345,47 @@ mod tests {
         assert_eq!(stderr, "denied\n");
     }
 
+    /// A.4's Exit 2 column: at `SessionStart` and `Notification`, exit 2 is a
+    /// failure, so the run is the one `report` logs, carrying the stderr
+    /// excerpt, and contributes no block.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_two_is_a_failure_at_session_start_and_notification() {
+        for event in [HookEvent::SessionStart, HookEvent::Notification] {
+            let dir =
+                std::env::temp_dir().join(format!("dim-hooks-exit2-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let runtime = test_runtime(
+                &dir,
+                Arc::new(DocumentSources {
+                    document: exit_two_document(event.name()),
+                }),
+            );
+            let snapshot = runtime.snapshot().await.expect("the sources");
+            let matching = handlers(&snapshot, event, None, None);
+            assert_eq!(matching.len(), 1, "{} matched no handler", event.name());
+            let run = HookRun {
+                result: runtime
+                    .run_one(&matching[0], Vec::new(), &runtime.cancel)
+                    .await,
+                on_failure: matching[0].on_failure,
+            };
+            assert!(
+                matches!(&run.result, HookResult::Failed { stderr, .. } if stderr.as_str() == "bad config\n"),
+                "exit 2 at {} was not a failure: {:?}",
+                event.name(),
+                run.result
+            );
+            assert_eq!(
+                contribution_of(event, &run),
+                None,
+                "{} wrote a block",
+                event.name()
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     /// F4: a result settles its call, and the call's input (whole file
     /// contents for `write`/`edit`) does not stay in the folded view.
     #[test]
@@ -1624,6 +1682,23 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    /// A document with one handler at `event` that writes `bad config` to its
+    /// standard error and exits 2.
+    #[cfg(unix)]
+    fn exit_two_document(event: &str) -> HooksDocument {
+        let mut hooks = serde_json::Map::new();
+        hooks.insert(
+            event.to_owned(),
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": "printf 'bad config\\n' >&2; exit 2",
+                }],
+            }]),
+        );
+        serde_json::from_value(serde_json::json!({ "hooks": hooks })).unwrap()
     }
 
     #[cfg(unix)]
