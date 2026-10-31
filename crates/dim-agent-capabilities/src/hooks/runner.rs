@@ -69,7 +69,12 @@ pub enum HookResult {
     Blocked { reason: String },
     /// Any other exit, a signal, a timeout, a cancellation or an oversized
     /// stdout.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+        /// The first [`STDERR_LIMIT`] bytes of its standard error, which the
+        /// diagnostic carries (§7). Never standard output or the payload.
+        stderr: String,
+    },
 }
 /// One handler's run, at its catalog position.
 #[derive(Clone, Debug)]
@@ -190,9 +195,7 @@ impl HooksRuntime {
         {
             Ok((spec, _)) => spec,
             Err(error) => {
-                let result = HookResult::Failed {
-                    reason: format!("{}: {}", error.code, error.reason),
-                };
+                let result = failed(format!("{}: {}", error.code, error.reason), &[]);
                 self.report(handler, &result, started.elapsed());
                 return result;
             }
@@ -201,9 +204,7 @@ impl HooksRuntime {
         let mut tree = match self.platform.spawn_with_stdin(spec, stdin) {
             Ok(tree) => tree,
             Err(error) => {
-                let result = HookResult::Failed {
-                    reason: format!("spawn failed: {error}"),
-                };
+                let result = failed(format!("spawn failed: {error}"), &[]);
                 self.report(handler, &result, started.elapsed());
                 return result;
             }
@@ -234,29 +235,27 @@ impl HooksRuntime {
         let result = match end {
             End::Cancelled => {
                 let _ = tree.terminate().await;
-                HookResult::Failed {
-                    reason: "cancelled".into(),
-                }
+                failed("cancelled", &[])
             }
             End::TimedOut => {
                 let _ = tree.terminate().await;
-                HookResult::Failed {
-                    reason: format!("timed out after {}s", handler.timeout.as_secs()),
-                }
+                failed(
+                    format!("timed out after {}s", handler.timeout.as_secs()),
+                    &[],
+                )
             }
             End::Done((bytes, overflow), (stderr, _), status) => {
                 let status = match status {
                     Ok(status) => status,
+                    // A run whose end cannot be read still reports (§7).
                     Err(error) => {
-                        return HookResult::Failed {
-                            reason: format!("wait failed: {error}"),
-                        };
+                        let result = failed(format!("wait failed: {error}"), &stderr);
+                        self.report(handler, &result, started.elapsed());
+                        return result;
                     }
                 };
                 if overflow {
-                    HookResult::Failed {
-                        reason: "stdout exceeded 64 KiB".into(),
-                    }
+                    failed("stdout exceeded 64 KiB", &stderr)
                 } else if status.code() == Some(2) {
                     HookResult::Blocked {
                         reason: String::from_utf8_lossy(&stderr).into_owned(),
@@ -266,9 +265,7 @@ impl HooksRuntime {
                         stdout: String::from_utf8_lossy(&bytes).into_owned(),
                     }
                 } else {
-                    HookResult::Failed {
-                        reason: format!("exited with {status}"),
-                    }
+                    failed(format!("exited with {status}"), &stderr)
                 }
             }
         };
@@ -279,13 +276,14 @@ impl HooksRuntime {
     /// Diagnostics keep only source, event, exit status, duration and a
     /// bounded stderr excerpt (Hooks §7).
     fn report(&self, handler: &HookHandler, result: &HookResult, duration: Duration) {
-        let HookResult::Failed { reason } = result else {
+        let HookResult::Failed { reason, stderr } = result else {
             return;
         };
         tracing::warn!(
             source = handler.source.as_str(),
             event = handler.event.name(),
             reason = %reason,
+            stderr = %stderr,
             duration_ms = duration.as_millis() as u64,
             "hook command failed"
         );
@@ -341,6 +339,15 @@ async fn read_capped<R: AsyncRead + Unpin>(reader: &mut R, limit: usize) -> (Vec
                 }
             }
         }
+    }
+}
+
+/// A failed run: its reason and the first [`STDERR_LIMIT`] bytes of its
+/// standard error, which its diagnostic carries (§7).
+fn failed(reason: impl Into<String>, stderr: &[u8]) -> HookResult {
+    HookResult::Failed {
+        reason: reason.into(),
+        stderr: String::from_utf8_lossy(&stderr[..stderr.len().min(STDERR_LIMIT)]).into_owned(),
     }
 }
 
@@ -1286,6 +1293,22 @@ mod tests {
             tags: None,
             kind,
         }
+    }
+
+    /// §7: a failed run's diagnostic carries a bounded standard-error
+    /// excerpt and nothing of the standard output or the payload.
+    #[test]
+    fn a_failure_keeps_a_bounded_stderr_excerpt() {
+        let long = vec![b'x'; STDERR_LIMIT * 2];
+        let HookResult::Failed { reason, stderr } = failed("exited with 1", &long) else {
+            panic!("a failure");
+        };
+        assert_eq!(reason, "exited with 1");
+        assert_eq!(stderr.len(), STDERR_LIMIT);
+        let HookResult::Failed { stderr, .. } = failed("exited with 1", b"denied\n") else {
+            panic!("a failure");
+        };
+        assert_eq!(stderr, "denied\n");
     }
 
     /// F4: a result settles its call, and the call's input (whole file

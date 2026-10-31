@@ -163,7 +163,8 @@ that a settled call's input does not stay in the folded view;
 `a_live_request_registers_its_token_before_its_task_starts`,
 `an_answer_folded_before_the_task_starts_runs_no_permission_command` and
 `an_answer_folded_during_the_read_runs_no_permission_command` pin that an
-answered request starts no command; and
+answered request starts no command; `a_failure_keeps_a_bounded_stderr_excerpt`
+pins the diagnostic's excerpt; and
 `hooks_settings.rs`'s `a_hook_point_reads_sources_without_authorizing_a_project`
 pins that reading a Session's sources never authorizes a workspace.
 [hooks_settings_flow.rs](../../../../crates/dim-app-server/tests/hooks_settings_flow.rs):

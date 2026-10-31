@@ -529,6 +529,7 @@
         "assert",
         "assert_eq",
         "format",
+        "panic",
         "serde_json::json",
         "vec"
       ]
@@ -8458,10 +8459,12 @@
       "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_capabilities::hooks::runner",
       "references": [
+        "path HookResult::Failed",
         "path HooksRuntime",
         "path Pending::default",
         "path View::default",
-        "path approval_point"
+        "path approval_point",
+        "path failed"
       ]
     },
     {
