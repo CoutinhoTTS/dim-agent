@@ -9,7 +9,7 @@ use dim_agent_runtime::{AgentBuilder, Names, SessionConfig, SessionIdentity};
 use dim_agent_types::grant::{GrantKind, GrantMode, SessionGrant};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -88,21 +88,10 @@ impl DynPlugin for SessionGrantsPlugin {
             methods.register(
                 ctx,
                 "session.grants",
-                [
-                    "session.grants.add",
-                    "session.grants.remove",
-                    "session.grants.list",
-                    "session.grants.lookup",
-                ]
-                .into_iter()
-                .map(|name| {
-                    MethodDecl::new(
-                        name,
-                        name != "session.grants.list" && name != "session.grants.lookup",
-                        Interruption::Report,
-                    )
-                })
-                .collect(),
+                ["session.grants.add", "session.grants.remove"]
+                    .into_iter()
+                    .map(|name| MethodDecl::new(name, true, Interruption::Report))
+                    .collect(),
                 Arc::new(move |method, value, _, _| {
                     let store = owner.clone();
                     let session_id = session_id.clone();
@@ -126,19 +115,6 @@ impl DynPlugin for SessionGrantsPlugin {
                                     .await
                                     .map_err(failed)?;
                                 reply(serde_json::json!({}))
-                            }
-                            "session.grants.list" => {
-                                let grants = store.grants(&session_id).await.map_err(failed)?;
-                                reply(GrantsView { grants })
-                            }
-                            "session.grants.lookup" => {
-                                let p: LookupGrant = params(value)?;
-                                let path = resolve(&cwd, p.path).await?;
-                                let grants = store.grants(&session_id).await.map_err(failed)?;
-                                let grant = grants
-                                    .into_iter()
-                                    .find(|grant| grant.matches(&path, p.mode));
-                                reply(LookupView { grant })
                             }
                             _ => unreachable!("registered session grants method"),
                         }
@@ -180,17 +156,4 @@ struct AddGrant {
 #[derive(Deserialize)]
 struct RemoveGrant {
     path: String,
-}
-#[derive(Deserialize)]
-struct LookupGrant {
-    path: String,
-    mode: GrantMode,
-}
-#[derive(Serialize)]
-struct GrantsView {
-    grants: Vec<SessionGrant>,
-}
-#[derive(Serialize)]
-struct LookupView {
-    grant: Option<SessionGrant>,
 }

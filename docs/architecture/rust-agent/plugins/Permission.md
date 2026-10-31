@@ -101,7 +101,7 @@ the reason and a Session-scoped grant action for file tools:
 - §1 and ADR 002 D1–D3: the existing branch Permission and Approval Capabilities
   own admission and approval facts. WorkspaceTools owns file execution; no
   plugin, wiring part, lifecycle or isolation dependency is added. The grant
-  store and `session.grants.*` belong to the App Server `SessionGrants` Session
+  store and `session.grants.add/remove` belong to the App Server `SessionGrants` Session
   part (ADR 012); Permission only reads them at an Ask.
 - §4 rules 1–6 and 9: existing approval requests/responses and tool results
   carry the decision and outcome; handlers retain their existing tasks,
@@ -140,8 +140,9 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `a_session_grant_matches_only_the_canonical_target_and_mode`.
 
 [session_grants.rs](../../../../crates/dim-app-server/tests/transport_flow/session_grants.rs)
-covers the four `session.grants.*` methods and a write grant admitting the next
-outside write without an approval request.
+covers the `session.grants.add/remove` methods, a write grant admitting the
+next outside write without an approval request, and its removal making the
+next write ask.
 
 [local_product.rs](../../../../tests/integration/tests/local_product.rs) verifies
 real workspace writes, per-call external write/edit approvals despite explicit
