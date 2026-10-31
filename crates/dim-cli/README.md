@@ -782,7 +782,17 @@ A bar means a run is under way or held up, so a finished or failed run removes i
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. Every language is translated; a string missing from a table reads as English. Rows already in the transcript keep their language.
 
-In the default theme (`System`) every colour is the terminal's own default foreground, a slot of its 16-colour palette (`ansi:N`) or the faint attribute, so it follows the terminal's colour scheme on dark and light backgrounds alike. Yellow is the accent (titles, the selected row, inline code), green the user's messages and successes, blue first-level and cyan second-level headings, red errors; muted text is faint, table rules bright black, and code is highlighted in the terminal's base colours (keywords and types blue, calls cyan, numbers yellow, strings green).
+Without a saved `themeId`, a dark terminal with truecolour or 256-colour support defaults to `Dim Dark`. Light backgrounds and 16-colour terminals use `System`. Apple Terminal (`TERM_PROGRAM=Apple_Terminal` or `TERM=nsterm…`) also uses `System` when its background is unknown; it only defaults to `Dim Dark` when an OSC 11 background report, `COLORFGBG` or an explicit `DIM_TERMINAL_APPEARANCE=dark` (also `DIMCODE_TERMINAL_APPEARANCE`) identifies a dark background. Detection keeps that precedence: explicit appearance override, OSC 11, then `COLORFGBG`. A saved theme choice is preserved; detection does not write it to configuration.
+
+```text
+ no saved theme
+   dark + truecolour/256 colours  -> Dim Dark
+   light / 16 colours            -> System
+   Apple Terminal, unknown bg    -> System
+ saved theme                     -> saved choice (existing compatibility checks)
+```
+
+In `System` on a dark background every colour is the terminal's own default foreground, a slot of its 16-colour palette (`ansi:N`) or the faint attribute, so it follows the terminal's colour scheme. Yellow is the accent (titles, the selected row, inline code), green the user's messages and successes, blue first-level and cyan second-level headings, red errors; muted text is faint, table rules bright black, and code is highlighted in the terminal's base colours (keywords and types blue, calls cyan, numbers yellow, strings green).
 
 On a light background (Terminal.app's default profile among them) the coloured roles do not come from the 16-colour slots: a light profile's ochre yellow and sea-green cyan were not chosen for reading on white. As in the TS build, each hue takes a fixed lightness that carries it on paper (amber, olive green, blue, teal, red) and is held to the contrast floors against the background the terminal reported (an off-white when it did not answer); muted and faint take fixed greys too, since the faint attribute is a pale grey on white, and the selected row carries white text; text and border stay the terminal's own, which it already pairs with its background. 16-colour terminals keep the slots. `Dim Light` takes the same ramp.
 

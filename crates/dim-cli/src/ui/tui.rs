@@ -186,7 +186,9 @@ pub fn print_web_panel(opened: &WebOpened) {
         println!("Press Ctrl+C to stop the Web workspace.");
         return;
     }
-    let palette = Theme::detect(&detect::env_from_process(), true, None).palette;
+    let palette = Theme::detect(&detect::env_from_process(), true, None)
+        .1
+        .palette;
     let cols = crate::ui::terminal::window_size().map_or(80, |(cols, _)| usize::from(cols));
     print!("{}", web_panel(cols, &palette, opened));
     if let Some(url) = opened.sign_in {
@@ -230,7 +232,7 @@ fn run_terminal(
     let env = detect::env_from_process();
     let mut progress = ProgressBar::from_env(&env);
     let mut title = WindowTitle::new(crate::ui::title::apple_terminal(), Instant::now());
-    let detected = Theme::detect(&env, true, background.as_deref());
+    let (default_id, detected) = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
         Some(id) => Theme::named(
@@ -257,7 +259,7 @@ fn run_terminal(
         mode: detected.mode,
         appearance: detected.appearance,
         background,
-        active: saved.unwrap_or_else(|| crate::ui::theme_panel::SYSTEM.to_owned()),
+        active: saved.unwrap_or_else(|| default_id.to_owned()),
     });
     let mut dirty = true;
     let mut last_frame: Option<Instant> = None;
