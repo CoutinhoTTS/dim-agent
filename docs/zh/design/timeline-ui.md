@@ -156,15 +156,15 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 
 ### 4.8 模型还没读到的消息
 
-用户消息先写入、再由 InputQueue 采用、最后由 Loop 消费。客户端从 `input/message` 起画出这一行；被队列压住的消息从 `input/applied` 起画。行显示模型是否已经读到：
+用户消息先写入、再由 InputQueue 采用、最后由 Loop 消费。客户端从 `input/applied` 起画出这一行，行显示模型是否已经读到：
 
 | 状态 | 事实 | 模型读到了吗 | 画成 |
 | --- | --- | --- | --- |
-| queue | `input/message`，InputQueue 还压着 | 否 | composer 上方的队列条 |
+| queue | `input/message`，InputQueue 还压着 | 否 | line 运行期间 composer 上方的队列条 |
 | applied | `input/applied`，等 Loop 的下一个请求 | 否 | 虚化的消息行 |
 | consumed | `input/consumed`，已进入携带它的那次请求 | 是 | 正常的用户消息行 |
 
-虚化的行保留文本和切点，用 muted 颜色画、不加底色条。fullscreen 里消息在它被说出的位置就提交，`input/consumed` 时原地重画这一块。scrollback 只能追加，所以那里会变的行留在 live tail 里（与流式回答、运行中的工具组同一规则），结算时才以用户色进入 scrollback。tail 画在所有已提交的行之后，所以待消费行只在它是最新一行时留在那里：如果后面的行先结算（例如跨过一次 stop 的 applied 输入），这条消息按 Timeline 顺序以用户色提交，已提交的行收不回这个提示。于是只要绘制还能改，等下一个请求的消息就读作未读：
+虚化的行保留文本和切点，用 muted 颜色画、不加底色条。fullscreen 里消息在它被说出的位置就提交，`input/consumed` 时原地重画这一块；离开 fullscreen 时先把已提交的待消费行结算，因为 scrollback 收不回这个提示。scrollback 只能追加，所以那里会变的行留在 live tail 里（与流式回答、运行中的工具组同一规则），结算时才以用户色进入 scrollback。tail 画在所有已提交的行之后，所以待消费行只在它是最新一行时留在那里：如果后面的行先结算（例如跨过一次 stop 的 applied 输入），这条消息按 Timeline 顺序以用户色提交，已提交的行收不回这个提示。于是只要绘制还能改，等下一个请求的消息就读作未读：
 
 ```
  › how do we fix this deadlock                       模型已读到
@@ -175,7 +175,7 @@ applied 的输入可以跨过一次 stop 继续待消费，正是下一个 turn 
 
 界面自己直接提交、不属于 transcript 那些行的内容（notice、`!!` 运行、失败行、resume 的边界）不在这条顺序规则里，可以排在待消费消息之上。
 
-待消费的样式只属于终端界面：Web 与 ACP 收不到 `input/consumed`，仍然把消息显示为已发送。
+待消费的样式只属于终端界面：Web 的 v1 `session.event` 会过滤 `input/consumed`（[事件驱动流程](../../architecture/rust-agent/event-driven-flows.md)），所以 Web 上消息仍显示为已发送。
 
 行按 input id 从写下它的 `input/message` 跟到结算它的 `input/consumed`，所以重连后折叠同一批事件时，画出的就是它已经到达的状态，而不是写入那一刻的状态。
 

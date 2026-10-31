@@ -600,11 +600,7 @@ fn run_terminal(
                     } else {
                         screen = Screen::new(terminal.size(), synchronized);
                     }
-                    app.fullscreen = entering;
-                    if entering {
-                        app.redraw_window();
-                    }
-                    app.request_reflow();
+                    app.set_fullscreen(entering);
                     dirty = true;
                 }
                 Outcome::Suspend => {
@@ -4050,6 +4046,39 @@ impl App {
         }
     }
 
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        if on {
+            self.redraw_window();
+        } else {
+            self.settle_committed_messages();
+        }
+        self.request_reflow();
+    }
+
+    /// Scrollback cannot recolour a row it printed, so a pending message
+    /// committed in fullscreen is settled before the history goes there
+    /// (timeline UI §4.8).
+    fn settle_committed_messages(&mut self) {
+        for index in std::mem::take(&mut self.message_blocks) {
+            let Some(at) = index.checked_sub(self.dropped) else {
+                continue;
+            };
+            let Some(Block::User {
+                text, display, cut, ..
+            }) = self.history.get(at).cloned()
+            else {
+                continue;
+            };
+            self.history[at] = Block::User {
+                text,
+                display,
+                cut,
+                pending: false,
+            };
+        }
+    }
+
     /// Fullscreen redraws a committed user row the model has consumed since;
     /// scrollback keeps what it printed (timeline UI §4.8).
     fn refresh_messages(&mut self) {
@@ -6149,6 +6178,39 @@ mod tests {
                 .iter()
                 .any(|block| matches!(block, Block::User { pending: true, .. })),
             "no pending copy is left behind"
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_prints_a_pending_message_settled() {
+        let mut drawn = attached();
+        drawn.app.fullscreen = true;
+        show(&mut drawn, vec![message(true)]);
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: true, .. } if text == "find the leak"
+            )),
+            "fullscreen commits the pending row"
+        );
+        drawn.app.set_fullscreen(false);
+        drawn.draw();
+        assert!(
+            drawn.app.history.iter().any(|block| matches!(
+                block,
+                Block::User { text, pending: false, .. } if text == "find the leak"
+            )),
+            "scrollback prints the row it cannot recolour"
+        );
+        assert_eq!(
+            drawn
+                .app
+                .history
+                .iter()
+                .filter(|block| matches!(block, Block::User { .. }))
+                .count(),
+            1,
+            "the hint is dropped, not printed a second time"
         );
     }
 

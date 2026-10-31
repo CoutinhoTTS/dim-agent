@@ -213,7 +213,8 @@ pub struct ApprovalView {
     pub always: Option<String>,
 }
 
-/// A message submitted while a turn runs, not yet consumed.
+/// A message the queue strip shows: submitted while a turn runs, without its
+/// `input/applied` yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub id: String,
