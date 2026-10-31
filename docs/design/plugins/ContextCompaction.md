@@ -1657,13 +1657,22 @@ factory configuration beside it (§13.5); chunking, folding, cut-off handling, r
 and the request budget are unchanged, so both arms run the shipped code and only the prompt or
 the sentence differs.
 
-The report shows each arm as the table below does, then one verdict line: `candidate passes;
-median T: current 1850, candidate 1600`, or `candidate fails` with the rules that failed, in the
-same shape. The verdict is [model-facing prompts §8.1](../model-prompts.md#81-the-rule)'s rule
-applied to this runner's metrics; the candidate texts' own token cost — the prompt's, and the
-length sentence's when one is given — stands beside the scores. A rate with no probe of its kind
-among the cases is left out. `skipped` stays a separate count, and both arms' median `T` stand
-beside the verdict, so the length is visible (§6: the length is reported beside every score).
+The report shows each arm as the table below does, then, for a candidate run, the family's
+comparison rows and one verdict line: `candidate passes: ...; median T: current 1850, candidate
+1600`, `candidate fails` naming the comparisons that are regressions, or `candidate is
+inconclusive` below the floor. The verdict is [model-facing prompts
+§8.1](../model-prompts.md#81-the-rule)'s test applied to this runner's family, which is fixed
+before any data: fact recall `F`, exact recall `X`, the violation rate `V`, the failed-run rate
+and the unjudged-run rate. The candidate texts' own token cost — the prompt's, and the length
+sentence's when one is given — stands beside the scores. `skipped` stays a separate count, and
+both arms' median `T` stand beside the verdict, so the length is visible (§6: the length is
+reported beside every score).
+
+A multi-arm run adds, below the table, every other arm's loss and p-value against the decision's
+baseline — `inherit` for the reasoning phase, and the best arm for the target phase — so both
+criteria of the decision list below are read off the same test. The best arm is the one with the
+highest `F`, ties broken by `X`, the lower violation rate, fewer failed runs and the table's own
+order.
 
 **Cases.** JSON files in `xtask/summary-eval/cases/`, one per history:
 
@@ -1712,9 +1721,8 @@ chain is five compactions in sequence:
 - Each step is one call to the shipped strategy, its history, request and cut built exactly as a
   single case's are, so `validate_cut` runs per step.
 - The probes are judged on the fifth summary only.
-- A step that fails ends the chain, and the case counts as one failed compaction: its `fact` and
-  `exact` probes count as missed and its `absent` probes as not violated (the failure rule
-  above).
+- A step that fails ends the chain, and the case counts as one failed compaction: it enters no
+  probe's rate and is compared once, as a failed run (the failure rule above).
 - The run's JSON records every step that ran, each with the outcome, duration, error, summary and
   diagnostics a single run records. In the metrics the chain is one compaction: `T` is the fifth
   summary's tokens, `C` sums every step's cut-off replies, the duration is the chain's, and a run
@@ -1776,14 +1784,16 @@ files are the command's own data, not the assembly, crate boundaries or generate
 - Before recording a decision, the operator reads the lowest-scoring summaries of each arm and
   corrects judge errors by hand; corrections are listed in the research note.
 
-Metrics per model and arm, over cases and runs: fact recall `F`, exact recall `X`, violations `V`,
-cut-off replies `C` (`cutOffCount`), failed compactions, median summary tokens `T`
-(`estimatedSummaryTokens`) and median `durationMs`; for target arms also the ratio `T / S`. Runs
-whose applied reasoning (`reasoning`) differs from the arm's value are counted as `fellBack`, so
-an arm the model rejects is not compared against itself (§13.2). A probe the judge did not answer
-is counted as `unjudged`, in a column of its own for the operator to correct by hand. A failed
-compaction has no summary: its `fact` and `exact` probes count as missed and its `absent` probes
-count as not violated, without a judge call, so a failure lowers `F` and `X` and adds nothing to
+Metrics per model and arm, over cases and runs: fact recall `F`, exact recall `X`, the violation
+rate `V` over the probes that can be violated, cut-off replies `C` (`cutOffCount`), failed
+compactions, median summary tokens `T` (`estimatedSummaryTokens`) and median `durationMs`; for
+target arms also the ratio `T / S`. Runs whose applied reasoning (`reasoning`) differs from the
+arm's value are counted as `fellBack`, so an arm the model rejects is not compared against itself
+(§13.2). A probe the judge did not answer is counted as `unjudged`, in a column of its own for the
+operator to correct by hand, and the unjudged-run rate compares a run whose judge left any of its
+`fact` or `absent` probes unanswered: the judge answers all of a run's such probes in one call,
+so an unusable answer leaves them together and counts the run once. A failed compaction enters
+no probe's rate: it is compared once, as the failed-run rate, so it moves neither `F`, `X` nor
 `V`.
 
 The report adds, per arm, `F` broken down by `item` over the `fact` probes that carry one: a
@@ -1817,22 +1827,30 @@ in phase 1 and has no reasoning default to decide. ContextCompaction reruns the 
 provisional classes under [#565](https://github.com/arcships/dim/issues/565); a class whose result
 fails the rule changes the default there.
 
-**Decision criteria** (`δ = 0.05`):
+**Decision criteria** ([model-facing prompts §8.1](../model-prompts.md#81-the-rule)'s test, with
+`δ = 0.05`, Holm at a family-wise `α = 0.10` and a floor of 20 runs of every case per arm):
 
-- **Reasoning default.** For a class, an arm passes when `F ≥ F_inherit − δ`, `X ≥ X_inherit − δ`,
-  `V ≤ V_inherit` and its failures are no more than `inherit`'s. The default is the first of
-  `off`, `low`, `inherit` that passes on every class: the cheapest value that loses no measured
-  quality.
-- **Keep the setting or not.** If on every class the default is also the best arm (no other arm
-  has `F` more than `δ` above it), the setting is not shipped: the value becomes a strategy
+- **An arm against its baseline.** Each arm is compared with the baseline its decision names —
+  `inherit` for the reasoning phase, and the best phase 2 arm for the target phase — on `F`, `X`,
+  `V`, the failed-run rate and the unjudged-run rate, and those five comparisons are the arm's
+  family. An arm passes when none of them is a regression and every case ran at least 20 times in
+  each arm; it is inconclusive below that floor. The table prints each arm's loss and p-value
+  against the baseline, so the decision is read off the same test.
+- **Reasoning default.** For a class, the default is the first of `off`, `low`, `inherit` that
+  passes against `inherit` on every class: the cheapest value that loses no measured quality.
+- **Keep the setting or not.** If on every class the default is also the best arm — no other
+  arm's `F` is more than `δ` above it — the setting is not shipped: the value becomes a strategy
   constant and `compaction.json` is not introduced (ablation). Otherwise the setting ships with
   that default, and the note says which classes benefit from another value.
-- **Target length.** An arm passes when `F ≥ F_best − δ`, `X ≥ X_best − δ` and `V ≤ V_best`,
-  where best is the best phase 2 arm, including no instruction. If no instruction passes and its
-  `C` and failures are no higher than those of every passing target arm, no instruction is kept.
+- **Target length.** An arm passes when none of its five comparisons against the best phase 2 arm
+  is a regression; no instruction is one of the arms. If no instruction passes and its `C` and
+  failures are no higher than those of every passing target arm, no instruction is kept.
   Otherwise the passing target arm with the fewest `C` plus failures is kept, ties broken by the
   smaller median `T`. A kept target must be followed: the 90th percentile of `T / S` is at most
   1.5; if not, the instruction does not control length and is not kept.
+- The decisions recorded under [#170](https://github.com/arcships/dim/issues/170) stand as
+  recorded and are not re-derived; [#565](https://github.com/arcships/dim/issues/565), the rerun
+  for the provisional classes, is evaluated under this rule.
 - The result, the arms' table and any hand corrections are in the
   [research note](../research/summary-eval.md); §10 records the decisions and §13 is their
   contract.
