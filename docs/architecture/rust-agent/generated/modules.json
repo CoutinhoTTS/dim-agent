@@ -22567,6 +22567,13 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::RELEASE"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_client",
       "references": [
         "path Client",
