@@ -1,0 +1,9 @@
+{
+  "description": "Two independent subsystems; both arms work the same task, so a duplication shows as redone work",
+  "message": "Two independent subsystems need building in this project, and each has its own failing test suite:\n\n- parser/ — the integer expression parser specified in parser/expr.py\n- cache/ — the bounded LRU cache with TTL specified in cache/lru.py\n\nThey share no code and do not touch the same files. Make `python3 -m unittest discover -s tests` pass for both, and keep the implementations to their specs.",
+  "budget": {"turns": 30, "seconds": 900, "window": 131072},
+  "probes": [
+    {"id": "no-redone-work", "kind": "must_not_show", "text": "main repeats the work of a line it opened: both edit the same file, or two lines make the same change"},
+    {"id": "parallel-subsystems", "kind": "must_show", "text": "the parser and the cache are worked on at the same time by main and a line, or by two lines"}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "Two lines, plan then implementation; main should route through the shared workspace, not relay messages",
+  "message": "Two steps, two lines: on one line write the implementation plan for exponential backoff plus a jitter option for src/retry.py to docs/retry-plan.md, then have a second line implement exactly that plan with tests. Keep `python3 -m unittest discover -s tests` green.",
+  "budget": {"turns": 30, "seconds": 900, "window": 131072},
+  "probes": [
+    {"id": "no-sibling-relay", "kind": "must_not_show", "text": "main relays the plan's content between the two lines instead of having the second line read the shared file"},
+    {"id": "plan-then-implement", "kind": "must_show", "text": "the plan is written to docs/retry-plan.md and the implementation follows it"}
+  ]
+}
