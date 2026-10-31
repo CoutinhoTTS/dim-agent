@@ -163,7 +163,7 @@ impl Pass<'_> {
             return Err("Compaction cut lies inside the retained tail.");
         }
         let pinned = pinned_inputs(self.view, Some(window), self.turn, &retain_from, self.model);
-        let digest = digest_entries(self.view, Some(window), &retain_from, self.model);
+        let digest = digest_entries(self.view, window, &retain_from, self.model);
         let message = digest
             .as_ref()
             .map(|digest| digest_message(&digest.entries, digest.dropped));
@@ -1116,7 +1116,7 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
 /// its events nor as the compaction it applies.
 fn digest_entries(
     view: &View,
-    window: Option<&PolicyWindow>,
+    window: &PolicyWindow,
     retain_from: &str,
     model: &dyn ContextModel,
 ) -> Option<DigestEntries> {
@@ -1136,7 +1136,7 @@ fn digest_entries(
             }
             _ => None,
         });
-    if let Some(window) = window {
+    {
         let (mut entries, mut dropped) = match previous {
             Some(data) => {
                 let ContextCompactionResult::Completed { digest_entries, .. } = &data.outcome
@@ -1201,113 +1201,6 @@ fn digest_entries(
         }
         return (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped });
     }
-    let events = &view.context.events;
-    let end = events.iter().position(|event| event.id == retain_from)?;
-    let (start, mut entries, mut dropped) = match previous {
-        Some(data) => {
-            let ContextCompactionResult::Completed {
-                retain_from: cut,
-                digest_entries,
-                ..
-            } = &data.outcome
-            else {
-                unreachable!("matched a completed compaction")
-            };
-            // The scan of the events since that cut starts at the first event
-            // the fixed context carries at or after it, in timeline order
-            // (§5.10).
-            let order: HashMap<&str, usize> = view
-                .events
-                .iter()
-                .enumerate()
-                .map(|(index, event)| (event.id.as_str(), index))
-                .collect();
-            let start = match order.get(cut.as_str()) {
-                Some(&cut) => events
-                    .iter()
-                    .position(|event| {
-                        order
-                            .get(event.id.as_str())
-                            .is_some_and(|index| *index >= cut)
-                    })
-                    .unwrap_or(end),
-                // The view carries no event at that cut. It still places it
-                // when it is the cut the view's compaction applied: the
-                // replay then begins at or after it, so every event the
-                // context carries is at or after it and the scan starts at
-                // the replay's first event. A cut the view can place neither
-                // way records no digest.
-                None => {
-                    let applied = view
-                        .checkpoint
-                        .as_ref()
-                        .is_some_and(|checkpoint| checkpoint.retain_from == *cut);
-                    if !applied {
-                        return None;
-                    }
-                    0
-                }
-            }
-            .min(end);
-            (
-                start,
-                digest_entries
-                    .as_ref()
-                    .map(|digest| digest.entries.clone())
-                    .unwrap_or_default(),
-                digest_entries.as_ref().is_some_and(|digest| digest.dropped),
-            )
-        }
-        None => (0, Vec::new(), false),
-    };
-    for event in &events[start..end] {
-        let EventKind::ToolResult(data) = &event.kind else {
-            continue;
-        };
-        for result in &data.results {
-            for effect in result.result.effects.iter().flatten() {
-                let entry = shortened(effect);
-                let key = digest_key(&entry);
-                if let Some(index) = entries
-                    .iter()
-                    .position(|existing| digest_key(existing) == key)
-                {
-                    entries.remove(index);
-                }
-                entries.push(entry);
-            }
-        }
-    }
-    let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
-    let count = |entries: &[ToolEffect], dropped: bool| {
-        model.count_tokens(&ModelRequest::new(
-            "",
-            "",
-            vec![digest_message(entries, dropped)],
-        )) - empty
-    };
-    let limit = DIGEST_SHARE * input_budget(model);
-    if (dropped || !entries.is_empty()) && count(&entries, dropped) > limit {
-        dropped = true;
-        // Dropping entries from the front only shrinks the rendered message,
-        // so the largest suffix that fits is one binary search rather than
-        // one render per entry. When even the note alone is over the bound,
-        // every entry goes and the note stays.
-        let fits = |kept: usize| count(&entries[kept..], true) <= limit;
-        let (mut low, mut high) = (0, entries.len());
-        if fits(high) {
-            while high - low > 1 {
-                let middle = low + (high - low) / 2;
-                if fits(middle) {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-        }
-        entries = entries.split_off(high);
-    }
-    (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped })
 }
 
 /// A command keeps its first `DIGEST_COMMAND_CHARS` characters, counted
