@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3. Language: TypeScript first for provider-executed categories; OCR depends on the OCR runtime component ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-> **Adapters are looked up per task ([#40](https://github.com/arcships/dim/issues/40)).** Modality looks up the adapter of an operation when a task needs it instead of depending on every adapter; a missing adapter makes only its operations unavailable.
+> **Adapters are looked up per task ([#40](https://github.com/arcships/dim/issues/40)).** The per-task adapter lookup contract belongs to #40; this design depends on it and does not restate how an adapter is registered or found. A missing adapter makes only its operations unavailable.
 
 > **P3: redesign with rutis' existing capabilities.** rutis is an external dependency; the requirements this document raises to rutis are withdrawn ([principles §4 rule 8](../../architecture/rust-agent/principles.md)).
 
@@ -25,7 +25,7 @@ flowchart LR
     OCR["OCR runtime component"]
   end
   CLI["CLI dimcode modality, image, ocr, realtime"]
-  AdPlug -->|"registers; looked up per task"| Mod
+  AdPlug -->|"looked up per task (#40)"| Mod
   Mod -->|"per OCR task"| HP
   HP --> OCR
   Mod -->|"check model, resolve connection"| Prov
@@ -36,15 +36,15 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Modality does not depend on any adapter: an adapter registers its service with Modality's process service `modalityAdapters` from its own `apply`, the registration is withdrawn when that row unloads, and Modality looks up the adapter for an operation when a task needs it ([#40](https://github.com/arcships/dim/issues/40)). A missing, Pending or reloading adapter therefore affects only the operations it served and never reloads Modality. Rpc looks up Modality's `modality` namespace in `managementMethods` per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). No Session or branch plugin depends on Modality.
+All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Adapter lookup is the contract owned by [#40](https://github.com/arcships/dim/issues/40); this design depends on a per-task lookup that does not gate Modality and does not restate how an adapter is registered or found. A missing, Pending or reloading adapter therefore affects only the operations it served and never reloads Modality. Rpc looks up Modality's `modality` namespace in `managementMethods` per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). No Session or branch plugin depends on Modality.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Modality` | Process (control node) | Provider model selection (`ModelSelectionHost`) and non-conversational connection resolution; `pluginFiles` (extended: UTF-8 and binary); Settings business source `modality`; the `modalityAdapters` registry (adapters register at start; Modality looks one up per task); HostPlatform of the control node and of each configured OCR node; diagnostics | `modalityAdapters` and `modalityTasks` process services; registers `modality` (`modality.*`) with `managementMethods` |
-| Adapter plugins | Process | their own provider dependencies | `modalityAdapter` service, key adapter name, declared in the plugin's `provides`; registers with `modalityAdapters` from its own `apply` |
+| `Modality` | Process (control node) | Provider model selection (`ModelSelectionHost`) and non-conversational connection resolution; `pluginFiles` (extended: UTF-8 and binary); Settings business source `modality`; the per-task adapter lookup contract owned by [#40](https://github.com/arcships/dim/issues/40); HostPlatform of the control node and of each configured OCR node; diagnostics | `modalityTasks` process service; registers `modality` (`modality.*`) with `managementMethods` |
+| Adapter plugins | Process | their own provider dependencies | `modalityAdapter` service, key adapter name, declared in the plugin's `provides`; found through the #40 lookup |
 
-**Contracts depended on:** the [methods](../contracts/session-boundary.md) contract (namespaces registered with `managementMethods`, per-call progress sink, connection-bound notifications); Provider's model selection (`ResolveModelSelection::resolve`, which rejects an unselectable explicit model; [AuxiliaryModel](../appserver/auxiliary-model.md)), its selectable-model read for the option list (Appendix F), and, for image generation and editing, its non-conversational connection resolution ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)); `pluginFiles` (extended) with binary atomic replace and a format version ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)); HostPlatform spawn with isolation ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md), isolation supplement in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)).
-**Contracts defined here:** category and operation identifiers; default keys `modality.<category>` and `modality.<category>.<operation>` in the `modality` settings document (Modality's own; Provider holds none); the `modalityAdapter`, `modalityAdapters` and `modalityTasks` services ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.2 and A.3; Rust binding in Appendix G); the `modality` settings document and its schema; task record and result formats (format version 1); the `modality.*` methods and the `modality.realtime.event` notification. Provider knows nothing about modalities; Modality knows no provider-specific semantics outside its adapters.
+**Contracts depended on:** the [methods](../contracts/session-boundary.md) contract (namespaces registered with `managementMethods`, per-call progress sink, connection-bound notifications); the per-task adapter lookup contract owned by [#40](https://github.com/arcships/dim/issues/40) (§9.1); Provider's model selection (`ResolveModelSelection::resolve`, which rejects an unselectable explicit model; [AuxiliaryModel](../appserver/auxiliary-model.md)), its selectable-model read for the option list (§9.2), and, for image generation and editing, its non-conversational connection resolution ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins), §9.3); `pluginFiles` (extended) with binary atomic replace and a format version ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)); HostPlatform spawn with isolation ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md), isolation supplement in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)).
+**Contracts defined here:** category and operation identifiers; default keys `modality.<category>` and `modality.<category>.<operation>` in the `modality` settings document (Modality's own; Provider holds none); the `modalityAdapter` and `modalityTasks` services ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.2 and A.3; Rust binding in Appendix G); the `modality` settings document and its schema; task record and result formats (format version 1); the `modality.*` methods and the `modality.realtime.event` notification. Provider knows nothing about modalities; Modality knows no provider-specific semantics outside its adapters.
 
 ## 2. Data and state
 
@@ -158,15 +158,17 @@ A connection closes on `close`, when the opening client connection ends, after 1
 
 ### 3.4 Capability listing and default model
 
-`dimcode modality` and the Web settings page call `modality.capabilities`, which returns every category and operation with its availability reasons, selectable options, the persisted default and the model a task would use now. Nothing is hidden and there is no `--all`. Each unavailable category or operation is shown with its reason per dimension, for example "not in this build", "OCR component not installed", "no adapter", "not configured", "no adapter for the configured model" (decision E16). The last is derived from business configuration Modality has adopted (the default in the `modality` settings document or an explicit model, and its Provider connection) against the adapters currently registered. The image operations are the first implementation slice; the other categories report a `build` reason until their adapters and runtime exist.
+`dimcode modality` and the Web settings page call `modality.capabilities`, which returns every category and operation with its availability reasons, selectable options, the persisted default and the model a task or consumer would use now. Nothing is hidden and there is no `--all`. Each unavailable category or operation is shown with its reason per dimension, for example "not in this build", "OCR component not installed", "no adapter", "not configured", "no adapter for the configured model" (decision E16). The last is derived from business configuration Modality has adopted (the default in the `modality` settings document or an explicit model, and its Provider connection) against the adapters available through the #40 lookup.
 
-`dimcode modality set-default image.generate <provider>/<model>` and the Web page call `modality.configure`, which validates that the model is selectable through Provider and that a registered adapter serves it for that operation, then writes the operation key in Modality's own `modality` settings document through its owner write (Settings CAS). `model: null` clears that key. The reply is the same snapshot `modality.capabilities` returns, including the new `revision`, so a client applies it without a second read.
+The image operations are the first implementation slice, and that slice ships only a fixture adapter. In the product, image generation and editing therefore report `unavailable` with an `adapter` reason ("no adapter in this build") and cannot have a default set; understanding can resolve and display its default but has no runtime consumer until §9.4 lands. This is the intended scope and satisfies the issue's fixture-task acceptance, not a defect. The other categories report a `build` reason until their adapters and runtime exist.
 
-A task resolves its model in this order: the explicit `model` in the request; the persisted default for the operation key; automatic resolution — Provider's global default selection when that model is selectable and served, otherwise the first selectable served model in the order Provider's own automatic selection uses. An explicit model or a persisted default that is no longer selectable fails the task (`model_unavailable` or `default_unavailable`); an operation with no adapter for the resolved model fails `unavailable`. Modality never substitutes another model. Only an absent default reaches automatic resolution, so clearing a default restores it. The resolved model is written into the task record and does not change when the default changes later.
+`dimcode modality set-default image.generate <provider>/<model>` and the Web page call `modality.configure`, which validates that the model is selectable through Provider and, for an adapter operation, that an available adapter serves it (for `image.understand`, that it is a selectable vision model), then writes the operation key in Modality's own `modality` settings document through its owner write (Settings CAS). `model: null` clears that key. The reply is the same snapshot `modality.capabilities` returns, including the new `revision`, so a client applies it without a second read.
 
-Image understanding in an agent turn is the Session model through `read` and attachments ([WorkspaceTools §read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images)); its default is the Agent default on the Web, not a Modality row. This design adds no separate image-understanding default.
+A task resolves its model in this order: the explicit `model` in the request; the persisted default for the operation key; automatic resolution — Provider's global default selection when that model is selectable and serving the operation, otherwise the first selectable model that serves it in the order Provider's own automatic selection uses. An explicit model or a persisted default that is no longer selectable fails the task (`model_unavailable` or `default_unavailable`); an operation with no available adapter for the resolved model fails `unavailable`. Modality never substitutes another model. Only an absent default reaches automatic resolution, so clearing a default restores it. The resolved model is written into the task record and does not change when the default changes later.
 
-The `modality` source is user scope only: operation defaults belong to the user, not a project. A missing source reads as empty defaults. The methods are additive protocol-v3 management methods; an older daemon answers `unknown_method` and a client shows the category unavailable. The legacy product's `modality-settings.json` is not imported; a later migration would be its own change. Provider records, model descriptors, the chat default selection and the Agent defaults page are unchanged; Modality stores no Provider or Session state and writes no Timeline event.
+`image.understand` uses the same resolution but has no task: Modality resolves its default and exposes it in `modality.capabilities`, and the Session image-understanding path (attachments and `read`) is the consumer. That path does not read the default yet; the Agent/Prompt requirement in §9.4 must land before the default changes the model the runtime uses. Until then the understanding row resolves and displays only.
+
+The `modality` source is user scope only: operation defaults belong to the user, not a project. A missing source reads as empty defaults. The methods are additive protocol-v3 management methods; an older daemon answers `unknown_method` and a client shows the category unavailable. The legacy product's `modality-settings.json` is not imported; a later migration would be its own change. Provider records, model descriptors and the chat default selection are unchanged; Modality stores no Provider or Session state and writes no Timeline event.
 
 ## 4. Timing and conflicts
 
@@ -185,7 +187,7 @@ sequenceDiagram
   D->>S: second write sees a terminal revision, discarded, its files removed
   Note over D,S: Case 2, reload or restart with a running provider task
   D->>S: apply reads records
-  alt running with remote_handle and its adapter registered
+  alt running with remote_handle and its adapter available through #40
     D->>A: wait(handle) observation only, never resubmit
   else queued, host task, or no handle
     D->>S: interrupted, did not survive recovery
@@ -194,7 +196,7 @@ sequenceDiagram
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Adapter plugin reloads | Modality does not reload. A running adapter call may be interrupted; its task becomes `interrupted` and is never resubmitted. New tasks look the adapter up again; other operations are unaffected | Modality |
+| Adapter plugin reloads | Modality does not reload. A running adapter call may be interrupted; its task becomes `interrupted` and is never resubmitted. New tasks resolve the adapter again through #40's lookup; other operations are unaffected | Modality |
 | Modality reload | `modality.*` returns `unknown_method` until Modality is active again, and Rpc does not reload; in-flight calls follow the [methods](../contracts/session-boundary.md) contract; disposer cancels local work, terminates OCR processes, closes realtime connections, writes `interrupted` for host tasks and tasks without handle | Rpc, Modality |
 | Settings change | Read at next use; availability recomputed; existing tasks keep their resolved executor; no reload | Modality |
 | Duplicate `submit` with the same `client_task_id` | Existing task returned | Modality |
@@ -215,8 +217,7 @@ No model-visible effect. Modality offers no tool, prompt source, input or Timeli
 | `modality.task.submit/status/list/wait/cancel/result` | Management methods | Task lifecycle; chunked binary result retrieval |
 | `modality.realtime.open/send/close`, `modality.realtime.event` | Management methods and connection-bound notification | Realtime connection |
 | `modalityTasks` | Process service, no key | Same operations as the task methods, for other process plugins |
-| `modalityAdapters` | Process service, no key | Adapter registration; Modality looks an adapter up per task |
-| `modalityAdapter` | Process service, key adapter name, registered with `modalityAdapters` | Provider-executed categories |
+| `modalityAdapter` | Process service, key adapter name, found through the #40 lookup | Provider-executed categories |
 | `modality` settings document | Business configuration (Settings source, schema declared by Modality, written through Settings typed operations) | Operation defaults, OCR component path per node, limits; read at use time |
 | `dimcode modality`, `image`, `video`, `speech`, `music`, `audio`, `asset`, `motion`, `ocr`, `realtime` | CLI | Thin clients of the methods |
 
@@ -243,24 +244,62 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 Core mechanisms carry no business meaning | Modality asks no change of Timeline, Dispatcher or Rpc; Provider holds no per-consumer keys; Modality passes the model explicitly. |
 | §4.5 Read the whole batch before deciding | Not applicable: Modality reads no Timeline event. |
 | §4.6 Model context only from handed-over events | Modality writes nothing model-visible; a result reaches a model only as an ordinary input owned by another plugin. |
-| §4.7 Plugins interact only through public events and services | Modality uses Provider, Settings, `pluginFiles`, HostPlatform and the registered `modalityAdapter` through their public services only. |
-| §4.8 Generic requirements to mechanism owners | The offline-node requirement is raised to rutis as [#5](https://github.com/arcships/dim/issues/5) (§9). |
+| §4.7 Plugins interact only through public events and services | Modality uses Provider, Settings, `pluginFiles`, HostPlatform and the `modalityAdapter` found through the #40 lookup through their public services only. |
+| §4.8 Generic requirements to mechanism owners | The offline-node requirement is raised to rutis as [#5](https://github.com/arcships/dim/issues/5); adapter lookup, Provider's selectable-model read and Provider's non-conversational connection are raised in §9. |
 | §4.9 Only facts later decisions use enter the Timeline | Modality writes no Timeline event; task records stay in `pluginFiles`, the operation defaults and other settings in its Settings business source. |
 | §1 Capability and App Server boundary | Modality is a process plugin, not a Capability; its business code lives in its own package, and the App Server only dispatches the namespace it registers with `managementMethods`. |
 | ADR 002 D1 Scope follows the owner | Tasks and provider connections are shared across Sessions, so Modality is process-scoped. |
-| ADR 002 D2 No wiring modules | Adapters register with Modality's own service table and are looked up per task; no wiring module exists. |
+| ADR 002 D2 No wiring modules | Adapter lookup follows the contract owned by #40; this design adds no wiring module. |
 | ADR 002 D3 Dependencies follow scope | All dependencies are process services; a missing, Pending or reloading adapter affects only its operations and never reloads Modality. |
 | ADR 002 D4 Structural and business configuration | Adapter plugins are loader rows and peer nodes come from the host's link configuration; the OCR component path per node and the limits are business configuration in the `modality` source, written through Settings and read at use time. |
 | ADR 002 D5 Language-neutral contracts | `modalityAdapter`, `modalityTasks` and the methods are given in neutral form; Appendix G is a binding only. |
 
 ## 9. Requirements raised to mechanism owners
 
+Rules: [principles §4 rule 8](../../architecture/rust-agent/principles.md). Each entry states the problem, the existing mechanisms considered, the generic capability, the impact on ordering and reload, and the owner/issue.
+
 | Requirement | Owner | Five items |
 | --- | --- | --- |
 | Services imported from a peer node stay registered while the link is down and fail calls with `node_unavailable` | rutis, [#5](https://github.com/arcships/dim/issues/5) | [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners); Modality needs it so an offline OCR node fails only its tasks and never reloads Modality or makes it Pending |
 | Runtime services exposed by name to non-Rust plugins | runtime, [#4](https://github.com/arcships/dim/issues/4) | [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); needed only for a TypeScript implementation of Modality |
+| Per-task adapter lookup without gating Modality | #40 design; runtime/assembly if the existing lookup cannot express it | [§9.1](#91-per-task-adapter-lookup) |
+| Provider read-only contract for selectable models and declared capabilities | Provider, [#790](https://github.com/arcships/dim/issues/790) | [§9.2](#92-provider-read-only-contract) |
+| Provider non-conversational connection | Provider, follow-up issue | [§9.3](#93-provider-non-conversational-connection) |
+| Session image-understanding consumer of `modality.image.understand` | Agent/Prompt owner, follow-up issue | [§9.4](#94-session-image-understanding-consumer) |
 
-The Provider supplement (non-conversational connections), the Settings business source and the `pluginFiles` supplement are changes to other plugins, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
+The Settings business source and the `pluginFiles` supplement are changes to other plugins, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
+
+### 9.1 Per-task adapter lookup
+
+- **Problem.** An adapter that is missing, Pending, Failed or reloading must not hold Modality Pending or reload it; only the operations that adapter served may become unavailable. A dependency on every `modalityAdapter` service does the opposite.
+- **Existing mechanisms.** Declaring each adapter with `Keyed` gates the consumer until every provider is Active; collecting named services has the same effect. Rpc's `managementMethods` lookup per call is the existing pattern for an owner that must not depend on its providers; [#40](https://github.com/arcships/dim/issues/40) owns the adapter version of that contract.
+- **Needed capability.** A per-call lookup of a named process service that does not gate the consumer and withdraws a provider without reloading the consumer.
+- **Ordering impact.** Adapter unload/reload affects only its operations; no Modality reload and no Timeline or batch change; in-flight tasks settle per A.6.
+- **Owner/issue.** #40 owns the contract. If the existing runtime lookup cannot express it, runtime/assembly implements it; Modality only declares the dependency.
+
+### 9.2 Provider read-only contract
+
+- **Problem.** `modality.capabilities` must compute `options` and automatic resolution from the models Provider can select. Provider's model-selection port resolves one model, and the catalog reads are client management methods, so a process owner cannot enumerate the selectable set with its declared capabilities.
+- **Existing mechanisms.** The single-model selection port cannot filter by an operation's capability. A new client method would expose management to the owner and duplicate the catalog. The Provider-side read-only contract is tracked separately by #790.
+- **Needed capability.** The read-only contract tracked by [#790](https://github.com/arcships/dim/issues/790): selectable-model enumeration with declared capabilities. Modality consumes it; this design does not define Provider's internal shape.
+- **Ordering impact.** Read at each `capabilities` call and task submission; no reload and no Timeline.
+- **Owner/issue.** Provider, [#790](https://github.com/arcships/dim/issues/790).
+
+### 9.3 Provider non-conversational connection
+
+- **Problem.** Image generation and editing adapters need a model's endpoint, protocol and credential material per call. Provider resolves connections only for a `ModelRequest`.
+- **Existing mechanisms.** `ProviderConnectionResolver` is tied to `ModelRequest`; adapters cannot own Provider credentials, and Modality must not store them.
+- **Needed capability.** A per-call resolution of a model's non-conversational connection, owned by Provider, used only for that call and never persisted or returned to a client.
+- **Ordering impact.** Resolved at submit; no reload; credentials never enter task records, results, diagnostics or errors.
+- **Owner/issue.** Provider, follow-up issue (to be opened).
+
+### 9.4 Session image-understanding consumer
+
+- **Problem.** Modality resolves `modality.image.understand`, but the Session image-understanding path (attachments and `read`) sends images to the Session's adopted model; nothing reads the Modality default. Until this requirement lands, the understanding row can resolve and display only.
+- **Existing mechanisms.** `read` returns image blocks to the Session model, and `session.model.update` plus Prompt's adopted configuration choose that model. There is no input path or typed lookup from the Session path to a process owner's default. Choosing in the browser would be the browser-only default the requirement excludes.
+- **Needed capability.** The Session image-understanding path resolves its model through Modality's `modality.image.understand` default (explicit → default → automatic), or an equivalent typed handoff. The mechanism belongs to Agent/Prompt.
+- **Ordering impact.** Per read or attachment; no Timeline event; existing Sessions keep their behavior until the requirement lands; no reload.
+- **Owner/issue.** Agent/Prompt owner, follow-up issue (to be opened).
 
 ## Appendix A. Interface details
 
@@ -268,7 +307,7 @@ The Provider supplement (non-conversational connections), the Settings business 
 
 | Category | CLI | Operations | Input | Result | Executor | Default key |
 | --- | --- | --- | --- | --- | --- | --- |
-| `image` | `image` | `generate`, `edit` (image, optional mask), `enhance` (`upscale`, `restore`, `denoise`, `sharpen`, `remove_background`, `colorize`) | prompt, files | image files | Provider | `modality.image.generate`, `modality.image.edit`, `modality.image.enhance` |
+| `image` | `image` | `generate`, `edit` (image, optional mask), `enhance` (`upscale`, `restore`, `denoise`, `sharpen`, `remove_background`, `colorize`), `understand` (image; selection only, consumer is the Session image-understanding path) | prompt, files; image for `understand` | image files; text for `understand` | Provider | `modality.image.generate`, `modality.image.edit`, `modality.image.enhance`, `modality.image.understand` |
 | `video` | `video` | `generate`, `edit`, `enhance` | prompt, files | video file | Provider | `modality.video` |
 | `speech` | `speech` | `synthesize`, `transcribe` | text or audio | audio file; or `data: { text, segments: [{ start_ms, end_ms, text }] }` plus `transcript.txt` | Provider | `modality.speech.synthesize`, `modality.speech.transcribe` |
 | `music` | `music` | `generate` | prompt | audio file | Provider | `modality.music` |
@@ -278,11 +317,11 @@ The Provider supplement (non-conversational connections), the Settings business 
 | `realtime` | `realtime` | `connect` | — | connection | Provider | `modality.realtime` |
 | `ocr` | `ocr` | `recognize` | image or PDF | `data: { pages: [{ index, text }] }` plus `text.txt` | Host runtime component | none; component path per node in the `modality` settings document |
 
-Image understanding in an agent turn is the Session model through `read` ([WorkspaceTools §read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images)); its Web setting is the Agent default, not a Modality row. Image operations use per-operation keys and have no category fallback in this design; other categories resolve a per-operation key before their category key (A3). Operation parameters beyond the input are declared by each adapter and validated at submission (A4).
+Image understanding is an image operation whose default is resolved by Modality (`modality.image.understand`). Its consumer is the Session image-understanding path (attachments and `read`, [WorkspaceTools §read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images)); that path does not consume the default yet, so the Agent/Prompt requirement in §9.4 must land before the default changes the model the runtime uses. Until it does, the understanding row resolves and displays only. Image operations use per-operation keys and have no category fallback in this design; other categories resolve a per-operation key before their category key (A3). Operation parameters beyond the input are declared by each adapter and validated at submission (A4).
 
 ### A.2 Adapters and OCR nodes
 
-Service `modalityAdapter`, scope process, key adapter name, declared in the adapter plugin's `provides`; built-in adapters provide the same service. The adapter registers its handle with Modality's process service `modalityAdapters` from its own `apply`; the registration is withdrawn when that row unloads. Modality looks the adapter up for an operation when a task needs it, so a missing, Pending or reloading adapter affects only its operations. Cancellation is a protocol action: Modality drops the call (or sends the binding's cancel request); the adapter stops local work. Errors are data `{ code, message }` with `code` one of `invalid_input`, `unavailable`, `provider_error`.
+Service `modalityAdapter`, scope process, key adapter name, declared in the adapter plugin's `provides`; built-in adapters provide the same service. How an adapter is registered and found is the contract owned by [#40](https://github.com/arcships/dim/issues/40) (§9.1); this design depends on it and does not restate it. Modality resolves the adapter for an operation when a task needs it, so a missing, Pending or reloading adapter affects only its operations. Cancellation is a protocol action: Modality drops the call (or sends the binding's cancel request); the adapter stops local work. Errors are data `{ code, message }` with `code` one of `invalid_input`, `unavailable`, `provider_error`.
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
@@ -298,7 +337,7 @@ Service `modalityAdapter`, scope process, key adapter name, declared in the adap
 
 `Job` is `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`. `ResolvedConnection` is the data shape Provider's non-conversational connection resolution returns (`kind`, `provider_id`, `model`, endpoint and credential material), passed per call and never stored or logged.
 
-`available` reports runtime availability without a reload (for example, a provider endpoint unreachable). An operation whose registered adapters do not serve the configured or explicit model is reported as "no adapter for the configured model", and its submits fail `unavailable`. OCR is not an adapter: per task, Modality uses the HostPlatform of the target node (absent or unavailable: `node_unavailable`), probes the OCR component path the `modality` settings document gives for that node, and spawns it there; an offline peer node fails the call with `node_unavailable` and nothing reloads (§3.2). `wait` with a stored `remote_handle` must work in a new generation; an adapter that returns no handle cannot be resumed.
+`available` reports runtime availability without a reload (for example, a provider endpoint unreachable). An operation whose available adapters do not serve the configured or explicit model is reported as "no adapter for the configured model", and its submits fail `unavailable`. `image.understand` is not an adapter operation: it is served by a selectable vision model and is selection-only. OCR is not an adapter: per task, Modality uses the HostPlatform of the target node (absent or unavailable: `node_unavailable`), probes the OCR component path the `modality` settings document gives for that node, and spawns it there; an offline peer node fails the call with `node_unavailable` and nothing reloads (§3.2). `wait` with a stored `remote_handle` must work in a new generation; an adapter that returns no handle cannot be resumed.
 
 ### A.3 Methods
 
@@ -308,7 +347,7 @@ Namespace `modality`, registered with the process's `managementMethods` (declara
 | --- | --- | --- |
 | `modality.capabilities` | `{}` | The default snapshot below; every category present |
 | `modality.configure` | `{ expectedRevision, category, operation?, model: {providerId, modelId} \| null }` | The same snapshot after the write; `modality_conflict`, `modality_invalid_selection` or `modality_unknown_operation` on failure |
-| `modality.task.submit` | `{ category, operation, params, files?: [{ name, media_type, data_base64 } \| { node_path }], model?, node?, client_task_id? }` | `{ task }`; an existing `client_task_id` returns the existing task |
+| `modality.task.submit` | `{ category, operation, params, files?: [{ name, media_type, data_base64 } \| { node_path }], model?, node?, client_task_id? }` | `{ task }`; an existing `client_task_id` returns the existing task. `image.understand` is selection-only and has no task; its consumer is the Session image-understanding path (§9.4) |
 | `modality.task.status` | `{ task_id }` | `{ task }` |
 | `modality.task.list` | `{ state?, category?, limit? (≤100), after? }` | `{ tasks, next? }`, newest first |
 | `modality.task.wait` | `{ task_id, timeout_ms? (≤600000, default 600000) }` | `{ task }` when terminal or at timeout (not an error); progress on the call's progress sink |
@@ -342,12 +381,12 @@ The default snapshot is the one shape both methods return. A model reference is 
 ```
 
 - `revision` is the `modality` settings document revision; only `configure` consumes it.
-- `default` is the persisted choice or `null`. When the model is no longer selectable or no registered adapter serves it, `available` is `false` and `reason` says why.
-- `effective` is the model a task would use now. It is the default when available. When `default` is `null`, it is automatic resolution: Provider's global default selection when selectable and served, else the first selectable served model in the order Provider's own automatic selection uses; `source` is `"automatic"`. An unavailable default yields `effective: null`, never a substituted model.
-- `options` lists the models a registered adapter serves and Provider can select, plus the current default when it is no longer selectable, marked with its reason. The owner computes them at read time from Provider's catalog and the registered adapters; the client does not derive them.
-- `configure` validates the operation, Provider selectability and adapter support, then writes or clears the operation key through Settings' owner write with CAS. `model: null` clears that key; clearing restores automatic resolution. `operation` is required where the operation has its own key (image, speech) and may be absent only for a category-keyed category. The write happens before the reply is sent, so a success means the default is persisted.
+- `default` is the persisted choice or `null`. When the model is no longer selectable or no available adapter serves it (for `image.understand`, when it is not a selectable vision model), `available` is `false` and `reason` says why.
+- `effective` is the model a task or consumer would use now. It is the default when available. When `default` is `null`, it is automatic resolution: Provider's global default selection when selectable and serving the operation, else the first selectable model that serves it in the order Provider's own automatic selection uses; `source` is `"automatic"`. An unavailable default yields `effective: null`, never a substituted model.
+- `options` lists the models that serve the operation and Provider can select: an available adapter serves them for generate/edit/enhance, and a selectable vision model serves `image.understand`. The current default is included when it is no longer selectable, marked with its reason. The owner computes them at read time from Provider's read-only contract (#790) and the available adapters; the client does not derive them.
+- `configure` validates the operation, Provider selectability and, for an adapter operation, adapter support (for `image.understand`, selectable vision support), then writes or clears the operation key through Settings' owner write with CAS. `model: null` clears that key; clearing restores automatic resolution. `operation` is required where the operation has its own key (image, speech) and may be absent only for a category-keyed category. The write happens before the reply is sent, so a success means the default is persisted.
 
-Boundary validation: files at most 100 MiB per submission and 25 MiB per inline file (A5); media types checked per operation; `node_path` only for host-executed operations; `node` only for host-executed categories, default control node (A15). Model selection: explicit `model`; else the operation default; else automatic resolution; else `no_default_model`. An explicit model that is not selectable fails `model_unavailable`, an unavailable default fails `default_unavailable`, and a resolved model no adapter serves fails `unavailable`; none of them falls back to another model. The resolved model is fixed in the record. At most 4 running tasks per category; others stay `queued` in submission order (A6).
+Boundary validation: files at most 100 MiB per submission and 25 MiB per inline file (A5); media types checked per operation; `node_path` only for host-executed operations; `node` only for host-executed categories, default control node (A15). Model selection: explicit `model`; else the operation default; else automatic resolution; else `no_default_model`. An explicit model that is not selectable fails `model_unavailable`, an unavailable default fails `default_unavailable`, and a resolved model no available adapter serves fails `unavailable`; none of them falls back to another model. The resolved model is fixed in the record. `image.understand` is selection-only and has no task; a task submission for it fails `modality_unknown_operation`. At most 4 running tasks per category; others stay `queued` in submission order (A6).
 
 ### A.4 Task record (`pluginFiles` (extended), format version 1)
 
@@ -389,11 +428,11 @@ Invoking an unavailable category prints the same reason as the listing. The firs
 | Step | Mechanism |
 | --- | --- |
 | Submit | Validate at the boundary; write `queued` (revision 1) and input files; return. The scheduler task registered with `ctx.effect` starts it when a slot frees |
-| Start | Write `running` with the resolved executor; look the operation's adapter up in `modalityAdapters`; call `submit`; write `remote_handle` as soon as known |
+| Start | Write `running` with the resolved executor; resolve the operation's adapter through #40's lookup; call `submit`; write `remote_handle` as soon as known |
 | Terminal | One write under the per-task lock comparing `revision`; first terminal write wins; later outcomes discarded and their files removed |
 | Cancel | Mark requested; cancel the local token (aborts HTTP, or terminates the component's process tree through HostPlatform); `cancel_remote` when a handle exists; release resources; then write `cancelled` (with `remote_cancel`) |
 | Unload (own reload or Provider reload) | Disposer cancels local work, terminates OCR processes, closes realtime connections, writes `interrupted` for host tasks and provider tasks without handle; tasks with handle stay `running` |
-| Startup (every `apply`) | `queued` → `interrupted` (never started later, A11); `running` host task → `interrupted`; `running` provider task with handle and its adapter registered → continue `wait` (observation only, A12); otherwise `interrupted` "did not survive recovery" |
+| Startup (every `apply`) | `queued` → `interrupted` (never started later, A11); `running` host task → `interrupted`; `running` provider task with handle and its adapter available through #40 → continue `wait` (observation only, A12); otherwise `interrupted` "did not survive recovery" |
 | Configuration change | `modality` settings change (defaults included): data update and notification, read at next use; availability recomputed; existing tasks keep their resolved executor; no reload |
 
 ## Appendix B. Full conflict table
@@ -429,7 +468,7 @@ Invoking an unavailable category prints the same reason as the listing. The firs
 | `default_unavailable` | The persisted operation default is no longer selectable; clear or replace it |
 | `model_unavailable` | An explicit model is not selectable |
 | `modality_conflict` | The settings revision is stale; reread and retry |
-| `modality_invalid_selection` | The model is not selectable through Provider or no registered adapter serves the operation; the reply carries the reason |
+| `modality_invalid_selection` | The model is not selectable through Provider, no available adapter serves the operation, or `image.understand` names a model without vision; the reply carries the reason |
 | `modality_unknown_operation` | Unknown category, operation or default key |
 | `node_unavailable` | Requested node not configured or its HostPlatform unavailable |
 | `provider_error` | Adapter or provider failure; message stripped of secrets |
@@ -456,11 +495,12 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 10. Realtime: events reach only the opening connection; close on disconnect and idle timeout.
 11. No Timeline event, tool declaration or input appears in any Session.
 12. Changing the `modality` settings document (operation defaults, OCR path, limits) applies at the next use without reloading Modality.
-13. Disabling or deleting the default model, its Provider or its adapter makes `default.available` false with a reason; submit fails `default_unavailable`; clearing the default restores automatic resolution; no other operation is disabled.
+13. Disabling or deleting the default model, its Provider or its adapter makes `default.available` false with a reason; for a task operation, submit fails `default_unavailable`; clearing the default restores automatic resolution; no other operation is disabled.
 14. Two `configure` calls with the same revision: the second fails `modality_conflict` and writes nothing; a reread shows the first writer's value.
 15. Automatic resolution: with no default, a task uses Provider's global default selection when it serves the operation, otherwise the first served model in Provider's order; `effective.source` is `"automatic"` and names that model.
 16. Web admission: the authenticated loopback Web entry can call `modality.capabilities` and `modality.configure`; the bare and unauthenticated WebSocket cannot; `modality.task.*` and realtime methods are not admitted; advertisement matches dispatch.
-17. Web rendering: wide and compact layouts show owner options, automatic effective model and unavailable reasons; a conflict keeps the typed draft and offers reload; a Provider or model mutation made in the Web session refreshes the page; replies carry no credentials.
+17. Web rendering: wide and compact layouts show owner options, automatic effective model and unavailable reasons, including understanding's "not yet applied" state; a conflict keeps the typed draft and offers reload; a Provider or model mutation made in the Web session refreshes the page; replies carry no credentials.
+18. `image.understand` resolves and displays a default through `modality.capabilities`/`modality.configure`. Before the Agent/Prompt requirement in §9.4 lands, the Session image-understanding path keeps using the Session model and the page says so; after it lands, a fixture image-understanding flow uses the configured default and clearing it restores automatic resolution.
 
 ## Appendix E. Assumptions
 
@@ -481,20 +521,6 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 | A14 | OCR component runs with input read access and no network | Judgment; overview isolation supplement | Weaker isolation |
 | A15 | OCR runs on the control node unless the caller names a configured node | Modality has no Session | A Session-derived default node needs a Session parameter |
 | A16 | Modality settings (operation defaults, OCR component path per node, concurrency and retention limits) are business configuration in a Settings business source `modality` | ADR 002 D4; the path is read per task and changes no loaded row | A path change would reload Modality as a structural loader field |
-| A17 | Adapters are named process services `modalityAdapter` that register with `modalityAdapters`; Modality looks one up per task; an adapter reload does not reload Modality; Rpc looks up Modality per call and does not reload | ADR 002 D2, D3, D5; [#40](https://github.com/arcships/dim/issues/40) | Adapters would gate Modality and every category with it |
-
-## Appendix F. Open questions
-
-| Question | Description |
-| --- | --- |
-| Provider selectable-model read | `modality.capabilities` must compute `options` and automatic resolution from Provider's models. Provider's current `ResolveModelSelection` resolves one model and its management read is a client method. Proposal: a Provider process read that returns selectable models with capabilities and availability, or an in-process `ProviderService` binding for a Rust owner. Without it the owner cannot compute options without a client-side catalog. |
-| Provider connection for adapters | Provider's current contract resolves a connection only for a model request. Image generation and editing need a per-call non-conversational connection (endpoint, protocol, credential material) resolved by Provider and never stored by Modality. Proposal: a Provider process service `modalityConnection(model)`; until it exists, those operations report `unavailable` and their defaults cannot be set. |
-| Image understanding default | The requirement asks for an understanding default; the current design uses the Session model for `read` and attachments. Proposal: the Web's Agent defaults page is the only understanding default and Modality has no such row. Confirm with the requirement owner. |
-| Automatic resolution order | Proposal: Provider's global default selection when it serves the operation, else the first served model in the order Provider's own automatic selection uses. An alternative is to report `no_default_model` until the user pins one; that would drop the requirement's "clearing restores automatic resolution". |
-| Provider catalog by category | Whether Provider tags non-conversational models by category, or adapters stay the only source of which model serves which operation |
-| Build vs feature list | Feature list places seven categories outside the standalone CLI's default scope; this design keeps them in scope and reports them unavailable by build |
-
-Requirement on [#5](https://github.com/arcships/dim/issues/5): see [§9](#9-requirements-raised-to-mechanism-owners).
 
 ## Appendix G. Rust binding
 
@@ -517,4 +543,4 @@ pub trait ModalityAdapter: Send + Sync + 'static {
 pub enum RemoteCancel { Cancelled, Unsupported, AlreadyFinished }
 ```
 
-Registration in Rust provides `ModalityAdapter` at `TypeKey::named("modalityAdapter")` with the adapter name as instance key and registers that handle with `ModalityAdapters::register(ctx, name, handle)`; the registration is withdrawn with `ctx`. Modality's own `managementMethods`, `modalityTasks` and `modalityAdapters` use the bindings of the [methods](../contracts/session-boundary.md) contract and the handles above.
+Registration in Rust provides `ModalityAdapter` at `TypeKey::named("modalityAdapter")` with the adapter name as instance key. How the adapter is registered and found follows #40's contract; this appendix binds only the operations. Modality's own `managementMethods` and `modalityTasks` use the bindings of the [methods](../contracts/session-boundary.md) contract and the handles above.
