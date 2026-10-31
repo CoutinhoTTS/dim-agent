@@ -27,7 +27,7 @@ commits and persists the terminal result before releasing its FileStorage child.
 
 ## Native adapter
 
-The adapter targets native format 26, initialized and checked by the existing
+The adapter targets the current native format, initialized and checked by the existing
 `SqliteStorage` API. It never sends source schemas to business owners. It rejects
 unsupported formats without downgrading or removing them. The Session catalog row is
 initialized through storage in the same transaction as the imported Session rows.

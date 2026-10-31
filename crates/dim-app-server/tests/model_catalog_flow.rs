@@ -19,8 +19,8 @@ fn bundled_lookup_preserves_explicit_asymmetric_limits_and_hidden_metadata() {
         )
         .unwrap();
 
-    assert_eq!(entry.capabilities.context_window, 777);
-    assert_eq!(entry.capabilities.max_output_tokens, 128_000);
+    assert_eq!(entry.capabilities.context_window, Some(777));
+    assert_eq!(entry.capabilities.max_output_tokens, Some(128_000));
     assert!(entry.metadata.as_ref().unwrap().pricing.is_some());
     assert_eq!(
         entry.metadata.as_ref().unwrap().raw["vendorFlag"]["nested"],
@@ -29,6 +29,34 @@ fn bundled_lookup_preserves_explicit_asymmetric_limits_and_hidden_metadata() {
     assert_eq!(
         entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
         Some("openai-exact")
+    );
+}
+
+#[test]
+fn a_bundled_match_declares_both_limits_and_an_unmatched_descriptor_has_none() {
+    let catalog = BundledCatalog::load().unwrap();
+    let provider = ProviderProjection {
+        provider_id: "custom".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    let matched = catalog
+        .project(&provider, &json!({ "id": "gpt-5-nano" }))
+        .unwrap();
+    assert_eq!(matched.capabilities.context_window, Some(400_000));
+    assert_eq!(matched.capabilities.max_output_tokens, Some(128_000));
+    assert!(matched.capabilities.missing_limits().is_empty());
+    let id = "zzzz-private-descriptor";
+    assert!(catalog.fallback(id).is_none());
+    let unmatched = catalog.project(&provider, &json!({ "id": id })).unwrap();
+    assert_eq!(
+        unmatched.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    let effective = catalog.effective_models(&provider, &[unmatched], &[]);
+    assert_eq!(
+        effective[0].capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
     );
 }
 
@@ -58,12 +86,12 @@ fn effective_override_and_reset_use_the_same_bundled_projection() {
 
     assert_eq!(overridden[0].display_name, "Mine");
     assert_eq!(reset[0].display_name, "GPT-5 Nano");
-    assert_eq!(reset[0].capabilities.max_output_tokens, 128_000);
+    assert_eq!(reset[0].capabilities.max_output_tokens, Some(128_000));
     let mut stored = defaults[0].clone();
     stored.capabilities = Default::default();
     let effective = catalog.effective_models(&provider, &[stored], &[]);
-    assert_eq!(effective[0].capabilities.context_window, 400_000);
-    assert_eq!(effective[0].capabilities.max_output_tokens, 128_000);
+    assert_eq!(effective[0].capabilities.context_window, Some(400_000));
+    assert_eq!(effective[0].capabilities.max_output_tokens, Some(128_000));
     assert!(!effective[0].capabilities.vision);
     assert_eq!(effective[0].capabilities.modalities, ["text"]);
 }
@@ -110,7 +138,7 @@ fn normalized_family_lookup_matches_prefixed_ids() {
             .as_deref(),
         Some("openai")
     );
-    assert_eq!(official.capabilities.max_output_tokens, 128000);
+    assert_eq!(official.capabilities.max_output_tokens, Some(128000));
     assert!(catalog.project(&provider, &json!(null)).is_err());
 }
 
@@ -154,8 +182,8 @@ fn media_lookup_and_explicit_capabilities_survive_editing() {
             }),
         )
         .unwrap();
-    assert_eq!(model.capabilities.context_window, 128000);
-    assert_eq!(model.capabilities.max_output_tokens, 16384);
+    assert_eq!(model.capabilities.context_window, Some(128000));
+    assert_eq!(model.capabilities.max_output_tokens, Some(16384));
     assert_eq!(model.capabilities.modalities, ["text"]);
     assert!(!model.capabilities.streaming);
     assert!(!model.capabilities.reasoning);
@@ -172,11 +200,11 @@ fn media_lookup_and_explicit_capabilities_survive_editing() {
             }),
         )
         .unwrap();
-    assert_eq!(nested_limits.capabilities.context_window, 128000);
-    assert_eq!(nested_limits.capabilities.max_output_tokens, 16384);
+    assert_eq!(nested_limits.capabilities.context_window, Some(128000));
+    assert_eq!(nested_limits.capabilities.max_output_tokens, Some(16384));
     let effective = catalog.effective_models(&provider, &[nested_limits], &[]);
-    assert_eq!(effective[0].capabilities.context_window, 128000);
-    assert_eq!(effective[0].capabilities.max_output_tokens, 16384);
+    assert_eq!(effective[0].capabilities.context_window, Some(128000));
+    assert_eq!(effective[0].capabilities.max_output_tokens, Some(16384));
     assert_eq!(
         model
             .metadata
@@ -250,4 +278,43 @@ fn visible_edits_preserve_hidden_fields_and_update_legacy_media_readers() {
             "{field} must not be editable"
         );
     }
+}
+
+/// The listings of some OpenAI-compatible servers name the limits under
+/// other keys; each model keeps what its server states.
+#[test]
+fn listing_keys_of_other_servers_declare_the_limits_they_state() {
+    let catalog = BundledCatalog::load().unwrap();
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    let openrouter = catalog
+        .project(
+            &provider,
+            &json!({
+                "id": "zzzz-openrouter-model", "context_length": 200_000,
+                "top_provider": {"max_completion_tokens": 32_000}
+            }),
+        )
+        .unwrap();
+    assert_eq!(openrouter.capabilities.context_window, Some(200_000));
+    assert_eq!(openrouter.capabilities.max_output_tokens, Some(32_000));
+    let vllm = catalog
+        .project(
+            &provider,
+            &json!({"id": "zzzz-vllm-model", "max_model_len": 32_768}),
+        )
+        .unwrap();
+    assert_eq!(vllm.capabilities.context_window, Some(32_768));
+    assert_eq!(vllm.capabilities.missing_limits(), ["maxOutputTokens"]);
+    let lmstudio = catalog
+        .project(
+            &provider,
+            &json!({"id": "zzzz-lmstudio-model", "max_context_length": 131_072}),
+        )
+        .unwrap();
+    assert_eq!(lmstudio.capabilities.context_window, Some(131_072));
+    assert_eq!(lmstudio.capabilities.missing_limits(), ["maxOutputTokens"]);
 }

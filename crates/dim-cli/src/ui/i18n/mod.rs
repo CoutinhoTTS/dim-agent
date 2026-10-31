@@ -201,21 +201,15 @@ mod tests {
         }
     }
 
-    /// The image marker exists in every locale, with the placeholders its
-    /// index and details go through.
+    /// What an image's marker says after its index is translated; the marker
+    /// itself is fixed text and has no entry.
     #[test]
-    fn every_locale_translates_the_scaled_image_marker() {
+    fn every_locale_translates_what_an_image_marker_adds() {
         for (code, lookup) in tables() {
-            for key in ["[Image #{index}{details}]", "first frame", "re-encoded"] {
+            for key in ["first frame", "re-encoded"] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }
-            let marker = lookup("[Image #{index}{details}]").expect("marker");
-            for placeholder in ["{index}", "{details}"] {
-                assert!(
-                    marker.contains(placeholder),
-                    "{code} drops {placeholder} in {marker:?}"
-                );
-            }
+            assert!(lookup("[Image #{index}{details}]").is_none(), "{code}");
         }
     }
 
@@ -350,6 +344,14 @@ mod tests {
                     "{provider}: {count} models disabled · dimcode models {id}",
                     &["{provider}", "{count}", "{id}"][..],
                 ),
+                (
+                    "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{id}"][..],
+                ),
+                (
+                    "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits",
+                    &["{provider}", "{count}", "{id}"][..],
+                ),
             ] {
                 let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
                 for placeholder in placeholders {
@@ -387,6 +389,20 @@ mod tests {
                 !text.contains('{'),
                 "{code} keeps a placeholder in {key:?}: {text:?}"
             );
+            let key = "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            assert!(
+                text.contains("{id}"),
+                "{code} drops {{id}} in {key:?}: {text:?}"
+            );
+            let key = "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            for placeholder in ["{provider}", "{model}"] {
+                assert!(
+                    text.contains(placeholder),
+                    "{code} drops {placeholder} in {key:?}: {text:?}"
+                );
+            }
             let key = "Saved model preferences cleared";
             let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
             assert!(

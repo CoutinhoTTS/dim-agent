@@ -9,7 +9,7 @@ use super::*;
 fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_panel() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        // No `ui.leaf`: the client runs the interface itself.
+        // No `ui.leaf.2`: the client runs the interface itself.
         wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");

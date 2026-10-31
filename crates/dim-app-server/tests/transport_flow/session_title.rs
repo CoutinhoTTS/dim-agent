@@ -182,9 +182,9 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
     let agent = server.agent().unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000008","displayName":"Title fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"main","displayName":"Main","status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()},
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
             {"modelId":"explicit","displayName":"Explicit","status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
     assert_ok(
         &client
             .rpc(

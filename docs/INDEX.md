@@ -48,6 +48,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Read-only member conversations in the CLI](design/member-conversation.md) (#300, #333, #324, #263)
 - [Subagent model policy](design/subagent-model-policy.md) (#263)
+- [Subagent tool approval and permission inheritance](design/subagent-tool-approval.md): requesting-branch policy, leader decision tools, user review, cancellation and recovery (#19, #29, #257)
 - [CLI background command output](design/background-task-output.md) (#324)
 - [Commands and members in the background-task list](design/background-task-list.md) (#324)
 - [Workflows in the CLI task view](design/workflow-task-view.md) (#264)

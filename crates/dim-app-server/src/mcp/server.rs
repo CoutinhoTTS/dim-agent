@@ -66,14 +66,16 @@ pub enum McpServerError {
 }
 pub type Result<T> = std::result::Result<T, McpServerError>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpTool {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: JsonSchema,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum McpServerState {
     Disconnected,
     Connecting,
@@ -85,6 +87,12 @@ pub enum McpServerState {
     AuthRequired {
         expired: bool,
     },
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct McpRuntime {
+    state: McpServerState,
+    tools: Option<Vec<McpTool>>,
 }
 
 struct Notifications(StateCell<u64>);
@@ -378,12 +386,20 @@ pub struct McpServer {
     authorization: Option<Authorization>,
     state: StateCell<McpServerState>,
     tool_changes: StateCell<u64>,
+    discovered_tools: Mutex<Option<Vec<McpTool>>>,
     connection: AsyncMutex<Option<Connection>>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     tasks: TaskTracker,
 }
 impl McpServer {
+    pub(super) fn snapshot(&self) -> McpRuntime {
+        McpRuntime {
+            state: self.state(),
+            tools: self.discovered_tools.lock().unwrap().clone(),
+        }
+    }
+
     pub fn state(&self) -> McpServerState {
         self.state.get()
     }
@@ -434,6 +450,7 @@ impl McpServer {
                 }
                 cursor = page.next_cursor;
                 let Some(next) = cursor.as_ref() else {
+                    *owner.discovered_tools.lock().unwrap() = Some(tools.clone());
                     return Ok(tools);
                 };
                 if !cursors.insert(next.clone()) {
@@ -814,6 +831,7 @@ impl Plugin for McpServerPlugin {
             }),
             state,
             tool_changes: StateCell::new(0),
+            discovered_tools: Mutex::new(None),
             connection: AsyncMutex::new(None),
             stopping: ctx.cancellation_token(),
             gate: Mutex::new(()),

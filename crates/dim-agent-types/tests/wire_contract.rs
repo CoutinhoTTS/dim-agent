@@ -298,7 +298,7 @@ fn capability_snapshot_validates_identity_limits_and_wire_absence() {
             provider_id: "p".into(),
             model_id: "m".into(),
         },
-        capabilities: ModelCapabilities::default(),
+        capabilities: ModelCapabilities::with_limits(128_000, 16_384),
         reasoning: None,
         service_tier: None,
     };

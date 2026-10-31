@@ -816,11 +816,12 @@ impl AgentIndex {
         &self,
         agent: Option<String>,
         version: u32,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> dim_agent_runtime::Result<Option<Vec<crate::protocol::SessionInfo>>> {
         let Some(store) = &self.session_store else {
             return Ok(None);
         };
-        let mut records = store.directory(agent, version).await?;
+        let mut records = store.directory(agent, version, cancel).await?;
         records.retain(|record| {
             !self.closed(&record.session_id)
                 && record
@@ -840,7 +841,9 @@ impl AgentIndex {
                     }
                     // Released under the read: the stored record stands (D8).
                     Err(_) if session.is_unloading() => {}
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(session_id=%record.session_id, %error, "Session state was not read for the listing");
+                    }
                 }
             }
             if version < 3 {
@@ -891,7 +894,9 @@ impl AgentIndex {
                         summary.session.sequence = sequence;
                     }
                     Err(_) if session.is_unloading() => {}
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(session_id=%summary.session.session_id, %error, "Session state was not read for the catalog");
+                    }
                 }
             }
         }

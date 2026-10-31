@@ -234,11 +234,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         let (mut daemon, socket) = launch_product(&directory).await;
         let mut client = connect(&socket).await;
 
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
-            ..Default::default()
-        };
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(4_000, 200);
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"bearer"},"credential":{"action":"set","value":CREDENTIAL}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
@@ -287,7 +283,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":26,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":27,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -346,14 +342,15 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(exported(&readonly, &session).await, stopped);
 
-        for (version, dropped) in [
-            (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;"),
-            (17, ""),
-            (19, ""),
-            (21, ""),
-            (22, ""),
-            (23, ""),
-            (24, ""),
+        for (version, dropped, end_index) in [
+            (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;", true),
+            (17, "", true),
+            (19, "", true),
+            (21, "", true),
+            (22, "", true),
+            (23, "", true),
+            (24, "", true),
+            (25, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -361,7 +358,13 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {dropped} CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE agent_store_format;
+            // v25 dropped the end-sequence index; every earlier version has it.
+            let end_index = if end_index {
+                "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence);"
+            } else {
+                ""
+            };
+            changed(&database, &older, &format!("{catalog} {dropped} {end_index} DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
             without_v26_columns(&older);
@@ -375,8 +378,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 27));
-                INSERT INTO agent_store_format VALUES (27);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 28));
+                INSERT INTO agent_store_format VALUES (28);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

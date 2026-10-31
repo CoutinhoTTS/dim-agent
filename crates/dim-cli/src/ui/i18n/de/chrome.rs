@@ -223,8 +223,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "Zwischenablage: {reason}",
         "Wait for clipboard insertion before sending" => "Vor Senden auf Zwischenablage warten",
         "A submission accepts at most 20 images" => "Pro Sendung höchstens 20 Bilder",
-        "[Image #{index}]" => "[Bild #{index}]",
-        "[Image #{index}{details}]" => "[Bild #{index}{details}]",
         "first frame" => "nur erstes Einzelbild",
         "re-encoded" => "neu kodiert",
         "The current model does not accept images; remove {label} to send" => {
@@ -421,6 +419,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}: {count} Modelle nicht verfügbar · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: 1 Modell braucht ein Fenster · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}: {count} Modelle brauchen ein Fenster · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: keine Modelle · dimcode models {id} --refresh"
         }
@@ -432,6 +436,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}: Katalog nicht lesbar · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "Ein Modell ohne deklarierte Grenzen kann nicht ausgewählt werden; deklariere sie mit dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N."
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "Deklariere sie mit dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N."
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "Kein zwischengespeicherter Katalog. Melde dich an und führe models PROVIDER --refresh aus."

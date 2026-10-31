@@ -227,7 +227,7 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
         hello["result"]["features"]
             .as_array()
             .unwrap()
-            .contains(&json!("ui.leaf"))
+            .contains(&json!("ui.leaf.2"))
     );
     let status = rpc(&mut wire, "ui.status", json!({}));
     assert_eq!(
@@ -240,7 +240,7 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
             .as_str()
             .unwrap()
             .starts_with("ui-"),
-        "the terminal uses the hosted ui.leaf path: {status}"
+        "the terminal uses the ui.leaf.2 path: {status}"
     );
     let sent = Instant::now();
     terminal.write(b"cold first submission marker\r");

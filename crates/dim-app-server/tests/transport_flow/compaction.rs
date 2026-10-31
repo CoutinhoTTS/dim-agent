@@ -203,11 +203,7 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         .unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
-            ..Default::default()
-        };
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(4_000, 200);
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
@@ -625,11 +621,9 @@ async fn summary_reasoning_comes_from_factory_configuration() {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
+        let capabilities = dim_agent_types::CatalogCapabilities {
             reasoning: true,
-            ..Default::default()
+            ..dim_agent_types::CatalogCapabilities::with_limits(4_000, 200)
         };
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","displayName":"Reasoning","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"thinking","displayName":"thinking","status":"active","capabilities":capabilities,"metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}}}}],"enabled":true})).await);
         assert_ok(
@@ -724,11 +718,11 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
         // threshold at 0.8 × (window − output) while the window still leaves
         // room for the requested output, so the turn meets no output-budget
         // recovery and the threshold skip is what it measures.
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 2_900,
-            max_output_tokens: 200,
-            ..Default::default()
-        };
+        let (context_window, max_output_tokens) = (2_900, 200);
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(
+            context_window,
+            max_output_tokens,
+        );
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000006","displayName":"Tight","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
@@ -746,7 +740,7 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
             .await;
         assert_ok(&usage);
         let threshold = usage["result"]["thresholdTokens"].as_f64().unwrap();
-        let budget = (capabilities.context_window - capabilities.max_output_tokens) as f64;
+        let budget = (context_window - max_output_tokens) as f64;
         // ContextModel::threshold_tokens (context_model.rs:78-83): the trigger
         // leaves 10% of the input budget, at least 16000 tokens and at most
         // 20% of it.
@@ -772,11 +766,9 @@ async fn an_automatic_compaction_skips_a_cut_that_removes_no_more_than_its_repla
             .and_then(|event| event["data"]["diagnostics"]["estimatedInputTokens"].as_f64())
             .expect("the threshold compaction records the request estimate");
         assert!(
-            request + capabilities.max_output_tokens as f64
-                <= capabilities.context_window as f64,
+            request + max_output_tokens as f64 <= context_window as f64,
             "the request leaves no room for the requested output: {request} + {} > {}",
-            capabilities.max_output_tokens,
-            capabilities.context_window
+            max_output_tokens, context_window
         );
         assert_eq!(provider.summaries(), 0);
         let starts: Vec<_> = events

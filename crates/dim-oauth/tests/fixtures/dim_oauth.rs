@@ -33,6 +33,8 @@ pub struct Service {
     /// `expires_in` of the next issued token only; absent means one hour.
     pub expires_in: Mutex<Option<Value>>,
     pub models: Mutex<Option<Value>>,
+    pub reset_keys: Mutex<Vec<String>>,
+    pub reset_forbidden: AtomicBool,
 }
 impl Service {
     pub fn calls(&self, prefix: &str) -> usize {
@@ -90,7 +92,8 @@ pub fn default_models() -> Value {
         {"id":"fixture-model","dim":{"id":"fixture-model","displayName":"Fixture model",
             "endpoint_type":"openai","contextWindow":32000,"maxOutputTokens":128,
             "reasoning":{"supported":true,"effortOptions":["low","high"]}},"zdr":true},
-        {"id":"fixture-claude","dim":{"id":"fixture-claude","endpoint_type":"anthropic"}},
+        {"id":"fixture-claude","dim":{"id":"fixture-claude","endpoint_type":"anthropic",
+            "contextWindow":64000,"maxOutputTokens":2048}},
         {"id":"fixture-image","dim":{"id":"fixture-image","endpoint_type":"openai",
             "raw":{"modalities":{"input":["text"],"output":["image"]}}}},
         {"id":"fixture-gemini","dim":{"id":"fixture-gemini","endpoint_type":"gemini"}}
@@ -185,14 +188,60 @@ pub async fn start() -> Fixture {
                     return unauthorized();
                 }
                 Json(json!({"success":true,"data":{
-                    "subscription":{"product":{"name":"Fixture plan"},"subscription":{"status":"active"},
-                        "current_term":{"end_at":"2026-10-28T00:00:00Z"}},
-                    "credits":{"subscription_bucket":{"used_units":25000,"total_units":300000,
+                    "subscription":{"product":{"name":"Fixture plan"},"subscription":{"id":42,"status":"active","cancel_at_period_end":true},
+                        "current_term":{"start_at":"2026-09-28T00:00:00Z","end_at":"2026-10-28T00:00:00Z"},
+                        "last_term":{"status":"expired","start_at":"2026-08-28T00:00:00Z","end_at":"2026-09-28T00:00:00Z"}},
+                    "credits":{"remaining_units":275000,"subscription_bucket":{"used_units":25000,"total_units":300000,"expires_at":"2026-10-28T00:00:00Z",
                         "window_states":[{"window_duration_hours":5,"window_token_used":1200,"window_token_cap":10000},
                             {"window_duration_hours":24}]}},
+                    "resets":{"window":{"available_count":2},"monthly_full":{"available_count":1,"nearest_expires_at":"2027-01-01T00:00:00Z"}},
                     "feature_meters":[{"feature_key":"web_search","total_used":211,"total_allowance":1500,"unit":"call"},
                         {"total_used":1}]}}))
                 .into_response()
+            }),
+        )
+        .route(
+            "/api/me/referral",
+            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+                s.record("GET /api/me/referral".into());
+                if s.rejects(&headers) { return unauthorized(); }
+                Json(json!({"success":true,"data":{"enabled":true,"eligible":true,
+                    "aff_code":"FRIEND +&", "invited_count":5,"paid_count":2,"reward_granted_units":12000,
+                    "inviter_rebate_bp":2000,"invitee_rebate_bp":1000,"access_token":"private-service-secret"}})).into_response()
+            }),
+        )
+        .route(
+            "/api/me/usage-resets",
+            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+                s.record("GET /api/me/usage-resets".into());
+                if s.rejects(&headers) { return unauthorized(); }
+                Json(json!({"success":true,"data":{"window":{"batches":[{
+                    "grant_id":7,"remaining":2,"expires_at":"2027-01-01T00:00:00Z",
+                    "scope_type":"subscription","subscription_id":42,"source_type":"campaign",
+                    "access_token":"private-service-secret"}]},"monthly_full":{"batches":[]}}})).into_response()
+            }),
+        )
+        .route(
+            "/api/me/usage-resets/apply",
+            post(|State(s): State<Arc<Service>>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                s.record(format!("POST /api/me/usage-resets/apply {body}"));
+                if s.rejects(&headers) { return unauthorized(); }
+                if s.reset_forbidden.load(Ordering::SeqCst) {
+                    return (StatusCode::FORBIDDEN, Json(json!({"success":false,"message":"private-service-secret"}))).into_response();
+                }
+                assert_eq!(body["subscription_id"], 42);
+                assert_eq!(body["reset_type"], "window");
+                let key = body["idempotency_key"].as_str().unwrap().to_owned();
+                let replayed = {
+                    let mut keys = s.reset_keys.lock().unwrap();
+                    let replayed = keys.contains(&key);
+                    if !replayed { keys.push(key); }
+                    replayed
+                };
+                Json(json!({"success":true,"data":{"bucket":{"used_units":0,"total_units":300000},
+                    "window_states":[{"window_duration_hours":5,"window_token_used":0,"window_token_cap":10000}],
+                    "resets":{"window":{"available_count":1},"monthly_full":{"available_count":1}},
+                    "replayed":replayed,"applied_at":"2026-10-30T00:00:00Z","access_token":"private-service-secret"}})).into_response()
             }),
         )
         .route(

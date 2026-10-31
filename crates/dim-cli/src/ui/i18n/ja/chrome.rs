@@ -207,8 +207,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "クリップボード：{reason}",
         "Wait for clipboard insertion before sending" => "クリップボード挿入の完了後に送信",
         "A submission accepts at most 20 images" => "送信できる画像は最大 20 枚",
-        "[Image #{index}]" => "[画像 #{index}]",
-        "[Image #{index}{details}]" => "[画像 #{index}{details}]",
         "first frame" => "先頭フレームのみ",
         "re-encoded" => "再エンコード",
         "The current model does not accept images; remove {label} to send" => {
@@ -393,6 +391,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: {count} models unavailable · dimcode models {id}" => {
             "{provider}：{count} モデル利用不可 · dimcode models {id}"
         }
+        "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：1 モデルにウィンドウが必要です · dimcode models {id} --set-missing-limits"
+        }
+        "{provider}: {count} models need a window · dimcode models {id} --set-missing-limits" => {
+            "{provider}：{count} モデルにウィンドウが必要です · dimcode models {id} --set-missing-limits"
+        }
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}：モデルなし · dimcode models {id} --refresh"
         }
@@ -404,6 +408,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "{provider}: catalog unreadable · dimcode models {id}" => {
             "{provider}：カタログを読み取れません · dimcode models {id}"
+        }
+        "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N." => {
+            "上限が未宣言のモデルは選択できません。dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N で宣言してください。"
+        }
+        "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N." => {
+            "dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N で宣言してください。"
         }
         "No cached catalog. Sign in and run models PROVIDER --refresh." => {
             "キャッシュされたカタログがありません。サインインして models PROVIDER --refresh を実行してください。"

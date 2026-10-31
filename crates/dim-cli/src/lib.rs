@@ -13,6 +13,7 @@ mod leaf;
 mod login;
 mod mcp;
 mod mcp_command;
+mod member_approval;
 mod migration_command;
 mod model;
 mod permission;
@@ -21,6 +22,7 @@ mod plugin_command;
 mod plugins;
 mod projection;
 mod question;
+mod recording;
 mod sanitize;
 mod session;
 mod session_host;
@@ -71,9 +73,11 @@ pub fn run_cli() -> i32 {
 }
 
 /// The composition root: builds the client tree, loads what the action needs
-/// and disposes the tree before the exit code goes back.
+/// and disposes the tree before the exit code goes back. rutis reports
+/// nothing to the terminal: the CLI hears its plugins' failures where it
+/// awaits them, and the terminal may belong to the TUI.
 async fn run(options: Options) -> Result<i32> {
-    let root = rutis::Ctx::root()?;
+    let root = rutis::Ctx::root_with_sink(tokio::runtime::Handle::current(), Arc::new(|_| {}));
     let outcome = act(&root, options).await;
     let closed = root.shutdown().await;
     let code = outcome?;
@@ -100,7 +104,7 @@ async fn daemon_link(
 }
 
 /// Runs the ordinary TUI plugin directly, for an older daemon without the
-/// `ui.leaf` capability, initial model setup and a leaf's TUI child. The caller
+/// `ui.leaf.2` capability and for initial model setup. The caller
 /// owns the terminal; the daemon is only the protocol v3 business peer.
 async fn run_tui_with_connection(
     root: &rutis::Ctx,
@@ -133,10 +137,10 @@ async fn run_tui_with_connection(
     }
 }
 
-/// The interactive entry on a daemon that hosts UI leaves (Tui design
+/// The interactive entry on a daemon that keeps UI leaves (Tui design
 /// §3.6): this process creates or resumes the Session, mounts its leaf
-/// node and asks the daemon to host `Tui` in it. It ends when the `Tui`
-/// leaves or the daemon closes the link.
+/// node, asks the daemon to open a session with it, then runs its own
+/// `Tui`. It ends when the `Tui` leaves or the session ends.
 async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -145,7 +149,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     }
 
     let (link, connection) = daemon_link(root, options, true).await?;
-    if !connection.offers("ui.leaf") {
+    if !connection.offers("ui.leaf.2") {
         return run_tui_with_connection(root, options, link, connection).await;
     }
     let mut client = connection.take().ok_or("App Server did not start")?;
@@ -163,6 +167,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     } else {
         let mut params = serde_json::json!({ "cwd": options.cwd });
         let mut preferences = None;
+        let mut target = None;
         if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
             params["model"] = serde_json::json!({
                 "provider": provider,
@@ -173,6 +178,7 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
             if let Some(preferences) = &preferences {
                 params["modelPreferences"] = preferences.clone();
             }
+            target = Some((provider.clone(), model.clone()));
         }
         if let Some(preset) = options.permission {
             params["permissionPolicy"] = serde_json::json!({ "preset": preset });
@@ -189,7 +195,13 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
                 return run_tui_with_connection(root, options, link, connection).await;
             }
             Err(error) => {
-                let error = session_host::model_adoption_error(error, preferences.as_ref());
+                let error = model_adoption_error(
+                    &mut client,
+                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                    error,
+                    preferences.as_ref(),
+                )
+                .await;
                 return Err(format!(
                     "Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"
                 ).into());
@@ -205,30 +217,36 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
     };
 
     let leaf = leaf::Leaf::bind(options)?;
-    let (leave, left) = tokio::sync::oneshot::channel();
-    let (node, state) = leaf.node(options.clone(), leave);
+    let params = serde_json::json!({
+        "sessionId": session_id,
+        "kind": "tui",
+        "peer": leaf.peer,
+        "address": leaf.address,
+    });
+    let (node, ended) = leaf.node();
     let node = root.plugin(node);
     (&node).await.map_err(plugin_error)?;
-    let opened = client
-        .rpc(
-            "ui.open",
-            serde_json::json!({
-                "sessionId": session_id,
-                "kind": "tui",
-                "peer": leaf.peer,
-                "address": leaf.address,
-            }),
-        )
-        .await;
+    let opened = client.typed::<leaf::Opened>("ui.open", params).await;
     drop(client);
-    if let Err(error) = opened {
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            node.dispose().await?;
+            return Err(error);
+        }
+    };
+    let (leave, left) = tokio::sync::oneshot::channel();
+    let tui = root.plugin(leaf::LeafTui::new(options, session_id, opened, leave));
+    if let Err(error) = (&tui).await {
+        let _ = tui.dispose().await;
         node.dispose().await?;
-        return Err(error);
+        return Err(plugin_error(error));
     }
     let leave = tokio::select! {
         leave = left => leave.ok(),
-        () = leaf::stopped(&state) => None,
+        _ = ended => None,
     };
+    tui.dispose().await?;
     node.dispose().await?;
     match leave {
         Some(ui::tui::Leave::Exit(code)) => Ok(code),
@@ -343,6 +361,86 @@ fn plugin_error(error: Arc<rutis::host::ErrorKind>) -> Error {
         rutis::host::ErrorKind::PluginFailed(source) => source.to_string().into(),
         other => other.to_string().into(),
     }
+}
+
+/// The failure of adopting `target` into a Session. When the target's
+/// catalog entry reports missing limits, the declaration command is appended;
+/// the catalog is read only on this failure path, never from the message.
+pub(crate) async fn model_adoption_error(
+    client: &mut client::Client,
+    target: Option<(&str, &str)>,
+    error: Error,
+    preferences: Option<&serde_json::Value>,
+) -> Error {
+    let error: Error = match preferences {
+        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Clear them with Ctrl+X in /models or dimcode models PROVIDER --clear-preferences MODEL; saved preferences were kept.").into(),
+        None => error,
+    };
+    let Some((provider_id, model_id)) = target else {
+        return error;
+    };
+    let Some(hint) = declaration_hint(client, provider_id, model_id).await else {
+        return error;
+    };
+    format!("{error} {hint}").into()
+}
+
+/// The command that declares both limits of one model, when its catalog
+/// entry says no source declares them.
+async fn declaration_hint(
+    client: &mut client::Client,
+    provider_id: &str,
+    model_id: &str,
+) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        catalog: Option<Catalog>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        models: Vec<CatalogModel>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CatalogModel {
+        id: String,
+        #[serde(default)]
+        missing_limits: Vec<String>,
+    }
+    let snapshot: Snapshot = client
+        .typed(
+            "provider.catalog",
+            serde_json::json!({"providerId": provider_id}),
+        )
+        .await
+        .ok()?;
+    let undeclared = snapshot.catalog.is_some_and(|catalog| {
+        catalog
+            .models
+            .into_iter()
+            .any(|model| model.id == model_id && !model.missing_limits.is_empty())
+    });
+    undeclared.then(|| {
+        crate::ui::i18n::tf(
+            "Declare them with dimcode models {provider} --set-limits {model} --context-window N --max-output-tokens N.",
+            &[("provider", provider_id), ("model", model_id)],
+        )
+    })
+}
+
+/// A model this crate marks `undeclared`: it has no declared limit and no
+/// other reason to be unavailable, so declaring the limits is the one thing
+/// that unblocks it. A disabled model or one unavailable for another reason
+/// keeps that state. `dimcode models` and the `/models` picker share this
+/// predicate for both the mark and the count.
+pub(crate) fn limits_undeclared(
+    missing_limits: &[String],
+    unavailable_reason: Option<&str>,
+    disabled: bool,
+) -> bool {
+    !disabled
+        && !missing_limits.is_empty()
+        && unavailable_reason.is_none_or(|reason| reason == "limits_undeclared")
 }
 
 fn prepare() -> Result<Option<Options>> {
@@ -573,6 +671,28 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 println!("{}", crate::ui::i18n::t("Saved model preferences cleared"));
                 return Ok(0);
             }
+            if options.set_limits.is_some() || options.set_missing_limits {
+                let (Some(context_window), Some(max_output_tokens)) =
+                    (options.context_window, options.max_output_tokens)
+                else {
+                    return Err(
+                        "--set-limits and --set-missing-limits require --context-window and --max-output-tokens"
+                            .into(),
+                    );
+                };
+                let target = match &options.set_limits {
+                    Some(model) => session_host::LimitTarget::Model(model.clone()),
+                    None => session_host::LimitTarget::Missing,
+                };
+                session_host::declare_model_limits(
+                    &mut client,
+                    provider,
+                    target,
+                    context_window,
+                    max_output_tokens,
+                )
+                .await?;
+            }
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Catalog {
@@ -585,6 +705,8 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 id: String,
                 name: String,
                 unavailable_reason: Option<String>,
+                #[serde(default)]
+                missing_limits: Vec<String>,
             }
             let params = serde_json::json!({"providerId":provider});
             let catalog = if options.refresh {
@@ -611,9 +733,25 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                     };
                     eprintln!("{notice}");
                 }
+                // Undeclared limits are the only blocker of a model this
+                // command can fix, so those are the ones it marks and names
+                // the declaring command for; a disabled model or one
+                // unavailable for another reason keeps that state.
+                let mut undeclared = 0;
                 for model in catalog.models {
-                    let availability = if catalog.disabled_model_ids.contains(&model.id) {
+                    let disabled = catalog.disabled_model_ids.contains(&model.id);
+                    let limits_only = limits_undeclared(
+                        &model.missing_limits,
+                        model.unavailable_reason.as_deref(),
+                        disabled,
+                    );
+                    if limits_only {
+                        undeclared += 1;
+                    }
+                    let availability = if disabled {
                         "disabled"
+                    } else if limits_only {
+                        "undeclared"
                     } else if model.unavailable_reason.is_some() {
                         "unavailable"
                     } else {
@@ -623,6 +761,15 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                         "{}\t{}\t{availability}",
                         crate::sanitize::safe(&model.id).replace(['\n', '\t'], " "),
                         crate::sanitize::safe(&model.name).replace(['\n', '\t'], " "),
+                    );
+                }
+                if undeclared > 0 {
+                    eprintln!(
+                        "{}",
+                        crate::ui::i18n::tf(
+                            "A model whose limits are undeclared cannot be selected; declare them with dimcode models {id} --set-missing-limits --context-window N --max-output-tokens N.",
+                            &[("id", provider)],
+                        )
                     );
                 }
             } else {
@@ -672,6 +819,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             mcp_command::print_report(rows, notes);
             Ok(0)
         }
+        Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
         Action::Chat | Action::Tui | Action::Exec => {
             session::chat(&mut client, &options, images.blocks, images.notes).await
         }

@@ -91,7 +91,9 @@ notifications continue to be processed. In the base view, leader approval/questi
 prompts take precedence and close the selected observation through the same
 cleanup path. Under §7, closing detail releases its selection while unfinished
 cards retain the observations they still need.
-The detail does not expose member approval, question or configuration actions.
+The detail does not expose member approval, question or configuration actions. Member tool
+approvals follow [Collaboration's leader route](subagent-tool-approval.md); any user review uses
+the [leader approval prompt](cli-commands.md#subagent-tool-approval), not controls in this detail.
 
 The displayed history belongs to the delivered Session's `main` branch, not to a
 synthetic transcript assembled from the leader's tool result. A reused member can

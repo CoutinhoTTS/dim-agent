@@ -173,6 +173,7 @@ pub fn from_bytes(bytes: Vec<u8>) -> Result<Attached> {
 }
 
 /// An image from pixels a platform decoder produced: a clipboard bitmap.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub fn from_pixels(image: image::DynamicImage) -> Result<Attached> {
     let image = dim_agent_capabilities::images::scale_pixels(image).map_err(refusal)?;
     attach(image, None)
@@ -180,6 +181,7 @@ pub fn from_pixels(image: image::DynamicImage) -> Result<Attached> {
 
 /// The shared pixel guard on a decoder's dimensions, run before the decoder
 /// is asked for any pixel.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn guard((width, height): (u32, u32)) -> Result<()> {
     let size = ImageSize { width, height };
     if size.pixels() > MAX_PIXELS {
@@ -204,6 +206,14 @@ pub fn refusal(error: ImageRefusal) -> crate::Error {
             format!("Invalid or truncated {} image: {reason}", kind.name()).into()
         }
     }
+}
+
+/// The marker an image shows in the draft and in the transcript: its
+/// position among the message's images, then what its sent form changed.
+/// The same fixed text in every interface language, so the two ends of one
+/// message read alike.
+pub fn marker(index: usize, details: &str) -> String {
+    format!("[Image #{index}{details}]")
 }
 
 /// Whether a local file is meant as an image: its first bytes or its
