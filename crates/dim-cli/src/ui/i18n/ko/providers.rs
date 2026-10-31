@@ -51,15 +51,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Email" => "이메일",
         "Continue" => "계속",
         "Browser login" => "브라우저 로그인",
-        "Print verification URL + pairing code again" => "인증 URL과 페어링 코드 다시 출력",
         "Restart device login" => "기기 로그인 재시작",
-        "Print OAuth URL again" => "OAuth URL 다시 출력",
+        "Select to copy · Enter opens link" => "선택하여 복사 · Enter로 링크 열기",
+        "Link shortened · Enter opens link" => "링크 축약됨 · Enter로 전체 열기",
         "Callback URL" => "콜백 URL",
         "Submit callback" => "콜백 제출",
         "The browser could not be opened. Open the link manually, then return here." => {
             "브라우저 열기 실패. 링크를 직접 열고 여기로 복귀"
         }
-        "Enter code {code} at {url}" => "{url}에서 코드 {code} 입력",
         "Waiting for authorization" => "승인 대기 중",
         "{name} device login" => "{name} 기기 로그인",
         "Open this URL: {url}" => "이 URL 열기: {url}",

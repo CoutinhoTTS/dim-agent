@@ -312,8 +312,8 @@ fn run_terminal(
             app.host.shutdown();
             return code;
         }
-        if full.is_some() && terminal.mouse() != app.mouse && terminal.set_mouse(app.mouse).is_err()
-        {
+        let mouse = app.mouse && !app.native_selection();
+        if full.is_some() && terminal.mouse() != mouse && terminal.set_mouse(mouse).is_err() {
             let code = terminal.lost();
             app.host.shutdown();
             return code;
@@ -1103,6 +1103,14 @@ impl App {
     /// No prompt, panel or palette owns the keys.
     fn keyboard_free(&self) -> bool {
         self.prompt.is_none() && !self.composer.palette_open() && !self.composer.mention_open()
+    }
+
+    fn native_selection(&self) -> bool {
+        match &self.prompt {
+            Some(Prompt::Login(view)) => view.native_selection(),
+            Some(Prompt::Providers(panel)) => panel.native_selection(),
+            _ => false,
+        }
     }
 
     /// Command entry is open over a pending question that is not being
@@ -2537,7 +2545,6 @@ impl App {
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
             Effect::OauthBack => {}
             Effect::OauthPaste(url) => self.host.send(Command::OauthPaste(url)),
-            Effect::Print(text) => self.reports.push((text, Tone::Muted)),
             Effect::Connected(provider_id) => {
                 self.set_notice(tf("Connected {provider}", &[("provider", &provider_id)]));
                 if provider_id == DIM_OAUTH_ID {
@@ -2553,8 +2560,12 @@ impl App {
             Effect::Logout(provider_id) => self.host.send(Command::Logout(provider_id)),
             Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),
             Effect::OpenUrl(url) => {
-                crate::login::open_browser(&url);
-                self.set_notice(tf("Opened {url}", &[("url", &url)]));
+                let opened = crate::browser::open(&url);
+                self.set_notice(if opened {
+                    t("Opened link")
+                } else {
+                    t("The browser could not be opened. Open the link manually, then return here.")
+                });
             }
             Effect::ClearModelPreferences {
                 provider_id,
@@ -3452,31 +3463,49 @@ impl App {
         if !replaced {
             live.extend(composer_box);
         }
-        let outer = cols.saturating_sub(2 + MARGIN).max(4);
-        let margin = " ".repeat(MARGIN);
+        let native_selection = self.native_selection();
+        let panel_margin = if native_selection { 0 } else { MARGIN };
+        let outer = if native_selection {
+            cols
+        } else {
+            cols.saturating_sub(2 + MARGIN).max(4)
+        };
+        let margin = " ".repeat(panel_margin);
         let composer_rows = if replaced { 0 } else { rows.len() + 2 };
-        let panel_rows = (size.1 as usize)
-            .saturating_sub(composer_rows + 1 + 4 + 1)
-            .min(18);
-        let panel_cursor = |width: usize| match &self.prompt {
+        let panel_rows = if native_selection {
+            size.1 as usize
+        } else {
+            (size.1 as usize)
+                .saturating_sub(composer_rows + 1 + 4 + 1)
+                .min(18)
+        };
+        let panel_cursor = |width: usize, height: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
+            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Ask(_)) if command_entry => None,
             Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
         };
         if self.fullscreen {
-            let budget = (size.1 as usize)
-                .saturating_sub(composer_rows + 2 + 2)
-                .min(OVERLAY_MAX_ROWS);
-            let list_width = cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH);
-            let caret = panel_cursor(list_width)
+            let budget = if native_selection {
+                size.1 as usize
+            } else {
+                (size.1 as usize)
+                    .saturating_sub(composer_rows + 2 + 2)
+                    .min(OVERLAY_MAX_ROWS)
+            };
+            let list_width = if native_selection {
+                cols
+            } else {
+                cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH)
+            };
+            let caret = panel_cursor(list_width, budget)
                 .flatten()
                 .map(|(row, column)| (row as u16, column as u16));
             let list = |rows: Vec<String>| {
@@ -3507,7 +3536,7 @@ impl App {
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, p)),
+                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -3530,7 +3559,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
-            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -3557,13 +3586,13 @@ impl App {
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
         );
-        frame.cursor = match panel_cursor(outer) {
+        frame.cursor = match panel_cursor(outer, panel_rows) {
             None => (!replaced).then_some(composer_cursor),
             Some(_) if self.fullscreen && !matches!(self.prompt, Some(Prompt::Ask(_))) => None,
             Some(caret) => caret.map(|(row, column)| {
                 (
                     (panel_top + row) as u16,
-                    (MARGIN + column).min(cols.saturating_sub(1)) as u16,
+                    (panel_margin + column).min(cols.saturating_sub(1)) as u16,
                 )
             }),
         };
@@ -6002,6 +6031,159 @@ mod tests {
                 ..ViewSnapshot::default()
             })));
             self.draw();
+        }
+    }
+
+    #[test]
+    fn oauth_links_are_selectable_and_open_without_copy_buttons() {
+        use crate::model::session::OauthEvent;
+        use crate::ui::render::panel::strip_escapes;
+
+        let url = "https://dimagent.cn/oauth/authorize?state=sample&redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fauth%2Fcallback&code_challenge=abcdefghijklmnopqrstuvwxyz0123456789";
+        let typical = format!("{url}&scope={}", "a".repeat(339 - url.len() - 7));
+        let long = format!("{url}&scope={}", "a".repeat(602 - url.len() - 7));
+        for fullscreen in [true, false] {
+            for (size, url, shortened) in [
+                ((80, 24), url, false),
+                ((48, 18), url, false),
+                ((40, 12), typical.as_str(), true),
+                ((48, 18), long.as_str(), true),
+            ] {
+                for mode in ["opened", "manual", "device", "device_complete"] {
+                    let mut drawn = Drawn::new(size, None, true);
+                    drawn.app.fullscreen = fullscreen;
+                    drawn.app.run_command("login", "");
+                    if mode.starts_with("device") {
+                        drawn.key(KeyCode::Down);
+                        drawn.key(KeyCode::Down);
+                    }
+                    drawn.key(KeyCode::Enter);
+                    let (event, expected) = if mode.starts_with("device") {
+                        let complete = (mode == "device_complete")
+                            .then(|| "https://dimagent.cn/device?code=ABCD-EFGH".to_owned());
+                        let target = complete.as_deref().unwrap_or("https://dimagent.cn/device");
+                        (
+                            OauthEvent::Device {
+                                verification_uri: "https://dimagent.cn/device".into(),
+                                verification_uri_complete: complete.clone(),
+                                user_code: "ABCD-EFGH".into(),
+                            },
+                            target.to_owned(),
+                        )
+                    } else {
+                        (
+                            OauthEvent::Url {
+                                url: url.into(),
+                                opened: mode == "opened",
+                            },
+                            url.to_owned(),
+                        )
+                    };
+                    drawn.app.apply(Update::Oauth {
+                        attempt: 1_001,
+                        event,
+                    });
+                    let frame = drawn.app.frame(size);
+                    let text = if fullscreen {
+                        let mut screen = FullScreen::new(size, true);
+                        let bytes = screen.render(&frame, size, &drawn.app.palette, &drawn.app);
+                        let mut terminal =
+                            crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                        terminal.feed(&bytes);
+                        terminal.rows_text().join("\n")
+                    } else {
+                        strip_escapes(&frame.live.join("\n"))
+                    };
+                    assert!(drawn.app.native_selection());
+                    if fullscreen {
+                        assert!(frame.overlay.as_ref().unwrap().rows.len() <= size.1 as usize);
+                    }
+                    let rows = text.lines().collect::<Vec<_>>();
+                    let start = rows
+                        .iter()
+                        .position(|row| row.contains("https://dimagent.cn/"))
+                        .unwrap();
+                    let selected = rows[start..]
+                        .iter()
+                        .take_while(|row| {
+                            !row.contains("Callback URL") && !row.contains("Restart device login")
+                        })
+                        .map(|row| {
+                            row.trim()
+                                .strip_prefix('│')
+                                .expect("the link keeps the left dialog border")
+                                .strip_suffix('│')
+                                .expect("the link keeps the right dialog border")
+                                .trim()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if shortened && !mode.starts_with("device") {
+                        let prefix = selected.replace('\n', "");
+                        assert!(prefix.ends_with('…'));
+                        assert!(expected.starts_with(prefix.trim_end_matches('…')));
+                    } else {
+                        assert_eq!(url::Url::parse(&selected).unwrap().as_str(), expected);
+                    }
+                    let rendered = if fullscreen {
+                        frame.overlay.as_ref().unwrap().rows.join("\n")
+                    } else {
+                        frame.live.join("\n")
+                    };
+                    assert!(rendered.contains(&format!("\x1b]8;;{expected}\x1b\\")));
+                    assert!(!text.contains("Copy OAuth"));
+                    assert!(!text.contains("Copy verification"));
+                    if mode.starts_with("device") {
+                        assert!(text.contains("ABCD-EFGH"));
+                    } else {
+                        assert!(text.contains("Submit callback"));
+                    }
+                    assert!(drawn.app.reports.is_empty(), "no URL in the transcript");
+                    let Some(Prompt::Login(view)) = &mut drawn.app.prompt else {
+                        panic!("the sign-in dialog stays open");
+                    };
+                    assert!(matches!(
+                        view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                        Effect::OpenUrl(url) if url == expected
+                    ));
+                    if !mode.starts_with("device") {
+                        view.handle_key(KeyEvent::new(KeyCode::Down, Modifiers::NONE));
+                        let frame = drawn.app.frame(size);
+                        let (row, _) = if fullscreen {
+                            frame.overlay.as_ref().unwrap().cursor.unwrap()
+                        } else {
+                            frame.cursor.unwrap()
+                        };
+                        let rows = if fullscreen {
+                            &frame.overlay.as_ref().unwrap().rows
+                        } else {
+                            &frame.live
+                        };
+                        assert!(rows[row as usize].contains("Callback URL"));
+                        let Some(Prompt::Login(view)) = &mut drawn.app.prompt else {
+                            panic!("the callback stays in the sign-in dialog");
+                        };
+                        let callback =
+                            "http://localhost:54321/auth/callback?code=example&state=sample";
+                        view.paste(callback);
+                        view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE));
+                        assert!(matches!(
+                            view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                            Effect::OauthPaste(url) if url == callback
+                        ));
+                    } else {
+                        drawn.app.apply(Update::Oauth {
+                            attempt: 1_001,
+                            event: OauthEvent::Done(Err(None)),
+                        });
+                        drawn.key(KeyCode::Esc);
+                        assert!(!drawn.app.native_selection());
+                    }
+                    drawn.key(KeyCode::Esc);
+                    assert!(!drawn.app.native_selection());
+                    assert!(drawn.app.terminal_requests.is_empty());
+                }
+            }
         }
     }
 
