@@ -362,6 +362,35 @@ async fn a_session_grant_matches_only_the_canonical_target_and_mode() {
             Decision::Ask { .. }
         ));
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            // A symlink is matched by its canonical target: a file grant on
+            // the target admits the link, and a directory grant does not
+            // cover a link that resolves outside it.
+            let real = granted.join("real.txt");
+            let link = granted.join("link.txt");
+            std::fs::write(&real, b"real").unwrap();
+            symlink(&real, &link).unwrap();
+            grants.set(Some(vec![grant(&real, GrantKind::File, GrantMode::Write)]));
+            assert_eq!(decide_write(&permission, &link).await, Decision::Allow);
+
+            let outside = root.join("outside");
+            let escape = granted.join("escape");
+            std::fs::create_dir_all(&outside).unwrap();
+            symlink(&outside, &escape).unwrap();
+            grants.set(Some(vec![grant(
+                &granted,
+                GrantKind::Dir,
+                GrantMode::Write,
+            )]));
+            assert!(matches!(
+                decide_write(&permission, &escape.join("child.txt")).await,
+                Decision::Ask { .. }
+            ));
+        }
+
         // The end-to-end call re-checks through Permission and runs without
         // an approval prompt.
         grants.set(Some(vec![grant(
