@@ -447,10 +447,12 @@ model selection and Session behavior are unchanged.
 The page renders one row per operation the owner reports for the `image`
 category, including understanding. It offers the owner's `options`, an Automatic
 choice when no default is pinned, and shows `effective` so automatic resolution
-is visible. An unavailable default stays selected with its reason; the page never
-replaces it with another model. Save sends one `modality.configure` per changed
-key, using the revision from the previous reply; a conflict stops the loop and
-keeps the draft, and keys already accepted stay saved. A `modality_conflict`
+is visible. Options carry ids only; the page joins display names from its existing
+Provider list or catalog reads by `{providerId, modelId}` and shows an id when no
+name is available. An unavailable default stays selected with its reason; the page
+never replaces it with another model. Save sends one `modality.configure` per
+changed key, using the revision from the previous reply; a conflict stops the loop
+and keeps the draft, and keys already accepted stay saved. A `modality_conflict`
 keeps the typed draft, disables Save until reload and offers the owner's new
 snapshot; a stale page reloads after any Provider or model mutation made in the
 Web session. A missing owner method or an unavailable category is an actionable

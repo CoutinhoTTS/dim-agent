@@ -36,12 +36,12 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Adapter lookup is the contract owned by [#40](https://github.com/arcships/dim/issues/40); this design depends on a per-task lookup that does not gate Modality and does not restate how an adapter is registered or found. A missing, Pending or reloading adapter therefore affects only the operations it served and never reloads Modality. Rpc looks up Modality's `modality` namespace in `managementMethods` per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). No Session or branch plugin depends on Modality.
+All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Adapter lookup is the contract owned by [#40](https://github.com/arcships/dim/issues/40); this design depends on a per-task lookup that does not gate Modality and does not restate how an adapter is registered or found. **That contract is not delivered yet.** Until it lands, the current behavior is to declare every process-scoped `modalityAdapter` service by name as a dependency; that collection gates Modality on all of them, and one Pending or Failed adapter makes Modality Pending. This design targets the #40 behavior but does not assume the lookup exists. Rpc looks up Modality's `modality` namespace in `managementMethods` per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). No Session or branch plugin depends on Modality.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Modality` | Process (control node) | Provider model selection (`ModelSelectionHost`) and non-conversational connection resolution; `pluginFiles` (extended: UTF-8 and binary); Settings business source `modality`; the per-task adapter lookup contract owned by [#40](https://github.com/arcships/dim/issues/40); HostPlatform of the control node and of each configured OCR node; diagnostics | `modalityTasks` process service; registers `modality` (`modality.*`) with `managementMethods` |
-| Adapter plugins | Process | their own provider dependencies | `modalityAdapter` service, key adapter name, declared in the plugin's `provides`; found through the #40 lookup |
+| `Modality` | Process (control node) | Provider model selection (`ModelSelectionHost`) and non-conversational connection resolution; `pluginFiles` (extended: UTF-8 and binary); Settings business source `modality`; the per-task adapter lookup contract owned by [#40](https://github.com/arcships/dim/issues/40) (not delivered; collection gates until then); HostPlatform of the control node and of each configured OCR node; diagnostics | `modalityTasks` process service; registers `modality` (`modality.*`) with `managementMethods` |
+| Adapter plugins | Process | their own provider dependencies | `modalityAdapter` service, key adapter name, declared in the plugin's `provides`; lookup is #40's contract (not delivered) |
 
 **Contracts depended on:** the [methods](../contracts/session-boundary.md) contract (namespaces registered with `managementMethods`, per-call progress sink, connection-bound notifications); the per-task adapter lookup contract owned by [#40](https://github.com/arcships/dim/issues/40) (§9.1); Provider's model selection (`ResolveModelSelection::resolve`, which rejects an unselectable explicit model; [AuxiliaryModel](../appserver/auxiliary-model.md)), its selectable-model read for the option list (§9.2), and, for image generation and editing, its non-conversational connection resolution ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins), §9.3); `pluginFiles` (extended) with binary atomic replace and a format version ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)); HostPlatform spawn with isolation ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md), isolation supplement in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)).
 **Contracts defined here:** category and operation identifiers; default keys `modality.<category>` and `modality.<category>.<operation>` in the `modality` settings document (Modality's own; Provider holds none); the `modalityAdapter` and `modalityTasks` services ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.2 and A.3; Rust binding in Appendix G); the `modality` settings document and its schema; task record and result formats (format version 1); the `modality.*` methods and the `modality.realtime.event` notification. Provider knows nothing about modalities; Modality knows no provider-specific semantics outside its adapters.
@@ -72,7 +72,7 @@ flowchart TB
   Cfg -->|"read at use time"| Mod
 ```
 
-Task records are the only durable state; the index is rebuilt from them on `apply`, and non-terminal records are settled by the startup rule (§4). Running work and realtime connections are never rebuilt. Modality settings, the operation defaults and the OCR component path per node included, are business configuration ([ADR 002 D4](../../adr/002-plugin-scope.md)), written through Settings typed operations into the `modality` business source under the schema Modality declares: a change is a data update with a notification, read at the next use, never a reload (A16). The set of adapter plugins is structural configuration in loader rows; a "configured node" is a peer node the host already imports over a rutis link (structural link configuration, not Modality's), and which of them OCR uses is chosen per task by the caller. No Timeline state, no `StateCell`; ordering of competing writes uses the record `revision` under the per-task lock.
+Task records are the only durable state; the index is rebuilt from them on `apply`, and non-terminal records are settled by the startup rule (§4). Running work and realtime connections are never rebuilt. Modality settings, the operation defaults and the OCR component path per node included, are business configuration ([ADR 002 D4](../../adr/002-plugin-scope.md)), written through Settings typed operations into the `modality` business source under the schema Modality declares: a change is a data update with a notification, read at the next use, never a reload (A16). The set of adapter plugins is structural configuration in loader rows. How Modality finds their `modalityAdapter` services is #40's undelivered contract; until it lands, each adapter is a declared dependency and its presence gates Modality (see §1 and §9.1). A "configured node" is a peer node the host already imports over a rutis link (structural link configuration, not Modality's), and which of them OCR uses is chosen per task by the caller. No Timeline state, no `StateCell`; ordering of competing writes uses the record `revision` under the per-task lock.
 
 The `defaults` member holds one entry per operation key, each a Provider model reference. Image operations use per-operation keys and have no category fallback in this design; the `modality.` prefix names the setting, not another nesting level:
 
@@ -217,7 +217,7 @@ No model-visible effect. Modality offers no tool, prompt source, input or Timeli
 | `modality.task.submit/status/list/wait/cancel/result` | Management methods | Task lifecycle; chunked binary result retrieval |
 | `modality.realtime.open/send/close`, `modality.realtime.event` | Management methods and connection-bound notification | Realtime connection |
 | `modalityTasks` | Process service, no key | Same operations as the task methods, for other process plugins |
-| `modalityAdapter` | Process service, key adapter name, found through the #40 lookup | Provider-executed categories |
+| `modalityAdapter` | Process service, key adapter name; lookup is #40's contract (not delivered; collection gates until then) | Provider-executed categories |
 | `modality` settings document | Business configuration (Settings source, schema declared by Modality, written through Settings typed operations) | Operation defaults, OCR component path per node, limits; read at use time |
 | `dimcode modality`, `image`, `video`, `speech`, `music`, `audio`, `asset`, `motion`, `ocr`, `realtime` | CLI | Thin clients of the methods |
 
@@ -249,8 +249,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.9 Only facts later decisions use enter the Timeline | Modality writes no Timeline event; task records stay in `pluginFiles`, the operation defaults and other settings in its Settings business source. |
 | §1 Capability and App Server boundary | Modality is a process plugin, not a Capability; its business code lives in its own package, and the App Server only dispatches the namespace it registers with `managementMethods`. |
 | ADR 002 D1 Scope follows the owner | Tasks and provider connections are shared across Sessions, so Modality is process-scoped. |
-| ADR 002 D2 No wiring modules | Adapter lookup follows the contract owned by #40; this design adds no wiring module. |
-| ADR 002 D3 Dependencies follow scope | All dependencies are process services; a missing, Pending or reloading adapter affects only its operations and never reloads Modality. |
+| ADR 002 D2 No wiring modules | Adapter lookup is #40's undelivered contract; this design adds no wiring module. |
+| ADR 002 D3 Dependencies follow scope | All dependencies are process services. Until #40's lookup lands, collecting adapters by name gates Modality; after it lands, a missing adapter affects only its operations. |
 | ADR 002 D4 Structural and business configuration | Adapter plugins are loader rows and peer nodes come from the host's link configuration; the OCR component path per node and the limits are business configuration in the `modality` source, written through Settings and read at use time. |
 | ADR 002 D5 Language-neutral contracts | `modalityAdapter`, `modalityTasks` and the methods are given in neutral form; Appendix G is a binding only. |
 
@@ -264,8 +264,8 @@ Rules: [principles §4 rule 8](../../architecture/rust-agent/principles.md). Eac
 | Runtime services exposed by name to non-Rust plugins | runtime, [#4](https://github.com/arcships/dim/issues/4) | [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); needed only for a TypeScript implementation of Modality |
 | Per-task adapter lookup without gating Modality | #40 design; runtime/assembly if the existing lookup cannot express it | [§9.1](#91-per-task-adapter-lookup) |
 | Provider read-only contract for selectable models and declared capabilities | Provider, [#790](https://github.com/arcships/dim/issues/790) | [§9.2](#92-provider-read-only-contract) |
-| Provider non-conversational connection | Provider, follow-up issue | [§9.3](#93-provider-non-conversational-connection) |
-| Session image-understanding consumer of `modality.image.understand` | Agent/Prompt owner, follow-up issue | [§9.4](#94-session-image-understanding-consumer) |
+| Provider non-conversational connection | Provider, [#799](https://github.com/arcships/dim/issues/799) | [§9.3](#93-provider-non-conversational-connection) |
+| Session image-understanding consumer of `modality.image.understand` | Agent/Prompt owner, [#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-image-understanding-consumer) |
 
 The Settings business source and the `pluginFiles` supplement are changes to other plugins, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
@@ -291,7 +291,7 @@ The Settings business source and the `pluginFiles` supplement are changes to oth
 - **Existing mechanisms.** `ProviderConnectionResolver` is tied to `ModelRequest`; adapters cannot own Provider credentials, and Modality must not store them.
 - **Needed capability.** A per-call resolution of a model's non-conversational connection, owned by Provider, used only for that call and never persisted or returned to a client.
 - **Ordering impact.** Resolved at submit; no reload; credentials never enter task records, results, diagnostics or errors.
-- **Owner/issue.** Provider, follow-up issue (to be opened).
+- **Owner/issue.** Provider, [#799](https://github.com/arcships/dim/issues/799).
 
 ### 9.4 Session image-understanding consumer
 
@@ -299,7 +299,7 @@ The Settings business source and the `pluginFiles` supplement are changes to oth
 - **Existing mechanisms.** `read` returns image blocks to the Session model, and `session.model.update` plus Prompt's adopted configuration choose that model. There is no input path or typed lookup from the Session path to a process owner's default. Choosing in the browser would be the browser-only default the requirement excludes.
 - **Needed capability.** The Session image-understanding path resolves its model through Modality's `modality.image.understand` default (explicit → default → automatic), or an equivalent typed handoff. The mechanism belongs to Agent/Prompt.
 - **Ordering impact.** Per read or attachment; no Timeline event; existing Sessions keep their behavior until the requirement lands; no reload.
-- **Owner/issue.** Agent/Prompt owner, follow-up issue (to be opened).
+- **Owner/issue.** Agent/Prompt owner, [#798](https://github.com/arcships/dim/issues/798).
 
 ## Appendix A. Interface details
 
@@ -321,7 +321,7 @@ Image understanding is an image operation whose default is resolved by Modality 
 
 ### A.2 Adapters and OCR nodes
 
-Service `modalityAdapter`, scope process, key adapter name, declared in the adapter plugin's `provides`; built-in adapters provide the same service. How an adapter is registered and found is the contract owned by [#40](https://github.com/arcships/dim/issues/40) (§9.1); this design depends on it and does not restate it. Modality resolves the adapter for an operation when a task needs it, so a missing, Pending or reloading adapter affects only its operations. Cancellation is a protocol action: Modality drops the call (or sends the binding's cancel request); the adapter stops local work. Errors are data `{ code, message }` with `code` one of `invalid_input`, `unavailable`, `provider_error`.
+Service `modalityAdapter`, scope process, key adapter name, declared in the adapter plugin's `provides`; built-in adapters provide the same service. How an adapter is registered and found is #40's undelivered contract (§9.1); this design depends on it and does not restate it. Until it lands, adapters are collected by name and gate Modality. Once it lands, Modality resolves the adapter for an operation when a task needs it, so a missing, Pending or reloading adapter affects only its operations. Cancellation is a protocol action: Modality drops the call (or sends the binding's cancel request); the adapter stops local work. Errors are data `{ code, message }` with `code` one of `invalid_input`, `unavailable`, `provider_error`.
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
@@ -374,7 +374,7 @@ The default snapshot is the one shape both methods return. A model reference is 
       "reasons": [],
       "default": {"providerId": "p", "modelId": "m", "available": true},
       "effective": {"providerId": "p", "modelId": "m", "source": "default"},
-      "options": [{"providerId": "p", "providerName": "P", "modelId": "m", "modelName": "M", "available": true}]
+      "options": [{"providerId": "p", "modelId": "m", "available": true}]
     }]
   }]
 }
@@ -383,7 +383,7 @@ The default snapshot is the one shape both methods return. A model reference is 
 - `revision` is the `modality` settings document revision; only `configure` consumes it.
 - `default` is the persisted choice or `null`. When the model is no longer selectable or no available adapter serves it (for `image.understand`, when it is not a selectable vision model), `available` is `false` and `reason` says why.
 - `effective` is the model a task or consumer would use now. It is the default when available. When `default` is `null`, it is automatic resolution: Provider's global default selection when selectable and serving the operation, else the first selectable model that serves it in the order Provider's own automatic selection uses; `source` is `"automatic"`. An unavailable default yields `effective: null`, never a substituted model.
-- `options` lists the models that serve the operation and Provider can select: an available adapter serves them for generate/edit/enhance, and a selectable vision model serves `image.understand`. The current default is included when it is no longer selectable, marked with its reason. The owner computes them at read time from Provider's read-only contract (#790) and the available adapters; the client does not derive them.
+- `options` lists the models that serve the operation and Provider can select: an available adapter serves them for generate/edit/enhance, and a selectable vision model serves `image.understand`. The current default is included when it is no longer selectable, marked with its reason. The owner computes them at read time from Provider's read-only contract (#790) and the available adapters; the client does not derive them. An option carries only `{providerId, modelId, available, reason?}`: #790 returns ids and capabilities, not display names, so the client joins names from its existing Provider list or catalog reads by `{providerId, modelId}` and shows the ids when a name is unavailable.
 - `configure` validates the operation, Provider selectability and, for an adapter operation, adapter support (for `image.understand`, selectable vision support), then writes or clears the operation key through Settings' owner write with CAS. `model: null` clears that key; clearing restores automatic resolution. `operation` is required where the operation has its own key (image, speech) and may be absent only for a category-keyed category. The write happens before the reply is sent, so a success means the default is persisted.
 
 Boundary validation: files at most 100 MiB per submission and 25 MiB per inline file (A5); media types checked per operation; `node_path` only for host-executed operations; `node` only for host-executed categories, default control node (A15). Model selection: explicit `model`; else the operation default; else automatic resolution; else `no_default_model`. An explicit model that is not selectable fails `model_unavailable`, an unavailable default fails `default_unavailable`, and a resolved model no available adapter serves fails `unavailable`; none of them falls back to another model. The resolved model is fixed in the record. `image.understand` is selection-only and has no task; a task submission for it fails `modality_unknown_operation`. At most 4 running tasks per category; others stay `queued` in submission order (A6).
