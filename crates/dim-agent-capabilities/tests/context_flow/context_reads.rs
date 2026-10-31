@@ -671,7 +671,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
 }
 
 #[tokio::test]
-async fn each_model_step_reads_context_twice_with_and_without_compaction_policy() {
+async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
     for (policy, fail_snapshot) in [(false, false), (true, false), (true, true)] {
         let store = Arc::new(CountContextReads {
             fail_snapshot,
@@ -705,10 +705,11 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
+            let expected = if policy { 2 } else { 0 };
             assert_eq!(
                 store.reads.load(Ordering::SeqCst) - before,
-                2,
-                "policy={policy}"
+                expected,
+                "policy={policy}; the no-policy path streams batches"
             );
         }
         let history = session.history("main", None).await.unwrap();

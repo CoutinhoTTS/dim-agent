@@ -606,11 +606,27 @@ impl ContextPreparation {
         validate_capability_snapshot(&request)?;
         *self.prepared.lock().unwrap() =
             Some((source.turn_id.clone(), source.through, request.clone()));
-        let (context, history) = self
+        let streamed = self
             .history
-            .rendered_context(&self.timeline, source.through)
+            .rendered_stream(&self.timeline, source.through, 256)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
+        let (context, history) = if streamed.fallback || self.policy.is_some() {
+            self.history
+                .rendered_context(&self.timeline, source.through)
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?
+        } else {
+            (
+                dim_agent_runtime::ContextHistory {
+                    checkpoint: None,
+                    ancestry: streamed.ancestry,
+                    events: Vec::new(),
+                    positions: Vec::new(),
+                },
+                streamed.history,
+            )
+        };
         crate::context_policy::check_cancel(&cancel)?;
         let prefix = context_messages(&context, &history);
         if request.messages.len() < prefix.len()

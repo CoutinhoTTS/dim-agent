@@ -663,12 +663,32 @@ impl AgentLoop {
                     source.request_id = request_id.clone();
                     return Ok(source);
                 }
-                let (prefix, entries) = owner
+                let streamed = owner
                     .history
-                    .rendered_context(&owner.timeline, through)
+                    .rendered_stream(&owner.timeline, through, 256)
                     .await?;
-                let configuration = context_configuration(&prefix);
-                let prompt = PromptSnapshot::from_context(&prefix).revision;
+                let (prefix, entries, configuration, prompt) =
+                    if streamed.fallback || owner.policy.is_some() {
+                    let (prefix, entries) = owner
+                        .history
+                        .rendered_context(&owner.timeline, through)
+                        .await?;
+                    let configuration = context_configuration(&prefix);
+                    let prompt = PromptSnapshot::from_context(&prefix).revision;
+                    (prefix, entries, configuration, prompt)
+                } else {
+                    (
+                        dim_agent_runtime::ContextHistory {
+                            checkpoint: None,
+                            ancestry: streamed.ancestry,
+                            events: Vec::new(),
+                            positions: Vec::new(),
+                        },
+                        streamed.history,
+                        streamed.configuration,
+                        streamed.prompt,
+                    )
+                };
                 let history = context_messages(&prefix, &entries);
                 let settings = match &configuration {
                     Some(data) => crate::host::ModelSettings {
