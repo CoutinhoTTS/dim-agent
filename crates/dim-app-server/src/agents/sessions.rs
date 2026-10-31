@@ -432,7 +432,7 @@ impl AgentIndex {
         let index = self.clone();
         let session = tokio::spawn(async move {
             let session = index
-                .create_session(&host, config, PROTOCOL_VERSION)
+                .create_session(&host, config, PROTOCOL_VERSION, None)
                 .await?;
             index.retain_versions();
             Ok::<_, AgentError>(session)

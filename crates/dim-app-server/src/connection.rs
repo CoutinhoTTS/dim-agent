@@ -992,7 +992,7 @@ impl Connection {
             .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
             Call::AgentCreate(params) => rpc
                 .index
-                .create(uuid::Uuid::new_v4(), params.profile)
+                .create(uuid::Uuid::new_v4(), params.profile, None)
                 .await
                 .map(|host| {
                     Reply::AgentCreated(AgentCreated {
@@ -1011,6 +1011,13 @@ impl Connection {
                         "agent_default",
                         "The default Agent cannot be closed",
                     )));
+                }
+                if rpc
+                    .index
+                    .owner(&params.agent_id)
+                    .is_some_and(|owner| owner.is_some())
+                {
+                    return Some(Err(crate::protocol::agent_unknown()));
                 }
                 match rpc.index.close(&params.agent_id).await {
                     Ok(()) => Ok(Reply::empty()),
@@ -1280,7 +1287,7 @@ impl Connection {
         }
         let session = rpc
             .index
-            .create_session(&host, config, self.protocol_version())
+            .create_session(&host, config, self.protocol_version(), None)
             .await
             .map_err(RpcError::from)?;
         rpc.index.retain_versions();

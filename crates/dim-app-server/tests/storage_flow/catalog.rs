@@ -173,7 +173,49 @@ async fn catalog_projection_preserves_the_preview_window_and_commits_atomically(
         .into();
     store.close().await.unwrap();
     db.close().await.unwrap();
-    connection.execute_batch("CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence); DROP TABLE session_catalog; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 21)); INSERT INTO agent_store_format VALUES (21)").unwrap();
+    let v21 = database.0.with_extension("v21.sqlite");
+    let old = Connection::open(&v21).unwrap();
+    old.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    for sql in super::V13_SCHEMA
+        .iter()
+        .chain(super::V15_ADDITIONS)
+        .chain(super::V16_ADDITIONS)
+    {
+        old.execute_batch(&sql.replace("(version = 13)", "(version = 21)"))
+            .unwrap();
+    }
+    old.execute("INSERT INTO agent_store_format VALUES (21)", [])
+        .unwrap();
+    old.execute_batch(&format!(
+        "ATTACH DATABASE '{}' AS source",
+        database.0.display()
+    ))
+    .unwrap();
+    for table in super::BUSINESS_TABLES {
+        let present: bool = old
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if !present {
+            continue;
+        }
+        let projection = match *table {
+            "agents" => "agent_id, profile, is_default",
+            "agent_sessions" => "session_id, config, created_at_ms",
+            _ => "*",
+        };
+        old.execute_batch(&format!(
+            "INSERT INTO main.{table} SELECT {projection} FROM source.{table}"
+        ))
+        .unwrap();
+    }
+    old.execute_batch("DETACH DATABASE source").unwrap();
+    assert_eq!(super::schema(&old), super::schema_of(21));
+    drop(old);
+    let database = Database(v21);
     drop(connection);
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), Some(21));
