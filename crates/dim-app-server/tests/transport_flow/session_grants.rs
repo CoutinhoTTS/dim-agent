@@ -1,8 +1,11 @@
 use super::*;
 
 /// A stored write grant lets the next write run without an approval prompt;
-/// removing it makes the next write ask again. Grant matching is covered by
-/// `permission_flow`, and the stored rows by `storage_flow`.
+/// removing it makes the next write ask again. Both grant paths are relative
+/// to the Session workspace and name a file that does not exist yet, so the
+/// admitted write and the later ask also pin the daemon's canonical
+/// resolution. Grant matching is covered by `permission_flow`, and the stored
+/// rows by `storage_flow`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
     use dim_agent_capabilities::{
@@ -87,7 +90,7 @@ async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
         &client
             .rpc(
                 "session.grants.add",
-                json!({"sessionId":sid,"path":outside,"kind":"file","mode":"write"}),
+                json!({"sessionId":sid,"path":"../outside.txt","kind":"file","mode":"write"}),
             )
             .await,
     );
@@ -116,7 +119,7 @@ async fn a_session_grant_admits_the_next_write_until_it_is_removed() {
         &client
             .rpc(
                 "session.grants.remove",
-                json!({"sessionId":sid,"path":outside}),
+                json!({"sessionId":sid,"path":"../outside.txt"}),
             )
             .await,
     );

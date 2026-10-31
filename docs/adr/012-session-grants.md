@@ -43,7 +43,7 @@ The grant is a `Permission` fact, not an `Approval` decision. `Permission` reads
 grants through `SessionGrants` and applies a matching grant only at the `Ask` step; it never
 turns a `Deny` into `Allow`, and a write grant is inert under `read-only`. A grant read failure
 denies. `Approval` remains the one admission point and re-checks through `Permission` after the
-user answers.
+user answers. At process start, a write grant is mounted writable and a read grant read-only.
 
 The client calls `add(session_id, path, kind, mode)` and then answers allow; the re-check sees
 the grant. If `add` fails, the client answers allow-once. `ApprovalDecision` stays `Allow | Deny`.
@@ -87,7 +87,6 @@ too. It is not a property of this decision.
 - Model-written grants.
 - An identity tier; that belongs to the connection layer.
 - A path-pattern engine.
-- Mounting grants into the process sandbox at start; grants decide file tools only.
 
 ## Supersession
 

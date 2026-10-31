@@ -140,8 +140,9 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `a_session_grant_matches_only_the_canonical_target_and_mode`.
 
 [session_grants.rs](../../../../crates/dim-app-server/tests/transport_flow/session_grants.rs)
-covers the `session.grants.add/remove` methods and a write grant admitting the next
-outside write without an approval request.
+covers the `session.grants.add/remove` methods, a write grant admitting the
+next outside write without an approval request, and its removal making the
+next write ask.
 
 [local_product.rs](../../../../tests/integration/tests/local_product.rs) verifies
 real workspace writes, per-call external write/edit approvals despite explicit
