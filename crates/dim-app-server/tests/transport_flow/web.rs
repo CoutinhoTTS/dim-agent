@@ -23,6 +23,7 @@ impl ManagedProvider for SearchProvider {
             provider_id: "dimcode-api-oauth".into(),
             display_name: "Dim OAuth".into(),
             login_methods: vec!["device".into()],
+            default_directory: None,
         }]
     }
     fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {

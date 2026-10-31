@@ -8,12 +8,14 @@ import ToastRegion from "../components/ToastRegion.vue"
 import EndLineDialog from "../features/lines/EndLineDialog.vue"
 import LinesPanel from "../features/lines/LinesPanel.vue"
 import NewLineDialog from "../features/lines/NewLineDialog.vue"
+import { settingsMessages } from "../i18n/settings"
 import { useConnectionStore } from "../stores/connection"
 import { useSessionsStore, workspaceName } from "../stores/sessions"
 import { useUiStore } from "../stores/ui"
 
 const route = useRoute()
 const { t } = useI18n()
+const { t: settingsText } = useI18n({ messages: settingsMessages })
 const connection = useConnectionStore()
 const sessions = useSessionsStore()
 const ui = useUiStore()
@@ -21,10 +23,12 @@ const root = ref<HTMLElement>()
 const drawer = ref<HTMLDialogElement>()
 let observer: ResizeObserver | undefined
 
+const settingsRoute = computed(() => route.path === "/settings" || route.path.startsWith("/settings/"))
 const chatRoute = computed(() => route.name === "chat-new" || route.name === "chat-session")
 const sessionId = computed(() => typeof route.params.sessionId === "string" ? route.params.sessionId : undefined)
 const detailOpen = computed(() => ui.detailOpen && route.name === "chat-session" && sessionId.value !== undefined)
 const pageTitle = computed(() => {
+  if (settingsRoute.value) return settingsText("settings")
   if (route.name === "chat-session" && typeof route.params.sessionId === "string") {
     const session = sessions.byId.get(route.params.sessionId)
     return session?.preview ?? (session === undefined ? t("route.session") : workspaceName(session.cwd))
@@ -124,11 +128,12 @@ function resizeBy(delta: number): void {
     :data-mode="ui.shellMode"
     :data-sidebar-collapsed="ui.sidebarCollapsed"
     :data-chat-route="chatRoute"
+    :data-settings-route="settingsRoute"
     style="--sidebar-width: 280px"
   >
     <ToastRegion />
 
-    <header v-if="ui.shellMode === 'compact'" class="compact-header">
+    <header v-if="ui.shellMode === 'compact' && !settingsRoute" class="compact-header">
       <button class="ui-icon-button" data-variant="ghost" data-size="md" type="button" :aria-label="t('sidebar.openMenu')" @click="ui.drawerOpen = true">
         <Menu aria-hidden="true" />
       </button>
@@ -143,7 +148,7 @@ function resizeBy(delta: number): void {
       <AppSidebar @navigate="ui.drawerOpen = false" />
     </dialog>
 
-    <AppSidebar v-if="ui.shellMode !== 'compact' && !ui.sidebarCollapsed" class="inline-sidebar" />
+    <AppSidebar v-if="ui.shellMode !== 'compact' && !ui.sidebarCollapsed && !settingsRoute" class="inline-sidebar" />
 
     <div
       class="content-region"
@@ -152,14 +157,14 @@ function resizeBy(delta: number): void {
       :style="{ '--detail-width': `${ui.detailWidth}px` }"
     >
       <main id="main" class="main-region" :aria-label="t('a11y.mainContent')" @pointerdown="ui.detailFocused = false" @focusin="ui.detailFocused = false">
-        <button v-if="ui.sidebarCollapsed && ui.shellMode !== 'compact'" class="ui-icon-button sidebar-reopen" data-variant="ghost" data-size="md" type="button" :aria-label="t('sidebar.openMenu')" v-tooltip="t('sidebar.openMenu')" @click="ui.sidebarCollapsed = false">
+        <button v-if="ui.sidebarCollapsed && ui.shellMode !== 'compact' && !settingsRoute" class="ui-icon-button sidebar-reopen" data-variant="ghost" data-size="md" type="button" :aria-label="t('sidebar.openMenu')" v-tooltip="t('sidebar.openMenu')" @click="ui.sidebarCollapsed = false">
           <PanelLeftOpen aria-hidden="true" />
         </button>
-        <header class="main-header">
+        <header v-if="!settingsRoute" class="main-header">
           <div><p>Dim {{ connection.hello?.serverVersion }}</p><strong>{{ pageTitle }}</strong></div>
         </header>
         <p v-if="connection.phase === 'reconnecting'" class="reconnect-banner" role="status">{{ t("page.reconnecting") }}</p>
-        <RouterView :key="route.fullPath" />
+        <RouterView :key="settingsRoute ? 'settings' : route.fullPath" />
       </main>
 
       <div

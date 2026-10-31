@@ -1,6 +1,7 @@
 import { computed, ref, watch } from "vue"
 import { defineStore } from "pinia"
 import { approvalKeyboardBranch } from "../features/lines/line-state"
+import { useAppearanceStore } from "./appearance"
 
 export type ShellMode = "compact" | "regular" | "wide"
 
@@ -84,10 +85,7 @@ export const useUiStore = defineStore("ui", () => {
     }
   }, { deep: true })
 
-  const systemDark = matchMedia("(prefers-color-scheme: dark)")
-  const applyTheme = (): void => { document.documentElement.classList.toggle("dark", systemDark.matches) }
-  applyTheme()
-  systemDark.addEventListener("change", applyTheme)
+  useAppearanceStore()
 
   function setShellWidth(width: number): void {
     shellWidth.value = width

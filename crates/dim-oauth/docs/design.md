@@ -18,7 +18,7 @@ dim-app-server process tree (account build `dimcode`, product home set)
 
 | Part | Owns |
 | --- | --- |
-| `DimOAuth` (this repository) | Login attempts, `auth.json` account record, token refresh, relay catalog projection, usage projection, relay web search, credential leases; its accepted work |
+| `DimOAuth` (this repository) | Login attempts, `auth.json` account record, token refresh, relay catalog projection, usage and referral projections, credit-reset operations, relay web search, credential leases; its accepted work |
 | `ManagedProvider` (dim `managed_provider.rs`) | The typed service contract and its DTOs |
 | `ManagedProviderBinding` | Publishing the provider to `ManagedProviders` while both are active; quiesce on unload |
 | `ManagedProviders` | Process access for RPC, the provider service and `webSearch`; public error mapping |

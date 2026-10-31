@@ -1171,6 +1171,9 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
         .sign_in(&authority, user("legacy"), "code-sse-secret")
         .await;
     client.mcp_state(&session, "legacy", "ready").await;
+    let tested = client.ok("mcp.test", user("legacy")).await;
+    assert_eq!(tested["tools"][0]["name"], "read");
+    client.mcp_state(&session, "legacy", "ready").await;
     let refreshes = authority.refreshes.load(Ordering::SeqCst);
     let sse_token = daemon.store()["credentials"]
         .as_array()
@@ -1218,6 +1221,142 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
         .clone();
     assert_eq!(exchange["client"], "pre-client");
     assert!(!exchange.contains_key("client_secret"));
+    daemon.close().await;
+    servers.stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settings_inspection_tests_oauth_fields_and_cancellation_keep_credentials_private() {
+    let servers = Servers::start().await;
+    let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
+    let metadata = format!("{}/unused?token=metadata-fixture-secret", authority.base());
+    let daemon = Daemon::start(&[("pre", json!({"type":"http","url":resource.url(),"oauth":{"clientId":"pre-client","callbackPort":1457,"scopes":"files:read","authServerMetadataUrl":metadata,"extension":"preserved"}}))]).await;
+    let mut client = daemon.client().await;
+    let view = client.ok("mcp.inspect", user("pre")).await;
+    assert_eq!(view["connections"], json!([]));
+    assert_eq!(
+        resource.unauthorized.load(Ordering::SeqCst),
+        0,
+        "inspection must not contact the MCP server"
+    );
+    assert_eq!(view["configuration"]["oauth"]["clientId"], "pre-client");
+    assert_eq!(view["configuration"]["oauth"]["callbackPort"], 1457);
+    assert_eq!(view["configuration"]["oauth"]["metadataConfigured"], true);
+    assert!(!view.to_string().contains("metadata-fixture-secret"));
+    assert!(!view.to_string().contains("extension"));
+    let before = client.ok("mcp.catalog", json!({})).await;
+    client.ok("mcp.update", json!({"source":"user","id":"pre","expectedVersion":before["userRevision"],"patch":{"oauth":{"action":"set","callbackPort":null,"scopes":null}}})).await;
+    let db = rusqlite::Connection::open(daemon.home.join("rust/dimcode.sqlite")).unwrap();
+    let stored = || {
+        let bytes: String = db
+            .query_row(
+                "SELECT document FROM settings_documents WHERE source='user/mcp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Value>(&bytes).unwrap()["mcpServers"]["pre"].clone()
+    };
+    assert_eq!(stored()["oauth"]["authServerMetadataUrl"], metadata);
+    assert_eq!(stored()["oauth"]["clientId"], "pre-client");
+    assert_eq!(stored()["oauth"]["extension"], "preserved");
+    assert!(stored()["oauth"].get("callbackPort").is_none());
+    assert!(stored()["oauth"].get("scopes").is_none());
+    let current = client.ok("mcp.catalog", json!({})).await;
+    assert_eq!(client.error("mcp.update", json!({"source":"user","id":"pre","expectedVersion":current["userRevision"],"patch":{"bearer":{"action":"set","token":"must-not-persist-secret"}}})).await, "mcp_invalid_config");
+    let started = client
+        .ok(
+            "mcp.auth.start",
+            json!({"source":"user","id":"pre","clientSecret":"pre-secret"}),
+        )
+        .await;
+    assert_eq!(started["redirectUri"], "http://localhost:1456/callback");
+    assert!(!started.to_string().contains("pre-secret"));
+    let callback = consent(&authority, &started, "cancelled-code-secret");
+    client
+        .ok("mcp.auth.cancel", json!({"attemptId":started["attemptId"]}))
+        .await;
+    assert_eq!(
+        client
+            .error(
+                "mcp.auth.complete",
+                json!({"attemptId":started["attemptId"],"callbackUrl":callback})
+            )
+            .await,
+        "mcp_auth_attempt_closed"
+    );
+    assert!(!sent(&authority, "cancelled-code-secret"));
+    assert!(
+        !daemon.home.join("mcp-oauth.json").exists(),
+        "cancelling an attempt must not save credentials"
+    );
+    client
+        .sign_in(
+            &authority,
+            json!({"source":"user","id":"pre","clientSecret":"pre-secret"}),
+            "accepted-code-secret",
+        )
+        .await;
+    let session = daemon.session(&mut client).await;
+    client.mcp_state(&session, "pre", "ready").await;
+    let snapshot = client.ok("mcp.inspect", user("pre")).await;
+    assert!(
+        snapshot["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|connection| connection["state"]["status"] == "connected"
+                && connection["tools"][0]["name"] == "read")
+    );
+    for secret in [
+        "pre-secret",
+        "metadata-fixture-secret",
+        "accepted-code-secret",
+        "access-1-secret",
+        "refresh-1-secret",
+    ] {
+        assert!(!snapshot.to_string().contains(secret));
+    }
+    let before = stored();
+    let tested = client.ok("mcp.test", user("pre")).await;
+    assert_eq!(tested["tools"][0]["name"], "read");
+    assert_eq!(
+        stored(),
+        before,
+        "a probe cannot change persisted configuration"
+    );
+    client.mcp_state(&session, "pre", "ready").await;
+    let credentials = daemon.store()["credentials"].clone();
+    let started = client
+        .ok(
+            "mcp.auth.start",
+            json!({"source":"user","id":"pre","clientSecret":"pre-secret"}),
+        )
+        .await;
+    let callback = consent(&authority, &started, "inflight-cancelled-code-secret");
+    let held = authority.hold("authorization_code");
+    let mut completing = daemon.connect().await;
+    let complete = json!({"attemptId":started["attemptId"],"callbackUrl":callback});
+    let waiting =
+        tokio::spawn(async move { completing.error("mcp.auth.complete", complete).await });
+    arrived(held).await;
+    client
+        .ok("mcp.auth.cancel", json!({"attemptId":started["attemptId"]}))
+        .await;
+    authority.unhold("authorization_code");
+    assert_eq!(waiting.await.unwrap(), "mcp_auth_attempt_closed");
+    assert_eq!(
+        daemon.store()["credentials"],
+        credentials,
+        "cancellation preserves an existing grant"
+    );
+    assert_eq!(
+        client.catalog_auth(json!({}), "pre").await["status"],
+        "authorized"
+    );
+    let current = client.ok("mcp.catalog", json!({})).await;
+    client.ok("mcp.update", json!({"source":"user","id":"pre","expectedVersion":current["userRevision"],"patch":{"oauth":{"action":"remove"}}})).await;
+    assert!(stored().get("oauth").is_none());
     daemon.close().await;
     servers.stop.cancel();
 }
