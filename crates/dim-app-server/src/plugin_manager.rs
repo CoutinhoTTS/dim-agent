@@ -676,12 +676,17 @@ impl Owners {
             }
         }
         if kinds.contains(&Kind::Mcp) {
+            // Only a failed read keeps PluginManager's refusal of the kind.
+            // Every other outcome clears it: the document read and handed
+            // over, the kind not carried by the manifest, and the kind
+            // skipped because its owner is absent, which read nothing
+            // (§3.7).
+            self.clear_refusal(plugin, Kind::Mcp);
             match (self.ctx.get_at(&self.mcp), &manifest.mcp) {
                 (None, Some(_)) => outcome.skipped.push(Kind::Mcp),
                 (None, None) => {}
                 (Some(mcp), Some(path)) => match read_content(path) {
                     Ok(document) => {
-                        self.clear_refusal(plugin, Kind::Mcp);
                         if let Err(error) = mcp
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
@@ -699,7 +704,6 @@ impl Owners {
                     if let Err(error) = mcp.withdraw_plugin(plugin.into(), &cancel).await {
                         tracing::warn!(%plugin, %error, "MCP withdrawal refused");
                     }
-                    self.clear_refusal(plugin, Kind::Mcp);
                 }
             }
         }
@@ -745,6 +749,8 @@ impl Owners {
 
     /// What is refused for `plugin` now (§3.7): PluginManager's own refusal
     /// of a kind it could not read, else what that kind's owner reports.
+    /// Nothing for a kind whose owner is absent, as turning it off runs no
+    /// `register`: its content is not there to be refused.
     async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Value> {
         let mut found = Vec::new();
         if manifest.skills.is_some()
@@ -755,18 +761,16 @@ impl Owners {
                 Err(error) => found.push(refused(Kind::Skills, error)),
             }
         }
-        if manifest.mcp.is_some() {
+        if manifest.mcp.is_some()
+            && let Some(mcp) = self.ctx.get_at(&self.mcp)
+        {
             let error = self
                 .refusals
                 .lock()
                 .unwrap()
                 .get(&(plugin.to_owned(), Kind::Mcp))
                 .cloned()
-                .or_else(|| {
-                    self.ctx
-                        .get_at(&self.mcp)
-                        .and_then(|mcp| mcp.plugin_refusal(plugin))
-                });
+                .or_else(|| mcp.plugin_refusal(plugin));
             if let Some(error) = error {
                 found.push(refused(Kind::Mcp, error));
             }
