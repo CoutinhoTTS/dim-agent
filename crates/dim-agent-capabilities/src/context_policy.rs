@@ -62,11 +62,15 @@ pub(crate) struct CompactionStep {
 
 /// A request's context at a fixed boundary, projected under the compaction
 /// in effect for it.
+/// The context a policy preparation consumes. The full history is retained
+/// only for compaction snapshots; streamed preparations can omit it.
+pub(crate) struct PolicyContext(pub ContextHistory);
+
 pub(crate) struct View {
     /// The request as built from the Timeline, with the history prefix.
     request: Arc<ModelRequest>,
     prefix_len: usize,
-    context: ContextHistory,
+    context: PolicyContext,
     /// The entries from the cut in effect on.
     history: Vec<HistoryEntry>,
     /// The policy facts at the boundary.
@@ -216,10 +220,10 @@ fn checkpoint(data: &ContextCompactionData) -> Option<CompactionCheckpoint> {
 /// adopted configuration and system with the projected messages. Tools are
 /// declared but not bound; nothing executes them.
 pub(crate) fn configured_request(
-    context: &ContextHistory,
+    context: &PolicyContext,
     history: &[HistoryEntry],
 ) -> Option<Arc<ModelRequest>> {
-    let data = context_configuration(context)?;
+    let data = context_configuration(&context.0)?;
     Some(Arc::new(
         ModelSettings {
             provider_id: data.settings.provider_id.clone(),
@@ -230,7 +234,7 @@ pub(crate) fn configured_request(
             config: data.settings.config.clone(),
             metadata: data.settings.metadata.clone(),
         }
-        .request(context_messages(context, history)),
+        .request(context_messages(&context.0, history)),
     ))
 }
 
@@ -261,15 +265,15 @@ impl ContextPolicy {
     pub fn view(
         &self,
         request: Arc<ModelRequest>,
-        context: ContextHistory,
+        context: PolicyContext,
         history: Vec<HistoryEntry>,
         facts: PolicyFacts,
         reusable: Vec<Arc<AgentEvent>>,
     ) -> Result<View, HostError> {
-        let prefix_len = crate::history::context_messages_len(&context, &history);
+        let prefix_len = crate::history::context_messages_len(&context.0, &history);
         let reused = reusable.iter().rev().find_map(|event| match &event.kind {
             EventKind::ContextCompaction(data) => checkpoint(data).and_then(|checkpoint| {
-                retained_entry(&context, &history, &checkpoint.retain_from)
+                retained_entry(&context.0, &history, &checkpoint.retain_from)
                     .ok()
                     .map(|kept| (checkpoint, kept))
             }),
@@ -289,7 +293,7 @@ impl ContextPolicy {
             }
             None => (
                 history,
-                context_compaction(&context).and_then(checkpoint),
+                context_compaction(&context.0).and_then(checkpoint),
                 request.clone(),
             ),
         };
@@ -312,7 +316,7 @@ impl ContextPolicy {
         &self,
         request: Arc<ModelRequest>,
         source: &ContextPrepareData,
-        context: ContextHistory,
+        context: PolicyContext,
         history: Vec<HistoryEntry>,
         facts: PolicyFacts,
         cancel: CancellationToken,
@@ -331,7 +335,7 @@ impl ContextPolicy {
         &self,
         request: Arc<ModelRequest>,
         source: &ContextPrepareData,
-        context: ContextHistory,
+        context: PolicyContext,
         history: Vec<HistoryEntry>,
         facts: PolicyFacts,
         cancel: CancellationToken,
@@ -789,7 +793,7 @@ impl ContextPolicy {
                 request: None,
             });
         };
-        let request = retained_entry(&view.context, &view.history, retain_from)
+        let request = retained_entry(&view.context.0, &view.history, retain_from)
             .map_err(HostError::failed)
             .and_then(|kept| {
                 view.compacted(model.as_ref(), kept, replacement, context_baseline)
@@ -798,7 +802,7 @@ impl ContextPolicy {
             });
         if request.is_ok() {
             let saved = async {
-                let snapshot = self.history.snapshot(&view.context, retain_from, &fact)?;
+                let snapshot = self.history.snapshot(&view.context.0, retain_from, &fact)?;
                 self.timeline
                     .save_snapshot(snapshot)
                     .await
@@ -1086,6 +1090,7 @@ impl CarriedPins {
         let pins = group_pins(pinned, ids);
         let from = view
             .context
+            .0
             .events
             .iter()
             .find(|event| event.id == retain_from)
@@ -1329,6 +1334,7 @@ fn pinned_inputs(
         .collect();
     let checkpointed = view
         .context
+        .0
         .checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.state.inputs.as_slice())
@@ -1624,6 +1630,7 @@ impl<'a> Retention<'a> {
                 let start = self
                     .view
                     .context
+                    .0
                     .events
                     .iter()
                     .rev()

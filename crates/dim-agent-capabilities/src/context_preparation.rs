@@ -1,5 +1,5 @@
 use crate::{
-    context_policy::{ContextPolicy, configured_request},
+    context_policy::{ContextPolicy, PolicyContext, configured_request},
     history::{HistoryRenderer, context_configuration, context_messages},
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
@@ -549,11 +549,11 @@ impl ContextPreparation {
             .rendered_context(&self.timeline, through)
             .await
             .map_err(ContextOpError::Read)?;
-        let request =
-            configured_request(&context, &history).ok_or(ContextOpError::NotConfigured)?;
+        let request = configured_request(&PolicyContext(context.clone()), &history)
+            .ok_or(ContextOpError::NotConfigured)?;
         let facts = PolicyFacts::from_context(&context, through);
         let view = policy
-            .view(request, context, history, facts, Vec::new())
+            .view(request, PolicyContext(context), history, facts, Vec::new())
             .map_err(ContextOpError::Model)?;
         let model = policy
             .resolver
@@ -664,7 +664,13 @@ impl ContextPreparation {
                     .map_err(|error| HostError::failed(error.to_string()))?;
                 policy
                     .prepare(
-                        request, &source, context, history, facts, cancel, &cancelled,
+                        request,
+                        &source,
+                        PolicyContext(context),
+                        history,
+                        facts,
+                        cancel,
+                        &cancelled,
                     )
                     .await
             }
