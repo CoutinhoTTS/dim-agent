@@ -1237,15 +1237,24 @@ impl Worker {
             Command::SetApprovals(mode) => {
                 let result = match permission::parse_preset(&mode) {
                     Err(error) => Err(error.to_string()),
-                    Ok(_) if self.session_id.is_empty() => Err(NO_SESSION.to_owned()),
-                    Ok(_) if !self.client.supports(&permission::PRESET_METHODS) => {
+                    Ok(_)
+                        if !self.session_id.is_empty()
+                            && !self.client.supports(&permission::PRESET_METHODS) =>
+                    {
                         Err("This daemon cannot change the permission preset".to_owned())
                     }
                     Ok(preset) => {
-                        let session_id = self.session_id.clone();
-                        permission::select(&mut self.client, &session_id, preset)
-                            .await
-                            .map(|()| permission::name(preset).to_owned())
+                        let result = if self.session_id.is_empty() {
+                            Ok(())
+                        } else {
+                            let session_id = self.session_id.clone();
+                            permission::select(&mut self.client, &session_id, preset).await
+                        };
+                        result
+                            .map(|()| {
+                                self.options.permission = Some(preset);
+                                permission::name(preset).to_owned()
+                            })
                             .map_err(|error| error.to_string())
                     }
                 };

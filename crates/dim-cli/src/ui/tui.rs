@@ -1493,7 +1493,9 @@ impl App {
                                 &[("title", title)],
                             )),
                         }
-                        self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        if !self.session_id.is_empty() {
+                            self.notices.push(t("New members from main inherit this policy; existing members retain theirs.").to_owned());
+                        }
                     }
                     self.approvals = mode;
                 }
