@@ -810,6 +810,17 @@ impl SqliteTimelineStore {
     }
 }
 
+/// The newest turn at a watermark and the first event a window over it must
+/// include: the turn start, or an input the turn consumed when that is older
+/// (session-history-window §4.2).
+#[derive(Debug, Clone, Copy)]
+pub struct TurnWindow {
+    /// `None` when the branch has no `turn/start` at or below the watermark.
+    pub turn_start: Option<u64>,
+    /// The window's first sequence, always a batch start. `1` without a turn.
+    pub window_start: u64,
+}
+
 /// Session directory service; Agent hosting owns the profile and owner meaning.
 #[derive(Clone)]
 pub struct SessionStore {
@@ -1045,6 +1056,232 @@ impl SessionStore {
             .into_iter()
             .map(|record| record.event)
             .collect())
+    }
+    /// The newest turn at `through`, and the first event a window over it must
+    /// include: the turn start, or the messages the turn's first request
+    /// consumed when they are older.
+    pub async fn turn_window(&self, id: &str, branch: &str, through: u64) -> Result<TurnWindow> {
+        let session = id.to_owned();
+        let branch = branch.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                let turn: Option<i64> = connection
+                    .prepare(
+                        "SELECT max(sequence) FROM timeline_events \
+                         WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' \
+                         AND sequence<=?3",
+                    )
+                    .map_err(error)?
+                    .query_row(params![&session, &branch, sql_sequence(through)?], |row| {
+                        row.get(0)
+                    })
+                    .map_err(error)?;
+                let Some(turn) = turn else {
+                    return Ok(TurnWindow {
+                        turn_start: None,
+                        window_start: 1,
+                    });
+                };
+                let turn_start = sequence_value(turn)?;
+                let first_step: Option<i64> = connection
+                    .prepare(
+                        "SELECT min(sequence) FROM timeline_events \
+                         WHERE session_id=?1 AND branch_id=?2 AND kind='step/model-start' \
+                         AND sequence>?3 AND sequence<=?4",
+                    )
+                    .map_err(error)?
+                    .query_row(
+                        params![
+                            &session,
+                            &branch,
+                            sql_sequence(turn_start)?,
+                            sql_sequence(through)?
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(error)?;
+                let mut window_start = turn_start;
+                let mut consumed = false;
+                if let Some(first_step) = first_step {
+                    let inputs: Vec<String> = connection
+                        .prepare(
+                            "SELECT json_extract(body, '$.record.event.data.input_id') \
+                             FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 AND kind='input/consumed' \
+                             AND sequence>?3 AND sequence<?4 ORDER BY sequence",
+                        )
+                        .map_err(error)?
+                        .query_map(
+                            params![&session, &branch, sql_sequence(turn_start)?, first_step],
+                            |row| row.get(0),
+                        )
+                        .map_err(error)?
+                        .collect::<rusqlite::Result<_>>()
+                        .map_err(error)?;
+                    for input in inputs {
+                        let sequence: Option<i64> = connection
+                            .prepare(
+                                "SELECT sequence FROM timeline_events \
+                                 WHERE session_id=?1 AND event_id=?2",
+                            )
+                            .map_err(error)?
+                            .query_row(params![&session, input], |row| row.get(0))
+                            .optional()
+                            .map_err(error)?;
+                        if let Some(sequence) = sequence {
+                            window_start = window_start.min(sequence_value(sequence)?);
+                            consumed = true;
+                        }
+                    }
+                }
+                if !consumed {
+                    let newest: Option<i64> = connection
+                        .prepare(
+                            "SELECT max(sequence) FROM timeline_events \
+                             WHERE session_id=?1 AND branch_id=?2 AND kind='input/message' \
+                             AND sequence<=?3",
+                        )
+                        .map_err(error)?
+                        .query_row(
+                            params![&session, &branch, sql_sequence(turn_start)?],
+                            |row| row.get(0),
+                        )
+                        .map_err(error)?;
+                    if let Some(newest) = newest {
+                        window_start = window_start.min(sequence_value(newest)?);
+                    }
+                }
+                Ok(TurnWindow {
+                    turn_start: Some(turn_start),
+                    window_start,
+                })
+            })
+            .await
+    }
+
+    /// The newest events below `before` inside `window_start..=through`, whole
+    /// batches at both ends (session-history-window §4.2). Every event carries
+    /// its batch end, so the caller can trim by bytes without splitting one.
+    pub async fn read_page_before(
+        &self,
+        id: &str,
+        branch: &str,
+        before: u64,
+        limit: usize,
+        through: u64,
+        window_start: u64,
+    ) -> Result<Vec<StoredEvent>> {
+        let key = TimelineKey {
+            session_id: id.into(),
+            branch_id: branch.into(),
+        };
+        let top = before.saturating_sub(1).min(through);
+        if top == 0 || top < window_start || limit == 0 {
+            return Ok(vec![]);
+        }
+        let Some(at_top) = self.read_any(&key, top..=top).await?.pop() else {
+            return Ok(vec![]);
+        };
+        let end = if at_top.batch_end <= top {
+            at_top.batch_end
+        } else {
+            self.previous_batch_end(&key, at_top.event.sequence, at_top.batch_end, window_start)
+                .await?
+        };
+        if end < window_start {
+            return Ok(vec![]);
+        }
+        let mut low = end
+            .saturating_sub(limit.saturating_sub(1) as u64)
+            .max(1)
+            .max(window_start);
+        loop {
+            let page = self.timeline.read(&key, low..=end).await?;
+            let Some(first) = page.first() else {
+                return Ok(vec![]);
+            };
+            if low <= window_start || low == 1 {
+                return Ok(page);
+            }
+            let start = self
+                .batch_start(&key, first.event.sequence, first.batch_end, window_start)
+                .await?;
+            if start >= low {
+                return Ok(page);
+            }
+            low = start;
+        }
+    }
+    /// Reads a sequence range that may start and end inside a batch; the
+    /// caller checks the boundaries itself.
+    async fn read_any(
+        &self,
+        key: &TimelineKey,
+        range: RangeInclusive<u64>,
+    ) -> Result<Vec<StoredEvent>> {
+        let mut reader = self.timeline.reader();
+        let records = read_range(&self.timeline.db, &mut reader, key, range, false).await;
+        self.timeline.finish(reader);
+        records
+    }
+    /// The end of the batch before the one holding `sequence..=batch_end`,
+    /// searching no lower than `floor`.
+    async fn previous_batch_end(
+        &self,
+        key: &TimelineKey,
+        sequence: u64,
+        batch_end: u64,
+        floor: u64,
+    ) -> Result<u64> {
+        let mut probe = sequence.saturating_sub(1);
+        loop {
+            if probe == 0 {
+                return Ok(0);
+            }
+            let low = probe.saturating_sub(63).max(1).max(floor);
+            let chunk = self.read_any(key, low..=probe).await?;
+            if let Some(previous) = chunk
+                .iter()
+                .rev()
+                .find(|record| record.batch_end != batch_end)
+            {
+                return Ok(previous.event.sequence);
+            }
+            if low <= floor || low == 1 {
+                return Ok(low.saturating_sub(1));
+            }
+            probe = low - 1;
+        }
+    }
+    /// The first sequence of the batch holding `sequence..=batch_end`,
+    /// searching no lower than `floor` (a batch start).
+    async fn batch_start(
+        &self,
+        key: &TimelineKey,
+        sequence: u64,
+        batch_end: u64,
+        floor: u64,
+    ) -> Result<u64> {
+        let mut probe = sequence.saturating_sub(1);
+        loop {
+            if probe == 0 || probe < floor {
+                return Ok(floor);
+            }
+            let low = probe.saturating_sub(63).max(1).max(floor);
+            let chunk = self.read_any(key, low..=probe).await?;
+            if let Some(previous) = chunk
+                .iter()
+                .rev()
+                .find(|record| record.batch_end != batch_end)
+            {
+                return Ok(previous.event.sequence + 1);
+            }
+            if low <= floor || low == 1 {
+                return Ok(low);
+            }
+            probe = low - 1;
+        }
     }
     /// The stored events of `event_ids` in one statement; ids the store
     /// does not hold are absent.
@@ -1578,6 +1815,9 @@ pub(super) fn read_sequence(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::
 }
 fn sql_sequence(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(error)
+}
+fn sequence_value(value: i64) -> Result<u64> {
+    u64::try_from(value).map_err(|_| error("invalid Timeline sequence"))
 }
 struct OutputRow {
     sequence: u64,

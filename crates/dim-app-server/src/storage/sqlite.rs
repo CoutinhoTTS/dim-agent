@@ -232,13 +232,26 @@ fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -
                 name == expected_name && *sql == expected_sql
             })
 }
-/// The schema objects of `connection`'s database, sorted by name.
+/// The read index the daemon creates at open (session-history-window §5.1).
+/// It carries no data and no decode rule, so it is not part of the format:
+/// `schema` and the format gate ignore it, and every open recreates it.
+const DERIVED_INDEX: (&str, &str) = (
+    "timeline_history_anchors",
+    "CREATE INDEX IF NOT EXISTS timeline_history_anchors ON timeline_events(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')",
+);
+/// The schema objects of `connection`'s database that belong to the format,
+/// sorted by name.
 fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
     let mut query = connection
-        .prepare("SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+        .prepare(
+            "SELECT name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' AND name != ?1 ORDER BY name",
+        )
         .map_err(storage)?;
     query
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(rusqlite::params![DERIVED_INDEX.0], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .map_err(storage)?
         .collect::<rusqlite::Result<_>>()
         .map_err(storage)
@@ -397,6 +410,7 @@ impl SqliteStorage {
                 path.display()
             )));
         }
+        tx.execute_batch(DERIVED_INDEX.1).map_err(storage)?;
         tx.commit().map_err(storage)?;
         connection
             .pragma_update(None, "journal_mode", "WAL")

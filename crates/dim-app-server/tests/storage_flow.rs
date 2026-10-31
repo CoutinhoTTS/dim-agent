@@ -387,7 +387,7 @@ fn v15_store(path: &std::path::Path) -> Connection {
 /// The schema statements of a store, sorted.
 fn schema(connection: &Connection) -> Vec<String> {
     let mut statements: Vec<String> = connection
-        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'timeline_history_anchors'")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -6162,4 +6162,45 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
     store.close().await.unwrap();
     db.close().await.unwrap();
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_history_window_index_is_created_at_open_without_a_format_step() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let indexed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed);
+    assert_eq!(marker(&connection), [28]);
+    connection
+        .execute_batch("DROP INDEX timeline_history_anchors")
+        .unwrap();
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None, "the index is not a format step");
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let indexed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed, "a later open recreates the index");
+    assert_eq!(marker(&connection), [28]);
+    drop(connection);
+
+    let (read, format) = SqliteStorage::open_read_only(database.0.clone()).unwrap();
+    assert_eq!(format, 28);
+    read.close().await.unwrap();
 }
