@@ -731,7 +731,7 @@ async fn run_connection(
                                             .into_iter()
                                             .filter(|method| {
                                                 local
-                                                    || WEB_READABLE_METHODS
+                                                    || WEB_MANAGEMENT_METHODS
                                                         .contains(&method.as_str())
                                             })
                                             .filter(|_| trusted),

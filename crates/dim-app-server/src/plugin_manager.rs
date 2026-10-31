@@ -4,6 +4,7 @@
 //! carries out a configuration change by giving the loader and the content
 //! owners (SkillsCatalog, Mcp) commands.
 mod acquire;
+mod management;
 mod record;
 mod tools;
 
@@ -1603,7 +1604,8 @@ impl DynPlugin for PluginManagerPlugin {
                         manager
                             .call(&method, params, Some(&progress))
                             .await
-                            .map_err(RpcError::from)
+                            .map(|value| management::reply(&method, value))
+                            .map_err(management::error)
                     })
                 }),
             )?;
