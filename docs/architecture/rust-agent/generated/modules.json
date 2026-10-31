@@ -31159,6 +31159,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::fullscreen",
+      "references": [
+        "path FullScreen::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::render::markdown",
       "references": [
         "path MarkdownRenderer::new"
@@ -31257,6 +31264,7 @@
         "path App",
         "path App::new",
         "path ClipboardRead::Native",
+        "path GIT_BRANCH_POLL",
         "path ImageRead",
         "path LOAD_MORE",
         "path Prompt::Ask",
