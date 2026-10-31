@@ -40,8 +40,8 @@ pub(crate) enum Entry {
     Local,
     /// The unauthenticated `/ws` of `--ws`.
     Bare,
-    /// The authenticated local web entry: Session methods and web-readable
-    /// management reads only.
+    /// The authenticated local web entry: Session methods and allowlisted
+    /// management methods.
     Web,
 }
 
@@ -264,18 +264,25 @@ impl Connection {
     /// The connection's entry decides what it may call before any method is
     /// routed, for built-in and contributed methods alike: protected profiles
     /// serve only `hello` and `daemon.ping` to the bare WebSocket, and the web
-    /// entry serves Session methods plus the web-readable management reads.
+    /// entry serves Session methods plus explicitly permitted management.
     fn admit_entry(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
         match self.entry {
             Entry::Local => Ok(()),
             Entry::Web => {
                 let allowed = match call {
                     Call::Shutdown(_) => false,
-                    Call::Contributed { method, .. } => {
-                        !rpc.management.holds(method)
-                            || WEB_READABLE_METHODS.contains(&method.as_str())
+                    Call::Contributed { method, params } => {
+                        if matches!(method.as_str(), "settings.read" | "settings.update") {
+                            params
+                                .get("source")
+                                .and_then(Value::as_str)
+                                .is_some_and(|source| WEB_SETTINGS_SOURCES.contains(&source))
+                        } else {
+                            !rpc.management.holds(method)
+                                || WEB_MANAGEMENT_METHODS.contains(&method.as_str())
+                        }
                     }
-                    call => !call.is_web_entry(),
+                    call => !call.is_web_entry() && !call.is_ui_host(),
                 };
                 if allowed {
                     Ok(())

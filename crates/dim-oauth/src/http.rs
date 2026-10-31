@@ -37,6 +37,19 @@ pub struct ClientIds {
     pub cn: String,
 }
 
+pub(super) fn default_directory() -> &'static str {
+    let entry = std::env::var("DIMCODE_NPM_PACKAGE").ok().or_else(|| {
+        std::env::args_os()
+            .next()
+            .map(std::path::PathBuf::from)
+            .and_then(|path| Some(path.file_stem()?.to_string_lossy().into_owned()))
+    });
+    match entry.as_deref() {
+        Some("dimagent") => "https://dimagent.com",
+        _ => "https://dimagent.cn",
+    }
+}
+
 pub(super) fn identity_headers() -> HashMap<String, String> {
     HashMap::from([
         (
