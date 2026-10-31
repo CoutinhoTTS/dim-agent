@@ -261,6 +261,9 @@ struct Worker {
     /// finished, a run on main ended, a compaction result arrived on main, or
     /// the session or its model changed.
     context_stale: bool,
+    /// The last `model/usage` on main, folded from the events so `/usage`
+    /// can report its cache read share.
+    last_usage: Option<LastUsage>,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
     /// The catalog version each provider was last asked to refill at in this
@@ -367,6 +370,7 @@ async fn run(
         login: None,
         login_callbacks: unbounded_channel(),
         context_stale: false,
+        last_usage: None,
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
@@ -552,6 +556,49 @@ impl ContextUsage {
 
 fn tokens(value: f64) -> u64 {
     value.max(0.0).round() as u64
+}
+
+/// The last `model/usage` fact on `main`: the counters `/usage` reports the
+/// cache read share of.
+#[derive(Clone, Copy)]
+struct LastUsage {
+    prompt_tokens: u64,
+    cache_read_tokens: Option<u64>,
+}
+
+impl LastUsage {
+    /// The share `/usage` prints, or `None` when the counters cannot
+    /// produce one.
+    fn percent(&self) -> Option<String> {
+        cache_hit_rate(self.prompt_tokens, self.cache_read_tokens)
+    }
+}
+
+/// The cache read share of one request, floored at every step so the figure
+/// never flatters: `100%` only when every prompt token was a cache read, one
+/// decimal rounded down between 99% and 100%, an integer rounded down below
+/// that, and `<1%` for a positive share too small for an integer. `None` when
+/// the request reported no cache read count, its cache reads exceed its
+/// prompt, or its prompt is zero, so a reported zero stays `0%`.
+fn cache_hit_rate(prompt_tokens: u64, cache_read_tokens: Option<u64>) -> Option<String> {
+    let cache_read_tokens = cache_read_tokens?;
+    if prompt_tokens == 0 || cache_read_tokens > prompt_tokens {
+        return None;
+    }
+    if cache_read_tokens == prompt_tokens {
+        return Some("100%".to_owned());
+    }
+    if cache_read_tokens == 0 {
+        return Some("0%".to_owned());
+    }
+    let tenths = u128::from(cache_read_tokens) * 1000 / u128::from(prompt_tokens);
+    Some(if tenths >= 990 {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    } else if tenths >= 10 {
+        format!("{}%", tenths / 10)
+    } else {
+        "<1%".to_owned()
+    })
 }
 
 #[derive(Deserialize)]
@@ -1108,10 +1155,31 @@ impl Worker {
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
-            Command::Usage => match self.context_usage().await {
-                Ok(usage) => self.report(usage.describe(), false),
-                Err(error) => self.report(error.to_string(), true),
-            },
+            Command::Usage => {
+                let reading = self.context_usage().await;
+                // Pages land oldest first: until `main`'s history has
+                // finished loading, an earlier page's older request is not
+                // the newest, so the segment waits for `done`.
+                let loaded = self
+                    .task_history
+                    .get("main")
+                    .is_some_and(|history| history.done);
+                let cached = self
+                    .last_usage
+                    .filter(|_| loaded)
+                    .and_then(|usage| usage.percent());
+                match reading {
+                    Ok(usage) => {
+                        let mut line = usage.describe();
+                        if let Some(cached) = cached {
+                            line.push_str(" · last request cached ");
+                            line.push_str(&cached);
+                        }
+                        self.report(line, false)
+                    }
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::Compact => self.compact().await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -1237,15 +1305,24 @@ impl Worker {
             Command::SetApprovals(mode) => {
                 let result = match permission::parse_preset(&mode) {
                     Err(error) => Err(error.to_string()),
-                    Ok(_) if self.session_id.is_empty() => Err(NO_SESSION.to_owned()),
-                    Ok(_) if !self.client.supports(&permission::PRESET_METHODS) => {
+                    Ok(_)
+                        if !self.session_id.is_empty()
+                            && !self.client.supports(&permission::PRESET_METHODS) =>
+                    {
                         Err("This daemon cannot change the permission preset".to_owned())
                     }
                     Ok(preset) => {
-                        let session_id = self.session_id.clone();
-                        permission::select(&mut self.client, &session_id, preset)
-                            .await
-                            .map(|()| permission::name(preset).to_owned())
+                        let result = if self.session_id.is_empty() {
+                            Ok(())
+                        } else {
+                            let session_id = self.session_id.clone();
+                            permission::select(&mut self.client, &session_id, preset).await
+                        };
+                        result
+                            .map(|()| {
+                                self.options.permission = Some(preset);
+                                permission::name(preset).to_owned()
+                            })
                             .map_err(|error| error.to_string())
                     }
                 };
@@ -3313,6 +3390,14 @@ impl Worker {
         }
         if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
             self.context_stale = true;
+        }
+        if branch_id == "main"
+            && let EventContent::ModelUsage(data) = &event.content
+        {
+            self.last_usage = Some(LastUsage {
+                prompt_tokens: tokens(data.usage.prompt_tokens),
+                cache_read_tokens: data.usage.cache_read_tokens.map(tokens),
+            });
         }
         self.projection.apply(branch_id, &event);
         if let EventContent::ExecEnded(data) = &event.content

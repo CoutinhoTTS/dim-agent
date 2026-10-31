@@ -30,4 +30,7 @@ image = { version = "0.25.10", default-features = false, features = ["gif", "jpe
 serde_json.workspace = true
 uuid.workspace = true
 libc = "0.2"
+rutis.workspace = true
+rutis-bridge.workspace = true
+tokio.workspace = true
 rusqlite = "0.40.2"

@@ -36,7 +36,7 @@ flowchart TB
 
 ## 2. rutis 能力
 
-生命周期按 crates.io rutis 0.17.1 设计；接口见[单树装配](single-tree.md#rutis)。
+生命周期按 crates.io rutis 0.19.2 设计；接口见[单树装配](single-tree.md#rutis)。
 
 | 项目 | 使用方式 |
 | --- | --- |
@@ -67,7 +67,7 @@ flowchart TB
 | 回滚 | 禁止继续装配，取消初始化，等待已开始的 apply 和所有清理；永久卸载该作用域子树 |
 | 返回错误 | 包含初始化原因、未就绪插件/服务与清理错误；不发布半成品句柄 |
 
-构建结果与清理结果分别保存：初始化拒绝或取消但回滚成功，不使 Session close 失败；普通候选失败不关闭仍可用的 Session。真实回滚失败必须进入最终关闭结果，不能按 `InactiveEffect` 等错误名称过滤。rutis 以 apply 原因在前、回滚错误在后的结构保留失败插件的装载结果，子树 shutdown 会再次报告它；runtime 按卸载前状态从 shutdown 结果中去掉已作为构建原因报告的部分，构建入口合并两者向创建调用方报告。
+构建结果与清理结果分别保存：初始化拒绝或取消但回滚成功，不使 Session close 失败；普通候选失败不关闭仍可用的 Session。真实回滚失败必须进入最终关闭结果，不能按 `InactiveEffect` 等错误名称过滤。已知限制：rutis 0.19.2 上，关闭取消一个正在构建的插件时，它的清理错误只进入 error sink，不进入 `Agent::close` 的结果（rutis#969，已报告为 [rutis#983](https://github.com/arcships/rutis/issues/983)）；`lifecycle_review` 中检查这一点的两个测试在修复前忽略。rutis 以 apply 原因在前、回滚错误在后的结构保留失败插件的装载结果，子树 shutdown 会再次报告它；runtime 按卸载前状态从 shutdown 结果中去掉已作为构建原因报告的部分，构建入口合并两者向创建调用方报告。
 
 同一缓存清理结果可能经创建返回值、树关闭及子树卸载被多次观察。runtime 在既有错误聚合入口展开聚合与框架回传包装，按共享错误对象的身份只保留一次；不同对象即使类型和文案相同也全部保留。不改变 rutis 原有诊断、清理执行次数或并发关闭的缓存结果。
 
@@ -178,7 +178,7 @@ App Server 有原生存储时，Agents 每隔宽限期 `idle_unload_after`（默
 
 “关键运行缺陷关闭 Session”是 Rust 首版策略，用于保持 v1 的故障通知与生命周期可解释；不是宣称原设计 D2/D3 已经最终定案。业务错误保留类型化枚举；跨包基础设施错误携带组件、实例、操作身份和原始错误，不解析错误字符串决定行为。
 
-rutis error sink 进入诊断与监督，不能代替业务终态，也不能作为唯一的关闭成功判断。
+rutis error sink 进入诊断与监督，不能代替业务终态，也不能作为唯一的关闭成功判断。App Server 的根把它接到 `tracing`；`dimcode` 的根用一个什么都不写的 sink，所以 rutis 的输出不会进入 TUI 的终端。
 
 ## 7. 禁止形成的等待环
 

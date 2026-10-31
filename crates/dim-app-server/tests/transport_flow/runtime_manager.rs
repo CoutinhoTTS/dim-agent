@@ -6,6 +6,22 @@ use super::*;
 use dim_app_server::{runtime_manager::Runtimes, session_typescript::SessionTypeScriptConfig};
 use std::path::{Path, PathBuf};
 
+/// The `runtime.list` entry of `runtime` once its status is `status`.
+async fn status(client: &mut Client, runtime: usize, status: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let list = client.rpc("runtime.list", json!({})).await;
+            assert_ok(&list);
+            if list["result"][runtime]["status"] == status {
+                return list["result"][runtime].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("runtime {runtime} did not become {status}"))
+}
+
 async fn appears(path: &Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     while !path.exists() {
@@ -19,7 +35,7 @@ async fn appears(path: &Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires node 22.19+ and python3 3.10+ with pip on PATH, and the npm and PyPI registries"]
+#[ignore = "requires node 22.19+ and python3 3.12+ with pip on PATH, and the npm and PyPI registries"]
 async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     let home = PathBuf::from("/tmp").join(format!("drm-{}", uuid::Uuid::new_v4()));
     let plugins = home.join("sources");
@@ -36,7 +52,7 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
         plugins.join("probe.mjs"),
         format!(
             "import {{ writeFileSync }} from 'node:fs'\n\
-             export default {{ name: 'probe', apply() {{ writeFileSync({:?}, 'yes') }} }}\n",
+             export default {{ name: 'probe', apply() {{ writeFileSync({:?}, String(process.pid)) }} }}\n",
             node_marker
         ),
     )
@@ -86,12 +102,36 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     assert_eq!(list["result"][0]["name"], "node");
     assert_eq!(list["result"][1]["status"], "off", "{list}");
     assert!(!python_marker.exists());
+    status(&mut client, 0, "ready").await;
+
+    let pid = std::fs::read_to_string(&node_marker).unwrap();
+    std::fs::remove_file(&node_marker).unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let down = status(&mut client, 0, "down").await;
+    assert!(
+        down["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{down}"
+    );
+    assert!(!node_marker.exists());
+    assert_ok(&client.rpc("runtime.install", json!({"name": "node"})).await);
+    appears(&node_marker).await;
+    assert_ne!(std::fs::read_to_string(&node_marker).unwrap(), pid);
+    status(&mut client, 0, "ready").await;
 
     let install = client
         .rpc("runtime.install", json!({"name": "python"}))
         .await;
     assert_ok(&install);
     appears(&python_marker).await;
+    status(&mut client, 1, "ready").await;
     let records: Value =
         serde_json::from_slice(&std::fs::read(home.join("runtimes/runtimes.json")).unwrap())
             .unwrap();

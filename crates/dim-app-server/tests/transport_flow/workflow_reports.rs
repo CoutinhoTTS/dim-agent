@@ -107,7 +107,7 @@ async fn node_workflow_report_crash_recovery_resubmits_and_gets_the_first_input(
             .success()
     );
     assert!(client.response(request).await.get("error").is_some());
-    loader.restart("SessionNodeRuntime").await.unwrap();
+    loader.restart("session-node").await.unwrap();
     assert_ne!(ready(&mut client).await["pid"], before["pid"]);
     let recover = client.send("report.recover", json!({})).await;
     phase(&mut client, recover, "input").await;
@@ -194,7 +194,7 @@ async fn node_workflow_report_crash_before_input_writes_it_on_recovery() {
     assert_eq!(count(&target).await, 0);
     super::super::workflow::kill_node(before["pid"].as_u64().unwrap()).await;
     assert!(client.response(request).await.get("error").is_some());
-    loader.restart("SessionNodeRuntime").await.unwrap();
+    loader.restart("session-node").await.unwrap();
     assert_ne!(ready(&mut client).await["pid"], before["pid"]);
     assert_ok(&client.rpc("report.recover", json!({})).await);
     assert_eq!(

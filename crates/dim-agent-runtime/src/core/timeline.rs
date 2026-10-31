@@ -25,7 +25,7 @@ use uuid::Uuid;
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
 /// The steps stay local: the event is dispatched only by its own branch's
-/// `waterfall_sync`, in process, so listeners borrow this value.
+/// synchronous waterfall, in process, so listeners borrow this value.
 #[derive(Serialize, Deserialize)]
 struct BeforeCommit {
     /// The branch's private name it is dispatched under (`before_name`).
@@ -315,7 +315,8 @@ impl Timeline {
             let result = self
                 .0
                 .ctx
-                .waterfall_sync(offered.clone(), |offered| Ok(Some(offered.draft.clone())));
+                .waterfall(offered.clone())
+                .sync(|offered| Ok(Some(offered.draft.clone())));
             let (original, draft, steps) = match result {
                 Ok(Some(draft)) => {
                     let steps = std::mem::take(&mut *offered.steps.lock().unwrap());

@@ -308,7 +308,10 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
     let state = group_state(&states);
     let mark = state_mark(state);
     let sections = ordered_sections(&items);
-    let header = header_spans(&items, &sections);
+    let mut header = header_spans(&items, &sections);
+    if let Some(first) = header.first_mut() {
+        first.text = capitalize(&first.text);
+    }
     let mut expanded = vec![header_line(0, mark, header.clone())];
     if sections.len() == 1 {
         let members: Vec<&Item<'_>> = items.iter().collect();
@@ -318,7 +321,6 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             append_section(&mut expanded, run[0].section(), &run, true);
         }
     }
-    let mut header = header;
     let started = items.iter().filter(|item| !item.rejected()).count();
     let failed = items
         .iter()
@@ -502,11 +504,7 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
         let members: Vec<&Item<'_>> = items.iter().collect();
         return match section {
             Section::Explore => explore_header(&members),
-            Section::Edit => edit_header(&members),
-            _ => vec![span(
-                capitalize(&phrase(phrase_key(&items[0]), &members)),
-                Tone::Text,
-            )],
+            _ => phrase(phrase_key(&items[0]), &members),
         };
     }
     let mut keys: Vec<PhraseKey> = Vec::new();
@@ -516,14 +514,15 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
             keys.push(key);
         }
     }
-    let phrases: Vec<String> = keys
-        .iter()
-        .map(|key| {
-            let members: Vec<&Item<'_>> = items.iter().filter(|i| phrase_key(i) == *key).collect();
-            phrase(*key, &members)
-        })
-        .collect();
-    vec![span(capitalize(&phrases.join(t(", "))), Tone::Text)]
+    let mut spans = Vec::new();
+    for key in keys {
+        if !spans.is_empty() {
+            spans.push(span(t(", "), Tone::Text));
+        }
+        let members: Vec<&Item<'_>> = items.iter().filter(|i| phrase_key(i) == key).collect();
+        spans.extend(phrase(key, &members));
+    }
+    spans
 }
 
 /// The tiers the group's calls asked for, in widening order, when any did. A
@@ -581,12 +580,12 @@ fn running(members: &[&Item<'_>]) -> bool {
 }
 
 /// `ran 2 commands`: the verb in the progressive while any member runs.
-fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> String {
+fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> Vec<Span> {
     let verb = |past: &'static str, progressive: &'static str| {
         t(if running(members) { progressive } else { past })
     };
     let n = members.len();
-    match key {
+    let text = match key {
         PhraseKey::Search => format!("{} {}", verb("ran", "running"), counted(n, SEARCH)),
         PhraseKey::Skill => format!("{} {}", verb("read", "reading"), counted(n, SKILL)),
         PhraseKey::Explore => {
@@ -614,36 +613,31 @@ fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> String {
             format!("{verb} {items}")
         }
         PhraseKey::Command => format!("{} {}", verb("ran", "running"), counted(n, COMMAND)),
-        PhraseKey::Edit => {
-            let verb = if all_edits(members) {
-                verb("edited", "editing")
-            } else {
-                verb("changed", "changing")
-            };
-            format!("{verb} {}", counted(edited_paths(members), FILE))
-        }
+        PhraseKey::Edit => return edit_header(members),
         PhraseKey::Check => format!("{} {}", verb("checked on", "checking on"), counted(n, TASK)),
         PhraseKey::Agent => {
             let rejected = members.iter().filter(|item| item.rejected()).count();
             let started = n - rejected;
             if started == 0 {
-                return counted(rejected, DELEGATION);
+                counted(rejected, DELEGATION)
+            } else {
+                let mut phrase = format!(
+                    "{} {}",
+                    verb("worked with", "working with"),
+                    counted(started, AGENT)
+                );
+                if rejected > 0 {
+                    phrase.push_str(&tf(
+                        " · {count} rejected",
+                        &[("count", &rejected.to_string())],
+                    ));
+                }
+                phrase
             }
-            let mut phrase = format!(
-                "{} {}",
-                verb("worked with", "working with"),
-                counted(started, AGENT)
-            );
-            if rejected > 0 {
-                phrase.push_str(&tf(
-                    " · {count} rejected",
-                    &[("count", &rejected.to_string())],
-                ));
-            }
-            phrase
         }
         PhraseKey::Tool => format!("{} {}", verb("ran", "running"), counted(n, TOOL)),
-    }
+    };
+    vec![span(text, Tone::Text)]
 }
 
 /// `Explored 2 files, 2 searches`: the verb, then the counts muted.
@@ -675,13 +669,13 @@ fn explore_header(members: &[&Item<'_>]) -> Vec<Span> {
     ]
 }
 
-/// `Edited 1 file (+1 -1)`, or `Changed` once a write is among them.
+/// File paths and total line changes, using `changed` when a write is among them.
 fn edit_header(members: &[&Item<'_>]) -> Vec<Span> {
     let verb = match (all_edits(members), running(members)) {
-        (true, false) => "Edited",
-        (true, true) => "Editing",
-        (false, false) => "Changed",
-        (false, true) => "Changing",
+        (true, false) => "edited",
+        (true, true) => "editing",
+        (false, false) => "changed",
+        (false, true) => "changing",
     };
     let (mut added, mut removed) = (0, 0);
     for item in members {
@@ -693,15 +687,28 @@ fn edit_header(members: &[&Item<'_>]) -> Vec<Span> {
             removed += r;
         }
     }
-    let mut spans = vec![span(
-        format!("{} {}", t(verb), counted(edited_paths(members), FILE)),
-        Tone::Text,
-    )];
+    let mut paths: Vec<&str> = Vec::new();
+    for item in members {
+        let path = item.call().path();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    let mut spans = vec![span(format!("{} ", t(verb)), Tone::Text)];
+    if paths.len() == 1 {
+        spans.push(span(paths[0], Tone::Path));
+    } else {
+        spans.push(span(counted(paths.len(), FILE), Tone::Text));
+    }
     let summary = format_counts(added, removed);
     if !summary.is_empty() {
         spans.push(span(" (", Tone::Muted));
         spans.push(span(summary, Tone::Text));
         spans.push(span(")", Tone::Muted));
+    }
+    if paths.len() > 1 {
+        spans.push(span(" · ", Tone::Muted));
+        spans.extend(paths.into_iter().map(|path| span(path, Tone::Path)));
     }
     spans
 }
@@ -1269,13 +1276,6 @@ fn all_edits(members: &[&Item<'_>]) -> bool {
         .all(|item| matches!(item, Item::Edit { write: false, .. }))
 }
 
-fn edited_paths(members: &[&Item<'_>]) -> usize {
-    let mut paths: Vec<&str> = members.iter().map(|item| item.call().path()).collect();
-    paths.sort_unstable();
-    paths.dedup();
-    paths.len()
-}
-
 fn group_state(states: &[State]) -> State {
     if states.contains(&State::Running) {
         State::Running
@@ -1607,12 +1607,17 @@ fn lay_out_group(
         let lead = line.indent + if mark.is_some() { 2 } else { 0 };
         let reserve = if disclosure.is_some() { 2 } else { 0 };
         let rest_indent = line.indent + line.hang;
-        let laid = layout(
-            &line.spans,
-            width.saturating_sub(lead + reserve).max(1),
-            width.saturating_sub(rest_indent + reserve).max(1),
-            line.overflow,
-        );
+        let first_width = width.saturating_sub(lead + reserve).max(1);
+        let laid = if at == 0 && line.spans.iter().any(|span| span.tone == Tone::Path) {
+            vec![layout_paths(&line.spans, first_width)]
+        } else {
+            layout(
+                &line.spans,
+                first_width,
+                width.saturating_sub(rest_indent + reserve).max(1),
+                line.overflow,
+            )
+        };
         if line.overflow == Overflow::Tail {
             let hidden = hidden_lines(&line.spans, width.saturating_sub(lead).max(1));
             if hidden > 0 {
@@ -1789,6 +1794,76 @@ fn layout(
         *last = ellipsize(last, rest_width);
     }
     rows
+}
+
+fn layout_paths(spans: &[Span], width: usize) -> Vec<Cell> {
+    let first = spans
+        .iter()
+        .position(|span| span.tone == Tone::Path)
+        .unwrap();
+    let end = spans
+        .iter()
+        .rposition(|span| span.tone == Tone::Path)
+        .unwrap()
+        + 1;
+    let cells = |spans: &[Span]| -> Vec<Cell> {
+        spans
+            .iter()
+            .flat_map(|span| cells_of(&span.text.replace(['\r', '\n'], " "), span.tone))
+            .collect()
+    };
+    let prefix = cells(&spans[..first]);
+    let suffix = cells(&spans[end..]);
+    let paths = &spans[first..end];
+    let separator = cells_of(t(", "), Tone::Muted);
+    let mut visible = Vec::new();
+    let mut best = None;
+    for (index, path) in paths.iter().enumerate() {
+        if index > 0 {
+            visible.extend(separator.clone());
+        }
+        visible.extend(cells(std::slice::from_ref(path)));
+        let remaining = paths.len() - index - 1;
+        let mut row = prefix.clone();
+        row.extend(visible.clone());
+        if remaining > 0 {
+            row.extend(separator.clone());
+            row.extend(cells_of(
+                &tf("… {count} more", &[("count", &remaining.to_string())]),
+                Tone::Muted,
+            ));
+        }
+        row.extend(suffix.clone());
+        if row.iter().map(|cell| cell.2).sum::<usize>() <= width {
+            best = Some(row);
+        }
+    }
+    if let Some(row) = best {
+        return row;
+    }
+    let mut tail = Vec::new();
+    if paths.len() > 1 {
+        tail.extend(separator);
+        tail.extend(cells_of(
+            &tf(
+                "… {count} more",
+                &[("count", &(paths.len() - 1).to_string())],
+            ),
+            Tone::Muted,
+        ));
+    }
+    tail.extend(suffix);
+    let fixed = prefix.iter().chain(&tail).map(|cell| cell.2).sum::<usize>();
+    let mut row = prefix;
+    row.extend(ellipsize(
+        &cells(&paths[..1]),
+        width.saturating_sub(fixed).max(1),
+    ));
+    row.extend(tail);
+    if row.iter().map(|cell| cell.2).sum::<usize>() > width {
+        row = ellipsize(&row, width);
+    }
+    row
 }
 
 /// Source lines of the spans wholly above the last [`TAIL_MAX_ROWS`] rows at

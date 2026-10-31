@@ -128,6 +128,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // transcript/tool_group.rs: counts
         "1 file" => "1 ファイル",
         "{count} files" => "{count} ファイル",
+        "… {count} more" => "…ほか {count} 件",
         "1 web page" => "1 Web ページ",
         "{count} web pages" => "{count} Web ページ",
         "1 skill" => "1 スキル",
