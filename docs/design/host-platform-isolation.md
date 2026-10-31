@@ -3,7 +3,9 @@
 The sandbox is a user setting, and `HostPlatform` is the only code that applies it
 ([ADR 010](../adr/010-sandbox-opt-in.md), [ADR 011](../adr/011-execution-settings.md)). Permission
 decides whether a call runs ([ADR 009](../adr/009-permission-decides.md)); neither a preset, an
-approval nor the model changes the boundary. There is no node policy file and no escalation.
+approval nor the model changes the boundary. There is no node policy file and no escalation. A
+daemon that finds the `host-isolation.json` of earlier releases names it on stderr at startup and
+asks the user to delete it; it never reads it.
 
 ## Scope
 

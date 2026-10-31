@@ -435,9 +435,9 @@ for a read-only one. When a sandboxed command fails with a typical denial, its r
 model that the sandbox may be the cause and that you change the switches in
 `/settings > Execution`.
 
-There is no policy file, and the `host-isolation.json` that earlier releases read is ignored. If
-you have one, delete it; an upgrade diagnostic is tracked in
-[#691](https://github.com/arcships/dim/issues/691). The switches are stored as the user-scope
+There is no policy file, and the `host-isolation.json` that earlier releases read is ignored: a
+daemon that finds one names it on stderr at startup and asks you to delete it. The switches are
+stored as the user-scope
 `execution` settings source and written by the panel with revision conflict detection, so a
 conflicting edit requires reloading rather than overwriting another client's change.
 

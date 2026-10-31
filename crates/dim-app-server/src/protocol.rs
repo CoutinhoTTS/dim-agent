@@ -263,7 +263,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "plugin.remove",
 ];
 
-pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log"];
+pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log", "execution"];
 
 pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.permission.get",

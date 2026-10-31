@@ -507,6 +507,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
+    if let Some(index) = execution_root {
+        let legacy = config.file_roots[index].join("host-isolation.json");
+        if legacy.is_file() {
+            eprintln!(
+                "Ignoring {}: command isolation is a user setting in /settings > Execution; delete the file.",
+                legacy.display()
+            );
+        }
+    }
     // SessionStore keeps Session files next to the native database, below
     // the database directory as a FileStorage root (session-files §3.1).
     let session_files_root = match &config.database_path {
