@@ -2260,7 +2260,10 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "format",
-        "matches"
+        "matches",
+        "tokio::select",
+        "tracing::info",
+        "vec"
       ]
     },
     {
@@ -2352,6 +2355,7 @@
       "unexpandedMacros": [
         "format",
         "params",
+        "tracing::error",
         "vec"
       ]
     },
@@ -2486,7 +2490,9 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/ui_host.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "tracing::warn"
+      ]
     },
     {
       "id": "dim_app_server::ui_leaf",
@@ -2495,10 +2501,7 @@
       "file": "crates/dim-app-server/src/ui_leaf.rs",
       "unexpandedMacros": [
         "format",
-        "json",
         "matches",
-        "tracing::warn",
-        "vec",
         "writeln"
       ]
     },
@@ -2827,10 +2830,8 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/leaf.rs",
       "unexpandedMacros": [
-        "env",
         "format",
-        "matches",
-        "serde_json::json"
+        "matches"
       ]
     },
     {
@@ -3272,6 +3273,7 @@
         "format",
         "include_str",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -4534,7 +4536,6 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/tui.rs",
       "unexpandedMacros": [
-        "env",
         "eprintln",
         "format",
         "matches",
@@ -4600,15 +4601,49 @@
       ]
     },
     {
+      "id": "dim_cli::version",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/version.rs",
+      "unexpandedMacros": [
+        "env",
+        "format",
+        "matches",
+        "option_env"
+      ]
+    },
+    {
+      "id": "dim_cli::version::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::version",
+      "file": "crates/dim-cli/src/version.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::web_install",
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/web_install.rs",
       "unexpandedMacros": [
-        "env",
         "format",
         "matches",
-        "println"
+        "writeln"
+      ]
+    },
+    {
+      "id": "dim_cli::web_install::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::web_install",
+      "file": "crates/dim-cli/src/web_install.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "serde_json::json",
+        "write"
       ]
     },
     {
@@ -18771,6 +18806,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
+        "path dim_agent_runtime::names::registered_key",
         "use dim_agent_runtime::Names"
       ]
     },
@@ -20187,6 +20223,21 @@
       ]
     },
     {
+      "from": "dim_app_server::runtime_manager",
+      "to": "dim_app_server::session_typescript",
+      "references": [
+        "path ForeignRuntime",
+        "path RuntimeState",
+        "path RuntimeState::Down",
+        "path RuntimeState::Ready",
+        "path RuntimeState::Starting",
+        "path RuntimeStatus::key",
+        "use crate::session_typescript::ForeignRuntime",
+        "use crate::session_typescript::RuntimeState",
+        "use crate::session_typescript::RuntimeStatus"
+      ]
+    },
+    {
       "from": "dim_app_server::runtime_manager::tests",
       "to": "dim_app_server::runtime_manager",
       "references": [
@@ -20278,6 +20329,7 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_runtime::names",
       "references": [
+        "path dim_agent_runtime::names::registered_key",
         "path name_of",
         "use dim_agent_runtime::names::name_of"
       ]
@@ -20993,6 +21045,13 @@
         "path SqliteStorage",
         "path error",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore"
       ]
     },
     {
@@ -21776,8 +21835,10 @@
       "references": [
         "path LeafSpec",
         "path UiLeaves",
+        "path leaf_failed",
         "use crate::ui_leaf::LeafSpec",
-        "use crate::ui_leaf::UiLeaves"
+        "use crate::ui_leaf::UiLeaves",
+        "use crate::ui_leaf::leaf_failed"
       ]
     },
     {
@@ -22107,7 +22168,8 @@
         "path client",
         "path client::connect_inner",
         "path client::shutdown",
-        "path client::stop"
+        "path client::stop",
+        "path client::web_assets"
       ]
     },
     {
@@ -22171,7 +22233,9 @@
       "references": [
         "mod leaf",
         "path leaf",
-        "path leaf::Leaf::bind"
+        "path leaf::Leaf::bind",
+        "path leaf::LeafTui::new",
+        "path leaf::Opened"
       ]
     },
     {
@@ -22353,7 +22417,8 @@
       "from": "dim_cli",
       "to": "dim_cli::update",
       "references": [
-        "mod update"
+        "mod update",
+        "path update::registry"
       ]
     },
     {
@@ -22361,6 +22426,16 @@
       "to": "dim_cli::usage",
       "references": [
         "mod usage"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::version",
+      "references": [
+        "mod version",
+        "path version::RELEASE",
+        "path version::VERSION",
+        "path version::current"
       ]
     },
     {
@@ -22491,6 +22566,13 @@
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::RELEASE"
       ]
     },
     {
@@ -23807,6 +23889,13 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::images",
+      "references": [
+        "path crate::images::marker"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::member_approval",
       "references": [
         "path crate::member_approval::DetailError"
@@ -24767,6 +24856,7 @@
         "path Event",
         "path EventContent::Configuration",
         "path EventContent::ExecEnded",
+        "path EventContent::ModelUsage",
         "path EventContent::PermissionChanged",
         "path Progress",
         "use crate::wire::Configuration",
@@ -25425,10 +25515,12 @@
       "to": "dim_cli::images",
       "references": [
         "path crate::images::Attached",
+        "path crate::images::Attached::block",
         "path crate::images::Item::Image",
         "path crate::images::Item::Text",
         "path crate::images::file",
-        "path crate::images::is_image"
+        "path crate::images::is_image",
+        "path crate::images::marker"
       ]
     },
     {
@@ -25817,10 +25909,35 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::attachments",
+      "references": [
+        "path crate::attachments::pasted_entries"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::images",
       "references": [
+        "path crate::images::Attached",
         "path crate::images::from_bytes",
         "path crate::images::from_pixels"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path DraftPart",
+        "path DraftPart::Block",
+        "path DraftPart::Paste",
+        "path DraftPart::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::Projection::default"
       ]
     },
     {
@@ -25835,14 +25952,26 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn",
+        "path crate::ui::i18n::active",
+        "path crate::ui::i18n::set"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
         "path KeyCode::Backspace",
         "path KeyCode::Char",
+        "path KeyCode::Delete",
         "path KeyCode::Down",
+        "path KeyCode::End",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
+        "path KeyCode::Home",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
@@ -31008,6 +31137,13 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::current"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_client::question",
       "references": [
         "path crate::question::Reply::Accepted",
@@ -31079,6 +31215,13 @@
       "to": "dim_cli::ui::prompts",
       "references": [
         "path AskUserPrompt::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::fullscreen",
+      "references": [
+        "path FullScreen::new"
       ]
     },
     {
@@ -31181,6 +31324,7 @@
         "path App",
         "path App::new",
         "path ClipboardRead::Native",
+        "path GIT_BRANCH_POLL",
         "path ImageRead",
         "path LOAD_MORE",
         "path Prompt::Ask",
@@ -31278,11 +31422,25 @@
       ]
     },
     {
+      "from": "dim_cli::update",
+      "to": "dim_cli::version",
+      "references": [
+        "path crate::version::RELEASE"
+      ]
+    },
+    {
       "from": "dim_cli::update::tests",
       "to": "dim_cli::update",
       "references": [
         "path ALPHA_PACKAGE",
         "path installer"
+      ]
+    },
+    {
+      "from": "dim_cli::version",
+      "to": "dim_cli::version::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -31294,16 +31452,16 @@
     },
     {
       "from": "dim_cli::web_install",
-      "to": "dim_cli::client",
+      "to": "dim_cli::web_install::tests",
       "references": [
-        "path crate::client::web_assets"
+        "mod tests"
       ]
     },
     {
-      "from": "dim_cli::web_install",
-      "to": "dim_cli::update",
+      "from": "dim_cli::web_install::tests",
+      "to": "dim_cli::web_install",
       "references": [
-        "path crate::update::registry"
+        "path install"
       ]
     },
     {
@@ -32967,6 +33125,14 @@
       "path": "Kind::Python"
     },
     {
+      "module": "dim_app_server::session_typescript::tests",
+      "path": "ForeignRuntime::new"
+    },
+    {
+      "module": "dim_app_server::session_typescript::tests",
+      "path": "RuntimeStatus::key"
+    },
+    {
       "module": "dim_app_server::settings",
       "path": "D::NAMESPACE"
     },
@@ -33309,6 +33475,22 @@
     {
       "module": "dim_cli::ui::timeline_panel::tests",
       "path": "Theme::system"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "Locale::En"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "Locale::ZhCn"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "i18n::LOCALES"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "i18n::set"
     },
     {
       "module": "dim_cli::ui::transcript::blocks",

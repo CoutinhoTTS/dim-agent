@@ -1,10 +1,11 @@
 # Idle Session unload
 
 Status: Implemented in [#331](https://github.com/arcships/dim/pull/331). The implementation corrected one statement in
-place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added three
-cases to §7: a Session of a temporary Agent closing while another is unloaded; the delete of an unloaded Session, which
-Agents announces to Collaboration with a process event; and the last two Sessions of a temporary Agent ending at the
-same moment, a known limitation. §2 ends with its measurement. [#345](https://github.com/arcships/dim/issues/345)
+place: under the admission gate the pass checks the acquire count again, not `uses` (§6.1, step 4). It also added two
+cases to §7: a Session of an owned Agent closing while another is unloaded, and the delete of an unloaded Session, which
+Agents announces to Collaboration with a process event. An owned Agent's record follows its member Session rows
+([Collaboration §6](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)), so a close keeps it and a delete
+removes it with the last member. §2 ends with its measurement. [#345](https://github.com/arcships/dim/issues/345)
 bounds the admission slots: a mark holds its Session's slot, and each pass ends by removing the slots nothing needs
 (§6.1, §6.4, D12). Roadmap:
 Agents lane ([#126](https://github.com/arcships/dim/issues/126)), the target of
@@ -351,11 +352,10 @@ creation drops those of Sessions no longer loaded, as before.
 | `session.list`, `session.summaries` or a Collaboration `agent` read while S unloads | S found loaded, then released | The loaded read fails as S is released; the store is read instead (D8); the call never fails and never drops S | Agents, Rpc |
 | Collaboration Team status of an unloaded member | Any | `idle`, as for any available Session | Collaboration |
 | Collaboration request to an unloaded member | Leader tool call | `lookup` restores the member; `SessionRestored` lets Collaboration watch it again; relations kept | Collaboration |
-| Last Session of a temporary Agent unloaded | Any | The Agent stays: Collaboration closes it only after a business close or the delete of its last Session | Collaboration |
-| A Session of a temporary Agent closes while another is unloaded | Business close | The Agent stays: Collaboration counts the Agent's unloaded Sessions (stored, neither loaded nor closed in this process, as Agents reports them) along with its loaded ones. The leader's next request restores the unloaded member, and that member's own close later closes the Agent | Collaboration |
-| `session.delete` / `sessions.delete` of an unloaded Session | Delete under the gate; S neither loaded nor closed in this process | No close ends S, and Collaboration's watch of it ended with the unload. After the rows go and S leaves the Agent's unloaded Sessions, Agents emits `UnloadedSessionDeleted` with the Agent and Session ids, as it emits `SessionRestored` for a restore. Collaboration ends S as it ends a closed Session: S's relations go, and a temporary Agent left with no Session, loaded or unloaded, closes. A loaded S ends through its close instead, so nothing runs twice | Agents, Collaboration |
-| The delete of an unloaded Session ends while Agents reloads | `sessions.delete` runs to its own outcome across the reload, which reloads Collaboration | Agents emits `UnloadedSessionDeleted` on the process root, so a delete that ends after the next Collaboration subscribed reaches it. One that ends while Collaboration reloads reaches no listener. Collaboration therefore reconciles once it has subscribed, before it provides its service: relations that name a Session the index no longer knows go, and each temporary Agent left without a Session, loaded or unloaded, closes. A Session that both reach ends once; the second end changes nothing | Agents, Collaboration |
-| The last two Sessions of a temporary Agent end at the same moment, one of them by `session.close` | Concurrent ends | Known limitation: the Agent can stay, with no Session, until the process exits. `session.close` marks its Session's slot closed only after the close returns, so until then the other end can count that Session as unloaded, and each end finds the other Session remaining. Once `session.close` has returned, its Session is never counted; a delete closes the slot before the Session's end runs | Collaboration |
+| Last Session of an owned Agent unloaded | Any | The Agent stays: unload keeps the Session's rows, so its record keeps the Agent, and its instance stays loaded | Agents |
+| A Session of an owned Agent closes while another is unloaded | Business close | The Agent stays: the closed member keeps its rows, so the record keeps the Agent. The leader's next request restores the unloaded member | Agents, Collaboration |
+| `session.delete` / `sessions.delete` of an unloaded Session | Delete under the gate; S neither loaded nor closed in this process | Agents removes S's rows and emits `UnloadedSessionDeleted` with the Agent and Session ids, as it emits `SessionRestored` for a restore. Deleting S's last member Session also closes the Agent and removes its record. Collaboration drops S's relation when it observes the event, and an owned Agent left with no member is removed at startup | Agents, Collaboration |
+| The delete of an unloaded Session ends while Agents reloads | `sessions.delete` runs to its own outcome across the reload, which reloads Collaboration | Agents emits `UnloadedSessionDeleted` on the process root, so a delete that ends after the next Collaboration subscribed reaches it. One that ends while Collaboration reloads reaches no listener. Collaboration therefore reconciles once it has subscribed, before it provides its service: it rebuilds the relations from the stored leaders, so a member whose rows are gone is no longer one | Agents, Collaboration |
 | C4 leaf observers | Any | The rows stop admitting work when their `closing` settles and unload with the Session; the restored Session's rows listen again | C4 |
 | C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.list` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
 | S5b `setTitle` admitted before an unload | Any | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |
@@ -376,7 +376,7 @@ creation drops those of Sessions no longer loaded, as before.
 | Unload pass | agents.rs | Started by `AgentsPlugin` for its index generation when a native store is present; stopped and drained by the generation's cleanup. Its marks hold their slots, and it ends by removing the slots that can go (§6.1, §6.4) |
 | Closed-flag reads | agents.rs `session_directory`, `session_available` | Look the slot up instead of creating it (§6.4) |
 | Lease-free reads | agents.rs `session_directory`, `session_summary`, `read_page` | Fall back to the store when the loaded Session is released under them (D8) |
-| Unloaded Sessions of an Agent | agents.rs `unloaded_sessions` | The Agent's stored Sessions that are neither loaded nor closed in this process, which Collaboration counts before it closes a temporary Agent (§7) |
+| Unloaded Sessions of an Agent | agents.rs `unloaded_sessions` | The Agent's stored Sessions that are neither loaded nor closed in this process; Agents reports them and Collaboration no longer counts them to end an owned Agent, whose record follows its member rows (§7) |
 | Delete of an unloaded Session | agents.rs `delete`, `UnloadedSessionDeleted` | Once the rows of a Session that was neither loaded nor closed are gone, announces its Agent and Session ids to the owners of process state. It emits on the process root, because a delete can outlive its index generation. Collaboration listens as it does for `SessionRestored`, ends the Session as after a close, and reconciles at load what a reload made it miss (§7) |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | One field with its default, in the assembly lane (zerob13), as S2 added one line there |
 

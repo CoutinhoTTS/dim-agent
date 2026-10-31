@@ -156,7 +156,7 @@ jobs:
           elif [[ -n "$DIM_OAUTH_CLIENT_ID_CN$DIM_OAUTH_CLIENT_ID_GLOBAL" ]]; then
             echo 'Set DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL together.' >&2; exit 1
           fi
-          cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
+          DIM_RELEASE_BUILD=1 cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
           echo "DIM_BIN_DIR=$PWD/target/$DIM_BUILD_TARGET/release" >> "$GITHUB_ENV"
       - name: Stage and pack release payload
         env:

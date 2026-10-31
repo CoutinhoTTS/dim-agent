@@ -207,8 +207,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Clipboard: {reason}" => "クリップボード：{reason}",
         "Wait for clipboard insertion before sending" => "クリップボード挿入の完了後に送信",
         "A submission accepts at most 20 images" => "送信できる画像は最大 20 枚",
-        "[Image #{index}]" => "[画像 #{index}]",
-        "[Image #{index}{details}]" => "[画像 #{index}{details}]",
         "first frame" => "先頭フレームのみ",
         "re-encoded" => "再エンコード",
         "The current model does not accept images; remove {label} to send" => {

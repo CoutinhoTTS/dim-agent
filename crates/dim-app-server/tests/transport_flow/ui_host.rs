@@ -41,7 +41,7 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
             .features
             .as_array()
             .unwrap()
-            .contains(&json!("ui.leaf"))
+            .contains(&json!("ui.leaf.2"))
     );
     let session_id = attached_session(&mut first).await;
     let missing = first
@@ -212,241 +212,116 @@ async fn a_registration_leaves_when_its_session_is_detached_or_closed() {
     .expect("the registration leaves with the closed Session");
 }
 
-/// A leaf node as the interactive `dimcode` builds one (Tui design §3.6),
-/// with a stand-in `Tui` that registers its protocol v3 connection and
-/// counts its loads and unloads.
+/// A leaf as the interactive `dimcode` is one (Tui design §3.6): a rutis
+/// kernel on a private socket that greets with its id and offers no plugin
+/// catalog. Its `Tui` is a protocol v3 connection attaching with the token
+/// `ui.open` replied.
 struct FakeLeaf {
     peer: String,
     address: String,
     root: rutis::Ctx,
-    loaded: Arc<AtomicUsize>,
-    unloaded: Arc<AtomicUsize>,
+    session: tokio::sync::watch::Receiver<Option<rutis_bridge::SessionHandle>>,
+    ended: tokio::sync::watch::Receiver<bool>,
     directory: std::path::PathBuf,
+    tui: Option<Client>,
 }
 
 impl FakeLeaf {
-    async fn start(server: &RunningServer) -> Self {
-        let (leaf, handle, features) = Self::unhosted(server).await;
-        handle.set(features).await.unwrap();
-        leaf
+    async fn start() -> Self {
+        Self::greeting_as(None).await
     }
 
-    async fn unhosted(
-        server: &RunningServer,
-    ) -> (Self, rutis_bridge::PeerHandle, rutis_bridge::Features) {
-        use rutis_bridge::{
-            Described, Features, IdentityPlugin, LinkConfig, PeerPlugin, StaticCatalog,
-            StaticIdentity, channel::PeerId,
-        };
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let peer = format!("ui-{id}");
-        let directory = std::env::temp_dir().join(format!("dim-leaf-{}", &id[..12]));
+    /// A leaf whose handshake names `id` instead of its own id.
+    async fn greeting_as(id: Option<&str>) -> Self {
+        use rutis::host::FiberState;
+        use rutis_bridge::{LocalId, PeerId, Session};
+        let own = uuid::Uuid::new_v4().simple().to_string();
+        let peer = format!("ui-{own}");
+        let directory = std::env::temp_dir().join(format!("dim-leaf-{}", &own[..12]));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("leaf.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let loaded = Arc::new(AtomicUsize::new(0));
-        let unloaded = Arc::new(AtomicUsize::new(0));
-        let catalog = StaticCatalog::new().with(
-            "Tui",
-            Described {
-                schema: None,
-                version: None,
-                integrity: None,
-            },
-            FakeTuiFactory {
-                socket: server.unix_path.clone().unwrap(),
-                loaded: loaded.clone(),
-                unloaded: unloaded.clone(),
-            },
-        );
-        let mut link = LinkConfig::dial(
-            PeerId::new("dim-daemon").unwrap(),
-            "ui-leaf",
-            "ui-leaf",
-            "accept",
-        );
-        link.reconnect = false;
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let root = rutis::Ctx::root().unwrap();
-        root.plugin(LeafTransport(std::sync::Mutex::new(Some(listener))));
-        root.plugin(IdentityPlugin::new(
-            "ui-leaf",
-            StaticIdentity::new(PeerId::new(peer.clone()).unwrap()),
-        ));
-        let features = Features {
-            host: Some(Arc::new(catalog)),
-            ..Features::default()
-        };
-        let node = PeerPlugin::new(link, Features::default()).unwrap();
-        let handle = node.handle();
-        let node = root.plugin(node);
-        (&node).await.unwrap();
-        (
-            Self {
-                peer,
-                address: format!("unix:{}", path.display()),
-                root,
-                loaded,
-                unloaded,
-                directory,
-            },
-            handle,
-            features,
-        )
+        root.provide(LocalId(PeerId::new(id.unwrap_or(&peer)).unwrap()))
+            .unwrap();
+        let (found, session) = tokio::sync::watch::channel(None);
+        let (end, ended) = tokio::sync::watch::channel(false);
+        let ctx = root.clone();
+        tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().0.into_std().unwrap();
+            stream.set_nonblocking(false).unwrap();
+            let reader = stream.try_clone().unwrap();
+            let closer = Arc::new(UnixCloser(stream.try_clone().unwrap()));
+            let channel = rutis_bridge::pipe::framed(reader, stream, closer);
+            if let Ok(greeted) = Session::handshake(&ctx, channel).await {
+                found.send_replace(Some(greeted.handle()));
+                let mut state = ctx.plugin(greeted).watch();
+                let _ = state
+                    .wait_for(|s| matches!(s.state, FiberState::Disposed | FiberState::Failed))
+                    .await;
+            }
+            end.send_replace(true);
+        });
+        Self {
+            peer,
+            address: format!("unix:{}", path.display()),
+            root,
+            session,
+            ended,
+            directory,
+            tui: None,
+        }
     }
 
-    /// The process ends: its link closes.
+    /// Its `Tui` attaches as `ui.open` replied.
+    async fn attach(&mut self, server: &RunningServer, session_id: &str, opened: &Value) {
+        let mut tui = Client::new_version(server, false, 3).await;
+        assert_ok(
+            &tui.rpc("session.attach", json!({"sessionId": session_id}))
+                .await,
+        );
+        let attached = tui
+            .rpc(
+                "ui.attach",
+                json!({"sessionId": session_id, "kind": "tui",
+                    "uiId": opened["result"]["uiId"], "token": opened["result"]["token"]}),
+            )
+            .await;
+        assert_ok(&attached);
+        assert_eq!(attached["result"]["uiId"], self.peer.as_str());
+        self.tui = Some(tui);
+    }
+
+    fn ended(&self) -> bool {
+        *self.ended.borrow()
+    }
+
+    /// Waits until its session ended: the daemon closed it.
+    async fn closed(&mut self, within: Duration) {
+        tokio::time::timeout(within, self.ended.wait_for(|ended| *ended))
+            .await
+            .expect("the daemon closed the leaf")
+            .unwrap();
+    }
+
+    /// The process ends: its session ends with it.
     async fn exit(self) {
         let _ = self.root.shutdown().await;
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
-struct LeafTransport(std::sync::Mutex<Option<std::os::unix::net::UnixListener>>);
-
-impl rutis::host::DynPlugin for LeafTransport {
-    fn name(&self) -> &str {
-        "test/leaf-transport"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-    ) -> rutis::host::BoxFuture<'a, Result<rutis::host::Effect, rutis::Error>> {
-        Box::pin(async move {
-            let listener = self.0.lock().unwrap().take();
-            ctx.provide_at::<dyn rutis_bridge::Transport>(
-                rutis_bridge::transport_key("ui-leaf"),
-                Arc::new(Accept(std::sync::Mutex::new(listener))),
-            )?;
-            Ok(rutis::host::Effect::Done)
-        })
-    }
-}
-
-struct Accept(std::sync::Mutex<Option<std::os::unix::net::UnixListener>>);
-
-impl rutis_bridge::Transport for Accept {
-    fn kind(&self) -> &str {
-        "ui-leaf"
-    }
-    fn dial<'a>(
-        &'a self,
-        _: &'a rutis_bridge::Dial,
-    ) -> rutis::host::BoxFuture<
-        'a,
-        Result<rutis_bridge::channel::Channel, rutis_bridge::channel::ConnectError>,
-    > {
-        Box::pin(async move {
-            let listener = self.0.lock().unwrap().take().expect("one connection");
-            listener.set_nonblocking(true).unwrap();
-            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-            let stream = listener.accept().await.unwrap().0.into_std().unwrap();
-            stream.set_nonblocking(false).unwrap();
-            let reader = stream.try_clone().unwrap();
-            let closer = Arc::new(UnixCloser(stream.try_clone().unwrap()));
-            Ok(rutis_bridge::transport::local::framed(
-                reader, stream, closer,
-            ))
-        })
-    }
-}
-
 struct UnixCloser(std::os::unix::net::UnixStream);
 
 impl rutis_bridge::channel::Closer for UnixCloser {
-    fn close(&self, _: &str) {
+    fn close(&self, _: rutis_bridge::Close) {
         let _ = self.0.shutdown(std::net::Shutdown::Both);
-    }
-}
-
-struct FakeTuiFactory {
-    socket: std::path::PathBuf,
-    loaded: Arc<AtomicUsize>,
-    unloaded: Arc<AtomicUsize>,
-}
-
-impl rutis::host::PluginFactory<Value> for FakeTuiFactory {
-    fn name(&self) -> &str {
-        "Tui"
-    }
-    fn injects(&self) -> Vec<rutis::host::TypeKey> {
-        Vec::new()
-    }
-    fn build(&self, config: &Value) -> Result<Box<dyn rutis::host::DynPlugin>, rutis::Error> {
-        Ok(Box::new(FakeTui {
-            socket: self.socket.clone(),
-            config: config.clone(),
-            loaded: self.loaded.clone(),
-            unloaded: self.unloaded.clone(),
-        }))
-    }
-}
-
-/// Registers as the leaf the way the hosted `Tui` does: its own protocol
-/// v3 connection, `session.attach`, then `ui.attach` with the config's
-/// identity. Unloading closes the connection.
-struct FakeTui {
-    socket: std::path::PathBuf,
-    config: Value,
-    loaded: Arc<AtomicUsize>,
-    unloaded: Arc<AtomicUsize>,
-}
-
-impl rutis::host::DynPlugin for FakeTui {
-    fn name(&self) -> &str {
-        "Tui"
-    }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-    ) -> rutis::host::BoxFuture<'a, Result<rutis::host::Effect, rutis::Error>> {
-        Box::pin(async move {
-            let mut stream = BufReader::new(UnixStream::connect(&self.socket).await.unwrap());
-            let session = self.config["sessionId"].clone();
-            for (id, method, params) in [
-                (
-                    1,
-                    "hello",
-                    json!({"protocolVersion": 3, "clientKind": "cli"}),
-                ),
-                (2, "session.attach", json!({"sessionId": session})),
-                (
-                    3,
-                    "ui.attach",
-                    json!({"sessionId": session, "kind": "tui",
-                        "uiId": self.config["uiId"], "token": self.config["token"]}),
-                ),
-            ] {
-                let request =
-                    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-                stream
-                    .get_mut()
-                    .write_all(format!("{request}\n").as_bytes())
-                    .await
-                    .unwrap();
-                loop {
-                    let mut line = String::new();
-                    stream.read_line(&mut line).await.unwrap();
-                    let reply: Value = serde_json::from_str(&line).unwrap();
-                    if reply["id"] == id {
-                        assert!(reply.get("error").is_none(), "{method}: {reply}");
-                        break;
-                    }
-                }
-            }
-            self.loaded.fetch_add(1, Ordering::SeqCst);
-            let unloaded = self.unloaded.clone();
-            Ok(rutis::host::Effect::Disposer(Box::new(move || {
-                drop(stream);
-                unloaded.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })))
-        })
     }
 }
 
 async fn states(client: &mut Client) -> Vec<(String, String)> {
     let status = client.rpc("ui.status", json!({})).await;
-    status["result"]["instances"]
+    let mut states: Vec<(String, String)> = status["result"]["instances"]
         .as_array()
         .unwrap()
         .iter()
@@ -456,7 +331,13 @@ async fn states(client: &mut Client) -> Vec<(String, String)> {
                 i["state"].as_str().unwrap().to_owned(),
             )
         })
-        .collect()
+        .collect();
+    states.sort();
+    states
+}
+
+fn state(leaf: &FakeLeaf, state: &str) -> (String, String) {
+    (leaf.peer.clone(), state.to_owned())
 }
 
 async fn eventually(client: &mut Client, check: impl Fn(&[(String, String)]) -> bool) {
@@ -472,46 +353,33 @@ async fn eventually(client: &mut Client, check: impl Fn(&[(String, String)]) -> 
     .expect("the registry reached the expected state");
 }
 
+fn opening(session_id: &str, leaf: &FakeLeaf, extra: Value) -> Value {
+    let mut params = json!({"sessionId": session_id, "kind": "tui",
+        "peer": leaf.peer, "address": leaf.address});
+    for (key, value) in extra.as_object().into_iter().flatten() {
+        params[key] = value.clone();
+    }
+    params
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
+async fn the_daemon_opens_replaces_and_closes_leaves() {
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = attached_session(&mut client).await;
-    let open = |leaf: &FakeLeaf, extra: Value| {
-        let mut params = json!({"sessionId": session_id, "kind": "tui",
-            "peer": leaf.peer, "address": leaf.address});
-        for (key, value) in extra.as_object().into_iter().flatten() {
-            params[key] = value.clone();
-        }
-        params
-    };
+    let open = |leaf: &FakeLeaf, extra: Value| opening(&session_id, leaf, extra);
 
-    let (first, host, features) = FakeLeaf::unhosted(&server).await;
-    let opened = {
-        let mut state = host.link_state().unwrap();
-        let opening = client.rpc("ui.open", open(&first, json!({})));
-        tokio::pin!(opening);
-        tokio::select! {
-            result = &mut opening => panic!("ui.open ended before hosting was offered: {result}"),
-            () = async {
-                while !matches!(&*state.borrow_and_update(), rutis_bridge::LinkState::Ready { .. }) {
-                    state.changed().await.unwrap();
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            } => {}
-        }
-        assert_eq!(first.loaded.load(Ordering::SeqCst), 0);
-        host.set(features).await.unwrap();
-        opening.await
-    };
+    let mut first = FakeLeaf::start().await;
+    let opened = client.rpc("ui.open", open(&first, json!({}))).await;
     assert_ok(&opened);
     assert_eq!(opened["result"]["uiId"], first.peer.as_str());
-    assert_eq!(first.loaded.load(Ordering::SeqCst), 1);
-    let first_id = first.peer.clone();
-    eventually(&mut client, |s| {
-        s == [(first_id.clone(), "online".to_owned())]
-    })
-    .await;
+    assert!(
+        opened["result"]["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()),
+        "{opened}"
+    );
+    assert_eq!(states(&mut client).await, [state(&first, "starting")]);
 
     let mut other = Client::new_version(&server, false, 3).await;
     assert_ok(
@@ -526,6 +394,26 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
         )
         .await;
     assert_eq!(token["error"]["data"]["appError"], "ui_token", "{token}");
+    first.attach(&server, &session_id, &opened).await;
+    assert_eq!(states(&mut client).await, [state(&first, "online")]);
+
+    let handle = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let handle = first.session.borrow().clone().unwrap();
+            if let Ok(row) = handle.run("UiHost", json!({})) {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the daemon serves rows to the leaf");
+    let refused = handle.loaded().await.unwrap_err().to_string();
+    assert!(
+        refused.contains("does not contain plugin UiHost"),
+        "{refused}"
+    );
+
     let generation_alone = client
         .rpc("ui.open", open(&first, json!({"expectedGeneration": 1})))
         .await;
@@ -535,10 +423,7 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
     );
 
     let generation = opened["result"]["generation"].clone();
-    let (a, b) = (
-        FakeLeaf::start(&server).await,
-        FakeLeaf::start(&server).await,
-    );
+    let (a, b) = (FakeLeaf::start().await, FakeLeaf::start().await);
     let mut client_b = Client::new_version(&server, false, 3).await;
     assert_ok(
         &client_b
@@ -550,22 +435,30 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
         other.rpc("ui.open", open(&a, replace.clone())),
         client_b.rpc("ui.open", open(&b, replace.clone())),
     );
-    let (winner, loser, losing) = if ra.get("error").is_none() {
-        (a, b, rb)
+    let (mut winner, winning, loser, losing) = if ra.get("error").is_none() {
+        (a, ra, b, rb)
     } else {
-        (b, a, ra)
+        (b, rb, a, ra)
     };
     assert_eq!(
         losing["error"]["data"]["appError"], "ui_generation",
         "{losing}"
     );
-    assert_eq!(first.unloaded.load(Ordering::SeqCst), 1);
-    assert_eq!(loser.loaded.load(Ordering::SeqCst), 0);
-    let winner_id = winner.peer.clone();
-    eventually(&mut client, |s| {
-        s == [(winner_id.clone(), "online".to_owned())]
-    })
-    .await;
+    assert_ok(&winning);
+    let mut expected = vec![state(&first, "online"), state(&winner, "starting")];
+    expected.sort();
+    assert_eq!(states(&mut client).await, expected);
+    assert!(
+        !first.ended(),
+        "the old interface closed before the new one attached"
+    );
+    winner.attach(&server, &session_id, &winning).await;
+    first.closed(Duration::from_secs(10)).await;
+    assert_eq!(
+        first.tui.as_mut().unwrap().notice("ui.shutdown").await["params"]["reason"],
+        "replaced"
+    );
+    assert_eq!(states(&mut client).await, [state(&winner, "online")]);
 
     let failed = client
         .rpc(
@@ -578,30 +471,78 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
         failed["error"]["data"]["appError"], "ui_leaf_failed",
         "{failed}"
     );
-    assert_eq!(winner.unloaded.load(Ordering::SeqCst), 0);
-    let third = FakeLeaf::start(&server).await;
+    let ending = FakeLeaf::start().await;
     assert_ok(
         &client
-            .rpc("ui.open", open(&third, json!({"replace": winner.peer})))
+            .rpc("ui.open", open(&ending, json!({"replace": winner.peer})))
             .await,
     );
-    assert_eq!(winner.unloaded.load(Ordering::SeqCst), 1);
+    ending.exit().await;
+    eventually(&mut client, |s| s == [state(&winner, "online")]).await;
+    assert!(!winner.ended());
 
-    let third_id = third.peer.clone();
-    eventually(&mut client, |s| {
-        s == [(third_id.clone(), "online".to_owned())]
-    })
-    .await;
+    let mut third = FakeLeaf::start().await;
+    let replaced = client
+        .rpc("ui.open", open(&third, json!({"replace": winner.peer})))
+        .await;
+    assert_ok(&replaced);
+    third.attach(&server, &session_id, &replaced).await;
+    winner.closed(Duration::from_secs(10)).await;
+    assert_eq!(states(&mut client).await, [state(&third, "online")]);
     third.exit().await;
     eventually(&mut client, |s| s.is_empty()).await;
 
-    let fourth = FakeLeaf::start(&server).await;
-    assert_ok(&client.rpc("ui.open", open(&fourth, json!({}))).await);
+    let mut fourth = FakeLeaf::start().await;
+    let opened = client.rpc("ui.open", open(&fourth, json!({}))).await;
+    assert_ok(&opened);
+    fourth.attach(&server, &session_id, &opened).await;
     assert_ok(&client.rpc("ui.close", json!({"uiId": fourth.peer})).await);
-    assert_eq!(fourth.unloaded.load(Ordering::SeqCst), 1);
+    fourth.closed(Duration::from_secs(10)).await;
     assert!(states(&mut client).await.is_empty());
 
-    for leaf in [first, winner, loser, fourth] {
+    let impostor = FakeLeaf::greeting_as(Some("ui-someone-else")).await;
+    let refused = client.rpc("ui.open", open(&impostor, json!({}))).await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "ui_leaf_failed",
+        "{refused}"
+    );
+    assert!(states(&mut client).await.is_empty());
+
+    for leaf in [first, winner, loser, fourth, impostor] {
+        leaf.exit().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leaf_that_never_attaches_is_closed_after_its_start_bound() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session_id = attached_session(&mut client).await;
+    let open = |leaf: &FakeLeaf, extra: Value| opening(&session_id, leaf, extra);
+
+    let mut old = FakeLeaf::start().await;
+    let opened = client.rpc("ui.open", open(&old, json!({}))).await;
+    assert_ok(&opened);
+    old.attach(&server, &session_id, &opened).await;
+    let generation = opened["result"]["generation"].clone();
+
+    let mut silent = FakeLeaf::start().await;
+    let replace = json!({"replace": old.peer, "expectedGeneration": generation});
+    assert_ok(&client.rpc("ui.open", open(&silent, replace.clone())).await);
+    let mut expected = vec![state(&old, "online"), state(&silent, "starting")];
+    expected.sort();
+    assert_eq!(states(&mut client).await, expected);
+    silent.closed(Duration::from_secs(30)).await;
+    assert_eq!(states(&mut client).await, [state(&old, "online")]);
+    assert!(!old.ended());
+
+    let mut next = FakeLeaf::start().await;
+    let replaced = client.rpc("ui.open", open(&next, replace)).await;
+    assert_ok(&replaced);
+    next.attach(&server, &session_id, &replaced).await;
+    old.closed(Duration::from_secs(10)).await;
+
+    for leaf in [old, silent, next] {
         leaf.exit().await;
     }
 }

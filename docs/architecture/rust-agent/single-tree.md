@@ -17,7 +17,7 @@ Product assembly preflight remains incomplete; proposals are recorded in
 descriptive contracts that assembly does not check.
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
-本文统一按 rutis 0.16.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。本文描述当前 Rust 实现；目标插件契约（插件即一行、实例挂载为它登记的部件、按名字的服务目录）见 [ADR 006](../../adr/006-plugin-contract.md) 与[插件契约](../../design/plugin-contract.md)，迁移完成前以本文为准。
+本文统一按 rutis 0.19.2 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。本文描述当前 Rust 实现；目标插件契约（插件即一行、实例挂载为它登记的部件、按名字的服务目录）见 [ADR 006](../../adr/006-plugin-contract.md) 与[插件契约](../../design/plugin-contract.md)，迁移完成前以本文为准。
 
 ## 结构
 
@@ -255,7 +255,7 @@ Dispatcher、before 与 Session 广播统一使用显式 `EventKey<E>`：
 | 事件范围 | 键与调用 |
 | --- | --- |
 | 分支已提交事件 | 分支私有名 `dim/timeline/{instance}/committed`，只由 Dispatcher 构造；`on(ctx, &key, listener)` / `serial(ctx, &key, Arc::new(event)).await` |
-| 分支 before | 分支私有名 `dim/timeline/{instance}/before`，只由 Timeline 构造；`on_sync` / `waterfall_sync` |
+| 分支 before | 分支私有名 `dim/timeline/{instance}/before`，只由 Timeline 构造；`on_sync` / `waterfall(..).sync(..)` |
 | Session 活事件 | `session_channel(session_id) -> EventKey<SessionBroadcastEvent>`；`emit(ctx, &key, Arc::new(event))` / `on(ctx, &key, listener)` |
 | 进程通知 | 所属 Plugin 导出的 `EventKey<E>::of()`、静态 `named` 键或动态键构造函数 |
 
@@ -269,7 +269,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ### 同步 before
 
-`Timeline::before(ctx, name, keys, handler)` 在分支的 before 通道注册 `on_sync`，监听随注册 Plugin 卸载；提交锁内调用 `waterfall_sync`，不维护独立注册表或生命周期。`BeforeCommit` 是 runtime 内的调用载荷，trace 步骤不参与序列化，不写入 Timeline，不启动 future 或任务。
+`Timeline::before(ctx, name, keys, handler)` 在分支的 before 通道注册 `on_sync`，监听随注册 Plugin 卸载；提交锁内调用 `waterfall(..).sync(..)`，不维护独立注册表或生命周期。`BeforeCommit` 是 runtime 内的调用载荷，trace 步骤不参与序列化，不写入 Timeline，不启动 future 或任务。
 
 - handler 签名为 `Fn(EventDraft) -> Result<EventDraft>`。包装层固定先调用 `call.next()`，再变形下游结果；先注册者在外层，后注册者先变形，trace 按实际顺序保留 original 与 steps。handler 不能拦截下游。
 - handler 报错、panic（`SyncEventPanicked`）或改变事件 kind 时整链回退，原样提交并清空轨迹。
@@ -318,7 +318,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## rutis
 
-设计基准为 crates.io [rutis 0.16.0](https://github.com/arcships/rutis/releases/tag/v0.16.0)。核心服务与生命周期接口沿用 0.10.0 的合同，事件接口为 0.13 起的统一事件；接口依据见 [0.16.0 源码](https://github.com/arcships/rutis/tree/v0.16.0/crates/rutis/src)。
+设计基准为 crates.io [rutis 0.19.2](https://github.com/arcships/rutis/releases/tag/v0.19.2)。核心服务与生命周期接口沿用 0.10.0 的合同，事件接口为 0.13 起的统一事件；接口依据见 [0.19.2 源码](https://github.com/arcships/rutis/tree/v0.19.2/crates/rutis/src)。
 
 0.5.0 → 0.9.1 的内核变化不改变本文合同：错误、诊断记录与 `EventOptions` 标为 `#[non_exhaustive]`；`RuntimeDiagnostics::event_backlogs` 报告同键 `emit` 积压；根关闭先取消子树再排空实例事件，根 `dispose()` 与 `shutdown()` 并发时共享关闭结果；新增 `TypedPlugin`、`Ctx::dispose_self`、`Ctx::view`、`ServiceChanged`。`apply` 显式返回 `InjectUnsatisfied` 且本代有失败的严格读取时回到 Pending；项目代码不返回该错误，`require` 失败仍是 `ServiceRead`。
 
@@ -327,12 +327,13 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 0.10.0 → 0.11.0：核心与 loader 的合同不变。bridge 支持宿主声明固定事件名、通过 `Process::emit` 投递给 leaf 插件；TypeScript 的 `ctx.on` / `ctx.emit` 使用运行时进程内的同一事件总线。新增跨语言值类型使 `session::Value` 非穷尽；JSON 数据边界仍由现有消费者的 `json()` 校验，未增加产品值类型。C4 的具体广播绑定按 [#168](https://github.com/arcships/dim/issues/168) 评审和验收。
 0.11.0 → 0.12.1：核心不变，loader 无破坏性变更。leaf 插件 `ctx.provide` 的服务即使未在 `provides` 中声明也会到达 rutis，同名时后提供者失败；`ServiceCatalog::new()` 默认按名共享未另行注册的名字；`rutis-bridge` 新增 `build::Exports` / `ServiceCatalog::export_all`，让外部 leaf 直接调用已有 Rust 服务的方法（C5 使用）。
 0.12.1 → 0.16.0：插件 trait、effect、实例服务键、loader 分组与 `Exports` 的合同不变。事件按名字找监听方，载荷为 serde，每个 root 只有一条平总线；带实例的事件键、`SyncEvent`、`Process::emit` 与 `emits` 声明被移除。Dim 的对应改动见 [rutis 0.16 升级](../../design/rutis-0.16-upgrade.md)。
+0.16.0 → 0.19.2：插件 trait、effect、实例服务键与 loader 分组的合同不变。0.17 加入插件定义（`Definition`），去掉构建脚本的服务清单（`Exports::service_in`）。0.19 去掉 `waterfall_sync`（0.19.1 以 `waterfall(..).sync(..)` 补回），服务目录按名共享每个未另行注册的名字；本地运行时成为 rutis session 的远端，节点链接、对端、传输与身份层被去掉，App Server 以连接行 `session-node`、`py` 启动运行时，根提供 `LocalId("dim-daemon")`。Dim 的对应改动见 [rutis 0.19 升级](../../design/rutis-0.19-upgrade.md)。
 
 | 能力 | 接口 |
 | --- | --- |
 | 实例键 | `Ctx::instance()`、`TypeKey::instance`/`with_instance`；provide、读取、门控与诊断按作用域子树校验，越界返回 `InstanceOutOfScope` |
 | 事件键 | `EventKey<E>` 与统一的 `on` / `emit` / `serial` / `parallel`；同名的全部监听方都收到，同一进程同名事件按 emit 顺序开始，`serial` 按监听注册顺序等待 |
-| 同步事件 | `on_sync`、`bail_sync` / `waterfall_sync`；监听方经 `call.next()` 调用下游；卸载等待运行中的调用退出，不包含返回后的业务提交 |
+| 同步事件 | `on_sync`、`bail_sync` / `waterfall(..).sync(..)`；监听方经 `call.next()` 调用下游；卸载等待运行中的调用退出，不包含返回后的业务提交 |
 | 严格服务读取 | `Ctx::require` / `require_as` 返回带调用位置的 `ServiceReadError`；不取代 `injects` 门控或产品装配预检 |
 | 子树永久卸载 | `FiberView::shutdown()`：子树内消费者先于提供者 dispose 且不进入 Pending，子树外消费者重载；回收父级、依赖索引与总线记录；结果共享、不可重启 |
 | 就绪观察 | `FiberView::watch()` 观察各作用域子插件状态 |

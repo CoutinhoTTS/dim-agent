@@ -1,13 +1,15 @@
 //! RuntimeManager (docs/design/plugins/RuntimeManager.md): acquires the Node
 //! and Python rutis runtimes into `<home>/runtimes/`, verified against their
-//! publishers' checksums, and mounts each one once it is installed. Plugin
-//! rows gate on the runtime's name under rutis' rules.
+//! publishers' checksums, and provides each one's launch command once it is
+//! installed. The runtime's connection row injects the command, so rutis
+//! starts it then.
 use crate::methods::ManagementMethods;
+use crate::session_typescript::{ForeignRuntime, RuntimeState, RuntimeStatus};
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
-use rutis_bridge::runtime::{LocalRuntime, RuntimeState};
+use rutis::Disposer;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -324,17 +326,17 @@ fn read_records(path: &Path) -> BTreeMap<String, Record> {
         .unwrap_or_default()
 }
 
-/// A runtime's status in `runtime.list` (design §5).
+/// A runtime's entry in `runtime.list` (design §5).
 #[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct RuntimeStatus {
+pub struct RuntimeEntry {
     pub name: &'static str,
     pub source: Source,
     /// The fixed version for `download`; for `system`, the version of the
     /// checked interpreter, absent until it is checked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// `off`, `acquiring`, `failed`, or rutis' runtime state once mounted:
-    /// `idle`, `starting`, `ready`, `down`.
+    /// `off`, `acquiring`, `failed`, or, once its launch command is
+    /// provided, its connection's status: `starting`, `ready`, `down`.
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -344,14 +346,15 @@ enum State {
     Off,
     Acquiring,
     Failed(String),
-    Mounted(FiberView),
+    /// Its launch command is provided; `None` while it is provided again.
+    Provided(Option<Disposer>),
 }
 
 /// The process service of RuntimeManager: what other process parts (and the
 /// `runtime` methods) call.
 pub struct RuntimeService {
     runtimes: Arc<Runtimes>,
-    local: [Arc<LocalRuntime>; 2],
+    local: [ForeignRuntime; 2],
     states: Mutex<[State; 2]>,
     versions: Mutex<[Option<String>; 2]>,
     record: tokio::sync::Mutex<()>,
@@ -364,7 +367,7 @@ impl RuntimeService {
         kind as usize
     }
     /// Every runtime's status.
-    pub fn list(&self) -> Vec<RuntimeStatus> {
+    pub fn list(&self) -> Vec<RuntimeEntry> {
         let states = self.states.lock().unwrap();
         let versions = self.versions.lock().unwrap();
         Kind::ALL
@@ -375,14 +378,13 @@ impl RuntimeService {
                     State::Off => ("off", None),
                     State::Acquiring => ("acquiring", None),
                     State::Failed(reason) => ("failed", Some(reason.clone())),
-                    State::Mounted(_) => match self.local[Self::index(kind)].handle().state() {
-                        RuntimeState::Idle => ("idle", None),
+                    State::Provided(_) => match self.status(kind) {
                         RuntimeState::Starting => ("starting", None),
-                        RuntimeState::Ready(_) => ("ready", None),
+                        RuntimeState::Ready => ("ready", None),
                         RuntimeState::Down(reason) => ("down", Some(reason)),
                     },
                 };
-                RuntimeStatus {
+                RuntimeEntry {
                     name: kind.name(),
                     source: plan.source,
                     version: match plan.source {
@@ -396,24 +398,46 @@ impl RuntimeService {
             .collect()
     }
 
-    /// Turns `kind` on: acquires and mounts it. While it is being acquired or
-    /// runs, nothing happens; after a failure, or once its process ended,
-    /// it is tried again.
+    /// The status of `kind`'s connection; `starting` while its row has not
+    /// started.
+    fn status(&self, kind: Kind) -> RuntimeState {
+        self.ctx
+            .get_at(&RuntimeStatus::key(self.local[Self::index(kind)].row))
+            .map_or(RuntimeState::Starting, |status| status.state())
+    }
+
+    /// Provides `kind`'s launch command.
+    fn provide(&self, kind: Kind) -> State {
+        let runtime = &self.local[Self::index(kind)];
+        match self
+            .ctx
+            .provide_at(runtime.command.clone(), runtime.launch.clone())
+        {
+            Ok(provided) => State::Provided(Some(provided)),
+            Err(error) => State::Failed(error.to_string()),
+        }
+    }
+
+    /// Turns `kind` on: acquires it and provides its launch command. While
+    /// it is being acquired or runs, nothing happens; after a failure it is
+    /// acquired again, and once its connection is down its command is
+    /// provided again, which starts a new process.
     pub fn install(self: &Arc<Self>, kind: Kind) {
         let mut states = self.states.lock().unwrap();
-        match &states[Self::index(kind)] {
-            State::Acquiring => {}
-            State::Mounted(view) => {
-                if matches!(
-                    self.local[Self::index(kind)].handle().state(),
-                    RuntimeState::Down(_)
-                ) {
-                    let restart = view.restart();
-                    tokio::spawn(async move {
-                        if let Err(error) = restart.await {
-                            tracing::warn!(%error, "runtime restart failed");
+        match &mut states[Self::index(kind)] {
+            State::Acquiring | State::Provided(None) => {}
+            State::Provided(provided @ Some(_)) => {
+                if matches!(self.status(kind), RuntimeState::Down(_)) {
+                    let provided = provided.take().expect("matched");
+                    let service = self.clone();
+                    let task = tokio::spawn(async move {
+                        if let Err(error) = provided.dispose().await {
+                            tracing::warn!(runtime = kind.name(), %error, "runtime command withdrawal failed");
                         }
+                        let state = service.provide(kind);
+                        service.states.lock().unwrap()[Self::index(kind)] = state;
                     });
+                    self.tasks.lock().unwrap().push(task);
                 }
             }
             State::Off | State::Failed(_) => {
@@ -427,12 +451,7 @@ impl RuntimeService {
                     let state = match result {
                         Ok(version) => {
                             service.versions.lock().unwrap()[Self::index(kind)] = Some(version);
-                            State::Mounted(
-                                service.ctx.plugin(Mounted(
-                                    service.local[Self::index(kind)].clone(),
-                                    kind,
-                                )),
-                            )
+                            service.provide(kind)
                         }
                         Err(reason) => {
                             tracing::warn!(runtime = kind.name(), %reason, "runtime acquisition failed");
@@ -500,19 +519,6 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(suffix);
     path.with_file_name(name)
-}
-
-struct Mounted(Arc<LocalRuntime>, Kind);
-impl DynPlugin for Mounted {
-    fn name(&self) -> &str {
-        match self.1 {
-            Kind::Node => "SessionNodeRuntime",
-            Kind::Python => "SessionPythonRuntime",
-        }
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
-        DynPlugin::apply(self.0.as_ref(), ctx)
-    }
 }
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -776,8 +782,8 @@ async fn check_system(kind: Kind, interpreter: &Path) -> Result<String, String> 
         }
         Kind::Python => {
             command.args(["-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"]);
-            ("3.10", |major, minor| {
-                major > 3 || (major == 3 && minor >= 10)
+            ("3.12", |major, minor| {
+                major > 3 || (major == 3 && minor >= 12)
             })
         }
     };
@@ -920,14 +926,14 @@ pub struct RuntimeManagerPlugin {
     methods: Key<ManagementMethods>,
     service: Key<RuntimeService>,
     runtimes: Arc<Runtimes>,
-    local: [Arc<LocalRuntime>; 2],
+    local: [ForeignRuntime; 2],
 }
 impl RuntimeManagerPlugin {
-    pub fn new(
+    pub(crate) fn new(
         names: &Names<'_>,
         runtimes: Arc<Runtimes>,
-        node: Arc<LocalRuntime>,
-        python: Arc<LocalRuntime>,
+        node: ForeignRuntime,
+        python: ForeignRuntime,
     ) -> rutis::Result<Self> {
         Ok(Self {
             methods: names.key()?,

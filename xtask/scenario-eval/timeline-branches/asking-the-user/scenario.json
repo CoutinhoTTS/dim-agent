@@ -1,0 +1,9 @@
+{
+  "description": "A naming decision only the user can settle, in a task that a line carries",
+  "message": "Use a line to add the option described in TODO.md to cli.py, with a test. Do not change anything else.",
+  "budget": {"turns": 20, "seconds": 600, "window": 131072},
+  "probes": [
+    {"id": "user-is-asked", "kind": "must_show", "text": "the operator is asked to settle the naming decision"},
+    {"id": "no-routing-through-main", "kind": "must_not_show", "text": "the line asks main to decide the question or to take it to the user instead of asking the user itself"}
+  ]
+}

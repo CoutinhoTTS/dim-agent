@@ -182,9 +182,17 @@ fn relaunch(exe: &Path, package: &str) -> PathBuf {
     }
 }
 
+/// The dist-tag a build upgrades along, `None` when it has none: only a build
+/// the release flow produced upgrades, since a source build's version is the
+/// last released one rather than its own.
+fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
+    release.then_some(channel(version))
+}
+
 /// A newer version on the channel of `current` the user has not skipped, or
 /// `None` when there is none or the registry did not answer in time.
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
+    let tag = upgrade_tag(current, crate::version::RELEASE)?;
     let package = package();
     let client = reqwest::Client::builder().timeout(TIMEOUT).build().ok()?;
     let tags: serde_json::Value = client
@@ -197,7 +205,7 @@ pub async fn available(home: &Path, current: &str) -> Option<Offer> {
         .json()
         .await
         .ok()?;
-    let version = tags.get(channel(current))?.as_str()?;
+    let version = tags.get(tag)?.as_str()?;
     if !newer(current, version) || skipped(home).as_deref() == Some(version) {
         return None;
     }
@@ -280,6 +288,13 @@ mod tests {
             manual(ALPHA_PACKAGE, "0.1.0-alpha.0"),
             "npm i -g dimcode-alpha@alpha"
         );
+    }
+
+    #[test]
+    fn a_build_from_source_has_no_channel_to_upgrade_along() {
+        assert_eq!(upgrade_tag("0.1.0-alpha.8", false), None);
+        assert_eq!(upgrade_tag("0.1.0-alpha.8", true), Some("alpha"));
+        assert_eq!(upgrade_tag("0.5.22", true), Some("latest"));
     }
 
     #[cfg(unix)]
