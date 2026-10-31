@@ -58,9 +58,13 @@ Every statement carries its kind of evidence:
   (`READ_INLINE_MAX_CHARS`, `INLINE_OUTPUT_CHAR_LIMIT`).
 - The summarizer request has its own system prompt and one user message with the transcript as
   text ([summary_strategy.rs](../../../crates/dim-agent-capabilities/src/summary_strategy.rs)).
-- No production code sets `cache_control` (grep over `crates/`: only the type, the aimux
-  conversion and tests/examples mention it). Anthropic native requests are therefore not cached;
-  providers with automatic prefix caching (OpenAI and most OpenAI-compatible vendors) cache anyway.
+- The provider port marks two Anthropic cache breakpoints on every request
+  ([request.rs](../../../crates/dim-agent-aimux/src/request.rs),
+  [Anthropic cache breakpoints](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)): the end
+  of the System, so the tool declarations and the System are one cached prefix, and the last block of
+  the last user or tool-result message, so each turn reads the previous prefix and writes only the new
+  tail. Both use the API's five-minute lifetime; providers with automatic prefix caching (OpenAI and
+  most OpenAI-compatible vendors) take no breakpoint and gain none.
 
 ## 3. Trigger shape
 

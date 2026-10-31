@@ -22,6 +22,17 @@
 
 Aimux 无目录或 Session 依赖，独占可释放的 HTTP client。卸载关闭准入、释放未读取或停止读取的原生流、排空已受理调用，再释放池；旧宿主和流返回 `OwnerClosed`。HTTP 失败保留类型化 status/code，恢复由调用方决定，adapter 不重试。产品 Provider/OAuth 另行实施。
 
+## Anthropic 提示缓存断点
+
+请求的 `ModelProtocol` 是 anthropic 时，`src/request.rs` 的转换器在请求里标两个提示缓存断点；其他协议不带断点，Bedrock 不变。放在哪里是 dim 的产品决定：aimux 只负责线上编码（part 或消息上的 `providerOptions.anthropic.cacheControl`，每个请求至多四个断点），自己不放断点。
+
+- **System 末尾**：System 的最后一个块标一个断点，工具声明与 System 因此合成一个缓存前缀。System 已带显式断点（`SystemPromptPart::Text` 的 `cache_control`）时原样保留，不再加 System 断点。
+- **最后一条用户或工具结果消息**：在消息级 `providerOptions.anthropic.cacheControl` 标一个断点，由转换器落在该消息最后一个可缓存块上；只有请求仍在四个断点以内时加。
+- **生命周期**：用 API 默认的五分钟，每次使用刷新；一小时的长期缓存不用。
+- **其他尾部**：最后一条消息既不是用户消息也不是工具结果消息时，不加消息断点。
+- **不变的部分**：Timeline 与存储的请求不变；模型日志记录线上形态，包含断点。
+- **一次性请求**：压缩摘要这类一次性请求也带消息断点，付一次缓存写入而没有后续读取；短于该模型最小可缓存长度的提示不缓存，也不计费。这是把每个请求同样标记换来的已知代价。
+
 ## 请求录制
 
 `recording::set_request_recording` 开关 aimux 的 RFC-0023 录制，写入 `<目录>/recordings.jsonl`；App Server 的 `model-log` Settings 源调用它（[设计](../../docs/design/appserver/model-log.md)）。

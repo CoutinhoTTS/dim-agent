@@ -48,8 +48,11 @@
 - read 与 exec 工具每个结果最多内联 30,000 字符（`READ_INLINE_MAX_CHARS`、`INLINE_OUTPUT_CHAR_LIMIT`）。
 - 摘要请求使用自己的 system prompt，把转录作为一条用户消息的文本发送
   （[summary_strategy.rs](../../../../crates/dim-agent-capabilities/src/summary_strategy.rs)）。
-- 生产代码没有设置 `cache_control`（在 `crates/` 下 grep：只有类型定义、aimux 转换和测试/示例）。因此
-  Anthropic 原生请求不会被缓存；自动前缀缓存的厂商（OpenAI 及多数 OpenAI 兼容厂商）仍会缓存。
+- provider 端口在每个 Anthropic 请求上标记两个缓存断点（[request.rs](../../../../crates/dim-agent-aimux/src/request.rs)，
+  [Anthropic 提示缓存断点](../../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)）：System 末尾
+  （工具声明与 System 合成一个缓存前缀），以及最后一条用户或工具结果消息的最后一个块（每一轮读取上一轮前缀、
+  只写入新的尾部）。两者都用 API 默认的五分钟生命周期；自动前缀缓存的厂商（OpenAI 及多数 OpenAI 兼容厂商）
+  不加断点，也不受影响。
 
 ## 3. 触发形状
 
