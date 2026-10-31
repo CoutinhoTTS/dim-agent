@@ -219,6 +219,9 @@ impl HistoryRenderer {
             }
             let projected = project_batch(&events, state.as_ref())
                 .map_err(|error| AgentError::fault("History", error))?;
+            if projected.compacted && projected.compaction.is_none() {
+                return Ok(StreamedContext::fallback());
+            }
             history.extend(projected.history);
             streamed_state = projected.checkpoint.or(streamed_state);
             compaction = projected.compaction.or(compaction);
