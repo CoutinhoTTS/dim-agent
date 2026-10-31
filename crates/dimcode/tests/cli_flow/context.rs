@@ -178,7 +178,8 @@ fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
 
 /// A finished model request on `main` reads the context again while the run
 /// continues, once per request; a line's request does not read it; the run's
-/// end still reads it (§4).
+/// end still reads it; and a replayed history page that carries finished
+/// requests spends no read of its own (§4).
 #[test]
 fn tui_context_reading_follows_each_finished_model_request_on_main() {
     let home = Home::new();
@@ -193,7 +194,11 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
         let history = wire.read("session.history");
         wire.reply(
             &history,
-            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            json!({"events":[
+                {"sequence":4,"create_at":1,"type":"step","name":"model-output-end",
+                 "data":{"turn_id":"old-turn","request_id":"old-request",
+                     "status":"completed","finish_reason":"end_turn"}}
+            ],"through":8,"nextAfter":8,"done":true}),
         );
         for _ in 0..2 {
             let request = wire.read_any();
@@ -210,7 +215,11 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
             }
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
-        let submit = wire.read("session.submit");
+        let submit = wire.read_any();
+        assert_eq!(
+            submit["method"], "session.submit",
+            "a replayed history page read the context"
+        );
         assert_eq!(submit["params"]["text"], "hello");
         wire.reply(&submit, json!({"event":{}}));
         wire.notice(
@@ -283,72 +292,6 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
     terminal.until("120K / 256K");
     wait_ended.recv_timeout(PATIENCE).unwrap();
     terminal.until("121K / 256K");
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-}
-
-/// A resumed Session's history replays finished requests; each replayed page
-/// must not read the context, so the reading is read once on entry (§4).
-#[test]
-fn tui_context_reading_reads_once_when_resumed_history_replays_requests() {
-    let home = Home::new();
-    let (quiet_done, wait_quiet_done) = mpsc::channel();
-    let daemon = home.daemon(move |wire| {
-        wire.hello(&[]);
-        wire.created();
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let mut pages = 0;
-        let mut reads = 0;
-        let mut account = false;
-        while pages < 2 || reads < 1 || !account {
-            let request = wire.read_any();
-            match request["method"].as_str() {
-                Some("account.providers") => {
-                    account = true;
-                    wire.reply(&request, json!([]));
-                }
-                Some("session.context.usage") => {
-                    reads += 1;
-                    wire.reply(&request, usage(1849.0));
-                }
-                Some("session.history") => {
-                    pages += 1;
-                    if pages == 1 {
-                        assert_eq!(request["params"]["after"], 0);
-                        wire.reply(
-                            &request,
-                            json!({"events":[
-                            {"sequence":4,"create_at":1,"type":"step","name":"model-output-end",
-                             "data":{"turn_id":"old-turn","request_id":"old-request",
-                                 "status":"completed","finish_reason":"end_turn"}}
-                        ],"through":10,"nextAfter":7,"done":false}),
-                        );
-                    } else {
-                        assert_eq!(request["params"]["after"], 7);
-                        assert_eq!(request["params"]["through"], 10);
-                        wire.reply(
-                            &request,
-                            json!({"events":[],"through":10,"nextAfter":10,"done":true}),
-                        );
-                    }
-                }
-                method => panic!("unexpected request {method:?}"),
-            }
-        }
-        assert_eq!(reads, 1, "a replayed page read the context again");
-        wire.quiet(Duration::from_millis(300));
-        quiet_done.send(()).unwrap();
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
-        }
-    });
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("1.8K / 256K");
-    wait_quiet_done.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
