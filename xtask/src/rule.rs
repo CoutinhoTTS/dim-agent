@@ -331,48 +331,50 @@ mod tests {
     }
 
     /// The mid-p values against references computed independently with exact
-    /// rational arithmetic (`reference.py` under the issue's data directory):
-    /// small counts, and counts in the hundreds as the pooled rates are.
+    /// rational arithmetic and stated here as the fractions they are: small
+    /// counts, and counts in the hundreds as the pooled rates are.
     #[test]
     fn the_mid_p_values_match_the_exact_references() {
-        for (low, high, expected) in [
-            // 4/10 against 9/10: 39/2584.
-            (Counts::new(4, 10), Counts::new(9, 10), 0.015092879256965945),
-            // 24/40 against 30/40: 56364741159/691135163467.
+        for (low, high, numerator, denominator) in [
+            // 4/10 against 9/10.
+            (Counts::new(4, 10), Counts::new(9, 10), 39., 2584.),
+            // 24/40 against 30/40.
             (
                 Counts::new(24, 40),
                 Counts::new(30, 40),
-                0.08155386115250274,
+                56364741159.,
+                691135163467.,
             ),
-            // 8/20 against 16/20: 637/99789.
-            (
-                Counts::new(8, 20),
-                Counts::new(16, 20),
-                0.006383469119842868,
-            ),
-            // 2/100 against 12/100: 1676724311/589617197112.
+            // 8/20 against 16/20.
+            (Counts::new(8, 20), Counts::new(16, 20), 637., 99789.),
+            // 2/100 against 12/100.
             (
                 Counts::new(2, 100),
                 Counts::new(12, 100),
-                0.0028437506897911933,
+                1676724311.,
+                589617197112.,
             ),
-            // Pooled counts in the hundreds: 250/300 against 260/300.
+            // Counts in the hundreds as the pooled rates are: 1/150 against
+            // 10/150.
             (
-                Counts::new(250, 300),
-                Counts::new(260, 300),
-                0.1279533546444494,
+                Counts::new(1, 150),
+                Counts::new(10, 150),
+                644041.,
+                231403782.,
             ),
-            // The far tail of similarly pooled counts: 150/300 against 200/300.
+            // The far tail of a larger pool: 2/200 against 14/200.
             (
-                Counts::new(150, 300),
-                Counts::new(200, 300),
-                1.7615074657407043e-05,
+                Counts::new(2, 200),
+                Counts::new(14, 200),
+                10835633988.,
+                11064526330991.,
             ),
         ] {
+            let expected = numerator / denominator;
             let p = mid_p(low, high);
             assert!(
                 close(p, expected),
-                "mid_p({}/{} against {}/{}) is {p}, not {expected}",
+                "mid_p({}/{} against {}/{}) is {p}, not {expected} ({numerator}/{denominator})",
                 low.outcome,
                 low.total,
                 high.outcome,
