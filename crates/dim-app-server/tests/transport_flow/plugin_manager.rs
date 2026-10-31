@@ -106,6 +106,84 @@ fn plugins_entries(home: &Path) -> Vec<String> {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_client_replies_hide_git_credentials_and_runtime_errors() {
+    let home = home();
+    let config = config(&home);
+    let dir = plugin_dir(&home.join("plugins/private"), "abcdef1234")
+        .canonicalize()
+        .unwrap();
+    std::fs::write(
+        dir.join("dim-plugin.json"),
+        json!({"name":"package","skills":"skills"}).to_string(),
+    )
+    .unwrap();
+    let stored_url = "https://user-fixture:password-fixture@example.invalid/path-fixture?token=query-fixture#fragment-fixture";
+    std::fs::write(home.join("plugins.json"), json!({
+        "version":1,
+        "installed":[{"id":"private","name":"package","source":{"git":stored_url,"ref":"ref-fixture","commit":"abcdef1234"},"dir":dir,"kinds":["skills"]}],
+        "names":{"package":{"off":true}}
+    }).to_string()).unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = call(&mut client, "plugin.list", json!({})).await;
+    assert_ok(&listed);
+    let source = &item(&listed, "package")["candidates"][0]["source"];
+    assert_eq!(source["git"], "https://example.invalid/path-fixture");
+    assert_eq!(source["ref"], "ref-fixture");
+    assert_eq!(source["commit"], "abcdef1234");
+    for secret in [
+        "user-fixture",
+        "password-fixture",
+        "query-fixture",
+        "fragment-fixture",
+    ] {
+        assert!(
+            !listed.to_string().contains(secret),
+            "plugin catalog must hide stored Git credentials"
+        );
+    }
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap();
+    assert_eq!(stored["installed"][0]["source"]["git"], stored_url);
+    let invalid = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"git":"file://invalid-user:invalid-password@host/query-secret"}}),
+    )
+    .await;
+    assert_eq!(app_error(&invalid), "invalid_source");
+    assert_eq!(
+        invalid["error"]["message"],
+        "Use a local directory or an https:// or ssh:// Git URL; check the source and ref"
+    );
+    for secret in ["invalid-user", "invalid-password", "query-secret"] {
+        assert!(!invalid.to_string().contains(secret));
+    }
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"package","use":"private"}),
+        )
+        .await,
+    );
+    std::fs::write(
+        dir.join("dim-plugin.json"),
+        json!({"name":"package","code":{"entry":"private-runtime-secret"}}).to_string(),
+    )
+    .unwrap();
+    let failed = call(&mut client, "plugin.reload", json!({"name":"package"})).await;
+    assert_eq!(app_error(&failed), "invalid_manifest");
+    assert!(!failed.to_string().contains("private-runtime-secret"));
+    let listed = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&listed, "package")["status"], "failed");
+    assert!(!listed.to_string().contains("private-runtime-secret"));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Acceptance 6–9 for plugins without code, and the record surviving a
 /// restart (acceptance 5): built-ins turned off and back on, refusals that
 /// change nothing, and a Git plugin installed and updated over ssh.
@@ -313,11 +391,8 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     let list = call(&mut client, "plugin.list", json!({})).await;
     let notes = item(&list, "notes");
     assert_eq!(notes["status"], "failed", "{notes}");
-    assert!(
-        notes["error"]
-            .as_str()
-            .unwrap()
-            .contains("invalid_manifest"),
+    assert_eq!(
+        notes["error"], "Plugin content or runtime failed",
         "{notes}"
     );
     assert_ok(&call(&mut client, "permission.rules", json!({})).await);

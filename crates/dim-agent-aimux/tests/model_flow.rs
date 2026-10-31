@@ -80,7 +80,7 @@ async fn respond(
     let messages = request["messages"].as_array().unwrap();
     let last = messages.last().unwrap();
     let prompt = last["content"].as_str().unwrap_or("");
-    if prompt == "reject401" {
+    if prompt.starts_with("reject401") {
         return Response::builder()
             .status(401)
             .header("content-type", "application/json")
@@ -659,7 +659,7 @@ async fn recorded_failures_and_cancellations_close_their_record() {
         let failure = host
             .0
             .invoke(
-                request("reject401"),
+                request("reject401 recorded"),
                 connection("expired-secret"),
                 CancellationToken::new(),
             )
@@ -679,7 +679,9 @@ async fn recorded_failures_and_cancellations_close_their_record() {
         let lines = recording
             .wait(1, |line| {
                 line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
-                    && line["input"]["prompt"].to_string().contains("reject401")
+                    && line["input"]["prompt"]
+                        .to_string()
+                        .contains("reject401 recorded")
             })
             .await;
         assert_eq!(lines.len(), 1, "one line for a failed call");

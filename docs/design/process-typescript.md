@@ -116,8 +116,8 @@ Keep one initial reconcile in the existing assembly layer. Record the required
 host row ids from the host's composition, before adding the extension rows.
 `Processes::views` / `wait_active` use those required ids, rather than treating
 every top-level Layer(0) row as required. Keep the loader, existing host rows,
-shared Node runtime and `RuntimeRows` declaration publication in the required
-wait, with their current deadline and error handling. This changes the host's
+the shared Node runtime's connection row and the release of its rows
+(`SessionRows`) in the required wait, with their current deadline and error handling. This changes the host's
 readiness selection; it neither satisfies nor removes an extension's declared
 hard dependencies. Missing dependencies still leave that row Pending.
 
@@ -131,10 +131,11 @@ Rpc can tell an unavailable owner from an unknown namespace using its existing
 row-status table. A row that stays Pending or fails before it registers holds no
 namespace, so its names are `unknown_method`.
 
-Preserve the existing runtime gate: named Node factories inject `RuntimeRows`.
-While the initial reconcile holds the loader operation, the rows remain Pending;
-the existing `RuntimeRowsPlugin` refresh task obtains that operation afterwards,
-refreshes declarations and then publishes `RuntimeRows`. Only then can extension
+Preserve the runtime gate: each row of a runtime injects that runtime's
+`SessionRows::key(row)`. While the initial reconcile holds the loader operation,
+the rows remain Pending; rutis's `SessionRowsPlugin` refresh task obtains that
+operation afterwards, once the runtime's session is there, resolves again the rows
+resolved without it, and then provides `SessionRows`. Only then can extension
 `apply`, and with it management registration, start. A row's own resolution failure is
 reported in its status while the refresh continues for other rows. Shared
 runtime/declaration infrastructure failure retains the existing C4 failure
@@ -143,7 +144,7 @@ boundary; runtime crashes are infrastructure failures under ADR 002 D3.
 Known shared-gate limit: `loader.refresh` awaits Node's `describe_row`, including
 module evaluation, with no per-module timeout. A module that never finishes
 top-level evaluation, such as a top-level `await` on a network request, prevents
-`RuntimeRows` publication. The host then reaches its existing startup deadline
+the release of the runtime's rows (`SessionRows`). The host then reaches its existing startup deadline
 even if native rows are ready. This also affects the current C4 binding; a hung
 load is different from a completed resolution failure. Follow the
 [author-guide module rule](../typescript-plugin-authoring.md#plugin-shape-and-lifetime):
@@ -320,7 +321,7 @@ Status: the feature binding is accepted by the maintainer in
 with the dependency and recovery constraints below. This replaces #35's per-call
 owner replacement requirement. Full Scheduler/Workflow Ready remains separate.
 
-Use the current rutis 0.16.0 row dependencies. The Scheduler Session tool row
+Use the current rutis 0.19.2 row dependencies. The Scheduler Session tool row
 module declares `scheduleJobs` in `definePlugin.inject`; the Workflow Session
 tool module declares `workflowRuns`. This is the dependency description the
 runtime resolver uses to gate the row; a loader option alone is not a replacement
@@ -481,7 +482,7 @@ behavior; no-run-effect behavior requires each package's business-flow acceptanc
 | Item | Content |
 | --- | --- |
 | Contract served | ADR 002 D5's process `managementMethods` contract needs ordinary process placement and a foreign `register` on the native management table, owned by the calling row. |
-| Existing mechanisms considered | Reuse the public C4 runtime, `RuntimeResolver`, `ServiceCatalog`, the management table and `MethodProvider`. The same assembly-owned required-row selection covers startup failures/readiness and restart. The existing `RuntimeRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime for process owners; events cannot install an absent row or contribute its management namespace. |
+| Existing mechanisms considered | Reuse the public C4 runtime, `SessionResolver`, `ServiceCatalog`, the management table and `MethodProvider`. The same assembly-owned required-row selection covers startup failures/readiness and restart. The existing `SessionRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime for process owners; events cannot install an absent row or contribute its management namespace. |
 | Generic binding | Explicit process rows, management registration by the calling row, and required-host selection for startup and restart within App Server assembly. No new core service, facade, rutis requirement, loader API or public restart endpoint. |
 | Ordering and lifecycle impact | No Timeline sequence, batch or event change. Keep one initial reconcile, the existing runtime declaration gate and required-row deadline. Optional row failures stay local at startup and restart; native management admission and provider report/drain settlement remain unchanged. |
 | Implementation owner / issue | zerob13, App Server assembly and method binding under #4. Architecture review by the existing assembly/management maintainers; this does not assign new work to S2 or rutis. |

@@ -6982,8 +6982,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(
-            app.composer.text(),
-            format!("[wide.png · {width}×2 → {MAX_EDGE}×1]")
+            app.composer.display_text(),
+            format!("[Image #1 · {width}×2 → {MAX_EDGE}×1]")
         );
         assert!(app.notice.is_none());
     }

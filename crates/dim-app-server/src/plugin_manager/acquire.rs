@@ -293,7 +293,7 @@ pub fn check_git_url(url: &str) -> Result<(), PluginError> {
     let refused = || {
         PluginError::new(
             "invalid_source",
-            format!("{url:?}: use an https:// or ssh:// URL"),
+            "Use an https:// or ssh:// Git URL without whitespace",
         )
     };
     let (scheme, rest) = url.split_once("://").ok_or_else(refused)?;

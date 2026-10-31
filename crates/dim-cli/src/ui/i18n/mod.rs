@@ -201,21 +201,15 @@ mod tests {
         }
     }
 
-    /// The image marker exists in every locale, with the placeholders its
-    /// index and details go through.
+    /// What an image's marker says after its index is translated; the marker
+    /// itself is fixed text and has no entry.
     #[test]
-    fn every_locale_translates_the_scaled_image_marker() {
+    fn every_locale_translates_what_an_image_marker_adds() {
         for (code, lookup) in tables() {
-            for key in ["[Image #{index}{details}]", "first frame", "re-encoded"] {
+            for key in ["first frame", "re-encoded"] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }
-            let marker = lookup("[Image #{index}{details}]").expect("marker");
-            for placeholder in ["{index}", "{details}"] {
-                assert!(
-                    marker.contains(placeholder),
-                    "{code} drops {placeholder} in {marker:?}"
-                );
-            }
+            assert!(lookup("[Image #{index}{details}]").is_none(), "{code}");
         }
     }
 

@@ -24,7 +24,9 @@ function withTexts<C>(part: Plugin<C>, texts: C) {
 // branch mounts a copy, which closes over the row's texts.
 export default definePlugin({
   name: 'Goal',
-  config: z.toJSONSchema(options),
+  // A plain JSON Schema: zod's result also carries `~standard`, which
+  // rutis refuses as a Standard Schema.
+  config: JSON.parse(JSON.stringify(z.toJSONSchema(options))),
   inject: ['partRegistry', 'settings'],
   provides: {},
   async apply(ctx, config: z.infer<typeof options>) {

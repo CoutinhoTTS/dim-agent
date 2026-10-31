@@ -4,9 +4,9 @@ The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows nam
 
 The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; without it, `<product home>/web`; the directory is looked at on each open; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus the read-only model discovery methods in [Web workspace §2.5](../../docs/design/web-workspace.md#25-protocol-on-the-entry); other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
 
-The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)) is the daemon's record of the interfaces viewing its Sessions, any number per Session. `UiHostPlugin` is a process `Capability` providing `UiHost`. A terminal interface is a UI leaf: the interactive `dimcode` process is a rutis node waiting on a private address, and `ui.open` makes the daemon link to it with `PeerPlugin` and host the ordinary `Tui` plugin there with `plugins.load("Tui", {uiId, token, sessionId})`, unloading it in the same row's effect. The daemon starts no process and runs no UI control protocol; a leaf lives as long as its link. The hosted `Tui` keeps the ordinary protocol v3 business connection and registers it with `ui.attach {sessionId, kind, uiId, token}`.
+The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)) is the daemon's record of the interfaces viewing its Sessions, any number per Session. `UiHostPlugin` is a process `Capability` providing `UiHost`. A terminal interface is a UI leaf: the interactive `dimcode` process is a rutis kernel waiting on a private address, and `ui.open` makes the daemon's `UiLeaf` dial it, greet from a context where the daemon's session catalog is isolated, check the leaf's id and mount the session. The leaf runs its own `Tui`. The daemon starts no process and runs no UI control protocol; a leaf lives as long as its session. The leaf's `Tui` keeps the ordinary protocol v3 business connection and registers it with `ui.attach {sessionId, kind, uiId, token}`, the token coming from `ui.open`'s reply.
 
-`ui.open {sessionId, kind, peer, address, replace?, expectedGeneration?}` links to the leaf at `address` (its node id `peer` becomes the `uiId`) and returns `{uiId, generation}` once its `Tui` is loaded; a link or load failure is `ui_leaf_failed` and registers nothing. `ui.close` sends the advisory `ui.shutdown` and disposes the leaf (unload, so the leaf restores its terminal, then link close). `ui.status` is a read for management clients: a leaf is `starting` until `Tui` is loaded and attached, then `online` (or `replacing` while it replaces another); a leaf whose link stops is removed. There is no heartbeat. `ui.replace` replaces a connection registration; `ui.open {replace}` claims the observed generation before the link, closes the old interface only after the new leaf is loaded, and leaves it untouched when the start fails. Disposing `UiHostPlugin` waits for every leaf disposal. The methods are local-only and advertised in `hello`, with `ui.leaf`.
+`ui.open {sessionId, kind, peer, address, replace?, expectedGeneration?}` opens a session with the leaf at `address` (its id `peer` becomes the `uiId`) and returns `{uiId, generation, token}` once the session is mounted; a link or handshake failure is `ui_leaf_failed` and registers nothing. A leaf that does not attach within 20 s of the reply is closed. `ui.close` sends the advisory `ui.shutdown` and disposes the leaf, closing its session (the leaf restores its terminal and exits). `ui.status` is a read for management clients: a leaf is `starting` until its `Tui` attaches, then `online` (or `replacing` while it closes the one it replaces); a leaf whose session ends is removed. There is no heartbeat. `ui.replace` replaces a connection registration; `ui.open {replace}` claims the observed generation before the dial, closes the old interface only once the new leaf attaches, and leaves it untouched when the start fails or the new leaf ends or does not attach in time. Disposing `UiHostPlugin` waits for every leaf disposal. The methods are local-only and advertised in `hello`, with `ui.leaf.2`.
 
 Commands below run from the repository root:
 
@@ -110,6 +110,43 @@ not the user source.
 
 - `mcp.save` additionally takes `configuration`: a complete stdio, HTTP or SSE server definition
   in the existing `mcpServers` format. It creates or replaces that source's entry, not a merged one.
+- `mcp.configuration({source,id,cwd?})` returns an editable projection. Stdio entries include
+  command, arguments, working directory and environment names, never environment values. Remote
+  entries include `endpoint` (the URL origin), header names, bearer/OAuth presence flags and
+  OAuth client ID, callback port, scopes and metadata-URL presence. Endpoint userinfo, path,
+  query and fragment, the metadata URL, unknown extension fields and all credentials stay private.
+- `mcp.inspect({source,id,cwd?})` returns `{enabled,configuration,connections}`. Configuration
+  uses that same safe projection. Each connection contains `state: {status,expired?}` and
+  `tools: [{name,description,inputSchema}] | null`: its last complete successful discovery,
+  or null before discovery. Status is `disconnected`, `connecting`, `connected`, `failed`,
+  `closed` or `auth_required` (with `expired`). These are existing connection generations,
+  not a host-global connection state. Inspection does not connect or contact the server.
+- `mcp.test({source,id,cwd?,configuration?,patch?})` opens a disposable connection, initializes
+  it and lists every tool page. It returns `{tools:[{name,description,inputSchema}]}` only after
+  cleanup; failed initialization, discovery, cancellation, timeout or cleanup is an RPC error.
+  There is a 30-second connection/discovery deadline followed by normal resource cleanup.
+  A complete `configuration` is accepted only for a user-supplied draft, without `patch`.
+  Otherwise the test uses the selected source's entry and an optional unsaved `patch`, with
+  stored secrets preserved. Project and plugin entries must already be enabled; plugin patches
+  are refused. User tests are explicit local execution, including for a disabled user entry.
+  The Web client confirms this action. Tests never save configuration, alter source revisions,
+  publish tools to Sessions or replace their connections. OAuth uses the existing credential
+  authority, including its normal refresh behavior.
+- `mcp.update` takes the source revision and a typed `patch`: command, arguments, working
+  directory and environment for stdio, or URL, headers and bearer for remote entries. Stored
+  arguments are projected only as `argsCount`; omission preserves them, while an explicit
+  `args` array replaces them (including an empty array to clear them). An omitted URL
+  preserves the complete stored endpoint, including hidden credentials; an entered URL replaces
+  it. Environment/header maps change only named keys: a string sets a value and null removes it.
+  An omitted bearer preserves it; `bearer: {action:"set",token}` replaces it and
+  `bearer: {action:"remove"}` clears it. OAuth and static credentials remain mutually exclusive.
+  An omitted OAuth patch preserves it; `oauth: {action:"remove"}` removes explicit configuration
+  (automatic OAuth discovery remains). `oauth: {action:"set",clientId?,callbackPort?,scopes?,
+  authServerMetadataUrl?}` updates only mentioned fields, with null clearing an optional field.
+  Unmentioned keys, extra fields and enablement are preserved. The Web editor leaves metadata
+  replacement blank and omits it unless the user explicitly replaces or removes it.
+  An empty working directory clears it. Fields of the wrong transport and plugin-owned writes
+  are refused. The Web form leaves the replacement URL blank until the user enters one.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
 - `mcp.set_enabled` additionally takes `enabled`. A user entry's `enabled` field changes and the
   rest of the entry is preserved. For a project entry, enabling checks `expectedVersion` against
@@ -118,6 +155,10 @@ not the user source.
   unreadable or no longer defines the entry, and `mcp.remove` withdraws it before editing the file.
 - `mcp.disconnect` takes `source`, `id` and optional `cwd`, without a revision; it does not edit
   persisted intent.
+
+Edits are source-local. No atomic user/project scope migration is offered; the Web editor fixes
+the selected entry's source rather than copying secrets into another scope. OAuth sign-in,
+confidential-client input and attempt cancellation follow the [OAuth contract](../../docs/design/appserver/mcp-oauth.md#9-interfaces).
 
 Approval and Permission govern only model tool calls ([ADR 003](../../docs/adr/003-approval-scope.md)).
 A configured server runs when it is enabled; there are no grants, fingerprints or approval methods,
@@ -250,6 +291,17 @@ model selection (captured when the request is consumed) and `fixed` resolves its
 profile model would; both override the requested profile's model. A failed read or resolution
 refuses the request with `member_create_failed`. See
 [subagent model policy](../../docs/design/subagent-model-policy.md).
+
+### Execution shell preference
+
+`host.exec_shell.get({})` returns `{revision, executablePath, shells, configError}`:
+the optional explicit selection, detected `{executablePath,name}` choices and a parse
+error if the current version-1 file is malformed. `host.exec_shell.update` takes
+`{expectedRevision, executablePath?}` and returns the new snapshot. Omitting the path
+selects automatic detection; null is invalid. The HostPlatform owner validates the
+selection and atomically updates its configured `exec-shell.json` through FileStorage.
+Stale writes return `exec_shell_conflict`; other host/storage failures are
+`exec_shell_failed`. New commands reread the preference; running shells are unchanged.
 
 ### Permission command rules
 
@@ -413,9 +465,12 @@ with byte preservation and unchanged transaction/backup/lifecycle behavior.
 
 | Method | Input | Value |
 | --- | --- | --- |
-| `providers` | — | `ProviderDescriptor[]` (`providerId`, `displayName`, `loginMethods`) |
+| `providers` | — | `ProviderDescriptor[]` (`providerId`, `displayName`, `loginMethods`, `defaultDirectory?`) |
 | `status`, `recover`, `logout` | provider ID | `AccountSnapshot` |
 | `usage` | provider ID | `Usage` |
+| `referral` | provider ID | `Referral` |
+| `reset_batches` | provider ID | `ResetBatches` |
+| `apply_reset` | `{providerId,subscriptionId,resetType,idempotencyKey}` | `ResetApplied` |
 | `web_search` | `{query,count}` | `{results: Array<{title,url,snippet,publishedAt?}>}` |
 | `begin_browser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
 | `begin_device` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
@@ -437,14 +492,40 @@ type AccountSnapshot = {
 // its account service's usage report. Parts the service does not report are
 // absent; an unlimited bucket reports its totals as 0 with `unlimited: true`.
 type Usage = {
-  plan?: { name?: string; status?: string; priceAmount?: number; priceCurrency?: string; priceInterval?: string; expiresAt?: string }
+  subscriptionUrl?: string
+  pricingUrl?: string
+  subscriptionId?: number
+  resets?: ResetSummary
+  plan?: { name?: string; status?: string; priceAmount?: number; priceCurrency?: string; priceInterval?: string; expiresAt?: string; cancelAtPeriodEnd?: boolean; currentTermStart?: string; lastTermStatus?: string; lastTermStart?: string; lastTermEnd?: string }
   credits?: { usedUnits?: number; totalUnits?: number; remainingUnits?: number; unlimited?: boolean; resetsAt?: string }
-  windows: Array<{ durationHours: number; tokenUsed: number; tokenCap: number; expiresAt?: string }>
+  windows: Array<{ durationHours: number; tokenUsed: number; tokenCap: number; startedAt?: string; expiresAt?: string }>
   features: Array<{ key: string; used?: number; allowance?: number; remaining?: number; unit?: string; unlimited?: boolean; periodEnd?: string }>
+}
+type Referral = {
+  enabled: boolean; eligible: boolean; affCode?: string; inviteUrl?: string
+  invitedCount: number; paidCount: number; rewardGrantedUnits?: number
+  inviterRebateBp: number; inviteeRebateBp: number
+}
+type ResetType = "window" | "monthly_full"
+type ResetKind = { availableCount: number; nearestExpiresAt?: string }
+type ResetSummary = { window: ResetKind; monthlyFull: ResetKind }
+type ResetBatch = {
+  grantId: number; remaining: number; expiresAt: string
+  scopeType: "account" | "subscription"; subscriptionId?: number
+  sourceType: "admin_compensation" | "campaign" | "incident_compensation"
+}
+type ResetBatches = { window: ResetBatch[]; monthlyFull: ResetBatch[] }
+type ResetApplied = {
+  credits: NonNullable<Usage["credits"]>; windows: Usage["windows"]
+  resets: ResetSummary; replayed: boolean; appliedAt: string
 }
 ```
 
 Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`; a failed attempt reports only `Login failed`. Existing `account.codex.*` and `account.grok.*` retain their native contracts. Attempt secrets are memory-only and cleared on completion, cancellation or expiry; a terminal attempt stays queryable until its deadline.
+
+`account.referral` and `account.reset_batches` take `{providerId}`. `account.apply_reset` takes the typed `apply_reset` input above: the client confirms an action and generates one nonblank idempotency key (at most 128 bytes), retaining it for retries after an uncertain reply. The subscription ID is a positive safe integer from `account.usage`; the account service authorizes it. Batch selection and consumption order belong to the account service, not the client. These three methods are optional provider operations; the trait defaults reject them with `account_invalid_input` for providers without this account functionality. The Dim provider implements all three. The issuer, tokens, request headers and refresh retry stay in the provider; none is a client parameter. Account-service error bodies are never returned to clients.
+
+`defaultDirectory` is non-secret login metadata for a signed-out client, not an OAuth client ID. The Dim provider selects it from the host entry (`DIMCODE_NPM_PACKAGE`, otherwise the executable stem): `dimagent` selects `https://dimagent.com`, other entries select `https://dimagent.cn`. An enterprise email still goes through the provider's directory discovery. Subscription, pricing and referral URLs derive from the authenticated grant's issuer.
 
 `ManagedModel` is `{entry: ModelEntry, protocol, unavailableReason, zdr}`. `ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A provider supplies final public model descriptions; `BundledCatalog::fallback` offers the provider service's bundled metadata (refreshed before each release) for what its source omits. An unavailable model keeps a reason and is unselectable.
 
@@ -454,7 +535,7 @@ Account and login operations are exposed as `account.providers`, `account.status
 
 The provider owns every accepted operation: a caller dropping its future never abandons a token rotation or a persisted login, and disposal joins that work. Before draining Agent/RPC work, the host calls the idempotent `quiesce()`; binding unload does the same. Quiesce stops admission and cancels lock waits and login attempts without awaiting them; it does not abandon a refresh that holds the account lock or revoke delivered leases.
 
-Errors are the canonical `ManagedError` kinds; the host maps them to fixed public diagnostics (`account_required`, `account_changed`, `account_invalid_store`, `account_unsupported_schema`, `account_recovery_required`, `account_reset_blocked`, `account_identity_rejected`, `account_invalid_input`, `login_attempt_unknown`, `login_attempt_closed`, `account_invalid_response`, `service_reloading`, otherwise `account_unavailable`). Account corruption and an unavailable provider are never represented as a signed-out account.
+Errors are the canonical `ManagedError` kinds; the host maps them to fixed public diagnostics (`account_required`, `account_changed`, `account_invalid_store`, `account_unsupported_schema`, `account_recovery_required`, `account_reset_blocked`, `account_reset_denied`, `account_identity_rejected`, `account_invalid_input`, `login_attempt_unknown`, `login_attempt_closed`, `account_invalid_response`, `service_reloading`, otherwise `account_unavailable`). A reset-apply HTTP 403 maps to `account_reset_denied`, not a login failure. Account corruption and an unavailable provider are never represented as a signed-out account.
 
 ## Catalog and storage consistency
 
@@ -472,7 +553,7 @@ Public API-key, provider, native subscription, managed provider and transport fl
 cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test managed_provider_flow --test model_catalog_flow --test transport_flow
 ```
 
-The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; Python rows and an unmodified Cordis 4 plugin in their groups; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package. The Python rows need Python 3.10 or later with the pinned `rutis` package:
+The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; Python rows and an unmodified Cordis 4 plugin in their groups; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package. The Python rows need Python 3.12 or later with the pinned `rutis` package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts
@@ -537,6 +618,15 @@ configuration file: the default plugins by name and directory, and the locked na
 `--node` and `--js-runtime` (and `--python`); with `--defaults` and no `--session-rows`, packages
 resolve from the default configuration file's location. A plugin whose runtime is not given shows
 its row's status in `plugin.list`.
+
+Client RPC replies omit Git source userinfo, query and fragment, preserving the
+repository path, ref and commit. The complete source stays in the owner's record
+so update continues to work. RPC failures preserve their stable application code
+and an actionable description, but omit raw Git, manifest, loader and content-error
+messages, which can contain credentials. Runtime and content failures in successful
+replies use a generic error message. Projection touches only catalog candidate sources,
+top-level status errors and direct content-refusal errors, including mutation results;
+it does not traverse plugin-owned settings or add an alternate lifecycle.
 
 ```sh
 dim-app-server --product-home /absolute/home --home /absolute/home/rust \
