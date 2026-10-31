@@ -2318,6 +2318,63 @@ mod tests {
         assert_eq!(steer.mode, Some(InputMode::Steer));
     }
 
+    /// The committed set parses through the runner's own reader, and the two
+    /// pairs that share a premise stay equal: the compact scenario reuses
+    /// `redone-work`'s message and workspace, and `flooding` and
+    /// `never-ending` share one workspace (Timeline branches §12.3). No model
+    /// runs, so CI catches a schema, layout or pair drift before a manual run.
+    #[test]
+    fn the_committed_scenario_set_parses_and_its_shared_premises_stay_equal() {
+        let root = repository().join("xtask").join("scenario-eval");
+        let branches = read_scenarios(&root.join("timeline-branches")).unwrap();
+        let compact = read_scenarios(&root.join("timeline-branches-compact")).unwrap();
+        fn find<'a>(scenarios: &'a [Scenario], id: &str) -> &'a Scenario {
+            scenarios
+                .iter()
+                .find(|scenario| scenario.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the committed set"))
+        }
+        let redone = find(&branches, "redone-work");
+        let identity = find(&compact, "identity-after-compaction");
+        assert_eq!(
+            identity.message, redone.message,
+            "identity-after-compaction runs redone-work's task"
+        );
+        assert_eq!(
+            workspace_files(&identity.directory),
+            workspace_files(&redone.directory),
+            "identity-after-compaction starts from redone-work's workspace"
+        );
+        let flooding = find(&branches, "flooding");
+        let never_ending = find(&branches, "never-ending");
+        assert_eq!(
+            workspace_files(&flooding.directory),
+            workspace_files(&never_ending.directory),
+            "flooding and never-ending start from one workspace"
+        );
+    }
+
+    /// Every file under a scenario's `workspace/`, by path under it.
+    fn workspace_files(directory: &Path) -> BTreeMap<PathBuf, String> {
+        fn walk(root: &Path, directory: &Path) -> BTreeMap<PathBuf, String> {
+            let mut files = BTreeMap::new();
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.extend(walk(root, &path));
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        String::from_utf8(std::fs::read(&path).unwrap())
+                            .expect("a scenario workspace file is text"),
+                    );
+                }
+            }
+            files
+        }
+        walk(directory, &directory.join("workspace"))
+    }
+
     /// A candidate exactly at `current − δ` passes the rule; one just below
     /// fails it, over run counts whose rates as `f64` sit either side of the
     /// boundary (model-prompts §8.1).

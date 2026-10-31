@@ -371,6 +371,8 @@ The requirements that answer these items are in [Model-facing prompts](model-pro
 
 The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: seven under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 16,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
 
+`identity-after-compaction` reuses `redone-work`'s message and workspace, and `flooding` and `never-ending` share one workspace: each pair stays identical, and the no-model test that reads both committed directories fails when one copy changes alone.
+
 | Scenario | Scenario directory | Watch for |
 | --- | --- | --- |
 | A line acts as main | — | It opens lines, claims the roster, or coordinates other lines |
