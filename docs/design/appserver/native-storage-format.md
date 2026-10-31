@@ -1,17 +1,17 @@
 # Rust 会话存储格式
 
-The current native format is **v27**, with source-owned `settings_documents`,
+The current native format is **v28**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
 branch end events, the tool-effect and digest fields, and tool schemas that may
 omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, and a delegation's Agent owner
-and member leader. Startup requires the exact v27 SQL schema and a single
-format marker of 27 before writable PRAGMAs, or the exact v26, v25, v24, v23,
+and member leader, and Session file grants. Startup requires the exact v28 SQL schema and a single
+format marker of 28 before writable PRAGMAs, or the exact v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v27 one step after
-another ([#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v28 one step after
+another ([#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -24,17 +24,17 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v27, and v16 request rows stay readable as written.
+valid in v28, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v27 tables
+## Current v28 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 27)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 28)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -92,6 +92,10 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `session_files.writer` | `TEXT` | 是 | 隐式 `NULL` | 写入未完成时是 SessionStore 代次 ID；提交或放弃后为 `NULL` |
 | `session_file_owners.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)` |
 | `session_file_owners.file_id` | `TEXT` | 否 | — | 联合主键第 2 列；外键到 `session_files(file_id)` |
+| `session_grants.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)`；随 Session 删除（v28） |
+| `session_grants.path` | `TEXT` | 否 | — | 联合主键第 2 列；规范绝对路径；文件 grant 精确匹配，目录 grant 按路径分量包含子项 |
+| `session_grants.kind` | `TEXT` | 否 | — | `CHECK (kind IN ('file', 'dir'))` |
+| `session_grants.mode` | `TEXT` | 否 | — | `CHECK (mode IN ('read', 'write'))`；write 同时允许读，read 不降级已有 write |
 | `session_metadata.session_id` | `TEXT` | 否 | — | 主键；外键到 `agent_sessions(session_id)`；每个 Session 至多一行，没有行表示修订号 0、没有标题（v16） |
 | `session_metadata.revision` | `INTEGER` | 否 | — | `CHECK(revision > 0)`；该 Session 已提交 `setTitle` 的次数，`setTitle` 的 CAS 修订号 |
 | `session_metadata.title` | `TEXT` | 是 | 隐式 `NULL` | 标题文本，原样保存；清除后为 `NULL`，行保留 |
@@ -430,9 +434,18 @@ ProjectionCheckpoint = {
 - **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
 
+### #717 v28 格式决定
+
+[Session grants](../../adr/012-session-grants.md) 的原生存储格式为 **v28**，从 #593 的 v27 原地升级。v27 保留委派归属的两列和两个索引。
+
+- **新增结构**：`session_grants(session_id, path, kind, mode)`，列、主键、外键与约束见当前表定义；其他 SQL 结构和持久化 JSON 不变。主键服务 Session 内的读取、upsert 和删除；`session.grants.lookup` 按 Session 读取后匹配，没有按路径的单列查询，因此不另建索引。
+- **升级**：空库创建 v28；精确匹配且标记相符的 v27 库在现有启动准入事务内创建空的 grants 表，重建标记表并写入 28。更早的受支持格式先执行已有步骤，再执行本步。失败回滚；旧业务行及委派归属列原值不变，不从历史审批生成 grants。
+- **单向**：v27 守护进程拒绝 v28 库；不降级。准入仍要求精确 SQL 结构及对应标记，不能将不同结构共用同一编号。
+- **验证**：`storage_flow.rs` 的 `a_v27_store_upgrades_in_place_once` 核对 v27 原地升级、业务行保持、grants 初始为空和再次打开不再升级；`documented_native_records_restore_with_legacy_snapshot_bypassed` 经完整记录示例的 grants 行核对重启后原样恢复；`a_delete_removes_the_sessions_grants` 核对删除事务同时清掉 grants；既有各格式升级测试核对完整升级链。
+
 ### #593 v27 格式决定
 
-[Collaboration](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)（#593）的格式决定：升级到 **v27**，从 v26 原地升级。若在本实现之前另有格式变更先合入（[#717](https://github.com/arcships/dim/pull/717) 声明为 v27），实现取当时的下一个编号，本节其余内容与列定义不随编号改变。
+[Collaboration](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)（#593）的格式决定：升级到 **v27**，从 v26 原地升级。
 
 - **只加两个可空列与两个索引**：`agents.owner_session_id TEXT REFERENCES agent_sessions(session_id)` 与 `agent_sessions.leader_session_id TEXT REFERENCES agent_sessions(session_id)`，以及 `agents_by_owner`、`agent_sessions_by_leader`。其他表、列、持久化 JSON、内容寻址与既有索引不变。
   - `agents.owner_session_id` 非空表示该 leader Session 拥有这个私有 Agent；NULL 表示公开 Agent（默认 Agent 与 `agent.create` 创建的）。它就是"临时 Agent"的唯一标志，不另设布尔列。
@@ -551,6 +564,7 @@ ProjectionCheckpoint = {
 | v23 `session_catalog_by_activity` | `(updated_at_ms DESC, session_id)` | 目录键集分页 |
 | v23 `session_catalog_with_preview` | `(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL` | 过滤无预览行的目录分页 |
 | v16 主键 `session_metadata` | `(session_id)` | `read`、`setTitle`、列表联结标题、删除与创建回滚按 Session 删除 |
+| v28 主键 `session_grants` | `(session_id, path)` | 一个 Session 的 grant 读取、add 的 upsert、remove 与 delete 按 Session 定点删除 |
 
 ## 分页查询
 
@@ -566,7 +580,7 @@ ProjectionCheckpoint = {
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v26；v27 未改动这些行）
+## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -579,7 +593,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 26}],
+  "agent_store_format": [{"version": 28}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
@@ -724,6 +738,7 @@ current manual title.
   }],
   "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
   "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],
+  "session_grants": [{"session_id": "s1", "path": "/work/notes.md", "kind": "file", "mode": "write"}],
   "session_metadata": [{"session_id": "s1", "revision": 2, "title": "Example conversation", "title_source": "manual"}]
 }
 ```

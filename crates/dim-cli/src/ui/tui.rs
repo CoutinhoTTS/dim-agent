@@ -186,7 +186,9 @@ pub fn print_web_panel(opened: &WebOpened) {
         println!("Press Ctrl+C to stop the Web workspace.");
         return;
     }
-    let palette = Theme::detect(&detect::env_from_process(), true, None).palette;
+    let palette = Theme::detect(&detect::env_from_process(), true, None)
+        .1
+        .palette;
     let cols = crate::ui::terminal::window_size().map_or(80, |(cols, _)| usize::from(cols));
     print!("{}", web_panel(cols, &palette, opened));
     if let Some(url) = opened.sign_in {
@@ -230,7 +232,7 @@ fn run_terminal(
     let env = detect::env_from_process();
     let mut progress = ProgressBar::from_env(&env);
     let mut title = WindowTitle::new(crate::ui::title::apple_terminal(), Instant::now());
-    let detected = Theme::detect(&env, true, background.as_deref());
+    let (default_id, detected) = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
         Some(id) => Theme::named(
@@ -257,7 +259,7 @@ fn run_terminal(
         mode: detected.mode,
         appearance: detected.appearance,
         background,
-        active: saved.unwrap_or_else(|| crate::ui::theme_panel::SYSTEM.to_owned()),
+        active: saved.unwrap_or_else(|| default_id.to_owned()),
     });
     let mut dirty = true;
     let mut last_frame: Option<Instant> = None;
@@ -2367,6 +2369,7 @@ impl App {
                 branch_id,
                 allow,
                 remember,
+                grant,
             } => {
                 self.answered
                     .insert((branch_id.clone(), request_id.clone()));
@@ -2375,6 +2378,7 @@ impl App {
                     branch_id,
                     allow,
                     remember,
+                    grant,
                 });
                 self.prompt = None;
                 self.sync_prompt();
@@ -2468,6 +2472,7 @@ impl App {
                         branch_id,
                         allow: true,
                         remember: false,
+                        grant: None,
                     });
                 }
                 self.prompt = None;
@@ -2759,7 +2764,6 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
-            model: self.label.as_ref().map(ModelLabel::full),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -2786,10 +2790,6 @@ impl App {
                 let panel = crate::ui::isolation_panel::IsolationPanel::new(&self.approvals);
                 self.open_prompt(Prompt::Isolation(Box::new(panel)));
                 self.host.send(Command::ReadIsolation);
-            }
-            Setting::Model => {
-                self.open_prompt(Prompt::Models(ModelsPanel::new()));
-                self.host.send(Command::ListModels);
             }
             Setting::StartupForm => {
                 let fullscreen = !crate::ui::config::saved_fullscreen(&self.home);
@@ -5516,6 +5516,37 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn settings_omits_model_selection_and_model_command_keeps_it() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 32), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let screen = |drawn: &mut Drawn| {
+                if fullscreen {
+                    let frame = drawn.app.frame(drawn.size);
+                    let mut screen = FullScreen::new(drawn.size, true);
+                    let bytes = screen.render(&frame, drawn.size, &drawn.app.palette, &drawn.app);
+                    let mut terminal = crate::ui::render::testterm::Emu::new(100, 32);
+                    terminal.feed(&bytes);
+                    terminal.rows_text().join("\n")
+                } else {
+                    drawn.emu.rows_text().join("\n")
+                }
+            };
+            typed(&mut drawn.app, "/settings");
+            drawn.key(KeyCode::Enter);
+            let settings = screen(&mut drawn);
+            assert!(settings.contains("Settings"), "{settings}");
+            assert!(settings.contains("Execution"), "{settings}");
+            assert!(!settings.contains("Model"), "{settings}");
+            drawn.key(KeyCode::Esc);
+            typed(&mut drawn.app, "/model");
+            drawn.key(KeyCode::Enter);
+            let models = screen(&mut drawn);
+            assert!(models.contains("Select a model"), "{models}");
+        }
     }
 
     #[test]

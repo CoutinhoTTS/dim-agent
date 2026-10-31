@@ -329,3 +329,37 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
     drop(store);
     fixture.close().await;
 }
+
+/// ADR 012 D1: a delete removes the Session's grants in the same transaction
+/// as its other rows.
+#[tokio::test]
+async fn a_delete_removes_the_sessions_grants() {
+    use dim_agent_types::grant::{GrantKind, GrantMode};
+
+    let fixture = Fixture::new().await;
+    let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
+    fixture.session("deleted").await;
+    store
+        .add_grant(
+            "deleted",
+            PathBuf::from("/work/notes.md"),
+            GrantKind::File,
+            GrantMode::Write,
+        )
+        .await
+        .unwrap();
+    store
+        .add_grant(
+            "deleted",
+            PathBuf::from("/work/notes"),
+            GrantKind::Dir,
+            GrantMode::Write,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.grants("deleted").await.unwrap().len(), 2);
+    assert!(store.delete_session("deleted").await.unwrap());
+    assert!(store.grants("deleted").await.unwrap().is_empty());
+    drop(store);
+    fixture.close().await;
+}

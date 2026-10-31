@@ -314,8 +314,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Tool approvals" => "工具审批",
         "Execution" => "执行",
         "Models" => "模型",
-        "Model" => "模型",
-        "not set" => "未设置",
         "Settings" => "设置",
         "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ 移动 · Enter 选择 · ←→/Space 修改 · Esc 关闭"

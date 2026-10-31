@@ -346,8 +346,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Tool approvals" => "ツール承認",
         "Execution" => "実行",
         "Models" => "モデル",
-        "Model" => "モデル",
-        "not set" => "未設定",
         "Settings" => "設定",
         "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ 移動 · Enter 選択 · ←→/Space 変更 · Esc 閉じる"

@@ -1072,6 +1072,7 @@ impl Worker {
                 branch_id,
                 allow,
                 remember,
+                grant,
             } => {
                 let is_member = self.projection.approvals().iter().any(|approval| {
                     approval.request_id == request_id
@@ -1082,6 +1083,23 @@ impl Worker {
                     self.read_member_approval(&branch_id, &request_id, true)
                         .await?;
                     return Ok(());
+                }
+                if allow && let Some(grant) = grant {
+                    let result = self
+                        .client
+                        .rpc(
+                            "session.grants.add",
+                            json!({
+                                "sessionId": self.session_id,
+                                "path": grant.path,
+                                "kind": grant.kind,
+                                "mode": grant.mode,
+                            }),
+                        )
+                        .await;
+                    if let Err(error) = result {
+                        self.send(Update::Toast(format!("Grant not saved: {error}")));
+                    }
                 }
                 // "Always" saves the exact allow rule first (F2 §5.4); the
                 // call is allowed once either way, as the user asked.
