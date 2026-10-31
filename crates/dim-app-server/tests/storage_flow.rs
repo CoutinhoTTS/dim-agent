@@ -5652,8 +5652,8 @@ async fn streamed_context_reads_complete_batches_across_the_window() {
         .create_session("session", &SessionConfig::default())
         .await
         .unwrap();
-    let mut singles: Vec<_> = (1..=254).map(|sequence| text(sequence, "line")).collect();
-    append(&store, key("session", "main"), singles.drain(..).collect())
+    let singles: Vec<_> = (1..=254).map(|sequence| text(sequence, "line")).collect();
+    append(&store, key("session", "main"), singles)
         .await
         .unwrap();
     let mut batch = vec![text(255, "a"), text(256, "b"), text(257, "c")];
