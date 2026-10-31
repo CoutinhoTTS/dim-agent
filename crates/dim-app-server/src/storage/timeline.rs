@@ -2295,6 +2295,7 @@ impl TimelineStore for SqliteTimelineStore {
                          json_extract(body, '$.record.event.data.through') \
                          FROM timeline_events \
                          WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+                         AND event_id IS NOT NULL \
                          ORDER BY sequence",
                     )
                     .map_err(error)?;

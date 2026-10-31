@@ -751,7 +751,14 @@ impl Timeline {
             Bound::Unbounded => self.committed(),
         };
         let end = self.through(Some(end))?;
-        self.stored(start, end).await
+        Ok(self
+            .0
+            .store
+            .read(&self.0.key, start..=end)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
     }
 
     /// Full fact replay; no interpreter or snapshot is required.
