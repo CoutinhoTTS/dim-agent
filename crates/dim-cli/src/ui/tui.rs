@@ -85,7 +85,7 @@ const REWRITE_LOG: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
-const GIT_BRANCH_POLL: Duration = Duration::from_secs(1);
+const GIT_BRANCH_POLL: Duration = Duration::from_secs(10);
 /// One blank column of margin before every document row (L's content pad).
 const MARGIN: usize = 1;
 /// Revision of the transcript the planner is tracking; a session switch bumps it.

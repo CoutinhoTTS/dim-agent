@@ -732,10 +732,10 @@ answer text (including its retained streaming tail)
 
 The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
-The Git branch label follows branch switches in both modes, including switches made by tools or another terminal. At startup the client resolves the workspace's own Git `HEAD` path (including linked worktrees); the existing UI timer reads that file at most once per second, without spawning more Git processes, and requests a repaint only when the name changes. Detached HEAD displays `HEAD`; a transient read failure keeps the last known name until the next check.
+The Git branch label follows branch switches in both modes, including switches made by tools or another terminal. At startup the client resolves the workspace's own Git `HEAD` path (including linked worktrees); the existing UI timer reads that file at most once every 10 seconds, without spawning more Git processes, and requests a repaint only when the name changes. Detached HEAD displays `HEAD`; a transient read failure keeps the last known name until the next check.
 
 ```text
-git switch feature/fix  ->  workspace HEAD changes  ->  next check (about 1 s)
+git switch feature/fix  ->  workspace HEAD changes  ->  next check (within about 10 s)
                                                       |
 composer:  ... (main)  --------------------------------+->  ... (feature/fix)
 ```
