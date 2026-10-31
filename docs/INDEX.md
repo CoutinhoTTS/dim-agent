@@ -30,7 +30,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [ADR 015 — Sessions, branches and their content are plugins, not loader instances](adr/015-scopes-are-plugins.md)
 - [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability（[中文](zh/design/plugin-contract.md)）
 - [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings（[中文](zh/design/rutis-usage.md)）
-- [Sessions and branches are plugins, not loader instances](design/thin-instances.md): Session and branch scopes as plain plugins that mark their group on rutis 0.19.2, so creation reads no loader table (#594)
+- [Sessions and branches are plugins, not loader instances](design/thin-instances.md): Session and branch scopes as plain plugins that mark their group on rutis 0.19.3, so creation reads no loader table (#594)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
@@ -57,7 +57,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Workflows in the CLI task view](design/workflow-task-view.md) (#264)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
-- [Upgrading to rutis 0.19.2](design/rutis-0.19-upgrade.md): host, runtimes, leaf and TypeScript plugins in one step, runtimes as connection rows, the leaf as a session（[中文](zh/design/rutis-0.19-upgrade.md)）
+- [Upgrading to rutis 0.19.3](design/rutis-0.19-upgrade.md): host, runtimes, leaf and TypeScript plugins in one step, runtimes as connection rows, the leaf as a session（[中文](zh/design/rutis-0.19-upgrade.md)）
 - [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md)（[中文](zh/design/rutis-0.16-upgrade.md)）
 - [Upgrading to rutis 0.15.0](design/rutis-0.15-upgrade.md)（superseded by the 0.16 design）（[中文](zh/design/rutis-0.15-upgrade.md)）
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)

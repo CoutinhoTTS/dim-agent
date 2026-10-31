@@ -142,11 +142,9 @@ jobs:
           (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/session-title ./plugins/scheduler ./plugins/workflow)
           node --test runtime/plugin-sdk.test.mjs
           # The goal, session-title, scheduler and workflow plugin tests are off
-          # until rutis's 0.19 TypeScript test tool stops deadlocking when a
-          # callback and a fake call interleave (rutis#987), stops ending the
-          # host on one failed provide (rutis#988), and leaves `sessions` to the
-          # host (rutis#986). The Node-backed Rust flows below still load these
-          # plugins for real. `tsc` checks session-title, scheduler and
+          # although 0.19.3 fixed the test tool (rutis#986–#988): they do not
+          # pass against it yet. The Node-backed Rust flows below still load
+          # these plugins for real. `tsc` checks session-title, scheduler and
           # workflow; goal has no tsconfig.
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/session-title/tsconfig.json
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/scheduler/tsconfig.json
