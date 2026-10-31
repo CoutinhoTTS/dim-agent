@@ -39,7 +39,7 @@ use crate::ui::providers_panel::{action_row, field_room, input_row};
 use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered};
 use crate::ui::rows::title_plain;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
-use crate::ui::text::{display_width as width_of, truncate_cells};
+use crate::ui::text::{display_width as width_of, truncate_cells, wrap_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 
@@ -69,7 +69,7 @@ enum Focus {
     Logout,
     BrowserTab,
     Email,
-    Copy,
+    Link,
     Input,
     RestartDevice,
 }
@@ -268,16 +268,17 @@ impl OauthView {
             if let Some(text) = &self.device_text {
                 rows.push((Row::Section, text.clone()));
             }
-            rows.push((
-                Row::Action(Focus::Copy),
-                t("Print verification URL + pairing code again").into(),
-            ));
+            if let Some(url) = &self.auth_url {
+                rows.push((Row::Action(Focus::Link), url.clone()));
+            }
             rows.push((
                 Row::Action(Focus::RestartDevice),
                 t("Restart device login").into(),
             ));
         } else if self.phase == Phase::AwaitingCallback {
-            rows.push((Row::Action(Focus::Copy), t("Print OAuth URL again").into()));
+            if let Some(url) = &self.auth_url {
+                rows.push((Row::Action(Focus::Link), url.clone()));
+            }
             rows.push((Row::Action(Focus::Input), t("Callback URL").into()));
             rows.push((Row::Action(Focus::Submit), t("Submit callback").into()));
         }
@@ -465,6 +466,10 @@ impl OauthView {
             .collect()
     }
 
+    pub fn native_selection(&self) -> bool {
+        self.focus_order().contains(&Focus::Link)
+    }
+
     fn move_focus(&mut self, delta: isize) {
         let order = self.focus_order();
         if order.is_empty() {
@@ -483,19 +488,12 @@ impl OauthView {
             OauthEvent::Url { url, opened } => {
                 self.phase = Phase::AwaitingCallback;
                 self.auth_url = Some(url);
-                self.focus = Focus::Copy;
+                self.focus = Focus::Link;
                 if !opened {
                     self.message = Some(
                         t("The browser could not be opened. Open the link manually, then return here.")
                             .to_owned(),
                     );
-                }
-                if !opened {
-                    return Effect::Print(format!(
-                        "{}\n{}",
-                        tf("{name} OAuth URL", &[("name", &self.name)]),
-                        self.auth_url.clone().unwrap_or_default()
-                    ));
                 }
                 Effect::None
             }
@@ -505,22 +503,14 @@ impl OauthView {
                 user_code,
             } => {
                 self.phase = Phase::AwaitingDevice;
-                self.focus = Focus::Copy;
+                self.focus = Focus::Link;
                 let target = verification_uri_complete
                     .clone()
                     .unwrap_or_else(|| verification_uri.clone());
-                self.device_text = Some(tf(
-                    "Enter code {code} at {url}",
-                    &[("code", &user_code), ("url", &target)],
-                ));
+                self.device_text = Some(tf("Enter code:    {code}", &[("code", &user_code)]));
                 self.auth_url = Some(target);
                 self.message = Some(t("Waiting for authorization").to_owned());
-                Effect::Print(format!(
-                    "{}\n{}\n{}",
-                    tf("{name} device login", &[("name", &self.name)]),
-                    tf("Open this URL: {url}", &[("url", &verification_uri)]),
-                    tf("Enter code:    {code}", &[("code", &user_code)]),
-                ))
+                Effect::None
             }
             OauthEvent::Exchanging => {
                 self.phase = Phase::Exchanging;
@@ -615,9 +605,17 @@ impl OauthView {
         }
     }
 
+    fn link_height(&self, height: usize) -> usize {
+        let reserved = 5
+            + self.rows(0, None).len()
+            + usize::from(self.message.is_some())
+            + usize::from(self.error.is_some());
+        height.saturating_sub(reserved).max(1)
+    }
+
     /// The focused field's caret: its row among the rows drawn and its
     /// column after the border, the marker and the label.
-    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+    pub fn cursor(&self, width: usize, height: usize) -> Option<(usize, usize)> {
         let (phase, focus) = (self.phase, self.focus);
         let field = match (phase, focus) {
             (Phase::Email, Focus::Email) => &self.email,
@@ -629,9 +627,19 @@ impl OauthView {
         let (index, label) = rows.iter().enumerate().find_map(|(i, (row, label))| {
             matches!(row, Row::Action(f) if *f == focus).then_some((i, label))
         })?;
+        let before: usize = rows[..index]
+            .iter()
+            .map(|(row, label)| {
+                if *row == Row::Action(Focus::Link) {
+                    wrap_cells(label, inner).len().min(self.link_height(height))
+                } else {
+                    1
+                }
+            })
+            .sum();
         let column = field.view(field_room(inner, label)).1;
         Some((
-            3 + index,
+            3 + before,
             2 + width_of(SELECTED_MARKER) + width_of(label) + 2 + column,
         ))
     }
@@ -691,11 +699,8 @@ impl OauthView {
             },
             Focus::Logout => Effect::Logout(self.provider_id.clone()),
             Focus::RestartDevice => self.start(true, None),
-            Focus::Copy => match &self.auth_url {
-                Some(url) => Effect::Print(format!(
-                    "{}\n{url}",
-                    tf("{name} OAuth URL", &[("name", &self.name)])
-                )),
+            Focus::Link => match &self.auth_url {
+                Some(url) => Effect::OpenUrl(url.clone()),
                 None => Effect::None,
             },
             Focus::Input => {
@@ -713,6 +718,7 @@ impl OauthView {
             _ if matches!(self.focus, Focus::Email | Focus::Input) => {
                 "type value · ↑↓/tab move · enter submit · esc cancel"
             }
+            _ if self.focus == Focus::Link => "Select to copy · Enter opens link",
             Phase::Idle if self.signed_in() => {
                 "↑↓ move · enter activate · ctrl+r refresh · esc close"
             }
@@ -721,7 +727,7 @@ impl OauthView {
         })
     }
 
-    pub fn render(&self, width: usize, p: &Palette) -> Vec<String> {
+    pub fn render(&self, width: usize, height: usize, p: &Palette) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
         let mut content = vec![
             title_plain(&tf("{name} OAuth", &[("name", &self.name)]), inner, p),
@@ -729,6 +735,7 @@ impl OauthView {
         ];
         let restart = matches!(self.phase, Phase::Error | Phase::Cancelled);
         let rows = self.rows(inner.saturating_sub(2), Some(p));
+        let mut shortened = false;
         for (row, label) in &rows {
             match row {
                 Row::Section => content.push(format!(
@@ -736,6 +743,22 @@ impl OauthView {
                     fg(&truncate_cells(label, inner.saturating_sub(2)), &p.muted)
                 )),
                 Row::Styled => content.push(format!("{IDLE_MARKER}{label}")),
+                Row::Action(Focus::Link) => {
+                    let mut lines = wrap_cells(label, inner);
+                    let limit = self.link_height(height);
+                    if lines.len() > limit {
+                        shortened = true;
+                        lines.truncate(limit);
+                        let last = lines.last_mut().unwrap();
+                        *last = truncate_cells(&format!("{last}…"), inner);
+                    }
+                    for line in lines {
+                        content.push(fg(
+                            &crate::ui::render::osc8::hyperlink(label, &line),
+                            &p.accent,
+                        ));
+                    }
+                }
                 Row::Action(focus) => {
                     let focused = *focus == self.focus && !restart;
                     content.push(match focus {
@@ -779,7 +802,12 @@ impl OauthView {
             ));
         }
         content.push(String::new());
-        content.push(fg(&truncate_cells(self.hint(), inner), &p.muted));
+        let hint = if shortened && self.focus == Focus::Link {
+            t("Link shortened · Enter opens link")
+        } else {
+            self.hint()
+        };
+        content.push(fg(&truncate_cells(hint, inner), &p.muted));
         bordered(&content, width, None, &p.border, None, None)
     }
 }

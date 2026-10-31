@@ -276,6 +276,16 @@ const V15_ADDITIONS: &[&str] = &[
 const V16_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
 ];
+/// The v26 text of the two tables v27 adds a column to, and what v27 adds to
+/// them besides the marker.
+const AGENT_SESSIONS_V25: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))";
+const AGENT_SESSIONS_V27: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))";
+const AGENTS_V25: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
+const AGENTS_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)), owner_session_id TEXT REFERENCES agent_sessions(session_id))";
+const V27_ADDITIONS: &[&str] = &[
+    "CREATE INDEX agent_sessions_by_leader ON agent_sessions(leader_session_id)",
+    "CREATE INDEX agents_by_owner ON agents(owner_session_id)",
+];
 const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
     "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
@@ -287,8 +297,17 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V15_ADDITIONS.iter().filter(|_| version >= 15))
         .chain(V16_ADDITIONS.iter().filter(|_| version >= 16))
         .chain(V23_ADDITIONS.iter().filter(|_| version >= 23))
+        .chain(V27_ADDITIONS.iter().filter(|_| version >= 27))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
+        .map(|sql| {
+            if version < 27 {
+                sql
+            } else {
+                sql.replace(AGENT_SESSIONS_V25, AGENT_SESSIONS_V27)
+                    .replace(AGENTS_V25, AGENTS_V27)
+            }
+        })
         .collect();
     statements.sort();
     statements
@@ -362,8 +381,13 @@ fn schema(connection: &Connection) -> Vec<String> {
 }
 /// Every row of `table`, rendered and sorted.
 fn rows(connection: &Connection, table: &str) -> Vec<String> {
+    let projection = match table {
+        "agents" => "agent_id, profile, is_default",
+        "agent_sessions" => "session_id, config, created_at_ms",
+        _ => "*",
+    };
     let mut query = connection
-        .prepare(&format!("SELECT * FROM {table}"))
+        .prepare(&format!("SELECT {projection} FROM {table}"))
         .unwrap();
     let columns = query.column_count();
     let mut rows: Vec<String> = query
@@ -472,7 +496,9 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
     connection
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
-    insert_documented_records(&connection, &["agent_store_format"]);
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (27)", [])
+        .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
 
@@ -2748,8 +2774,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(26));
-    assert_eq!(marker(&connection), [26]);
+    assert_eq!(schema(&connection), schema_of(27));
+    assert_eq!(marker(&connection), [27]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2828,8 +2854,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(26));
-    assert_eq!(marker(&connection), [26]);
+    assert_eq!(schema(&connection), schema_of(27));
+    assert_eq!(marker(&connection), [27]);
     drop(connection);
 
     let database = Database::new();
@@ -2949,7 +2975,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [26]);
+    assert_eq!(marker(&connection), [27]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -3048,7 +3074,10 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     db.close().await.unwrap();
 
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(marker(&connection), [26]);
+    assert_eq!(
+        marker(&connection),
+        [i64::from(dim_app_server::storage::STORE_FORMAT)]
+    );
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -3064,7 +3093,11 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), None, "the store is already version 26");
+    assert_eq!(
+        db.upgraded_from(),
+        None,
+        "the store is already the current format"
+    );
     let store = SqliteTimelineStore::new(db.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
@@ -3123,7 +3156,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v26; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v27; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -3150,7 +3183,7 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     let connection = Connection::open(&database.0).unwrap();
     connection
         .execute(
-            "INSERT INTO agents VALUES ('owner', ?1, 1)",
+            "INSERT INTO agents(agent_id, profile, is_default) VALUES ('owner', ?1, 1)",
             [serde_json::to_string(&AgentProfile {
                 name: "owner".into(),
                 description: String::new(),
@@ -3165,13 +3198,19 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     let retained_db = root.get::<SqliteStorage>().unwrap();
     assert!(
         directory
-            .create_owned_session("missing-owner", &SessionConfig::default(), "unknown", 2)
+            .create_owned_session(
+                "missing-owner",
+                &SessionConfig::default(),
+                "unknown",
+                2,
+                None
+            )
             .await
             .is_err()
     );
     assert!(directory.sessions().await.unwrap().is_empty());
     directory
-        .create_owned_session("owned", &SessionConfig::default(), "owner", 2)
+        .create_owned_session("owned", &SessionConfig::default(), "owner", 2, None)
         .await
         .unwrap();
     assert_eq!(directory.sessions().await.unwrap(), ["owned"]);
@@ -5358,8 +5397,8 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             .unwrap()
     };
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(26));
-    assert_eq!(marker(&connection), [26]);
+    assert_eq!(schema(&connection), schema_of(27));
+    assert_eq!(marker(&connection), [27]);
     drop(connection);
 
     let listed_expected = json!({
@@ -5532,4 +5571,16 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
         ),
         before
     );
+}
+/// The step that adds a column to two tables alters them before v27's indexes
+/// exist, and keeps every business row.
+#[tokio::test]
+async fn a_v26_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = catalog_store(&database.0, 26);
+    connection
+        .execute_batch("DROP INDEX timeline_events_by_end")
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(26));
+    upgrades_in_place_once(&database, connection, 26).await;
 }

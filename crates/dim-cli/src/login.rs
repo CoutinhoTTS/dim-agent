@@ -100,7 +100,7 @@ pub async fn login(client: &mut Client, options: &Options, provider_id: &str) ->
     params["redirectUri"] = json!(options.redirect_uri);
     let browser: Browser = client.typed("account.login.browser.begin", params).await?;
     println!("Open: {}", safe(&browser.authorization_url));
-    open_browser(&browser.authorization_url);
+    crate::browser::open(&browser.authorization_url);
     let mut input = Input::new()?;
     let echo = input.hide_echo()?;
     println!("After authorization, paste the full callback URL. Input is hidden.");
@@ -173,27 +173,4 @@ async fn cancel(client: &mut Client, provider_id: &str, attempt_id: &str) -> Res
         )
         .await?;
     Ok(())
-}
-
-pub(crate) fn open_browser(url: &str) {
-    let valid = url.starts_with("https://") || url.starts_with("http://");
-    if !valid {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    let command = Some(("open", vec![url]));
-    #[cfg(target_os = "linux")]
-    let command = Some(("xdg-open", vec![url]));
-    #[cfg(windows)]
-    let command = Some(("rundll32.exe", vec!["url.dll,FileProtocolHandler", url]));
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    let command: Option<(&str, Vec<&str>)> = None;
-    if let Some((program, args)) = command {
-        let _ = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
 }

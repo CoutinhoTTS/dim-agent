@@ -7,7 +7,6 @@ use crate::{
     args::Options,
     client::Client,
     input::Input,
-    login::open_browser,
     mcp::{Capture, Catalog, Started, catalog_report, error, session_report, target},
     sanitize::safe,
 };
@@ -205,7 +204,7 @@ pub async fn sign_in(
     }
     println!("Open: {}", safe(&started.authorization_url));
     if local_browser {
-        open_browser(&started.authorization_url);
+        crate::browser::open(&started.authorization_url);
     }
     loop {
         let echo = input.hide_echo()?;

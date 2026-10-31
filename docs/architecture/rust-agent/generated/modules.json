@@ -1646,6 +1646,7 @@
         "json",
         "matches",
         "tokio::select",
+        "tracing::warn",
         "unreachable",
         "vec"
       ]
@@ -2646,8 +2647,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/browser.rs",
       "unexpandedMacros": [
-        "matches",
-        "vec"
+        "matches"
       ]
     },
     {
@@ -2656,8 +2656,7 @@
       "parent": "dim_cli::browser",
       "file": "crates/dim-cli/src/browser.rs",
       "unexpandedMacros": [
-        "assert",
-        "assert_eq"
+        "assert"
       ]
     },
     {
@@ -2860,8 +2859,7 @@
         "json",
         "println",
         "tokio::pin",
-        "tokio::select",
-        "vec"
+        "tokio::select"
       ]
     },
     {
@@ -14629,7 +14627,9 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path CollaborationRole::Member",
         "path SessionConfig",
+        "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig"
       ]
     },
@@ -16654,6 +16654,7 @@
         "path WEB_MANAGEMENT_METHODS",
         "path WEB_SETTINGS_SOURCES",
         "path agent_unknown",
+        "path crate::protocol::agent_unknown",
         "path session_cwd"
       ]
     },
@@ -23244,6 +23245,13 @@
     },
     {
       "from": "dim_cli::login",
+      "to": "dim_cli::browser",
+      "references": [
+        "path crate::browser::open"
+      ]
+    },
+    {
+      "from": "dim_cli::login",
       "to": "dim_cli::input",
       "references": [
         "path Input::new",
@@ -23323,18 +23331,17 @@
     },
     {
       "from": "dim_cli::mcp_command",
-      "to": "dim_cli::input",
+      "to": "dim_cli::browser",
       "references": [
-        "path Input",
-        "use crate::input::Input"
+        "path crate::browser::open"
       ]
     },
     {
       "from": "dim_cli::mcp_command",
-      "to": "dim_cli::login",
+      "to": "dim_cli::input",
       "references": [
-        "path open_browser",
-        "use crate::login::open_browser"
+        "path Input",
+        "use crate::input::Input"
       ]
     },
     {
@@ -27408,7 +27415,6 @@
         "path Effect::OauthStart",
         "path Effect::OpenModels",
         "path Effect::OpenUrl",
-        "path Effect::Print",
         "use crate::ui::prompts::Effect"
       ]
     },
@@ -27422,6 +27428,13 @@
         "use crate::ui::providers_panel::action_row",
         "use crate::ui::providers_panel::field_room",
         "use crate::ui::providers_panel::input_row"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view",
+      "to": "dim_cli::ui::render::osc8",
+      "references": [
+        "path crate::ui::render::osc8::hyperlink"
       ]
     },
     {
@@ -27466,8 +27479,10 @@
       "references": [
         "path truncate_cells",
         "path width_of",
+        "path wrap_cells",
         "use crate::ui::text::display_width",
-        "use crate::ui::text::truncate_cells"
+        "use crate::ui::text::truncate_cells",
+        "use crate::ui::text::wrap_cells"
       ]
     },
     {
@@ -28111,6 +28126,7 @@
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView",
+        "path OauthView::native_selection",
         "path OauthView::new",
         "use crate::ui::oauth_view::OauthView"
       ]
@@ -30452,13 +30468,6 @@
     },
     {
       "from": "dim_cli::ui::tui",
-      "to": "dim_cli::login",
-      "references": [
-        "path crate::login::open_browser"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::session",
       "references": [
         "path Command::Approval",
@@ -30823,7 +30832,6 @@
         "path Effect::OpenModels",
         "path Effect::OpenUrl",
         "path Effect::Plugin",
-        "path Effect::Print",
         "path Effect::Provider",
         "path Effect::ReadIsolation",
         "path Effect::ReadModelPolicy",
@@ -31314,6 +31322,7 @@
         "path SwitchKind::Forked",
         "path Update",
         "path Update::Isolation",
+        "path Update::Oauth",
         "path Update::PluginResult",
         "path Update::Plugins",
         "path Update::Snapshot",
@@ -31421,6 +31430,7 @@
         "path KeyCode::Home",
         "path KeyCode::Tab",
         "path KeyCode::Up",
+        "path KeyEvent::new",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path crate::ui::terminal::KeyEvent::new"
@@ -31480,6 +31490,7 @@
         "path ImageRead",
         "path LOAD_MORE",
         "path Prompt::Ask",
+        "path Prompt::Login",
         "path ThemeContext",
         "path WebOpened",
         "path banner",
@@ -33431,6 +33442,14 @@
     },
     {
       "module": "dim_cli::browser",
+      "path": "Command::new"
+    },
+    {
+      "module": "dim_cli::browser",
+      "path": "Stdio::null"
+    },
+    {
+      "module": "dim_cli::browser",
       "path": "char::is_control"
     },
     {
@@ -33776,6 +33795,18 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "IsolationPolicySource::File"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "OauthEvent::Device"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "OauthEvent::Done"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "OauthEvent::Url"
     },
     {
       "module": "dim_cli::ui::tui::tests",

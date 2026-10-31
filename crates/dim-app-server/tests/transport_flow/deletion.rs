@@ -426,11 +426,16 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
         );
     }
     let list = client.rpc("session.list", json!({})).await;
-    assert!(!listed(&list, &lead) && listed(&list, &member), "{list}");
-    let member_session = agent.get_session(&member).unwrap();
-    assert!(!member_session.state("main").unwrap().running);
+    assert!(
+        !listed(&list, &lead) && !listed(&list, &member),
+        "the team ends before its leader's own rows, which this delete could not remove: {list}"
+    );
+    assert!(
+        store.rows(&member).is_empty(),
+        "the Team ends with its leader"
+    );
 
-    drop((client, member_session, agent));
+    drop((client, agent));
     server.shutdown();
     server.join().await.unwrap();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
@@ -449,7 +454,6 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
     );
     assert!(store.rows(&lead).is_empty(), "{:?}", store.rows(&lead));
     assert!(!exists(&store.output(&lead)));
-    assert!(!store.rows(&member).is_empty(), "a delete does not cascade");
     drop((client, agent));
     server.shutdown();
     server.join().await.unwrap();

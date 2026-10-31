@@ -49,15 +49,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Email" => "電子郵件",
         "Continue" => "繼續",
         "Browser login" => "瀏覽器登入",
-        "Print verification URL + pairing code again" => "重新顯示驗證 URL 與配對碼",
         "Restart device login" => "重新開始裝置登入",
-        "Print OAuth URL again" => "重新顯示 OAuth URL",
+        "Select to copy · Enter opens link" => "拖選手動複製 · Enter 開啟連結",
+        "Link shortened · Enter opens link" => "連結已縮略 · Enter 開啟完整連結",
         "Callback URL" => "回呼 URL",
         "Submit callback" => "送出回呼",
         "The browser could not be opened. Open the link manually, then return here." => {
             "無法開啟瀏覽器，請手動開啟連結，完成後返回。"
         }
-        "Enter code {code} at {url}" => "在 {url} 輸入配對碼 {code}",
         "Waiting for authorization" => "等待授權",
         "{name} device login" => "{name} 裝置登入",
         "Open this URL: {url}" => "開啟此 URL：{url}",
