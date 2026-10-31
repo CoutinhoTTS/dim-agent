@@ -642,10 +642,15 @@ async fn post_tool_use_follows_the_protocol_for_success_block_and_failure() {
 async fn post_tool_use_failure_runs_only_for_error_results() {
     let env = Env::new().await;
     let marker = env.path("failure-marker");
+    let done = env.path("failure-marker.done");
     env.sources.set(document(serde_json::json!({
         "PostToolUseFailure": [command(serde_json::json!({
             "type": "command",
-            "command": format!("printf 'failed' > {}", marker.display()),
+            "command": format!(
+                "printf 'failed' > {} && touch {}",
+                marker.display(),
+                done.display(),
+            ),
         }))],
     })));
     let session = env.session().await;
@@ -666,15 +671,9 @@ async fn post_tool_use_failure_runs_only_for_error_results() {
         ),
     )
     .await;
-    for _ in 0..500 {
-        if marker.exists() {
-            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "failed");
-            env.close().await;
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("PostToolUseFailure did not run");
+    wait_file(&done, "PostToolUseFailure did not run").await;
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "failed");
+    env.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -827,6 +826,7 @@ async fn an_async_handler_does_not_delay_the_turn_or_the_next_point() {
     let env = Env::new().await;
     let late = env.path("late");
     let now = env.path("now");
+    let done = env.path("now.done");
     env.sources.set(document(serde_json::json!({
         "PostToolUse": [
             command(serde_json::json!({
@@ -836,8 +836,9 @@ async fn an_async_handler_does_not_delay_the_turn_or_the_next_point() {
             command(serde_json::json!({
                 "type": "command",
                 "command": format!(
-                    "printf 'now' > {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"context\"}}}}'",
-                    now.display()
+                    "printf 'now' > {} && touch {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"context\"}}}}'",
+                    now.display(),
+                    done.display(),
                 ),
             })),
         ],
@@ -853,11 +854,15 @@ async fn an_async_handler_does_not_delay_the_turn_or_the_next_point() {
     .await;
     assert!(started.elapsed() < Duration::from_millis(1200));
     for _ in 0..100 {
-        if now.exists() {
+        if done.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(
+        done.exists(),
+        "the PostToolUse hook did not write its marker"
+    );
     assert_eq!(std::fs::read_to_string(&now).unwrap(), "now");
     assert!(!late.exists(), "the async handler is still running");
     let blocks = wait_blocks(&session, "post-tool", 1).await;

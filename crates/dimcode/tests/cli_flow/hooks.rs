@@ -233,10 +233,12 @@ fn a_stop_hook_exports_its_session_from_dimcode_home() {
     let project = home.0.join("work");
     fs::create_dir(&project).unwrap();
     let exported = home.0.join("export.jsonl");
+    let done = home.0.join("export.done");
     let command = format!(
-        "{} export \"$DIM_SESSION_ID\" --output {}",
+        "{} export \"$DIM_SESSION_ID\" --output {} && touch {}",
         env!("CARGO_BIN_EXE_dimcode"),
-        exported.display()
+        exported.display(),
+        done.display()
     );
     fs::write(
         home.0.join("hooks.json"),
@@ -278,14 +280,14 @@ fn a_stop_hook_exports_its_session_from_dimcode_home() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let mut text = String::new();
         for _ in 0..500 {
-            text = fs::read_to_string(&exported).unwrap_or_default();
-            if text.contains(session.id()) {
+            if done.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        assert!(done.exists(), "the Stop hook did not finish its export");
+        let text = fs::read_to_string(&exported).unwrap_or_default();
         assert!(
             text.contains(session.id()),
             "the Stop hook did not export the Session: {text}"
