@@ -13,9 +13,10 @@
 //! Both arms run the shipped assembly: `current` with the product's own texts
 //! and `candidate` with each candidate file in place of the text its `--text`
 //! id names. Every `--text ID --candidate FILE` pair replaces one text, a
-//! text named twice is an error, and the report gives each candidate text's
-//! own token cost. The runs are interleaved: for each run index and scenario
-//! the `current` run is scheduled before the `candidate` one, so a drift in
+//! pair reads in either order, a text named twice is an error, and the report
+//! gives each candidate text's own token cost. The runs are interleaved: for
+//! each run index and scenario the `current` run is scheduled before the
+//! `candidate` one, so a drift in
 //! the endpoint lands on both arms alike, and the records come out in that
 //! order whatever order the runs complete in. `--jobs N` (default 1) runs N
 //! runs at once; each run keeps its own workspace copy, product home, local
@@ -412,7 +413,7 @@ impl Options {
         // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut home, mut out) = (None, None, None);
-        let (mut text, mut model, mut judge) = (None, None, None);
+        let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
         let (mut runs, mut jobs, mut model_config, mut defaults) = (None, None, None, None);
         let mut texts: Vec<(String, Arc<str>)> = Vec::new();
         while let Some(flag) = args.next() {
@@ -420,19 +421,24 @@ impl Options {
             match flag.as_str() {
                 "--scenarios" => scenarios = Some(PathBuf::from(value)),
                 "--text" => {
-                    if let Some(text) = &text {
-                        return Err(format!("--text {text} has no --candidate").into());
+                    if let Some(pending) = &text {
+                        return Err(format!("--text {pending} has no --candidate").into());
                     }
                     if texts.iter().any(|(given, _)| *given == value) {
                         return Err(format!("--text {value} is named twice").into());
                     }
-                    text = Some(value);
+                    match candidate.take() {
+                        Some(prompt) => texts.push((value, prompt)),
+                        None => text = Some(value),
+                    }
                 }
                 "--candidate" => {
-                    let Some(id) = text.take() else {
-                        return Err("--candidate has no --text before it".into());
-                    };
-                    texts.push((id, candidate_prompt(Path::new(&value))?));
+                    let prompt = candidate_prompt(Path::new(&value))?;
+                    match text.take() {
+                        Some(id) => texts.push((id, prompt)),
+                        None if candidate.is_none() => candidate = Some(prompt),
+                        None => return Err("--candidate has no --text".into()),
+                    }
                 }
                 "--model" => model = Some(target(&value)?),
                 "--judge" => judge = Some(target(&value)?),
@@ -447,6 +453,9 @@ impl Options {
         }
         if let Some(text) = &text {
             return Err(format!("--text {text} has no --candidate").into());
+        }
+        if candidate.is_some() {
+            return Err("--candidate has no --text".into());
         }
         if texts.is_empty() {
             return Err(usage.into());
@@ -2481,6 +2490,53 @@ mod tests {
             Ok(_) => panic!("a text named twice is refused before any run"),
         };
         assert!(error.contains("goal/objective is named twice"), "{error}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A `--text ID --candidate FILE` pair reads in either order: the
+    /// candidate given first pairs with the text that follows it
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_pair_reads_in_either_order() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-order-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("candidate.md");
+        std::fs::write(&candidate, "candidate").unwrap();
+        let out = directory.join("out");
+        let file = candidate.to_str().unwrap();
+        let parse = |flags: [&str; 4]| {
+            Options::parse_from(
+                [
+                    "--scenarios",
+                    "scenarios",
+                    flags[0],
+                    flags[1],
+                    flags[2],
+                    flags[3],
+                    "--model",
+                    "gateway/model",
+                    "--judge",
+                    "gateway/model",
+                    "--runs",
+                    "1",
+                    "--home",
+                    "home",
+                    "--out",
+                    out.to_str().unwrap(),
+                ]
+                .map(str::to_owned),
+            )
+        };
+        for flags in [
+            ["--text", "goal/objective", "--candidate", file],
+            ["--candidate", file, "--text", "goal/objective"],
+        ] {
+            let options = parse(flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
+            assert_eq!(options.texts.len(), 1, "{flags:?}");
+            assert_eq!(options.texts[0].0, "goal/objective", "{flags:?}");
+            assert_eq!(&*options.texts[0].1, "candidate", "{flags:?}");
+        }
         let _ = std::fs::remove_dir_all(&directory);
     }
 
