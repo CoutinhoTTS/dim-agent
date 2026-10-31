@@ -19573,6 +19573,14 @@
     },
     {
       "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::hooks_settings",
+      "references": [
+        "path HooksService",
+        "use crate::hooks_settings::HooksService"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::mcp",
       "references": [
         "path McpService",
@@ -19622,6 +19630,7 @@
         "path Defaults::read",
         "path Installed",
         "path Kind",
+        "path Kind::Hooks",
         "path Kind::Mcp",
         "path Kind::Skills",
         "path Manifest",

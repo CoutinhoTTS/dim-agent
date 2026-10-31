@@ -2,12 +2,13 @@
 //! configuration of a host, kept in `<home>/plugins.json`. It keeps no
 //! runtime state: rows are rutis-loader's, content is its owners'. It
 //! carries out a configuration change by giving the loader and the content
-//! owners (SkillsCatalog, Mcp) commands.
+//! owners (SkillsCatalog, Mcp, Hooks) commands.
 mod acquire;
 mod management;
 mod record;
 mod tools;
 
+use crate::hooks_settings::HooksService;
 use crate::mcp::McpService;
 use crate::methods::ManagementMethods;
 use crate::settings::{SettingsService, SourceDeclaration};
@@ -544,10 +545,15 @@ pub(crate) struct Owners {
     ctx: Ctx,
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
+    hooks: Key<HooksService>,
 }
 
 /// The row names of the content owners and the kind each takes.
-const OWNERS: [(&str, Kind); 2] = [("SkillsCatalog", Kind::Skills), ("Mcp", Kind::Mcp)];
+const OWNERS: [(&str, Kind); 3] = [
+    ("SkillsCatalog", Kind::Skills),
+    ("Mcp", Kind::Mcp),
+    ("HooksSettings", Kind::Hooks),
+];
 
 fn refused(kind: Kind, error: impl std::fmt::Display) -> Value {
     json!({"kind": kind, "error": error.to_string()})
@@ -577,6 +583,7 @@ impl Owners {
             ctx,
             skills: names.key()?,
             mcp: names.key()?,
+            hooks: names.key()?,
         })
     }
 
@@ -597,6 +604,14 @@ impl Owners {
             match mcp.plugins(&self.ctx.cancellation_token()).await {
                 Ok(plugins) => held.extend(plugins),
                 Err(error) => tracing::warn!(%error, "MCP plugin documents unreadable"),
+            }
+        }
+        if kinds.contains(&Kind::Hooks)
+            && let Some(hooks) = self.ctx.get_at(&self.hooks)
+        {
+            match hooks.plugins(&self.ctx.cancellation_token()).await {
+                Ok(plugins) => held.extend(plugins),
+                Err(error) => tracing::warn!(%error, "Hooks plugin documents unreadable"),
             }
         }
         held
@@ -667,6 +682,38 @@ impl Owners {
                 }
             }
         }
+        if kinds.contains(&Kind::Hooks) {
+            match (self.ctx.get_at(&self.hooks), &manifest.hooks) {
+                (None, Some(_)) => outcome.skipped.push(Kind::Hooks),
+                (None, None) => {}
+                (Some(hooks), Some(path)) => {
+                    let document = std::fs::read(path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<Value>(&bytes)
+                                .map_err(|error| error.to_string())
+                        });
+                    let result = match document {
+                        Ok(document) => hooks
+                            .register_plugin(plugin.into(), dir.into(), document, &cancel)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => {
+                            let _ = hooks.withdraw_plugin(plugin.into(), &cancel).await;
+                            Err(format!("{}: {error}", path.display()))
+                        }
+                    };
+                    if let Err(error) = result {
+                        outcome.refused.push(refused(Kind::Hooks, error));
+                    }
+                }
+                (Some(hooks), None) => {
+                    if let Err(error) = hooks.withdraw_plugin(plugin.into(), &cancel).await {
+                        tracing::warn!(%plugin, %error, "Hooks withdrawal refused");
+                    }
+                }
+            }
+        }
     }
 
     /// Withdraws `plugin`'s content of `kinds` from each present owner.
@@ -683,6 +730,12 @@ impl Owners {
             && let Err(error) = mcp.withdraw_plugin(plugin.into(), &cancel).await
         {
             tracing::warn!(%plugin, %error, "MCP withdrawal refused");
+        }
+        if kinds.contains(&Kind::Hooks)
+            && let Some(hooks) = self.ctx.get_at(&self.hooks)
+            && let Err(error) = hooks.withdraw_plugin(plugin.into(), &cancel).await
+        {
+            tracing::warn!(%plugin, %error, "Hooks withdrawal refused");
         }
     }
 
@@ -704,6 +757,14 @@ impl Owners {
                 .and_then(|mcp| mcp.plugin_refusal(plugin))
         {
             found.push(refused(Kind::Mcp, error));
+        }
+        if manifest.hooks.is_some()
+            && let Some(error) = self
+                .ctx
+                .get_at(&self.hooks)
+                .and_then(|hooks| hooks.plugin_refusal(plugin))
+        {
+            found.push(refused(Kind::Hooks, error));
         }
         found
     }
@@ -1494,8 +1555,8 @@ fn object(value: Value) -> Map<String, Value> {
     }
 }
 
-/// The content kinds PluginManager registers with owners. Hooks is M2.
-const CONTENT: [Kind; 2] = [Kind::Skills, Kind::Mcp];
+/// The content kinds PluginManager registers with owners.
+const CONTENT: [Kind; 3] = [Kind::Skills, Kind::Mcp, Kind::Hooks];
 
 fn status_value(loader: &Loader, entry: &EntryInfo) -> Value {
     let pending = || {
@@ -1532,6 +1593,7 @@ pub(crate) struct PluginManagerPlugin {
     parts: Key<PartRegistry>,
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
+    hooks: Key<HooksService>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
     settings: Key<SettingsService>,
 }
@@ -1545,6 +1607,7 @@ impl PluginManagerPlugin {
             parts: names.key()?,
             skills: names.key()?,
             mcp: names.key()?,
+            hooks: names.key()?,
             runtimes: names.key()?,
             settings: names.key()?,
         })
@@ -1571,6 +1634,7 @@ impl DynPlugin for PluginManagerPlugin {
                     ctx: ctx.clone(),
                     skills: self.skills.clone(),
                     mcp: self.mcp.clone(),
+                    hooks: self.hooks.clone(),
                 },
                 ctx: ctx.clone(),
                 runtimes: self.runtimes.clone(),

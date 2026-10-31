@@ -1546,3 +1546,368 @@ async fn plugin_content_follows_the_record_over_restarts() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// The product's local execution profile with mock model hosts, with Hooks
+/// installed: a Session mounts the Hooks parts and reads its hook sources.
+fn hooks_builder(home: &Path) -> AgentBuilder {
+    let mut builder = product_builder();
+    dim_app_server::hooks_settings::install(&mut builder, Some(home.to_owned()));
+    dim_agent_capabilities::hooks::install(&mut builder);
+    builder
+}
+
+/// A plugin carrying a Skill and a `hooks.json` whose `Stop` handler appends
+/// `<tag> <DIM_PLUGIN_ROOT> <CLAUDE_PLUGIN_ROOT or unset>` to `runs`.
+fn write_hook_plugin(dir: &Path, name: &str, runs: &Path, tag: &str) {
+    let skill = dir.join("skills/review");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review\ndescription: The review skill\n---\nReview.\n",
+    )
+    .unwrap();
+    let command = format!(
+        "printf '{tag} %s %s\\n' \"$DIM_PLUGIN_ROOT\" \"${{CLAUDE_PLUGIN_ROOT-unset}}\" >> {}",
+        runs.display()
+    );
+    std::fs::write(
+        dir.join("hooks.json"),
+        json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command}]}]}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dim-plugin.json"),
+        json!({"name": name, "skills": "skills", "hooks": "hooks.json"}).to_string(),
+    )
+    .unwrap();
+}
+
+fn lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits until `path` holds `count` lines and returns them.
+async fn wait_lines(path: &Path, count: usize) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let found = lines(path);
+        if found.len() >= count {
+            return found;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} lines were not written: {found:?}",
+            count
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Creates a Session in `cwd`.
+async fn session_in(client: &mut Client, cwd: &Path) -> String {
+    let created = client.rpc("session.create", json!({"cwd": cwd})).await;
+    assert_ok(&created);
+    created["result"]["sessionId"].as_str().unwrap().to_owned()
+}
+
+/// Runs one turn on `session`; its completed `turn/end` is the `Stop` point.
+async fn turn(client: &mut Client, session: &str) {
+    submit(client, session, "hello").await;
+}
+
+/// Hooks A.2 and PluginManager §3.7: a plugin's hook document reaches
+/// Sessions through Hooks under the source `plugin:<id>`; its commands read
+/// `DIM_PLUGIN_ROOT` and never `CLAUDE_PLUGIN_ROOT`; turning it off, switching
+/// the name to another plugin and removing that plugin withdraw its handlers;
+/// the registration survives a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_hooks_run_with_their_plugin_root_and_follow_the_record() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let runs = home.join("hook-runs");
+    let barrier = home.join("hook-points");
+    // The user's own `Stop` handler marks each point that ran; the branch
+    // drains points in order, so a later mark means earlier points finished.
+    std::fs::write(
+        home.join("hooks.json"),
+        json!({"hooks": {"Stop": [{"hooks": [{
+            "type": "command",
+            "command": format!("printf 'point\\n' >> {}", barrier.display()),
+        }]}]}})
+        .to_string(),
+    )
+    .unwrap();
+    let server = serve(hooks_builder(&home), config.clone()).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+
+    let source = home.join("src/kit");
+    write_hook_plugin(&source, "kit", &runs, "kit");
+    let kit = std::fs::canonicalize(&source).unwrap();
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(installed["result"]["enabled"], true, "{installed}");
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    let sources: Vec<&Value> = catalog["result"]["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{catalog}"))
+        .iter()
+        .map(|source| &source["source"])
+        .collect();
+    assert_eq!(sources, [&json!("user"), &json!("plugin:kit")], "{catalog}");
+    assert_eq!(
+        catalog["result"]["sources"][1]["enabled"], true,
+        "{catalog}"
+    );
+    assert_eq!(
+        catalog["result"]["sources"][1]["path"],
+        kit.to_string_lossy().as_ref(),
+        "{catalog}"
+    );
+    assert_eq!(
+        catalog["result"]["hooks"][1]["source"], "plugin:kit",
+        "{catalog}"
+    );
+
+    let session = session_in(&mut client, &work).await;
+    turn(&mut client, &session).await;
+    let written = wait_lines(&runs, 1).await;
+    assert_eq!(
+        written,
+        [format!("kit {} unset", kit.display())],
+        "{written:?}"
+    );
+    wait_lines(&barrier, 1).await;
+
+    // One branch drains its hook points in order, so a later mark is written
+    // only after an earlier point, which would have run a withdrawn handler,
+    // completed.
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name":"kit"})).await);
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"].as_array().unwrap().len(),
+        1,
+        "{catalog}"
+    );
+    turn(&mut client, &session).await;
+    turn(&mut client, &session).await;
+    wait_lines(&barrier, 3).await;
+    assert_eq!(lines(&runs), written, "a disabled plugin's handler ran");
+
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name":"kit"})).await);
+    turn(&mut client, &session).await;
+    let written = wait_lines(&runs, 2).await;
+    assert_eq!(
+        written.last().unwrap(),
+        &format!("kit {} unset", kit.display())
+    );
+    wait_lines(&barrier, 4).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The registration is kept in `hooks-plugins`, so a new process restores
+    // it without being told again.
+    let server = serve(hooks_builder(&home), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    when_served(&mut client, "plugin.list", json!({})).await;
+    let session = session_in(&mut client, &work).await;
+    turn(&mut client, &session).await;
+    let written = wait_lines(&runs, 3).await;
+    assert_eq!(
+        written.last().unwrap(),
+        &format!("kit {} unset", kit.display())
+    );
+    wait_lines(&barrier, 5).await;
+
+    // The name switches to another plugin: the old plugin's handler is
+    // withdrawn, so the next two points write the new one's line only.
+    let before = written.len();
+    let second = home.join("src/kit-two");
+    write_hook_plugin(&second, "kit", &runs, "second");
+    let second = std::fs::canonicalize(&second).unwrap();
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":home.join("src/kit-two")},"id":"kit2"}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    turn(&mut client, &session).await;
+    turn(&mut client, &session).await;
+    wait_lines(&barrier, 7).await;
+    wait_lines(&runs, before + 2).await;
+    let added: Vec<String> = lines(&runs)[before..].to_vec();
+    assert_eq!(
+        added,
+        [
+            format!("second {} unset", second.display()),
+            format!("second {} unset", second.display()),
+        ],
+        "{added:?}"
+    );
+    let written = lines(&runs);
+
+    // Removing the plugin the name uses leaves nothing under that name, and
+    // its handler no longer runs.
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id":"kit2"})).await);
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"].as_array().unwrap().len(),
+        1,
+        "{catalog}"
+    );
+    turn(&mut client, &session).await;
+    turn(&mut client, &session).await;
+    wait_lines(&barrier, 9).await;
+    assert_eq!(lines(&runs), written, "a removed plugin's handler ran");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// PluginManager §3.7: a `hooks` document that does not parse is reported
+/// under `refused` and stops none of the plugin's other content; a later
+/// reload of a valid document registers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_plugin_hook_document_stops_only_its_own_kind() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let runs = home.join("hook-runs");
+    let source = home.join("src/kit");
+    write_hook_plugin(&source, "kit", &runs, "kit");
+    std::fs::write(source.join("hooks.json"), json!({"hooks": []}).to_string()).unwrap();
+    let server = serve(hooks_builder(&home), config.clone()).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    let kinds: Vec<&Value> = installed["result"]["refused"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{installed}"))
+        .iter()
+        .map(|refused| &refused["kind"])
+        .collect();
+    assert_eq!(kinds, [&json!("hooks")], "{installed}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        installed["result"]["refused"],
+        "{list}"
+    );
+    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:review"]);
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"].as_array().unwrap().len(),
+        1,
+        "{catalog}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // Startup registers every plugin in use again, so a refused document is
+    // reported again after a restart.
+    let server = serve(hooks_builder(&home), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "kit")["refused"][0]["kind"], "hooks", "{list}");
+
+    write_hook_plugin(&source, "kit", &runs, "kit");
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"][1]["source"], "plugin:kit",
+        "{catalog}"
+    );
+    let session = session_in(&mut client, &work).await;
+    turn(&mut client, &session).await;
+    let written = wait_lines(&runs, 1).await;
+    assert_eq!(written.len(), 1, "{written:?}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// PluginManager §3.3 and §3.7: an absent Hooks owner skips only its kind of
+/// content, and turning HooksSettings on registers that kind for every plugin
+/// in use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_hooks_follow_the_hooks_owner() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let runs = home.join("hook-runs");
+    let source = home.join("src/kit");
+    write_hook_plugin(&source, "kit", &runs, "kit");
+    let server = serve(hooks_builder(&home), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.disable",
+            json!({"name":"HooksSettings"}),
+        )
+        .await,
+    );
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(
+        installed["result"]["skipped"],
+        json!(["hooks"]),
+        "{installed}"
+    );
+
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"HooksSettings"}),
+        )
+        .await,
+    );
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"][1]["source"], "plugin:kit",
+        "{catalog}"
+    );
+    let session = session_in(&mut client, &work).await;
+    turn(&mut client, &session).await;
+    wait_lines(&runs, 1).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
