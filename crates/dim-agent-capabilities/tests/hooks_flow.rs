@@ -23,6 +23,7 @@ use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::{
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -1309,6 +1310,43 @@ async fn identical_commands_at_one_point_run_once() {
     env.close().await;
 }
 
+/// A.2: user and project handlers have no plugin directory, so their
+/// identical commands at one point still run once, across sources.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_identical_command_in_the_user_and_project_sources_runs_once() {
+    let env = Env::new().await;
+    let runs = env.path("runs");
+    let repeat = format!(
+        "{}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"context\"}}}}'",
+        marker_command(&runs, "run\n")
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [
+            command(serde_json::json!({"type": "command", "command": repeat})),
+        ],
+    })));
+    env.sources.set_project(
+        document(serde_json::json!({
+            "PostToolUse": [
+                command(serde_json::json!({"type": "command", "command": repeat.clone()})),
+            ],
+        })),
+        true,
+    );
+    let session = env.session().await;
+    let note = env.path("work/note.txt");
+    std::fs::write(&note, "note\n").unwrap();
+    turn(
+        &session,
+        &format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
+    )
+    .await;
+    wait_blocks(&session, "post-tool", 1).await;
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\n");
+    assert_eq!(hook_blocks(&session, "post-tool").await.len(), 1);
+    env.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hook_output_is_dropped_after_an_interrupt() {
     let env = Env::new().await;
@@ -1616,11 +1654,14 @@ async fn a_plugin_source_runs_like_any_other_source() {
         })),
     );
     let session = env.session().await;
-    let blocks = wait_blocks(&session, "session-start", 3).await;
-    assert_eq!(blocks.len(), 3, "{blocks:?}");
+    let blocks = wait_blocks(&session, "session-start", 4).await;
+    assert_eq!(blocks.len(), 4, "{blocks:?}");
     assert!(blocks[0].contains("user context"), "{blocks:?}");
     assert!(blocks[1].contains("shared"), "{blocks:?}");
     assert!(blocks[2].contains("plugin context"), "{blocks:?}");
+    // The plugin's "shared" is a different command from the user's: it runs
+    // with its own `DIM_PLUGIN_ROOT` (A.2).
+    assert!(blocks[3].contains("shared"), "{blocks:?}");
 
     // The plugin's command reads its directory; the user's reads none.
     let environment = std::fs::read_to_string(&seen).unwrap();
@@ -1658,6 +1699,66 @@ async fn a_plugin_source_runs_like_any_other_source() {
     let second = env.session().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(hook_blocks(&second, "session-start").await.is_empty());
+    env.close().await;
+}
+
+/// A.2: `DIM_PLUGIN_ROOT` gives the same command string different meanings in
+/// two plugins, so both handlers run at one point, each with its own root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_commands_from_two_plugins_run_with_their_own_roots() {
+    let env = Env::new().await;
+    let runs = env.path("runs");
+    let plugins: Vec<(&str, PathBuf)> = ["alpha", "beta"]
+        .into_iter()
+        .map(|id| {
+            let dir = env.path(id);
+            std::fs::create_dir_all(dir.join("scripts")).unwrap();
+            let script = dir.join("scripts").join("check.sh");
+            std::fs::write(
+                &script,
+                format!(
+                    "printf '{id} context %s' \"$DIM_PLUGIN_ROOT\"; \
+                     printf '{id} %s\\n' \"$DIM_PLUGIN_ROOT\" >> {}",
+                    runs.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (id, dir)
+        })
+        .collect();
+    for (id, dir) in &plugins {
+        env.sources.set_plugin(
+            id,
+            dir.as_path(),
+            document(serde_json::json!({
+                "SessionStart": [command(serde_json::json!({
+                    "type": "command",
+                    "command": "$DIM_PLUGIN_ROOT/scripts/check.sh",
+                }))],
+            })),
+        );
+    }
+    let session = env.session().await;
+    let blocks = wait_blocks(&session, "session-start", 2).await;
+    assert_eq!(blocks.len(), 2, "{blocks:?}");
+    for (index, (id, dir)) in plugins.iter().enumerate() {
+        let context = format!("{id} context {}", dir.display());
+        assert!(blocks[index].contains(&context), "{blocks:?}");
+    }
+    wait_file(&runs, "the marker file").await;
+    let mut lines: Vec<String> = std::fs::read_to_string(&runs)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    lines.sort();
+    let mut expected: Vec<String> = plugins
+        .iter()
+        .map(|(id, dir)| format!("{id} {}", dir.display()))
+        .collect();
+    expected.sort();
+    assert_eq!(lines, expected);
     env.close().await;
 }
 

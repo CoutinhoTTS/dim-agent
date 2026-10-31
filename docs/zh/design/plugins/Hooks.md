@@ -374,7 +374,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 
 插件文档保存在 Settings 来源 `hooks-plugins` 中，每个插件 id 一条 `{dir, hooks}`，如同 Mcp 保存 `mcp-plugins`；`plugins()` 列出 Hooks 持有的 id，Hooks 在自身重载后恢复它们。登记的文档与其他文档一样校验（A.1）：Hooks 拒绝的文档以 `refused` 报告给 PluginManager，不留任何条目，其中的 Hook 都不运行。插件来源的命令获得指向 `dir` 的 `DIM_PLUGIN_ROOT`（A.3），其目录条目的 `path` 就是该 `dir`，另列启用状态。
 
-`HookSources.read(cwd, cancel)` 按来源返回其 id、路径、启用状态与文档或错误。工作区是 Settings 为 `cwd` 授权的项目根，如同 `mcp.catalog` 的解析方式；没有项目的 `cwd` 没有项目来源。目录顺序为表中顺序，再按文档顺序。同一 Hook 点上 `command` 字符串相同的处理器只运行一次。文档在每个 Hook 点读取；缺失的项目文件视为空，无法读取或无效的文件列为 `invalid` 并记诊断，其中的 Hook 都不运行。
+`HookSources.read(cwd, cancel)` 按来源返回其 id、路径、启用状态与文档或错误。工作区是 Settings 为 `cwd` 授权的项目根，如同 `mcp.catalog` 的解析方式；没有项目的 `cwd` 没有项目来源。目录顺序为表中顺序，再按文档顺序。同一 Hook 点上 `command` 字符串与插件目录都相同的处理器只运行一次；插件之间的命令从不合并，因为 `DIM_PLUGIN_ROOT` 赋予它们不同的含义（A.3）。文档在每个 Hook 点读取；缺失的项目文件视为空，无法读取或无效的文件列为 `invalid` 并记诊断，其中的 Hook 都不运行。
 
 ### A.3 命令协议
 
