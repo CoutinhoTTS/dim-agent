@@ -15,9 +15,21 @@ use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn malloc_trim(pad: usize) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
+}
+
+fn trim_heap() -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        Some(malloc_trim(0))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -678,7 +690,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_restored = allocation::live();
     let peak_restored = allocation::peak();
     let rss_restored = rss_kb();
-    let trim_restored = unsafe { malloc_trim(0) };
+    let trim_restored = trim_heap();
     let rss_restored_trim = rss_kb();
     allocation::reset_peak_now();
     session
@@ -692,7 +704,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_active = allocation::live();
     let peak = allocation::peak();
     let rss_active = rss_kb();
-    let trim_active = unsafe { malloc_trim(0) };
+    let trim_active = trim_heap();
     let rss_active_trim = rss_kb();
     let tasks_active = tokio::runtime::Handle::current()
         .metrics()
@@ -709,7 +721,7 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_after_agent = allocation::live();
     let rss_after_agent = rss_kb();
     drop(db);
-    let trim_result = unsafe { malloc_trim(0) };
+    let trim_result = trim_heap();
     let rss_after_trim = rss_kb();
     let live_after_trim = allocation::live();
     let report = json!({
