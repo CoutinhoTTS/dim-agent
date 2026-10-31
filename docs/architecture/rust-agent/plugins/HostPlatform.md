@@ -143,6 +143,11 @@ policies without another read. `cwd` is an already resolved working directory.
 The builder preserves shell flags, forced environment overrides and runtime PATH
 prefixes, including Git Bash mapping. It does not start the user's command.
 
+`spawn` closes the child's standard input. `spawn_with_stdin(spec, bytes)`
+starts the same tree and writes `bytes` to that input from a task of the
+caller's runtime, then closes it; a child that exits without reading the bytes
+does not fail the start. Hooks is its consumer.
+
 Refusals are `ProcessSpecError { code, reason }` data: malformed/unreadable
 preferences (`EXEC_SHELL_CONFIG_INVALID`), unavailable shells
 (`EXEC_SHELL_UNAVAILABLE`), a network-share cwd with cmd
@@ -172,6 +177,7 @@ None (§4 rule 8). Existing FileStorage and process primitives cover S7 and F5.
 [host_platform_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_flow.rs):
 `shell_resolution_follows_the_preference_and_never_fails_the_service`,
 `spawn_isolates_the_environment_and_terminate_releases_the_tree`,
+`spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe`,
 `unchanged_shell_preferences_reuse_detection_and_edits_recover`.
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs):
 `exec_and_external_shell_callers_use_live_shell_preferences` exercises the real

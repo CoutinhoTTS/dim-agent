@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStderr, ChildStdout},
     sync::Mutex,
 };
@@ -307,18 +307,35 @@ impl HostPlatform {
         }
         resolved.status.clone()
     }
-    /// Starts `spec` as the root of its own process tree.
-    pub fn spawn(&self, spec: ProcessSpec) -> io::Result<ProcessTree> {
+    /// The command for `spec`: its own tree, a cleared environment and piped
+    /// stdout and stderr. `stdin` is the caller's choice.
+    fn command(spec: &ProcessSpec, stdin: Stdio) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&spec.executable);
         command
             .args(&spec.args)
             .current_dir(&spec.cwd)
             .env_clear()
             .envs(spec.env.iter().map(|(key, value)| (key, value)))
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        native::spawn(command)
+        command
+    }
+    /// Starts `spec` as the root of its own process tree.
+    pub fn spawn(&self, spec: ProcessSpec) -> io::Result<ProcessTree> {
+        native::spawn(Self::command(&spec, Stdio::null()))
+    }
+    /// [`Self::spawn`] with `stdin` written to the child's standard input,
+    /// which then closes. A child that exits before reading it does not fail
+    /// the start.
+    pub fn spawn_with_stdin(&self, spec: ProcessSpec, stdin: Vec<u8>) -> io::Result<ProcessTree> {
+        let mut tree = native::spawn(Self::command(&spec, Stdio::piped()))?;
+        if let Some(mut pipe) = tree.child.stdin.take() {
+            tokio::spawn(async move {
+                let _ = pipe.write_all(&stdin).await;
+            });
+        }
+        Ok(tree)
     }
 
     #[cfg(windows)]

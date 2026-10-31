@@ -249,3 +249,46 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     ));
     root.shutdown().await.unwrap();
 }
+
+/// A start whose stdin carries the payload and then closes it.
+#[tokio::test]
+async fn spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe() {
+    let platform = HostPlatform::current(ShellStatus::Unavailable {
+        code: EXEC_SHELL_UNAVAILABLE,
+        reason: "spawn does not need a shell".into(),
+    })
+    .unwrap();
+    let cwd = std::env::temp_dir();
+    let payload = br#"{"hook_event_name":"Stop"}"#.to_vec();
+    let mut tree = platform
+        .spawn_with_stdin(
+            ProcessSpec {
+                executable: "/bin/sh".into(),
+                args: vec!["-c".into(), "cat; echo done".into()],
+                cwd: cwd.clone(),
+                env: vec![],
+            },
+            payload.clone(),
+        )
+        .unwrap();
+    let mut output = String::new();
+    tree.stdout().read_to_string(&mut output).await.unwrap();
+    assert!(tree.wait().await.unwrap().success());
+    assert_eq!(output, "{\"hook_event_name\":\"Stop\"}done\n");
+
+    let mut tree = platform
+        .spawn_with_stdin(
+            ProcessSpec {
+                executable: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo ok".into()],
+                cwd,
+                env: vec![],
+            },
+            vec![b'x'; 4 * 1024 * 1024],
+        )
+        .unwrap();
+    let mut output = String::new();
+    tree.stdout().read_to_string(&mut output).await.unwrap();
+    assert!(tree.wait().await.unwrap().success());
+    assert_eq!(output, "ok\n");
+}
