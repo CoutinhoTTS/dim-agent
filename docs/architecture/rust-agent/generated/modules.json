@@ -511,6 +511,16 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::host_platform",
+      "file": "crates/dim-agent-capabilities/src/host_platform/exec_shell_settings.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::host_platform::isolation",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::host_platform",
@@ -1702,6 +1712,16 @@
       ]
     },
     {
+      "id": "dim_app_server::exec_shell_settings",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/exec_shell_settings.rs",
+      "unexpandedMacros": [
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::execution_settings",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1767,6 +1787,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/mcp.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "tokio::pin",
         "tokio::select",
@@ -2033,6 +2054,15 @@
       "file": "crates/dim-app-server/src/plugin_manager/acquire.rs",
       "unexpandedMacros": [
         "format",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_app_server::plugin_manager::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::plugin_manager",
+      "file": "crates/dim-app-server/src/plugin_manager/management.rs",
+      "unexpandedMacros": [
         "matches"
       ]
     },
@@ -8039,6 +8069,16 @@
     },
     {
       "from": "dim_agent_capabilities::host_platform",
+      "to": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "references": [
+        "mod exec_shell_settings",
+        "use exec_shell_settings::ExecShellSettings",
+        "use exec_shell_settings::ExecShellSettingsError",
+        "use exec_shell_settings::ShellChoice"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_capabilities::host_platform::isolation",
       "references": [
         "mod isolation"
@@ -8078,6 +8118,46 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorageError",
+        "path FileStorageError::Io",
+        "use crate::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path ShellStatus::Available",
+        "path ShellStatus::Unavailable",
+        "path parse_preference",
+        "path resolve_shell",
+        "use super::HostPlatform",
+        "use super::ShellStatus",
+        "use super::parse_preference",
+        "use super::resolve_shell"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform::unix",
+      "references": [
+        "path native::detect",
+        "use super::native"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform::windows",
+      "references": [
+        "path native::detect",
+        "use super::native"
       ]
     },
     {
@@ -14026,6 +14106,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::exec_shell_settings",
+      "references": [
+        "mod exec_shell_settings",
+        "path exec_shell_settings::ExecShellSettingsPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::execution_settings",
       "references": [
         "mod execution_settings",
@@ -16393,7 +16481,8 @@
         "path SessionMethodsResult",
         "path SessionSkillsResult",
         "path SessionSummary",
-        "path WEB_READABLE_METHODS",
+        "path WEB_MANAGEMENT_METHODS",
+        "path WEB_SETTINGS_SOURCES",
         "path agent_unknown",
         "path session_cwd"
       ]
@@ -16754,6 +16843,64 @@
       ]
     },
     {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "references": [
+        "path ExecShellSettingsError",
+        "path ExecShellSettingsError::Conflict",
+        "path ExecShellSettingsError::Invalid",
+        "use dim_agent_capabilities::host_platform::ExecShellSettingsError"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
       "from": "dim_app_server::execution_settings",
       "to": "dim_agent_capabilities::execution_settings",
       "references": [
@@ -16951,6 +17098,7 @@
       "to": "dim_app_server::managed_provider::management",
       "references": [
         "mod management",
+        "path ApplyReset",
         "path BrowserLogin",
         "path BrowserLoginBegin",
         "path DeviceLogin",
@@ -16959,8 +17107,12 @@
         "path LoginState::Completed",
         "path ManagedBrowserLoginComplete",
         "path ManagedLoginAttempt",
+        "path Referral",
+        "path ResetApplied",
+        "path ResetBatches",
         "path Usage",
         "path management::provide",
+        "use management::ApplyReset",
         "use management::BrowserLogin",
         "use management::BrowserLoginBegin",
         "use management::DeviceLogin",
@@ -16968,6 +17120,9 @@
         "use management::LoginState",
         "use management::ManagedBrowserLoginComplete",
         "use management::ManagedLoginAttempt",
+        "use management::Referral",
+        "use management::ResetApplied",
+        "use management::ResetBatches",
         "use management::Usage"
       ]
     },
@@ -17170,6 +17325,9 @@
         "mod server",
         "path McpServer",
         "path McpServerError",
+        "path McpServerError::Cleanup",
+        "path McpServerError::Timeout",
+        "path server::McpServerPlugin::new",
         "path server::McpServerState",
         "path server::McpTool",
         "path server::Result",
@@ -17475,12 +17633,16 @@
       "from": "dim_app_server::mcp::management",
       "to": "dim_app_server::mcp::config",
       "references": [
+        "path BearerAuth::Bearer",
         "path McpServerSettings",
         "path McpServerSettings::Remote",
         "path McpServerSettings::Stdio",
+        "path McpSettings::default",
         "path RemoteTransport::Http",
         "path RemoteTransport::Sse",
+        "use super::config::BearerAuth",
         "use super::config::McpServerSettings",
+        "use super::config::McpSettings",
         "use super::config::RemoteTransport"
       ]
     },
@@ -17520,6 +17682,7 @@
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
         "path SettingsService",
+        "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
       ]
@@ -17647,10 +17810,12 @@
       "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::mcp::server",
       "references": [
+        "path McpRuntime",
         "path McpServer",
         "path McpServerError::Cleanup",
         "path McpServerPlugin",
         "path McpServerPlugin::new",
+        "use super::server::McpRuntime",
         "use super::server::McpServer",
         "use super::server::McpServerError",
         "use super::server::McpServerPlugin",
@@ -18511,7 +18676,6 @@
         "path MethodDecl::new",
         "path Progress",
         "path RpcError",
-        "path RpcError::from",
         "path RpcError::service",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodDecl",
@@ -18585,6 +18749,15 @@
         "path acquire::clone",
         "path acquire::manifest_of",
         "use acquire::PluginsDir"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::plugin_manager::management",
+      "references": [
+        "mod management",
+        "path management::error",
+        "path management::reply"
       ]
     },
     {
@@ -18666,6 +18839,23 @@
         "path Manifest",
         "path Manifest::read",
         "use super::record::Manifest"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::management",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::service",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::management",
+      "to": "dim_app_server::plugin_manager",
+      "references": [
+        "path PluginError",
+        "use super::PluginError"
       ]
     },
     {
@@ -21365,7 +21555,7 @@
         "path SERVER_VERSION",
         "path UI_HOST_METHODS",
         "path WEB_ENTRY_METHODS",
-        "path WEB_READABLE_METHODS",
+        "path WEB_MANAGEMENT_METHODS",
         "path decode"
       ]
     },
@@ -32534,6 +32724,10 @@
     {
       "module": "dim_app_server::mcp::auth::oauth",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_app_server::mcp::management",
+      "path": "D::Error"
     },
     {
       "module": "dim_app_server::mcp::server",

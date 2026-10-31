@@ -7,6 +7,7 @@ pub mod collaboration;
 mod collaboration_model_policy;
 mod connection;
 mod control;
+mod exec_shell_settings;
 mod execution_settings;
 pub mod grok_oauth;
 mod managed_oauth;
@@ -720,6 +721,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 ))
             },
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(exec_shell_settings::ExecShellSettingsPlugin::new(
+                names,
+            )?))
+        })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(skills_management::SkillsCatalogPlugin::new(
                 names,

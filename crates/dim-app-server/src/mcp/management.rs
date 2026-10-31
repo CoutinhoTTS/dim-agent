@@ -1,11 +1,11 @@
 //! MCP management wire boundary over the MCP and Settings owners.
 use super::auth::{AuthState, McpAuth, McpAuthError, credential_key, stored_key};
-use super::config::{McpServerSettings, RemoteTransport};
+use super::config::{BearerAuth, McpServerSettings, McpSettings, RemoteTransport};
 use super::{McpChange, McpError, McpService, McpSource};
 use crate::{
     methods::{ManagementMethods, SelectionScope},
     protocol::{canonical_cwd, optional_non_null},
-    settings::{SettingsError, SettingsScope, SettingsService},
+    settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{Ctx, Error};
@@ -55,6 +55,222 @@ impl std::fmt::Debug for SaveMcp {
         f.debug_struct("SaveMcp").finish_non_exhaustive()
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    id: String,
+    source: McpScope,
+    expected_version: String,
+    patch: ConfigurationPatch,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TestMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    id: String,
+    source: McpScope,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    configuration: Option<McpServerSettings>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    patch: Option<ConfigurationPatch>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConfigurationPatch {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    command: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    args: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    cwd: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    url: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    env: Option<std::collections::BTreeMap<String, Option<String>>>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    headers: Option<std::collections::BTreeMap<String, Option<String>>>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    bearer: Option<BearerPatch>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    oauth: Option<OAuthPatch>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+enum BearerPatch {
+    Set { token: String },
+    Remove,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+enum OAuthPatch {
+    Set {
+        #[serde(rename = "clientId", default, deserialize_with = "nullable_patch")]
+        client_id: Option<Option<String>>,
+        #[serde(rename = "callbackPort", default, deserialize_with = "nullable_patch")]
+        callback_port: Option<Option<u16>>,
+        #[serde(
+            rename = "authServerMetadataUrl",
+            default,
+            deserialize_with = "nullable_patch"
+        )]
+        auth_server_metadata_url: Option<Option<String>>,
+        #[serde(default, deserialize_with = "nullable_patch")]
+        scopes: Option<Option<String>>,
+    },
+    Remove,
+}
+
+fn nullable_patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+fn configuration_view(configuration: McpServerSettings) -> Result<serde_json::Value, RpcError> {
+    Ok(match configuration {
+        McpServerSettings::Stdio {
+            command,
+            args,
+            cwd,
+            env,
+            ..
+        } => serde_json::json!({
+            "type": "stdio", "command": command, "argsCount": args.len(), "cwd": cwd,
+            "envNames": env.keys().collect::<Vec<_>>()
+        }),
+        McpServerSettings::Remote {
+            kind,
+            url,
+            headers,
+            auth,
+            oauth,
+            ..
+        } => serde_json::json!({
+            "type": kind, "endpoint": url::Url::parse(&url)
+                .map_err(|_| RpcError::invalid("Invalid MCP endpoint"))?
+                .origin().ascii_serialization(),
+            "headerNames": headers.keys().collect::<Vec<_>>(),
+            "authConfigured": auth.is_some(), "oauthConfigured": oauth.is_some(),
+            "oauth": oauth.map(|oauth| serde_json::json!({
+                "clientId": oauth.client_id, "callbackPort": oauth.callback_port,
+                "scopes": oauth.scopes,
+                "metadataConfigured": oauth.auth_server_metadata_url.is_some()
+            }))
+        }),
+    })
+}
+
+fn patch_configuration(
+    configuration: &mut McpServerSettings,
+    patch: ConfigurationPatch,
+) -> Result<(), RpcError> {
+    let (changes, secrets) = match configuration {
+        McpServerSettings::Stdio {
+            command,
+            args,
+            cwd,
+            env,
+            ..
+        } => {
+            if patch.url.is_some()
+                || patch.headers.is_some()
+                || patch.bearer.is_some()
+                || patch.oauth.is_some()
+            {
+                return Err(RpcError::invalid(
+                    "remote fields cannot update a stdio server",
+                ));
+            }
+            if let Some(value) = patch.command {
+                *command = value;
+            }
+            if let Some(value) = patch.args {
+                *args = value;
+            }
+            if let Some(value) = patch.cwd {
+                *cwd = (!value.is_empty()).then_some(value);
+            }
+            (patch.env, env)
+        }
+        McpServerSettings::Remote {
+            url,
+            headers,
+            auth,
+            oauth,
+            ..
+        } => {
+            if patch.command.is_some()
+                || patch.args.is_some()
+                || patch.cwd.is_some()
+                || patch.env.is_some()
+            {
+                return Err(RpcError::invalid(
+                    "stdio fields cannot update a remote server",
+                ));
+            }
+            if let Some(value) = patch.url {
+                *url = value;
+            }
+            if let Some(bearer) = patch.bearer {
+                *auth = match bearer {
+                    BearerPatch::Set { token } => Some(BearerAuth::Bearer { token }),
+                    BearerPatch::Remove => None,
+                };
+            }
+            if let Some(change) = patch.oauth {
+                match change {
+                    OAuthPatch::Remove => *oauth = None,
+                    OAuthPatch::Set {
+                        client_id,
+                        callback_port,
+                        auth_server_metadata_url,
+                        scopes,
+                    } => {
+                        let oauth = oauth.get_or_insert_with(Default::default);
+                        if let Some(value) = client_id {
+                            oauth.client_id = value;
+                        }
+                        if let Some(value) = callback_port {
+                            oauth.callback_port = value;
+                        }
+                        if let Some(value) = auth_server_metadata_url {
+                            oauth.auth_server_metadata_url = value;
+                        }
+                        if let Some(value) = scopes {
+                            oauth.scopes = value;
+                        }
+                    }
+                }
+            }
+            (patch.headers, headers)
+        }
+    };
+    for (name, value) in changes.into_iter().flatten() {
+        if name.trim().is_empty() {
+            return Err(RpcError::invalid("secret field names must not be empty"));
+        }
+        match value {
+            Some(value) => {
+                secrets.insert(name, value);
+            }
+            None => {
+                secrets.remove(&name);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveMcp {
@@ -87,6 +303,13 @@ pub struct CompleteMcpAuth {
     /// Carries the authorization code; never logged.
     pub callback_url: String,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CancelMcpAuth {
+    attempt_id: String,
+}
+
 impl std::fmt::Debug for CompleteMcpAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompleteMcpAuth").finish_non_exhaustive()
@@ -206,11 +429,16 @@ pub(super) fn provide(
     settings: Arc<SettingsService>,
     auth: Arc<McpAuth>,
 ) -> Result<(), Error> {
+    let context = ctx.clone();
     methods.register(
         ctx,
         "mcp",
         [
             "mcp.catalog",
+            "mcp.configuration",
+            "mcp.inspect",
+            "mcp.test",
+            "mcp.update",
             "mcp.temporary.capabilities",
             "mcp.save",
             "mcp.remove",
@@ -218,17 +446,73 @@ pub(super) fn provide(
             "mcp.disconnect",
             "mcp.auth.start",
             "mcp.auth.complete",
+            "mcp.auth.cancel",
             "mcp.auth.logout",
         ]
         .into_iter()
-        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.temporary.capabilities"), Interruption::Report))
+        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.configuration" | "mcp.inspect" | "mcp.temporary.capabilities"), Interruption::Report))
         .collect(),
         Arc::new(move |method, value, stopping, _| {
             let directory = directory.clone();
             let settings = settings.clone();
             let auth = auth.clone();
+            let context = context.clone();
             Box::pin(async move {
                 match method.as_str() {
+                    "mcp.inspect" => {
+                        let p: McpTarget = params(value)?;
+                        let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
+                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                        let connections = directory.publication.inspect(source, p.id, &stopping).await.map_err(error)?;
+                        return Ok(serde_json::json!({
+                            "enabled": entry.enabled(),
+                            "configuration": configuration_view(entry.configuration)?,
+                            "connections": connections
+                        }));
+                    }
+                    "mcp.test" => {
+                        let p: TestMcp = params(value)?;
+                        if p.id.trim().is_empty() {
+                            return Err(RpcError::invalid("id must not be empty"));
+                        }
+                        let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
+                        let configuration = if let Some(configuration) = p.configuration {
+                            if !matches!(source, McpSource::User) || p.patch.is_some() {
+                                return Err(RpcError::invalid("A new test configuration must be user-supplied and cannot include a patch"));
+                            }
+                            configuration
+                        } else {
+                            let mut entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                            if !matches!(source, McpSource::User) && !entry.enabled() {
+                                return Err(error(McpError::Disabled));
+                            }
+                            if let Some(patch) = p.patch {
+                                writable(source)?;
+                                patch_configuration(&mut entry.configuration, patch)?;
+                            }
+                            entry.configuration
+                        };
+                        let mut document = McpSettings::default();
+                        document.mcp_servers.insert(p.id.clone(), configuration);
+                        document.validate().map_err(|e| error(e.into()))?;
+                        let configuration = document.mcp_servers.remove(&p.id).unwrap();
+                        let tools = directory.test(context, p.id, configuration, &stopping).await.map_err(error)?;
+                        return Ok(serde_json::json!({"tools": tools}));
+                    }
+                    "mcp.configuration" => {
+                        let p: McpTarget = params(value)?;
+                        let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
+                        let entry = target(&directory, source, p.id, &stopping).await?;
+                        return configuration_view(entry.configuration);
+                    }
+                    "mcp.update" => {
+                        let p: UpdateMcp = params(value)?;
+                        let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
+                        let scope = writable(source)?;
+                        let mut entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                        patch_configuration(&mut entry.configuration, p.patch)?;
+                        directory.update(scope, p.expected_version, p.id, McpChange::Put(entry.configuration), &stopping).await.map_err(error)?;
+                    }
                     "mcp.temporary.capabilities" => return Ok(serde_json::json!({"transports":["stdio","http","sse"],"leaseSeconds":super::temporary::LEASE.as_secs()})),
                     "mcp.catalog" => {
                         let p: SelectionScope = params(value)?;
@@ -378,6 +662,12 @@ pub(super) fn provide(
                             .await
                             .map_err(|e| error(e.into()))?;
                         return reply(started);
+                    }
+                    "mcp.auth.cancel" => {
+                        let p: CancelMcpAuth = params(value)?;
+                        let id = uuid::Uuid::parse_str(&p.attempt_id)
+                            .map_err(|_| RpcError::invalid("attemptId must be a UUID"))?;
+                        auth.cancel_attempt(id, &stopping).await.map_err(|e| error(e.into()))?;
                     }
                     "mcp.auth.complete" => {
                         let p: CompleteMcpAuth = params(value)?;

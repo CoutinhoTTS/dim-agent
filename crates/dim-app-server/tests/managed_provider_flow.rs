@@ -113,6 +113,7 @@ impl ManagedProvider for Provider {
             provider_id: "fixture".into(),
             display_name: "Fixture".into(),
             login_methods: vec!["device".into()],
+            default_directory: None,
         }]
     }
     fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {

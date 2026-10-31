@@ -23,8 +23,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod exec_shell_settings;
 #[cfg(unix)]
 mod isolation;
+pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellChoice};
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";

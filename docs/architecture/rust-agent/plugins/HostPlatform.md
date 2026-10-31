@@ -48,6 +48,17 @@ has members. Dropping a `ProcessTree` signals only when the tree was neither
 confirmed terminated nor reaped on its own; otherwise a recycled pid or reused
 group could receive `SIGKILL`.
 
+`read_exec_shell_settings(cancel)` reads the current version-1 preference and
+detected shell choices, returning the byte revision, optional explicit executable
+and any parse error. `update_exec_shell_settings(expected_revision, executable_path,
+cancel)` validates the selection with the same resolver used by execution, then
+replaces the preference atomically under a FileStorage lease if its byte revision
+still matches. An absent executable selects automatic detection; a malformed
+preference can be repaired using its current revision. Missing files have revision
+`absent`. App Server exposes these operations as trusted local management methods
+`host.exec_shell.get` and `host.exec_shell.update`, never model tools. No service,
+dependency or assembly changes are needed for these owner operations.
+
 The [process isolation design](../../../design/host-platform-isolation.md) owns the boundary
 contract: the two switches, their defaults, each platform's roots, the temporary
 directory and the failure note. `prepare_isolated_process(spec, workspace, output_dir)` reads
@@ -60,7 +71,7 @@ returns it as a `TemporaryDirectory`; the consumer passes it to `ProcessTree::ho
 `PtyProcessTree::hold`, and dropping the tree handle removes it on a blocking worker, so a
 background handoff keeps it. Failure to create it returns `isolation_unavailable`. A sandboxed
 spec also returns the crate-local `Isolation` marker, which supplies the failure note. With the
-sandbox off, and on Windows, the original spec comes back with neither value.
+sandbox off, the original spec comes back with neither value.
 
 A missing port or an unreadable source fails preparation as `isolation_config_invalid` before any
 payload starts; it never runs unsandboxed. Sandbox on without a backend fails as
