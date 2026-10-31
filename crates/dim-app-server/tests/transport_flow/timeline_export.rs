@@ -283,7 +283,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":27,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":28,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -351,10 +351,18 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (23, "", true),
             (24, "", true),
             (25, "", false),
+            (26, "", false),
+            (27, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
                 "DROP TABLE session_catalog;"
+            } else {
+                ""
+            };
+            // Every format before v28 lacks the grants table.
+            let grants = if version < 28 {
+                "DROP TABLE session_grants;"
             } else {
                 ""
             };
@@ -364,10 +372,12 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {dropped} {end_index} DROP TABLE agent_store_format;
+            changed(&database, &older, &format!("{catalog} {grants} {dropped} {end_index} DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
-            without_v26_columns(&older);
+            if version < 27 {
+                without_v26_columns(&older);
+            }
             let bytes = std::fs::read(&older).unwrap();
             let read = exported(&older, &session).await;
             assert_eq!(read[0]["store_format"], version, "v{version}");
@@ -378,8 +388,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 28));
-                INSERT INTO agent_store_format VALUES (28);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29));
+                INSERT INTO agent_store_format VALUES (29);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

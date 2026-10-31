@@ -322,6 +322,7 @@ pub fn run_with(
                 dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
             );
             permission_rules::install(&mut builder);
+            crate::session_grants::install(&mut builder);
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));

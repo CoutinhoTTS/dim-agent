@@ -2369,6 +2369,7 @@ impl App {
                 branch_id,
                 allow,
                 remember,
+                grant,
             } => {
                 self.answered
                     .insert((branch_id.clone(), request_id.clone()));
@@ -2377,6 +2378,7 @@ impl App {
                     branch_id,
                     allow,
                     remember,
+                    grant,
                 });
                 self.prompt = None;
                 self.sync_prompt();
@@ -2470,6 +2472,7 @@ impl App {
                         branch_id,
                         allow: true,
                         remember: false,
+                        grant: None,
                     });
                 }
                 self.prompt = None;

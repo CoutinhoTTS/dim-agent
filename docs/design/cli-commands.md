@@ -428,15 +428,16 @@ interrupts do not become an exit or draft-clear action at the next prompt.
 The App Server already owns everything needed to decide tool calls: a branch preset fixed
 at `session.create {permissionPolicy}` and changed with `session.permission.get/update`
 (versioned per branch), and the user's command rules read and replaced with
-`permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)). The
-CLI only answered each approval once with `y`. This section adds CLI entry points over those
-contracts and the [F2 §5.4](appserver/permission-command-rules.md#54-always-allow-client-flow)
-client flow. The App Server, Permission, Approval, events, protocol and storage do not change.
+`permission.rules`/`permission.set_rules` ([F2](appserver/permission-command-rules.md)).
+Session file grants are stored by the App Server's `session.grants.*` methods under
+[ADR 012](../../adr/012-session-grants.md). The CLI only answered each approval once with `y`.
+This section adds CLI entry points over those contracts and the
+[F2 §5.4](appserver/permission-command-rules.md#54-always-allow-client-flow) client flow.
 
 | Preset | What runs (Permission's existing decision, after `disallowedTools` and deny rules) |
 | --- | --- |
 | `read-only` | Reads and Session tools run; file writes, commands, network and unclassified tools are denied |
-| `workspace-write` | Reads, workspace file writes and Session tools run; outside writes, commands, network and unclassified tools ask |
+| `workspace-write` | Reads, workspace file writes and Session tools run; outside writes without a matching write grant, commands, network and unclassified tools ask |
 | `full-access` | Every tool call runs without asking |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
@@ -747,6 +748,28 @@ ends as `[rule not saved]`, and the stop settles the request. The recheck after 
 still applies, so a deny rule written meanwhile wins. Command text is shown through the terminal
 filter.
 
+### "Allow for this session"
+
+For `read`, `write` and `edit` calls with a `path`, the prompt also offers `Allow for this
+session` (ADR 012). The CLI sends the tool's path unchanged to `session.grants.add
+{sessionId, path, kind: "file", mode}`: the mode is `read` for `read` and `write` otherwise.
+The daemon resolves `~`, a relative path, `..` and symlinks against the Session workspace and
+stores the canonical path; a new file is resolved by its parent and final name. The CLI decides
+no path or kind locally.
+
+```text
+[approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
+  path: /home/user/.zshrc
+› Allow once   Allow for this session   Reject   Full access
+```
+
+`Allow for this session` writes the grant first, then answers `approval.respond allow`; the
+recheck sees the grant. If the write fails, the CLI shows `Grant not saved: <error>` and still
+allows the call once, as the user asked, so no failed store write blocks the turn. This prompt
+does not list or remove grants; `session.grants.remove/list/lookup` are the contract for a
+client that does. A grant is consulted only at the `Ask` step, a `read` grant never authorizes a
+write, and a fork starts without the source's grants.
+
 ### Decisions
 
 1. **No default preset in the CLI.** A default for new Sessions is user host configuration
@@ -777,7 +800,6 @@ filter.
 | Item | What it needs |
 | --- | --- |
 | A reviewer model that answers approvals for the user | An approval answerer that responds through Approval's public respond operation, with its own model call and design, like the Collaboration leader route; not a CLI change |
-| Allows remembered only for one Session | A recorded fact or a Session-scoped rules source (F2 §10.2 defers per-workspace user rules); a CLI-process memory would answer without a recorded decision |
 | Shift+Tab cycle | CLI only: an editor action result and a confirmation path (decision 4) |
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
 | `/approvals` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
@@ -788,7 +810,7 @@ filter.
 | --- | --- |
 | Principles §1 (bounded plugins, App Server only assembles) | No new plugin or Capability; the CLI is a client of existing methods |
 | Principles §3 (dependency direction) | The CLI depends on `dim-agent-types` for `PermissionPolicy`, `CommandRule` and `COMMAND_SEPARATORS`, as it already does for events; nothing depends on the CLI |
-| §4 rule 1 (command events) | Policy changes go through Permission's existing `session.permission.update`, which writes `permission/changed`; rules go through their owner's typed write |
+| §4 rule 1 (command events) | Policy changes go through Permission's existing `session.permission.update`, which writes `permission/changed`; rules and grants go through their owners' typed writes |
 | §4 rule 2 (handover) | Unchanged |
 | §4 rule 3 (before callback) | Not used |
 | §4 rule 4 (core has no business meaning) | Timeline, Dispatcher and Permission are unchanged; tool names appear only in the CLI's prompt eligibility |
@@ -796,7 +818,7 @@ filter.
 | §4 rule 6 (context) | The model sees only the existing results and denials |
 | §4 rule 7 (public interfaces only) | Only public methods and notifications; the CLI reads `permission/changed` from the public event stream |
 | §4 rule 8 (infrastructure unchanged) | No change; two requirements are raised below for App Server owners, not infrastructure |
-| §4 rule 9 (only needed facts in Timeline) | No new event; rules stay out of the Timeline |
+| §4 rule 9 (only needed facts in Timeline) | No new event; rules and grants stay out of the Timeline |
 | ADR 002 D1 to D5 | No new part, wiring, dependency, configuration or contract |
 | ADR 003 | Presets and rules govern only agent tool calls; `!command` is unaffected; rules are user scope only, so no project file can widen them; replay, restore and fork confer nothing new |
 

@@ -140,6 +140,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Session record, owner, branches, events, content, snapshots | Native store | Step 4, one transaction |
 | Session-file ownership | `session_file_owners` (S5a) | Step 4. Files left without an owner go in S5a's sweep |
 | Title metadata | Native store, S5b's `session_metadata` row ([title metadata](session-title-metadata.md#9-lifecycle)) | Step 4, same transaction |
+| File grants | Native store, `session_grants` rows (v28, [ADR 012](../../adr/012-session-grants.md) D1) | Step 4, same transaction |
 | Exec output and offloaded `read` results | `<database directory>/command-output/<S>/` | Step 3 |
 | Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
 | Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
@@ -324,6 +325,7 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17). The `session/forked` row references no content |
 | `timeline_snapshots` | The rows anchored on copied `main` events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
 | `session_file_owners` | One row for F per file S owns ([Session files §4](session-files.md#4-sharing-on-fork)) |
+| `session_grants` | None: a fork is a new Session and does not inherit grants ([ADR 012](../../adr/012-session-grants.md) D1) |
 | Title metadata (S5b) | None: a fork starts untitled ([SessionTitle](../plugins/SessionTitle.md) A7) |
 
 **Why child branches come without their events.** A child's events are not ordered against `main`'s cut, so no prefix
@@ -363,6 +365,7 @@ length grows with `main`'s copied prefix.
 | An input still being submitted | Not committed, so not a fact |
 | The command output directory | WorkspaceTools' per-Session directory. F's copied tool results quote paths under `command-output/<S>/`, readable while S exists (§6.6) |
 | Title metadata | SessionTitle A7 |
+| File grants | A grant is a per-Session approval; F is a new Session and does not inherit S's grants ([ADR 012](../../adr/012-session-grants.md) D1). The user answers for F separately |
 | Collaboration relations and temporary Agents | Process memory of the source's team. F leads no member, and S's temporary Agents stay invisible to F |
 | Host configuration | Never part of a Session |
 
@@ -544,7 +547,8 @@ policy by its starter as `launch` does, because a process caller must not get a 
 - A fork copies the permission preset and never widens it. The preset at the cut is one the source held, and the
   caller could already change the source's preset with `session.permission.update`.
 - Copied approval facts are decisions about calls that are already settled. Approval rechecks the current policy on
-  every answer and records no standing grant, so no authority comes from them.
+  every answer and itself records no standing grant, so no authority comes from them. A client-written Session
+  grant is separate and is not copied by the fork (§6.4, [ADR 012](../../adr/012-session-grants.md) D1).
 - Host security settings never enter the Timeline, so a fork neither restores nor widens them (ADR 003 D5).
 - Owning the source's Session files adds no authority ([Session files §11](session-files.md#11-security)).
 - Copied references to another Session's resources (member Session ids, task ids, paths) confer nothing: an owner

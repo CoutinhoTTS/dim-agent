@@ -3,7 +3,10 @@ use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
     Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
 };
-use dim_agent_types::*;
+use dim_agent_types::{
+    grant::{GrantKind, GrantMode, SessionGrant},
+    *,
+};
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
@@ -195,13 +198,15 @@ const BUSINESS_TABLES: &[&str] = &[
     "timeline_snapshots",
     "session_files",
     "session_file_owners",
+    "session_grants",
     "session_metadata",
     "session_catalog",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
-/// v19 through v22 and v24 add none.
+/// The business tables each upgrade step adds: v15's, then v16's and v28's;
+/// v17, v18, v19 through v22 and v24 add none; v27 only alters columns.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
+const V28_TABLES: [&str; 1] = ["session_grants"];
 /// Inserts the rows of `tables` from the complete record example in
 /// native-storage-format.md.
 fn insert_documented_records(connection: &Connection, tables: &[&str]) {
@@ -286,6 +291,9 @@ const V27_ADDITIONS: &[&str] = &[
     "CREATE INDEX agent_sessions_by_leader ON agent_sessions(leader_session_id)",
     "CREATE INDEX agents_by_owner ON agents(owner_session_id)",
 ];
+const V28_ADDITIONS: &[&str] = &[
+    "CREATE TABLE session_grants (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')), mode TEXT NOT NULL CHECK (mode IN ('read', 'write')), PRIMARY KEY (session_id, path))",
+];
 const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
     "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
@@ -298,6 +306,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V16_ADDITIONS.iter().filter(|_| version >= 16))
         .chain(V23_ADDITIONS.iter().filter(|_| version >= 23))
         .chain(V27_ADDITIONS.iter().filter(|_| version >= 27))
+        .chain(V28_ADDITIONS.iter().filter(|_| version >= 28))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -497,7 +506,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
     connection
-        .execute("INSERT INTO agent_store_format VALUES (27)", [])
+        .execute("INSERT INTO agent_store_format VALUES (28)", [])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
@@ -2755,6 +2764,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .filter(|_| from < 16)
         .chain(V15_TABLES.iter().filter(|_| from < 15))
         .chain(["session_catalog"].iter().filter(|_| from < 23))
+        .chain(V28_TABLES.iter().filter(|_| from < 28))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -2774,8 +2784,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(27));
-    assert_eq!(marker(&connection), [27]);
+    assert_eq!(schema(&connection), schema_of(28));
+    assert_eq!(marker(&connection), [28]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2854,8 +2864,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(27));
-    assert_eq!(marker(&connection), [27]);
+    assert_eq!(schema(&connection), schema_of(28));
+    assert_eq!(marker(&connection), [28]);
     drop(connection);
 
     let database = Database::new();
@@ -2975,7 +2985,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [27]);
+    assert_eq!(marker(&connection), [28]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -3221,7 +3231,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v27; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v28; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -5477,8 +5487,8 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             .unwrap()
     };
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(27));
-    assert_eq!(marker(&connection), [27]);
+    assert_eq!(schema(&connection), schema_of(28));
+    assert_eq!(marker(&connection), [28]);
     drop(connection);
 
     let listed_expected = json!({
@@ -5935,4 +5945,92 @@ async fn a_v26_store_upgrades_in_place_once() {
         .unwrap();
     assert_eq!(schema(&connection), schema_of(26));
     upgrades_in_place_once(&database, connection, 26).await;
+}
+
+#[tokio::test]
+async fn a_v27_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(27);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (27)", [])
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(27));
+    upgrades_in_place_once(&database, connection, 27).await;
+    let connection = Connection::open(&database.0).unwrap();
+    assert!(rows(&connection, "session_grants").is_empty());
+}
+
+/// Grants upsert without downgrading write, survive a restart, are absent
+/// from a fork, and remove takes the same path it added.
+#[tokio::test]
+async fn session_grants_upsert_remove_survive_restart_and_are_not_forked() {
+    let database = Database::new();
+    let notes = PathBuf::from("/work/notes.md");
+    let directory = PathBuf::from("/work/notes");
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("s", &SessionConfig::default())
+        .await
+        .unwrap();
+    sessions
+        .add_grant("s", notes.clone(), GrantKind::File, GrantMode::Write)
+        .await
+        .unwrap();
+    sessions
+        .add_grant("s", notes.clone(), GrantKind::File, GrantMode::Read)
+        .await
+        .unwrap();
+    sessions
+        .add_grant("s", directory.clone(), GrantKind::Dir, GrantMode::Write)
+        .await
+        .unwrap();
+    assert_eq!(
+        sessions.grants("s").await.unwrap(),
+        vec![
+            SessionGrant {
+                path: directory,
+                kind: GrantKind::Dir,
+                mode: GrantMode::Write,
+            },
+            SessionGrant {
+                path: notes.clone(),
+                kind: GrantKind::File,
+                mode: GrantMode::Write,
+            },
+        ]
+    );
+
+    sessions.fork_session("s", "f", 0).await.unwrap();
+    assert!(sessions.grants("f").await.unwrap().is_empty());
+
+    drop(sessions);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = SqliteTimelineStore::new(db.clone());
+    assert_eq!(sessions.grants("s").await.unwrap().len(), 2);
+    sessions.remove_grant("s", notes.clone()).await.unwrap();
+    assert_eq!(
+        sessions.grants("s").await.unwrap(),
+        vec![SessionGrant {
+            path: PathBuf::from("/work/notes"),
+            kind: GrantKind::Dir,
+            mode: GrantMode::Write,
+        }]
+    );
+
+    drop(sessions);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }

@@ -17,6 +17,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
     SessionForkedData,
+    grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rutis::Ctx;
@@ -27,6 +28,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
     sync::{Arc, Mutex, Weak, mpsc},
     thread,
     time::{Duration, Instant},
@@ -739,6 +741,7 @@ impl SqliteTimelineStore {
             "timeline_events",
             "timeline_branches",
             "timeline_content",
+            "session_grants",
             "session_metadata",
             "session_catalog",
             "session_owners",
@@ -844,6 +847,88 @@ impl SessionStore {
                     .map_err(error)?
                     .collect::<rusqlite::Result<_>>()
                     .map_err(error)
+            })
+            .await
+    }
+    /// Adds a canonical user grant for `session_id`. The caller resolves
+    /// `path`; a write grant is not downgraded by a later read grant, and a
+    /// read grant may become write.
+    pub async fn add_grant(
+        &self,
+        session_id: &str,
+        path: PathBuf,
+        kind: GrantKind,
+        mode: GrantMode,
+    ) -> Result<()> {
+        let id = session_id.to_owned();
+        let path = path.to_string_lossy().into_owned();
+        let kind = match kind {
+            GrantKind::File => "file",
+            GrantKind::Dir => "dir",
+        };
+        let mode = match mode {
+            GrantMode::Read => "read",
+            GrantMode::Write => "write",
+        };
+        self.timeline
+            .db
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO session_grants (session_id, path, kind, mode) VALUES (?1, ?2, ?3, ?4) \
+                         ON CONFLICT(session_id, path) DO UPDATE SET kind=excluded.kind, \
+                         mode=CASE WHEN session_grants.mode='write' THEN 'write' ELSE excluded.mode END",
+                        params![id, path, kind, mode],
+                    )
+                    .map_err(error)?;
+                Ok(())
+            })
+            .await
+    }
+    /// Removes the grant at the canonical `path`; the caller resolves it the
+    /// same way `add_grant` does.
+    pub async fn remove_grant(&self, session_id: &str, path: PathBuf) -> Result<()> {
+        let id = session_id.to_owned();
+        let path = path.to_string_lossy().into_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "DELETE FROM session_grants WHERE session_id=?1 AND path=?2",
+                        params![id, path],
+                    )
+                    .map_err(error)?;
+                Ok(())
+            })
+            .await
+    }
+    pub async fn grants(&self, session_id: &str) -> Result<Vec<SessionGrant>> {
+        let id = session_id.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                let mut query = connection
+                    .prepare("SELECT path, kind, mode FROM session_grants WHERE session_id=?1 ORDER BY path")
+                    .map_err(error)?;
+                let rows = query
+                    .query_map([id], |row| {
+                        let path: String = row.get(0)?;
+                        let kind: String = row.get(1)?;
+                        let mode: String = row.get(2)?;
+                        Ok((path, kind, mode))
+                    })
+                    .map_err(error)?;
+                let mut grants = Vec::new();
+                for row in rows {
+                    let (path, kind, mode) = row.map_err(error)?;
+                    grants.push(SessionGrant {
+                        path: PathBuf::from(path),
+                        kind: if kind == "file" { GrantKind::File } else { GrantKind::Dir },
+                        mode: if mode == "write" { GrantMode::Write } else { GrantMode::Read },
+                    });
+                }
+                Ok(grants)
             })
             .await
     }
@@ -1096,8 +1181,10 @@ impl SessionStore {
     /// `at` with the content rows its events reference and the snapshots
     /// anchored on them, a directory without events for every branch `main`
     /// created by then, and an owner row for every Session file the source
-    /// owns. Rows are copied as stored. A source whose delete committed first
-    /// is `Closed`. The runtime validates the copy when it builds the fork.
+    /// owns. Rows are copied as stored, except grants: a fork is a new
+    /// Session and does not inherit them. A source whose delete committed
+    /// first is `Closed`. The runtime validates the copy when it builds the
+    /// fork.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
         let (source, fork) = (source.to_owned(), fork.to_owned());
         self.timeline
@@ -1240,6 +1327,8 @@ impl SessionStore {
                 }
                 super::catalog::initialize_session_catalog(&tx, &fork)?;
                 files::share(&tx, &source, &fork).map_err(error)?;
+                // A fork is a new Session and does not inherit grants
+                // (ADR 012 D1).
                 tx.commit().map_err(error)
             })
             .await

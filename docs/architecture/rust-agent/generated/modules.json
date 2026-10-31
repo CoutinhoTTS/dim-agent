@@ -742,6 +742,16 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::session_grants",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/session_grants.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "format"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::settings",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -1399,6 +1409,13 @@
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
       "file": "crates/dim-agent-types/src/lib.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_types::grant",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types",
+      "file": "crates/dim-agent-types/src/grant.rs",
       "unexpandedMacros": []
     },
     {
@@ -2266,6 +2283,18 @@
         "assert",
         "assert_eq",
         "format"
+      ]
+    },
+    {
+      "id": "dim_app_server::session_grants",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/session_grants.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -6380,6 +6409,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::session_grants",
+      "references": [
+        "mod session_grants",
+        "path session_grants::SessionGrantsHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "mod settings"
@@ -8833,6 +8870,16 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::session_grants",
+      "references": [
+        "path SessionGrantsHost",
+        "path resolve_grant_path",
+        "use crate::session_grants::SessionGrantsHost",
+        "use crate::session_grants::resolve_grant_path"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
         "path canonical_prefix",
@@ -8904,6 +8951,15 @@
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path GrantMode::Read",
+        "path GrantMode::Write",
+        "use dim_agent_types::grant::GrantMode"
       ]
     },
     {
@@ -9694,6 +9750,29 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::session_grants",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::session_grants",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path crate::workspace_tools::files::resolve_path"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::session_grants",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path SessionGrant",
+        "use dim_agent_types::grant::SessionGrant"
       ]
     },
     {
@@ -13714,6 +13793,13 @@
     },
     {
       "from": "dim_agent_types",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "mod grant"
+      ]
+    },
+    {
+      "from": "dim_agent_types",
       "to": "dim_agent_types::member_approval",
       "references": [
         "mod member_approval"
@@ -14441,6 +14527,13 @@
         "mod runtime_manager",
         "path runtime_manager::RuntimeManagerPlugin::new",
         "path runtime_manager::RuntimeService"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::session_grants",
+      "references": [
+        "mod session_grants"
       ]
     },
     {
@@ -15568,6 +15661,13 @@
       "references": [
         "path Runtimes::load",
         "use crate::runtime_manager::Runtimes"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::session_grants",
+      "references": [
+        "path crate::session_grants::install"
       ]
     },
     {
@@ -20343,6 +20443,106 @@
       ]
     },
     {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::HostError",
+        "path dim_agent_capabilities::host::HostError::failed"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Interruption::Report",
+        "path MethodDecl::new",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path SessionMethods",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_capabilities::session_grants",
+      "references": [
+        "path ReadSessionGrants",
+        "path SessionGrantsHost",
+        "path resolve_grant_path",
+        "use dim_agent_capabilities::session_grants::ReadSessionGrants",
+        "use dim_agent_capabilities::session_grants::SessionGrantsHost",
+        "use dim_agent_capabilities::session_grants::resolve_grant_path"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::Feature::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path GrantKind",
+        "path GrantMode",
+        "path SessionGrant",
+        "use dim_agent_types::grant::GrantKind",
+        "use dim_agent_types::grant::GrantMode",
+        "use dim_agent_types::grant::SessionGrant"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_grants",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore",
+        "use crate::storage::SessionStore"
+      ]
+    },
+    {
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::methods",
       "references": [
@@ -21598,6 +21798,22 @@
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::SessionForkedData"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path GrantKind",
+        "path GrantKind::Dir",
+        "path GrantKind::File",
+        "path GrantMode",
+        "path GrantMode::Read",
+        "path GrantMode::Write",
+        "path SessionGrant",
+        "use dim_agent_types::grant::GrantKind",
+        "use dim_agent_types::grant::GrantMode",
+        "use dim_agent_types::grant::SessionGrant"
       ]
     },
     {
@@ -24807,6 +25023,7 @@
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::TaskOutput",
+        "path Update::Toast",
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
@@ -27851,6 +28068,7 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::model::session",
       "references": [
+        "path crate::model::session::GrantRequest",
         "path crate::model::session::OauthStart",
         "path crate::model::session::PluginAction",
         "path crate::model::session::ProviderAction",
@@ -33374,6 +33592,18 @@
     {
       "module": "dim_app_server::storage::codec",
       "path": "Field::Tools"
+    },
+    {
+      "module": "dim_app_server::storage::files::tests",
+      "path": "GrantKind::Dir"
+    },
+    {
+      "module": "dim_app_server::storage::files::tests",
+      "path": "GrantKind::File"
+    },
+    {
+      "module": "dim_app_server::storage::files::tests",
+      "path": "GrantMode::Write"
     },
     {
       "module": "dim_app_server::storage::metadata",

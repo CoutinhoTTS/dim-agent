@@ -43,6 +43,7 @@ pub enum Effect {
         branch_id: String,
         allow: bool,
         remember: bool,
+        grant: Option<crate::model::session::GrantRequest>,
     },
     Answers {
         call: Call,
@@ -296,6 +297,8 @@ pub enum PermissionAction {
     Retry,
     /// Allow and save an allow rule for the command, so it never asks again.
     AllowAlways,
+    /// Allow this exact path for the rest of this Session.
+    AllowSession,
     Reject,
     /// Switch the session to the full-access preset, which also becomes the
     /// default for later sessions, and allow this call. The loudest last.
@@ -308,6 +311,7 @@ impl PermissionAction {
             Self::AllowOnce => t("Allow once"),
             Self::Retry => t("Retry"),
             Self::AllowAlways => t("Allow always"),
+            Self::AllowSession => t("Allow for this session"),
             Self::Reject => t("Reject"),
             Self::FullAccess => t("Full access"),
         }
@@ -346,6 +350,9 @@ impl PermissionPrompt {
         let mut actions = vec![PermissionAction::AllowOnce];
         if always {
             actions.push(PermissionAction::AllowAlways);
+        }
+        if Self::grant_for(&tool_name, &input).is_some() {
+            actions.push(PermissionAction::AllowSession);
         }
         actions.push(PermissionAction::Reject);
         actions.push(PermissionAction::FullAccess);
@@ -434,6 +441,25 @@ impl PermissionPrompt {
         )
     }
 
+    /// The grant a prompt may offer. `read`, `write` and `edit` all name a
+    /// file, so the kind does not depend on the client's filesystem: the
+    /// daemon resolves the path against the Session workspace.
+    fn grant_for(tool: &str, input: &Value) -> Option<crate::model::session::GrantRequest> {
+        if !matches!(tool, "read" | "write" | "edit") {
+            return None;
+        }
+        let path = input.get("path")?.as_str()?.to_owned();
+        Some(crate::model::session::GrantRequest {
+            path,
+            kind: "file".into(),
+            mode: if tool == "read" { "read" } else { "write" }.into(),
+        })
+    }
+
+    fn grant(&self) -> Option<crate::model::session::GrantRequest> {
+        Self::grant_for(&self.tool_name, &self.input)
+    }
+
     fn always(&self) -> bool {
         self.actions.contains(&PermissionAction::AllowAlways)
     }
@@ -479,7 +505,12 @@ impl PermissionPrompt {
         }
     }
 
-    fn decide(&self, allow: bool, remember: bool) -> Effect {
+    fn decide(
+        &self,
+        allow: bool,
+        remember: bool,
+        grant: Option<crate::model::session::GrantRequest>,
+    ) -> Effect {
         if allow
             && self.tool_name == dim_agent_types::MEMBER_APPROVAL_ALLOW
             && !matches!(self.member, Some(Ok(_)))
@@ -491,6 +522,7 @@ impl PermissionPrompt {
             branch_id: self.branch_id.clone(),
             allow,
             remember,
+            grant,
         }
     }
 
@@ -538,10 +570,12 @@ impl PermissionPrompt {
             };
         }
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => self.decide(true, false),
-            KeyCode::Char('n') | KeyCode::Char('N') if plain(key) => self.decide(false, false),
+            KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => self.decide(true, false, None),
+            KeyCode::Char('n') | KeyCode::Char('N') if plain(key) => {
+                self.decide(false, false, None)
+            }
             KeyCode::Char('a') | KeyCode::Char('A') if plain(key) && self.always() => {
-                self.decide(true, true)
+                self.decide(true, true, None)
             }
             KeyCode::Right | KeyCode::Tab => {
                 self.selected = (self.selected + 1) % self.actions.len();
@@ -552,13 +586,14 @@ impl PermissionPrompt {
                 Effect::None
             }
             KeyCode::Enter => match self.actions[self.selected] {
-                PermissionAction::AllowOnce => self.decide(true, false),
+                PermissionAction::AllowOnce => self.decide(true, false, None),
                 PermissionAction::Retry => Effect::RetryApproval {
                     request_id: self.request_id.clone(),
                     branch_id: self.branch_id.clone(),
                 },
-                PermissionAction::AllowAlways => self.decide(true, true),
-                PermissionAction::Reject => self.decide(false, false),
+                PermissionAction::AllowAlways => self.decide(true, true, None),
+                PermissionAction::AllowSession => self.decide(true, false, self.grant()),
+                PermissionAction::Reject => self.decide(false, false, None),
                 PermissionAction::FullAccess => {
                     self.confirming = Some(1);
                     Effect::None
@@ -1496,6 +1531,15 @@ mod tests {
         assert!(matches!(
             p.handle_key(key(KeyCode::Char('a'))),
             Effect::None
+        ));
+        p.handle_key(key(KeyCode::Right));
+        assert!(matches!(
+            p.handle_key(key(KeyCode::Enter)),
+            Effect::Approval {
+                allow: true,
+                grant: Some(_),
+                ..
+            }
         ));
         p.handle_key(key(KeyCode::Right));
         assert!(matches!(
