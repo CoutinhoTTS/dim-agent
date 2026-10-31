@@ -1181,6 +1181,25 @@ fn session_started(event: &AgentEvent) -> bool {
     })
 }
 
+/// The events this branch folds, in the one list its live subscription uses.
+/// Every arm [`View::fold`] and [`Branch::fold`] match names its key here: a
+/// kind folded on replay but not delivered live would leave a live Session's
+/// view disagreeing with a rebuilt one (AGENTS rule 4).
+const FOLLOWED_EVENTS: [&str; 12] = [
+    "stop/interrupt",
+    "input/message",
+    "input/consumed",
+    "input/deleted",
+    "turn/start",
+    "turn/end",
+    "step/tool-call",
+    "step/tool-result",
+    "context/configured",
+    "approval/request",
+    "approval/respond",
+    "approval/cancelled",
+];
+
 pub struct HooksBranchPlugin {
     runtime: Key<HooksRuntime>,
     timeline: Key<Timeline>,
@@ -1238,34 +1257,17 @@ impl DynPlugin for HooksBranchPlugin {
             });
             let owner = branch.clone();
             dispatcher
-                .follow(
-                    ctx,
-                    "HooksBranch",
-                    &[
-                        "stop/interrupt",
-                        "input/message",
-                        "input/consumed",
-                        "turn/start",
-                        "turn/end",
-                        "step/tool-call",
-                        "step/tool-result",
-                        "approval/request",
-                        "approval/respond",
-                        "approval/cancelled",
-                        "context/configured",
-                    ],
-                    move |delivery| {
-                        match delivery {
-                            Delivery::Replay(events) => {
-                                for event in &events {
-                                    owner.fold(event, false);
-                                }
+                .follow(ctx, "HooksBranch", &FOLLOWED_EVENTS, move |delivery| {
+                    match delivery {
+                        Delivery::Replay(events) => {
+                            for event in &events {
+                                owner.fold(event, false);
                             }
-                            Delivery::Live(event) => owner.fold(&event, true),
                         }
-                        Box::pin(async { Ok(()) })
-                    },
-                )
+                        Delivery::Live(event) => owner.fold(&event, true),
+                    }
+                    Box::pin(async { Ok(()) })
+                })
                 .await?;
             let closing = tracker.clone();
             ctx.effect(move || async move {
@@ -1294,8 +1296,9 @@ mod tests {
     };
     use crate::host::HostFuture;
     use dim_agent_types::{
-        ApprovalCallData, ContentBlock, InputConsumedData, InputDeletedData, ToolCall,
-        ToolCallData, ToolResult, ToolResultData, TurnEndData, UserInput,
+        ApprovalCallData, ContentBlock, ContextConfiguredData, InputConsumedData, InputDeletedData,
+        InterruptScope, ModelConfiguration, StopInterruptData, ToolCall, ToolCallData, ToolResult,
+        ToolResultData, TurnEndData, TurnStartData, UserInput,
     };
     use std::path::PathBuf;
 
@@ -1366,6 +1369,128 @@ mod tests {
         assert!(
             view.calls.is_empty(),
             "a settled call stayed in the folded view"
+        );
+    }
+
+    /// AGENTS rule 4: a live fold must see what a replay does. The dispatcher
+    /// matches a live event with `event.kind.key()`, and the subscription uses
+    /// `FOLLOWED_EVENTS` alone, so that list is exactly the keys of the kinds
+    /// `View::fold` and `Branch::fold` match: a kind the folds handle and the
+    /// list misses leaves a live Session's view behind a rebuilt one, and a
+    /// listed key no fold matches is dead weight.
+    #[test]
+    fn the_live_subscription_follows_exactly_the_kinds_the_folds_match() {
+        let folded = [
+            // The nine arms of `View::fold`.
+            event(
+                1,
+                EventKind::StopInterrupt(StopInterruptData {
+                    reason: "stop".into(),
+                    scope: InterruptScope::Branch,
+                }),
+            ),
+            event(2, EventKind::InputMessage(InputMessageData::default())),
+            event(
+                3,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "input".into(),
+                }),
+            ),
+            event(
+                4,
+                EventKind::InputDeleted(InputDeletedData {
+                    input_id: "input".into(),
+                }),
+            ),
+            event(
+                5,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            event(
+                6,
+                EventKind::TurnEnd(TurnEndData {
+                    turn_id: "turn".into(),
+                    outcome: TurnOutcome::Completed {
+                        reason: "stop".into(),
+                    },
+                }),
+            ),
+            event(
+                7,
+                EventKind::ToolCall(ToolCallData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    calls: Vec::new(),
+                }),
+            ),
+            event(
+                8,
+                EventKind::ToolResult(ToolResultData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_event_id: None,
+                    results: Vec::new(),
+                }),
+            ),
+            event(
+                9,
+                EventKind::ContextConfigured(ContextConfiguredData {
+                    timeline: "main".into(),
+                    revision: "configuration".into(),
+                    previous: None,
+                    prompt: None,
+                    settings: Box::new(ModelConfiguration {
+                        provider_id: "provider".into(),
+                        model_id: "model".into(),
+                        capability_snapshot: None,
+                        tools: None,
+                        tool_sources: Vec::new(),
+                        config: None,
+                        metadata: None,
+                    }),
+                    system: None,
+                    system_source: None,
+                }),
+            ),
+            // The three arms of `Branch::fold`.
+            event(
+                10,
+                EventKind::ApprovalRequest(ApprovalRequestData {
+                    approval_id: "approval".into(),
+                    source: BranchSource::Host {
+                        operation_id: "operation".into(),
+                    },
+                    call: ApprovalCallData {
+                        name: "exec".into(),
+                        input: JsonObject::new(),
+                    },
+                    reason: "needs permission".into(),
+                }),
+            ),
+            event(
+                11,
+                EventKind::ApprovalRespond(ApprovalRespondData {
+                    approval_id: "approval".into(),
+                    decision: ApprovalDecision::Allow,
+                }),
+            ),
+            event(
+                12,
+                EventKind::ApprovalCancelled(ApprovalCancelledData {
+                    approval_id: "approval".into(),
+                    reason: "cancelled".into(),
+                }),
+            ),
+        ];
+        let mut matched: Vec<&str> = folded.iter().map(|event| event.kind.key()).collect();
+        matched.sort_unstable();
+        let mut followed = FOLLOWED_EVENTS.to_vec();
+        followed.sort_unstable();
+        assert_eq!(
+            followed, matched,
+            "the live fold and the rebuilt fold disagree"
         );
     }
 

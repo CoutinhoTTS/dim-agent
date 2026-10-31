@@ -162,6 +162,9 @@ that excerpt, and a handler whose document does not parse is reported by
 `disable_all_hooks_turns_every_source_off`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
+`the_live_subscription_follows_exactly_the_kinds_the_folds_match` pins that the
+live subscription follows every event kind the two folds handle, `input/deleted`
+included;
 `a_live_request_registers_its_token_before_its_task_starts`,
 `an_answer_folded_before_the_task_starts_runs_no_permission_command` and
 `an_answer_folded_during_the_read_runs_no_permission_command` pin that an
