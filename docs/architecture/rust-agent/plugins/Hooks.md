@@ -188,7 +188,9 @@ reported by `hooks.catalog` rather than at the hook point.
 `two_proceeding_handlers_keep_their_contexts_in_catalog_order`,
 `a_failure_finishing_after_a_later_result_blocks_by_its_own_handler`;
 `runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
-that a settled call's input does not stay in the folded view;
+that a settled call's input does not stay in the folded view; `a_json_array_on_stdout_is_prompt_context`
+pins that plain text, other JSON values included, is prompt context (A.3's
+exit-0 row);
 `a_live_request_registers_its_token_before_its_task_starts`,
 `an_answer_folded_before_the_task_starts_runs_no_permission_command` and
 `an_answer_folded_during_the_read_runs_no_permission_command` pin that an

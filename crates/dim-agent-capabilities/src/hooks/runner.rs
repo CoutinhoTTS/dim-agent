@@ -1556,6 +1556,32 @@ mod tests {
         assert_eq!(stderr, "denied\n");
     }
 
+    /// A.3's exit-0 row: stdout that is not one JSON object is plain text,
+    /// and for `UserPromptSubmit` plain text is prompt context.
+    #[test]
+    fn a_json_array_on_stdout_is_prompt_context() {
+        let handler = HookHandler {
+            event: HookEvent::UserPromptSubmit,
+            source: HookSourceId::User,
+            plugin_root: None,
+            command: String::new(),
+            command_windows: None,
+            timeout: Duration::from_secs(30),
+            on_failure: OnFailure::Continue,
+            asynchronous: false,
+        };
+        let run = HookRun {
+            result: HookResult::Success {
+                stdout: "[\"bonus\"]".into(),
+            },
+            on_failure: OnFailure::Continue,
+        };
+        let PromptDecision::Context(context) = prompt_decision(&handler, &run) else {
+            panic!("a JSON array on stdout is context");
+        };
+        assert_eq!(context, "[\"bonus\"]");
+    }
+
     /// F4: a result settles its call, and the call's input (whole file
     /// contents for `write`/`edit`) does not stay in the folded view.
     #[test]

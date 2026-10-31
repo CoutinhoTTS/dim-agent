@@ -8505,7 +8505,10 @@
       "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_capabilities::hooks::document",
       "references": [
+        "path HookEvent::UserPromptSubmit",
+        "path HookHandler",
         "path HooksDocument",
+        "path OnFailure::Continue",
         "use crate::hooks::HooksDocument"
       ]
     },
@@ -8514,17 +8517,22 @@
       "to": "dim_agent_capabilities::hooks::runner",
       "references": [
         "path HookResult::Failed",
+        "path HookResult::Success",
+        "path HookRun",
         "path HooksRuntime",
         "path Pending::default",
+        "path PromptDecision::Context",
         "path View::default",
         "path approval_point",
-        "path failed"
+        "path failed",
+        "path prompt_decision"
       ]
     },
     {
       "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
+        "path HookSourceId::User",
         "path HookSourcesHost",
         "path HookSourcesSnapshot",
         "path ReadHookSources",

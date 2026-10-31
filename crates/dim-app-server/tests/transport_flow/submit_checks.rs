@@ -187,15 +187,40 @@ async fn a_block_fails_the_operator_entries_and_writes_nothing() {
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let session = agent.get_session(&id).unwrap();
 
+    let submission = uuid::Uuid::new_v4().to_string();
     let refused = client
         .rpc(
             "session.submit",
-            json!({"sessionId": id, "branchId": "main", "text": "delete everything"}),
+            json!({"sessionId": id, "branchId": "main", "submissionId": submission.clone(),
+                "text": "delete everything"}),
         )
         .await;
     assert_eq!(refused["error"]["code"], -32000);
     assert_eq!(refused["error"]["data"]["appError"], "input_blocked");
     assert_eq!(refused["error"]["message"], "Hook test: no prompts today");
+    assert!(inputs(&session).await.is_empty(), "a block wrote an input");
+    // Appendix D item 5: a blocked submission stays unknown to
+    // `session.input_lookup`, and a retry with its id runs the checks again.
+    let looked_up = client
+        .rpc(
+            "session.input_lookup",
+            json!({"sessionId": id, "branchId": "main", "submissionId": submission.clone()}),
+        )
+        .await;
+    assert_ok(&looked_up);
+    assert_eq!(
+        looked_up["result"],
+        json!({"status": "unknown"}),
+        "a blocked submission stays unknown to session.input_lookup"
+    );
+    let refused = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": id, "branchId": "main", "submissionId": submission.clone(),
+                "text": "delete everything"}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "input_blocked");
     assert!(inputs(&session).await.is_empty(), "a block wrote an input");
 
     let branches = session.branches().len();
@@ -213,7 +238,7 @@ async fn a_block_fails_the_operator_entries_and_writes_nothing() {
         "a block created a branch"
     );
 
-    assert_eq!(check.entries(), ["submit", "branch"]);
+    assert_eq!(check.entries(), ["submit", "submit", "branch"]);
     server.shutdown();
     server.join().await.unwrap();
 }
