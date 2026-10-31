@@ -3390,7 +3390,7 @@ impl App {
             rows.resize(FULLSCREEN_COMPOSER_ROWS, String::new());
         }
         let box_top = live.len();
-        let activity = |label: &str| fg(label, self.activity_color());
+        let activity = |label: &str| fg(label, &p.activity);
         let shell_title = shell.map(|shell| match shell {
             Shell::Recorded => t("! shell mode"),
             Shell::Private => t("!! shell mode · not sent to the model"),
@@ -4377,15 +4377,6 @@ impl App {
                 >= u128::from(reading.threshold) * u128::from(CONTEXT_WARNING_PERCENT)
     }
 
-    fn activity_color(&self) -> &'static str {
-        use crate::ui::theme::ColorMode;
-        match self.theme_context.as_ref().map(|context| context.mode) {
-            Some(ColorMode::TrueColor) => "#38bdf8",
-            Some(ColorMode::Ansi256) => "ansi:75",
-            Some(ColorMode::Ansi16) | None => "ansi:12",
-        }
-    }
-
     /// Fullscreen's bottom border label, the status corner: the run
     /// status, the slot (a notice in the highlight colour), the approvals
     /// mode when it is not the default one and the context use.
@@ -4393,7 +4384,7 @@ impl App {
         let p = &self.palette;
         let mut parts: Vec<String> = Vec::new();
         if let Some(run) = run {
-            parts.push(fg(run, self.activity_color()));
+            parts.push(fg(run, &p.activity));
         }
         if let Some(slot) = self.slot() {
             let color = if self.notice.is_some() {
@@ -5345,23 +5336,43 @@ mod tests {
 
     #[test]
     fn model_activity_stays_blue_across_themes_and_terminal_modes() {
-        use crate::ui::theme::{Appearance, ColorMode, themes::THEMES};
+        use crate::ui::theme::{Appearance, ColorMode};
 
-        for (mode, sgr) in [
-            (ColorMode::TrueColor, "\x1b[38;2;56;189;248m"),
-            (ColorMode::Ansi256, "\x1b[38;5;75m"),
-            (ColorMode::Ansi16, "\x1b[94m"),
+        for (mode, appearance, sgr) in [
+            (
+                ColorMode::TrueColor,
+                Appearance::Dark,
+                "\x1b[38;2;56;189;248m",
+            ),
+            (ColorMode::Ansi256, Appearance::Dark, "\x1b[38;5;75m"),
+            (ColorMode::Ansi16, Appearance::Dark, "\x1b[94m"),
+            (
+                ColorMode::TrueColor,
+                Appearance::Light,
+                "\x1b[38;2;3;105;161m",
+            ),
+            (
+                ColorMode::Ansi256,
+                Appearance::Light,
+                "\x1b[38;2;3;105;161m",
+            ),
+            (ColorMode::Ansi16, Appearance::Light, "\x1b[94m"),
         ] {
-            for appearance in [Appearance::Dark, Appearance::Light] {
-                let mut drawn = Drawn::new((80, 24), None, true);
-                drawn.app.theme_context = Some(ThemeContext {
-                    mode,
-                    appearance,
-                    background: None,
-                    active: "system".into(),
-                });
-                for id in std::iter::once("system").chain(THEMES.iter().map(|theme| theme.id)) {
-                    drawn.app.paint_theme(id);
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.theme_context = Some(ThemeContext {
+                mode,
+                appearance,
+                background: None,
+                active: "system".into(),
+            });
+            let named = match appearance {
+                Appearance::Dark => "monokai-dark",
+                Appearance::Light => "monokai-light",
+            };
+            for id in ["system", named] {
+                drawn.app.paint_theme(id);
+                for initialized in [true, false] {
+                    let context = (!initialized).then(|| drawn.app.theme_context.take());
                     for fullscreen in [false, true] {
                         drawn.app.fullscreen = fullscreen;
                         for name in ["text", "thinking"] {
@@ -5376,6 +5387,7 @@ mod tests {
                             drawn
                                 .app
                                 .apply(Update::Snapshot(Box::new(projection.snapshot())));
+                            drawn.app.run_started = Some(Instant::now() - Duration::from_secs(42));
                             let frame = drawn.app.frame((80, 24));
                             let label = if name == "thinking" {
                                 "thinking…"
@@ -5387,11 +5399,17 @@ mod tests {
                                 .find(sgr)
                                 .expect("the activity uses the terminal's blue");
                             let colored = row[start + sgr.len()..].split("\x1b[0m").next().unwrap();
-                            assert!(
-                                colored.contains(label),
-                                "{mode:?}, {appearance:?}, {id}, fullscreen={fullscreen}: {row:?}"
+                            let (pulse, status) = colored.split_once(' ').unwrap();
+                            assert!(["·", "•", "●"].contains(&pulse));
+                            assert_eq!(
+                                status,
+                                format!("{label}  42s"),
+                                "{mode:?}, {appearance:?}, {id}, fullscreen={fullscreen}, initialized={initialized}: {row:?}"
                             );
                         }
+                    }
+                    if let Some(context) = context {
+                        drawn.app.theme_context = context;
                     }
                 }
             }
