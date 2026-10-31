@@ -1871,6 +1871,10 @@ fn indexed(row: Fetched) -> Result<StoredEvent> {
     Ok(record)
 }
 
+fn is_tool_result(event: &AgentEvent) -> bool {
+    matches!(&event.kind, EventKind::ToolResult(_))
+}
+
 fn is_window_event(event: &AgentEvent) -> bool {
     matches!(
         &event.kind,
@@ -1929,6 +1933,22 @@ fn window_rows(
         )
         .optional()
         .map_err(error)?;
+    rows.extend(
+        connection
+            .prepare(
+                "SELECT sequence, last_sequence FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+                 AND kind='step/tool-result' ORDER BY sequence",
+            )
+            .map_err(error)?
+            .query_map(
+                params![key.session_id, key.branch_id, through as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(error)?,
+    );
     if let Some(turn) = turn {
         rows.push(turn);
         let previous_end: Option<i64> = connection
@@ -2308,19 +2328,28 @@ impl TimelineStore for SqliteTimelineStore {
                 }
                 ranges.push((key.branch_id.clone(), sequence..=last_sequence));
             }
-            let events = self
+            let mut events = Vec::new();
+            let mut tool_results = Vec::new();
+            for event in self
                 .read_segments(&key.session_id, ranges)
                 .await?
                 .into_iter()
                 .flatten()
                 .map(|record| record.event)
                 .filter(|event| event.sequence <= through)
-                .filter(|event| event.id == cut || is_window_event(event))
-                .collect();
+            {
+                if is_tool_result(&event) {
+                    tool_results.push(event.clone());
+                }
+                if event.id == cut || is_window_event(&event) {
+                    events.push(event);
+                }
+            }
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
                 events,
+                tool_results,
             })
         })
     }

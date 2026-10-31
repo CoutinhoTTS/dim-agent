@@ -38,6 +38,7 @@ pub struct PolicyWindow {
     pub through: u64,
     pub cut: String,
     pub events: Vec<Arc<AgentEvent>>,
+    pub tool_results: Vec<Arc<AgentEvent>>,
 }
 
 /// The event ids and turn starts a compaction needs to enumerate legal cuts,
@@ -246,14 +247,21 @@ pub trait TimelineStore: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<PolicyWindow>> {
         Box::pin(async move {
             let records = self.read(key, 1..=through).await?;
+            let mut events = Vec::new();
+            let mut tool_results = Vec::new();
+            for record in records {
+                if matches!(&record.event.kind, EventKind::ToolResult(_)) {
+                    tool_results.push(record.event.clone());
+                }
+                if record.event.id == cut || window_event(&record.event) {
+                    events.push(record.event);
+                }
+            }
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
-                events: records
-                    .into_iter()
-                    .map(|record| record.event)
-                    .filter(|event| event.id == cut || window_event(event))
-                    .collect(),
+                events,
+                tool_results,
             })
         })
     }
