@@ -26,9 +26,11 @@ cache or event.
 | `B:Dispatcher` | Replay local policies, apply committed policy changes and settle update waiters. |
 | `B:Timeline` | Write changes and read ancestor policies. |
 
-`S:FileAccessFacts` is read optionally for a file write; a composition without
-the App Server facts part decides a write by the workspace alone. It is not an
-injected dependency, so its absence does not gate the part.
+`S:FileAccessFacts` and `P:HostPlatform` are looked up when a write is decided,
+after the part is active, not while it loads; a composition without the App
+Server facts part decides a write by the workspace alone, and one without
+HostPlatform keeps the fallback for relative targets. Neither is an injected
+dependency, so their absence does not gate the part.
 
 
 ### Events and lifetime

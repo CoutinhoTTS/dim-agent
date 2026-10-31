@@ -83,14 +83,13 @@ pub struct Permission {
     timeline: Arc<Timeline>,
     state: Arc<StateCell<PermissionState>>,
     rules: Arc<CommandRulesHost>,
-    /// Absent compositions decide writes without the fixed facts; their
-    /// workspace rule is the fallback.
-    facts: Option<Arc<FileAccessFacts>>,
+    /// Held for reads after publication: the optional facts and platform are
+    /// looked up at decision time, never while the part loads.
+    ctx: Ctx,
+    facts: Key<FileAccessFacts>,
+    platform: Key<HostPlatform>,
     session_id: String,
     cwd: PathBuf,
-    /// The host home for `~` and the tool resolver; absent compositions keep
-    /// the fallback rule for relative targets.
-    home: Option<PathBuf>,
     inner: Mutex<Inner>,
 }
 impl Permission {
@@ -104,6 +103,13 @@ impl Permission {
         cancel: &CancellationToken,
     ) -> Result<Decision, HostError> {
         let write = matches!(Risk::of(risk), Risk::Write);
+        let home = write
+            .then(|| {
+                self.ctx
+                    .get_at(&self.platform)
+                    .map(|platform| platform.home.clone())
+            })
+            .flatten();
         let path = call
             .input
             .get("path")
@@ -112,9 +118,9 @@ impl Permission {
         let write_target = if write
             && self.state.get().policy.preset != PermissionPreset::FullAccess
             && let Some(path) =
-                path.filter(|path| self.home.is_some() || std::path::Path::new(path).is_absolute())
+                path.filter(|path| home.is_some() || std::path::Path::new(path).is_absolute())
         {
-            let (cwd, home, path) = (self.cwd.clone(), self.home.clone(), path.to_owned());
+            let (cwd, path) = (self.cwd.clone(), path.to_owned());
             let target = tokio::task::spawn_blocking(move || {
                 let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
                     format!("Failed to resolve workspace {}: {error}", cwd.display())
@@ -151,7 +157,8 @@ impl Permission {
             });
         }
         if write && policy.preset != PermissionPreset::FullAccess {
-            if let (Some(Ok((_, target))), Some(facts)) = (&write_target, &self.facts) {
+            let facts = self.ctx.get_at(&self.facts);
+            if let (Some(Ok((_, target))), Some(facts)) = (&write_target, facts) {
                 let facts = tokio::select! {
                     result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Write) => result,
                     _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
@@ -463,13 +470,6 @@ impl DynPlugin for PermissionPlugin {
             let config = ctx.require_at(&self.config)?;
             let rules = ctx.require_at(&self.rules)?;
             let identity = ctx.require_at(&self.identity)?;
-            // A composition without the facts part decides a write by the
-            // workspace alone; without HostPlatform it cannot resolve `~` or
-            // relative targets.
-            let facts = ctx.get_at(&self.facts);
-            let home = ctx
-                .get_at(&self.platform)
-                .map(|platform| platform.home.clone());
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let service = Arc::new(Permission {
@@ -479,10 +479,11 @@ impl DynPlugin for PermissionPlugin {
                     policy: config.permission_policy.clone(),
                 })),
                 rules,
-                facts,
+                ctx: ctx.clone(),
+                facts: self.facts.clone(),
+                platform: self.platform.clone(),
                 session_id: identity.session_id.clone(),
                 cwd: PathBuf::from(&config.cwd),
-                home,
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();
