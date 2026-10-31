@@ -51,6 +51,18 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 `ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. Pushes to `main` and manual runs also run the account-build ACP Registry check below; pull requests receive no OAuth client IDs. A pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
 
+### Action pins and updates
+
+External Actions in `ci.yml`, `release.yml` and the disabled npm publication workflow use full commit SHAs. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
+
+Update an Action in a normal pull request:
+
+1. Select a release in the Action's original upstream repository. Review its release notes and the changes since the pinned commit, including runner requirements and input changes.
+2. Resolve the release tag to its commit. For example, `git ls-remote https://github.com/actions/checkout.git 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'` shows the commit; for an annotated tag use the peeled `^{}` entry, not the tag object's SHA. Verify the commit in the upstream repository, then update every use of that Action and its version comment together. Keep npm publication disabled.
+3. Run `node --test scripts/*.test.mjs`, review the workflow diff and require PR CI to pass before merging. A change to release-only behavior also needs the affected platform's release-build validation before shipping.
+
+The release script suite rejects external Action references that are not full commit SHAs, including those in disabled workflows. Upstream tag movement never updates a pin automatically.
+
 ### ACP Registry checks
 
 The `acp-registry` job runs on the trusted Linux x64 runner for `main` pushes and manual CI runs. It installs the toolchain from `rust-toolchain.toml`, compiles `dimcode` with both OAuth client ID secrets and executes the unmodified upstream Registry authentication checker and unauthenticated protocol matrix, pinned to the revision in `ci.yml`. Missing secrets, authentication failures, skipped authentication checks or failed advertised protocol methods fail `ci-ok`. Pull requests skip this job and retain the ordinary Gateway/helper flow tests; they never receive the client IDs.
