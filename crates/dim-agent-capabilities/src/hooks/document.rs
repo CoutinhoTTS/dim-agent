@@ -6,9 +6,9 @@ use std::{
     time::Duration,
 };
 
-/// The document events this build knows. `PreToolUse` and `UserPromptSubmit`
-/// are listed and never run until their owners land (#757, #758); every other
-/// event name is `unsupported`.
+/// The document events this build knows. `PreToolUse` is listed and never
+/// runs until its owner lands (#758); every other event name is
+/// `unsupported`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookEvent {
     SessionStart,
@@ -48,7 +48,7 @@ impl HookEvent {
     }
     /// Whether this build runs the event at all.
     pub fn supported(self) -> bool {
-        !matches!(self, Self::PreToolUse | Self::UserPromptSubmit)
+        !matches!(self, Self::PreToolUse)
     }
     /// What a non-tool matcher is tested against; `None` for a tool event and
     /// for the events whose matcher is ignored.

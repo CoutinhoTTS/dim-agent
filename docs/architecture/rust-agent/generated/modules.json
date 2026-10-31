@@ -8226,7 +8226,8 @@
         "mod runner",
         "path runner::HooksBranchPlugin::new",
         "path runner::HooksSessionPlugin::new",
-        "use runner::HooksRuntime"
+        "use runner::HooksRuntime",
+        "use runner::HooksSessionPlugin"
       ]
     },
     {
@@ -8309,6 +8310,7 @@
         "path HookEvent::PostToolUseFailure",
         "path HookEvent::SessionStart",
         "path HookEvent::Stop",
+        "path HookEvent::UserPromptSubmit",
         "path HookHandler",
         "path OnFailure",
         "path OnFailure::Block",
@@ -8338,12 +8340,39 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostFuture",
+        "use crate::host::HostError",
+        "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
         "path Os::Windows",
         "use crate::host_platform::HostPlatform",
         "use crate::host_platform::Os"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::input_queue",
+      "references": [
+        "path CheckSubmission",
+        "path SubmitCheckReply",
+        "path SubmitCheckReply::Block",
+        "path SubmitCheckReply::Proceed",
+        "path SubmitCheckRequest",
+        "path SubmitChecks",
+        "use crate::input_queue::CheckSubmission",
+        "use crate::input_queue::SubmitCheckReply",
+        "use crate::input_queue::SubmitCheckRequest",
+        "use crate::input_queue::SubmitChecks"
       ]
     },
     {
@@ -8399,7 +8428,10 @@
       "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_types::content",
       "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
         "path ToolContent",
+        "use dim_agent_types::ContentBlock",
         "use dim_agent_types::ToolContent"
       ]
     },
@@ -8433,7 +8465,9 @@
         "path InputMode",
         "path InputMode::Append",
         "path InputMode::Queue",
+        "path InputMode::Steer",
         "path ToolCallResult",
+        "path UserInput",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCancelledData",
         "use dim_agent_types::ApprovalDecision",
@@ -8445,7 +8479,8 @@
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode",
         "use dim_agent_types::ToolCallResult",
-        "use dim_agent_types::TurnOutcome"
+        "use dim_agent_types::TurnOutcome",
+        "use dim_agent_types::UserInput"
       ]
     },
     {

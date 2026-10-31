@@ -7,12 +7,13 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     hooks::{
         HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost, HookSourcesSnapshot,
-        HooksDocument, ReadHookSources,
+        HooksDocument, HooksSessionPlugin, ReadHookSources,
     },
     host::*,
     host_platform::{
         ExecShellRuntime, HostPlatform, OutputEncoding, ShellEdition, ShellSource, ShellStatus,
     },
+    methods::{RpcError, SessionMethods},
     model_provider::ModelProviderPlugin,
     permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
@@ -22,6 +23,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, DynPlugin, Effect, FiberView, TypeKey};
 use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -167,7 +170,8 @@ impl ReadHookSources for Sources {
 }
 
 /// The scripted model records each request, then answers like the echo model,
-/// or fails on the provider budget so the turn compacts and retries.
+/// or fails on the provider budget so the turn compacts and retries. A hold
+/// keeps the next answer waiting, so a call can be made while a turn runs.
 #[derive(Default)]
 struct Model {
     requests: Mutex<Vec<Arc<ModelRequest>>>,
@@ -247,13 +251,26 @@ struct Env {
     sources: Arc<Sources>,
     model: Arc<Model>,
     dir: PathBuf,
+    /// The `HooksSession` instance the test can unload, when the harness
+    /// mounts it through an owner (`Env::with_mounted_hooks`).
+    hooks: Arc<Mutex<Vec<FiberView>>>,
 }
 impl Env {
     async fn new() -> Self {
-        Self::with(Arc::new(Model::default()), None).await
+        Self::build(Arc::new(Model::default()), None, false).await
     }
 
     async fn with(model: Arc<Model>, strategy: Option<Arc<Small>>) -> Self {
+        Self::build(model, strategy, false).await
+    }
+
+    /// The same host, with `HooksSession` mounted as a child of a test owner
+    /// so a test can unload it mid-call.
+    async fn with_mounted_hooks(model: Arc<Model>, strategy: Option<Arc<Small>>) -> Self {
+        Self::build(model, strategy, true).await
+    }
+
+    async fn build(model: Arc<Model>, strategy: Option<Arc<Small>>, mounted_hooks: bool) -> Self {
         let context_model: Option<Arc<dyn ResolveContextModel>> = match &strategy {
             Some(strategy) => {
                 let model: Arc<dyn ResolveContextModel> = strategy.clone();
@@ -310,7 +327,26 @@ impl Env {
             dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
         );
         builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
-        dim_agent_capabilities::hooks::install(&mut builder);
+        let hooks: Arc<Mutex<Vec<FiberView>>> = Arc::new(Mutex::new(Vec::new()));
+        if mounted_hooks {
+            // `HooksSession` is mounted as a child of a test owner, so a test
+            // can unload it mid-call. No branch part is mounted: these tests
+            // reach no branch hook point.
+            let views = hooks.clone();
+            builder.require_feature(Feature::new("HooksTest").session(
+                "HooksSessionOwner",
+                move |names| {
+                    let plugin = HooksSessionPlugin::new(names)?;
+                    Ok(Box::new(HooksSessionOwner {
+                        injects: plugin.injects(),
+                        plugin: Mutex::new(Some(plugin)),
+                        views: views.clone(),
+                    }))
+                },
+            ));
+        } else {
+            dim_agent_capabilities::hooks::install(&mut builder);
+        }
         let agent = MinimalHost::start_with(&builder, |root, _| {
             root.provide_as::<HostPlatform>(Arc::new(platform))?;
             root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
@@ -325,7 +361,21 @@ impl Env {
             sources,
             model,
             dir,
+            hooks,
         }
+    }
+
+    /// Unloads and reloads `HooksSession`, as a provider reload does: its
+    /// token fires before it is withdrawn.
+    async fn restart_hooks(&self) {
+        let view = self
+            .hooks
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a mounted HooksSession");
+        view.restart().await.unwrap();
     }
 
     async fn session(&self) -> Session {
@@ -354,6 +404,37 @@ impl Env {
     async fn close(self) {
         self.agent.close().await.unwrap();
         std::fs::remove_dir_all(&self.dir).unwrap();
+    }
+}
+
+/// Mounts the real `HooksSession` as a child, so a test can unload it and
+/// read what an unload settles (A.5, A.6.2's reload row).
+struct HooksSessionOwner {
+    plugin: Mutex<Option<HooksSessionPlugin>>,
+    /// What the mounted plugin injects; the owner is ordered by the same
+    /// services, so it mounts after `SubmitChecks` is provided.
+    injects: Vec<TypeKey>,
+    views: Arc<Mutex<Vec<FiberView>>>,
+}
+impl DynPlugin for HooksSessionOwner {
+    fn name(&self) -> &str {
+        "HooksSessionOwner"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        self.injects.clone()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let plugin = self
+                .plugin
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the owner mounts its HooksSession once");
+            let view = dim_agent_runtime::mount_active(ctx, plugin).await?;
+            self.views.lock().unwrap().push(view);
+            Ok(Effect::Done)
+        })
     }
 }
 
@@ -1828,5 +1909,425 @@ async fn only_the_follow_ups_turn_reports_stop_hook_active() {
     assert!(active.len() >= 3, "{payloads:?}");
     assert_eq!(active[..2], [false, false], "{payloads:?}");
     assert!(active[2..].iter().all(|active| *active), "{payloads:?}");
+    env.close().await;
+}
+
+/// Calls `session.input.withdraw` as Rpc does, through the Session.
+async fn withdraw(
+    session: &Session,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, RpcError> {
+    let methods = session
+        .session_service::<SessionMethods>()
+        .unwrap()
+        .provider("session.input.withdraw")
+        .unwrap();
+    let accepted = methods
+        .accept(
+            "session.input.withdraw".into(),
+            params,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .unwrap();
+    accepted.reply.await.unwrap()
+}
+
+fn app_error(error: &RpcError) -> &str {
+    &error.data.as_ref().unwrap().app_error
+}
+
+/// Appendix D 6: a blocked steer writes neither the withdrawal nor the new input, and
+/// the old input is applied later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_steer_writes_nothing_and_the_old_input_still_applies() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [command(serde_json::json!({
+            "type": "command", "command": "echo 'not happening' >&2; exit 2",
+        }))],
+    })));
+    let session = env.session().await;
+    let release = env.model.hold(1);
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    wait_event(&session, |kind| {
+        matches!(kind, EventKind::TurnStart(_)).then_some(())
+    })
+    .await;
+    let old = session
+        .submit("old".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+
+    let refused = withdraw(
+        &session,
+        serde_json::json!({"sessionId": session.id(), "branchId": "main",
+            "inputId": old.id, "steer": {"content": [{"type": "text", "text": "new"}]}}),
+    )
+    .await
+    .expect_err("a blocked steer fails");
+    assert_eq!(app_error(&refused), "input_blocked");
+    assert_eq!(refused.message, "Hook user: not happening");
+    let local = session.local("main", ..).await.unwrap();
+    assert!(
+        !local.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::InputWithdraw(data) if data.input_id == old.id
+        )),
+        "a blocked steer wrote its withdrawal"
+    );
+    assert!(
+        local.iter().all(|event| !matches!(&event.kind,
+            EventKind::InputMessage(data)
+                if data.user.as_ref().is_some_and(|user| user.content
+                    == vec![ContentBlock::Text { text: "new".into() }]))),
+        "a blocked steer wrote the replacement input"
+    );
+    assert!(
+        !local.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::InputDeleted(data) if data.input_id == old.id
+        )),
+        "a blocked steer deleted the old input"
+    );
+
+    let _ = release.send(());
+    let mut applied = false;
+    for _ in 0..500 {
+        applied = session
+            .local("main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| {
+                matches!(&event.kind,
+                EventKind::InputApplied(data) if data.input_id == old.id)
+            });
+        if applied {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(applied, "the old input was not applied after the block");
+    for _ in 0..500 {
+        if last_request(&env.model).contains("old") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        last_request(&env.model).contains("old"),
+        "the model did not see the old input"
+    );
+    env.close().await;
+}
+
+/// Appendix D 5: the hook's context is a text block after the operator's own content,
+/// and the input carries no raw block, so it stays operator input (Goal A5
+/// restarts its count on it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_prompt_context_follows_the_operator_text_and_keeps_it_operator_input() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [command(serde_json::json!({
+            "type": "command",
+            "command": "printf '{\"hookSpecificOutput\":{\"additionalContext\":\"prompt context\"}}'",
+        }))],
+    })));
+    let session = env.session().await;
+    let reply = withdraw(
+        &session,
+        serde_json::json!({"sessionId": session.id(), "branchId": "main",
+            "inputId": "unknown", "steer": {"content": [{"type": "text", "text": "new"}]}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply["status"], "notHeld", "{reply}");
+    let steer = reply["steer"]["inputId"].as_str().unwrap();
+    let event = session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.id == steer)
+        .expect("the steer input was written");
+    let EventKind::InputMessage(data) = &event.kind else {
+        panic!("the steer input is an input message");
+    };
+    let user = data
+        .user
+        .as_ref()
+        .expect("the steer keeps its user content");
+    assert_eq!(
+        user.content.len(),
+        2,
+        "the context is one text block after the operator's content: {user:?}"
+    );
+    let ContentBlock::Text { text: operator } = &user.content[0] else {
+        panic!("the operator's block is text");
+    };
+    assert_eq!(operator, "new");
+    let ContentBlock::Text { text: context } = &user.content[1] else {
+        panic!("the context is text");
+    };
+    assert!(
+        context.starts_with("<dim-hooks kind=\"prompt-submit\">"),
+        "{context}"
+    );
+    assert!(context.contains("prompt context"), "{context}");
+    assert!(
+        data.blocks.is_empty(),
+        "the input carries no raw block, so it stays operator input"
+    );
+    env.close().await;
+}
+
+/// Appendix D 5: only the operator-input entries call the checks, so an input another
+/// owner writes (a Goal or Scheduler input) runs no prompt hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_source_input_runs_no_prompt_hook() {
+    let env = Env::new().await;
+    let runs = env.path("prompt-runs");
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [command(serde_json::json!({
+            "type": "command", "command": marker_command(&runs, "ran\n"),
+        }))],
+    })));
+    let session = env.session().await;
+    session
+        .input(
+            InputMessageData {
+                user: Some(UserInput {
+                    content: vec![ContentBlock::Text {
+                        text: "continue the goal".into(),
+                    }],
+                }),
+                blocks: vec![dim_agent_capabilities::context_block::raw(
+                    "<dim-goal kind=\"continuation\"/>".into(),
+                    None,
+                )],
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !runs.exists(),
+        "a Goal or Scheduler input runs no UserPromptSubmit hook"
+    );
+    env.close().await;
+}
+
+/// A5: the reason is the first block in catalog order, and the handlers after
+/// it are terminated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_handlers_after_the_first_block_are_terminated() {
+    let env = Env::new().await;
+    let gate = env.path("gate");
+    let late = env.path("late-handler");
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [{
+            "hooks": [
+                {"type": "command", "command": "echo 'first block' >&2; exit 2"},
+                {"type": "command", "command": format!(
+                    "while [ ! -e {} ]; do sleep 0.05; done; printf ran > {}",
+                    gate.display(), late.display())},
+            ],
+        }],
+    })));
+    let session = env.session().await;
+    let refused = withdraw(
+        &session,
+        serde_json::json!({"sessionId": session.id(), "branchId": "main",
+            "inputId": "unknown", "steer": {"content": [{"type": "text", "text": "new"}]}}),
+    )
+    .await
+    .expect_err("a blocked steer fails");
+    assert_eq!(refused.message, "Hook user: first block");
+    // The gate releases the second handler, so a surviving one writes its
+    // marker; termination is what keeps it from running.
+    std::fs::write(&gate, "go").unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !late.exists(),
+        "a handler after the first block was not terminated"
+    );
+    env.close().await;
+}
+
+/// Runs `command` and waits until it has written `started` and its pid; the
+/// handler then blocks until the test ends or the part unloads.
+fn blocking_prompt(started: &Path, pid_file: &Path, on_failure: Option<&str>) -> serde_json::Value {
+    let mut handler = serde_json::json!({
+        "type": "command",
+        "command": format!(
+            "printf '%s' $$ > {pid}; printf started > {started}; sleep 30",
+            pid = pid_file.display(),
+            started = started.display(),
+        ),
+    });
+    if let Some(on_failure) = on_failure {
+        handler["onFailure"] = serde_json::json!(on_failure);
+    }
+    command(handler)
+}
+
+/// Starts a turn the model holds, queues a second input and withdraws it as a
+/// `steer` in the background, returning the call and the hold's sender.
+async fn steer_into_a_pending_prompt(
+    env: &Env,
+) -> (
+    Session,
+    tokio::sync::oneshot::Sender<()>,
+    String,
+    tokio::task::JoinHandle<std::result::Result<serde_json::Value, RpcError>>,
+) {
+    let session = env.session().await;
+    let release = env.model.hold(1);
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    wait_event(&session, |kind| {
+        matches!(kind, EventKind::TurnStart(_)).then_some(())
+    })
+    .await;
+    let old = session
+        .submit("old".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let call = {
+        let session = session.clone();
+        let input_id = old.id.clone();
+        tokio::spawn(async move {
+            withdraw(
+                &session,
+                serde_json::json!({"sessionId": session.id(), "branchId": "main",
+                    "inputId": input_id, "steer": {"content": [{"type": "text", "text": "new"}]}}),
+            )
+            .await
+        })
+    };
+    (session, release, old.id.clone(), call)
+}
+
+/// Waits until `pid` names no live process, up to a bounded number of polling
+/// steps.
+async fn wait_gone(pid: u32) {
+    for _ in 0..1000 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("process {pid} outlived the unload");
+}
+
+fn prompted_pid(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A.5 and A.6.2's reload row: a `UserPromptSubmit` check whose part unloads
+/// mid-call settles by its handler's `onFailure: block`, so the entry refuses
+/// the input and nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unload_settles_a_pending_prompt_check_by_on_failure() {
+    let env = Env::with_mounted_hooks(Arc::new(Model::default()), None).await;
+    let started = env.path("prompt-started");
+    let pid_file = env.path("prompt-pid");
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [blocking_prompt(&started, &pid_file, Some("block"))],
+    })));
+    let (session, release, old_id, call) = steer_into_a_pending_prompt(&env).await;
+    wait_file(&started, "the prompt hook did not start").await;
+    env.restart_hooks().await;
+    let refused = call
+        .await
+        .unwrap()
+        .expect_err("an unloaded check with onFailure block refuses the steer");
+    assert_eq!(app_error(&refused), "input_blocked");
+    assert_eq!(refused.message, "Hook user did not finish");
+    let local = session.local("main", ..).await.unwrap();
+    assert!(
+        !local.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::InputWithdraw(data) if data.input_id == old_id
+        )),
+        "a settled block wrote its withdrawal"
+    );
+    assert!(
+        !local.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::InputDeleted(data) if data.input_id == old_id
+        )),
+        "a settled block deleted the old input"
+    );
+    assert!(
+        local.iter().all(|event| !matches!(&event.kind,
+            EventKind::InputMessage(data)
+                if data.user.as_ref().is_some_and(|user| user.content
+                    == vec![ContentBlock::Text { text: "new".into() }]))),
+        "a settled block wrote the replacement input"
+    );
+    wait_gone(prompted_pid(&pid_file)).await;
+    let _ = release.send(());
+
+    env.close().await;
+}
+
+/// A.5 and A.6.2's reload row: with the default `onFailure` the same unload
+/// lets the entry write the input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unload_with_the_default_on_failure_writes_the_input() {
+    let env = Env::with_mounted_hooks(Arc::new(Model::default()), None).await;
+    let started = env.path("prompt-started");
+    let pid_file = env.path("prompt-pid");
+    env.sources.set(document(serde_json::json!({
+        "UserPromptSubmit": [blocking_prompt(&started, &pid_file, None)],
+    })));
+    let (session, release, old_id, call) = steer_into_a_pending_prompt(&env).await;
+    wait_file(&started, "the prompt hook did not start").await;
+    env.restart_hooks().await;
+    let reply = call
+        .await
+        .unwrap()
+        .expect("an unloaded check with the default onFailure proceeds");
+    assert_eq!(reply["status"], "deleted", "{reply}");
+    assert!(reply["steer"]["inputId"].is_string(), "{reply}");
+    let local = session.local("main", ..).await.unwrap();
+    assert!(
+        local.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::InputWithdraw(data) if data.input_id == old_id
+        )),
+        "the withdrawal was written"
+    );
+    assert!(
+        local.iter().any(|event| matches!(&event.kind,
+            EventKind::InputMessage(data)
+                if data.user.as_ref().is_some_and(|user| user.content
+                    == vec![ContentBlock::Text { text: "new".into() }]))),
+        "the replacement input was written"
+    );
+    wait_gone(prompted_pid(&pid_file)).await;
+    let _ = release.send(());
+
     env.close().await;
 }

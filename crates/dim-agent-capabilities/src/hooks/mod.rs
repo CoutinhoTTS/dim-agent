@@ -10,6 +10,7 @@ mod runner;
 mod sources;
 
 pub(crate) use runner::HooksRuntime;
+pub use runner::HooksSessionPlugin;
 
 pub use document::{
     HookEntry, HookEvent, HookGroup, HookHandler, HookState, HooksDocument, OnFailure, entries,
