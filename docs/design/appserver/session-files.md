@@ -484,7 +484,9 @@ is one of the fixed facts, so under every preset the read is allowed without an 
 records no grant; a read outside the facts asks, and a non-interactive run denies it.**
 [ADR 014](../../adr/014-file-access-facts.md) decides file reads and writes from the workspace,
 system roots, Session-owned artifacts and grants; [ADR 013](../../adr/013-command-output-ownership.md)
-extends the ownership fact to command output.
+extends the ownership fact to command output in [#784](https://github.com/arcships/dim/pull/784).
+Until that lands, command output is not an owned fact; under `read-only` and `workspace-write`,
+a read of it asks.
 
 ```
  model: read {path: "<database directory>/<db>.session-files/<fileId>/paste.txt"}
@@ -506,10 +508,12 @@ What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/
 [approval.rs](../../../crates/dim-agent-capabilities/src/approval.rs) `admit`:
 
 - **An owned artifact needs no prompt.** `SessionFiles.owns` reports the Session's attachment
-  rows and, through ADR 013, its command-output rows; the facts' `owned` field is true for those
-  paths. Under `read-only` and `workspace-write` they are inside the facts, so a `read` of a
-  pasted file, an oversized `read` result or `exec` output is allowed without an approval
-  request, and the read records no grant. §11.2's two properties hold.
+  rows, so the facts' `owned` field is true for a path a `put` returned. Under `read-only` and
+  `workspace-write` it is inside the facts, so a `read` of a pasted Session file is allowed
+  without an approval request, and the read records no grant. ADR 013's output table extends
+  `owns` to command output in [#784](https://github.com/arcships/dim/pull/784); until it lands,
+  command output — including an oversized `read` result — is not an owned fact, so a read of it
+  asks. §11.2's two properties hold for the rows `owns` reads.
 - **Reads outside the facts ask.** A read whose resolved path is not the workspace, a system
   root, a Session-owned artifact or a grant asks under `read-only` and `workspace-write`
   ([ADR 014 D2/D4](../../adr/014-file-access-facts.md#d2-read-and-write)). The CLI offers "Allow
@@ -533,7 +537,7 @@ What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/
  ~/.dimcode/                            product home: auth.json and others
    rust/                                database directory, a FileStorage root
      dimcode.sqlite                     native store; read refuses .sqlite as binary
-     command-output/<sessionId>/        WorkspaceTools output, Session-owned (ADR 013)
+     command-output/<sessionId>/        WorkspaceTools output; owned once #784 lands
      dimcode.sqlite.session-files/
        <fileId S owns>/paste.txt        path returned by a put for S
        <fileId T owns>/notes.md         Session T's file, unowned here
@@ -579,7 +583,8 @@ same shape, data a Session's own capabilities hand to its model by path, outside
 SessionStore answers "which files does S own" from `session_file_owners`, whose primary key
 `(session_id, file_id)` serves that lookup, so v15 needs no change for it. `sessionFiles.owns`
 is that query; [ADR 014](../../adr/014-file-access-facts.md) reads it as the session-owned fact for
-reads and writes, and [ADR 013](../../adr/013-command-output-ownership.md)'s output table extends it.
+reads and writes, and [ADR 013](../../adr/013-command-output-ownership.md)'s output table extends it
+in [#784](https://github.com/arcships/dim/pull/784).
 
 Rejected alternatives:
 

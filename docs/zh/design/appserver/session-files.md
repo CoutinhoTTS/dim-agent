@@ -339,7 +339,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 ### 11.1 读取 Session 文件
 
-**决定：模型读取 Session 文件与读取任何文件相同。Session 自有文件是固定事实之一，所以在任何预设下该读取都不询问、不记录授权；事实之外的读取需要询问，非交互运行则拒绝。** [ADR 014](../../../adr/014-file-access-facts.md) 根据工作区、系统目录、Session 自有文件和授权决定文件读写；[ADR 013](../../../adr/013-command-output-ownership.md) 把命令输出并入所有权事实。
+**决定：模型读取 Session 文件与读取任何文件相同。Session 自有文件是固定事实之一，所以在任何预设下该读取都不询问、不记录授权；事实之外的读取需要询问，非交互运行则拒绝。** [ADR 014](../../../adr/014-file-access-facts.md) 根据工作区、系统目录、Session 自有文件和授权决定文件读写；[ADR 013](../../../adr/013-command-output-ownership.md) 在 [#784](https://github.com/arcships/dim/pull/784) 中把命令输出并入所有权事实；在它落地前，命令输出不是自有事实，`read-only` 和 `workspace-write` 下其读取需要询问。
 
 ```
  model: read {path: "<database directory>/<db>.session-files/<fileId>/paste.txt"}
@@ -358,7 +358,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 今天的实际行为，依据 [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs) 的 `decide`、[file_access.rs](../../../../crates/dim-agent-capabilities/src/file_access.rs) 和 [approval.rs](../../../../crates/dim-agent-capabilities/src/approval.rs) 的 `admit`：
 
-- **自有文件不需要询问。** `SessionFiles.owns` 读出本 Session 的附件行，并通过 ADR 013 读出命令输出行；命中的路径在事实中 `owned` 为真。在 `read-only` 和 `workspace-write` 下它们位于事实之内，所以读取粘贴文件、超长 `read` 结果或 `exec` 输出都不经审批请求直接被允许，且这次读取不记录授权。§11.2 的两条性质成立。
+- **自有文件不需要询问。** `SessionFiles.owns` 读出本 Session 的附件行，所以 `put` 返回的路径在事实中 `owned` 为真。在 `read-only` 和 `workspace-write` 下它位于事实之内，所以读取粘贴的 Session 文件不经审批请求直接被允许，且这次读取不记录授权。ADR 013 的输出表在 [#784](https://github.com/arcships/dim/pull/784) 中把 `owns` 扩展到命令输出；在它落地前，命令输出（包括超长 `read` 结果）不是自有事实，其读取需要询问。§11.2 的两条性质对 `owns` 读出的行成立。
 - **事实之外的读取需要询问。** 解析后的路径既不是工作区、系统目录、Session 自有文件，也没有授权覆盖时，`read-only` 和 `workspace-write` 下需要询问（[ADR 014 D2/D4](../../../adr/014-file-access-facts.md#d2-read-and-write)）。CLI 提供"本次会话内允许"，为解析后的路径写入 read 授权；`exec` 以普通拒绝作答、停止回合并以 3 退出。`full-access` 不询问直接允许读取。路径检查在工具列表和 `allowedTools` 之前，显式允许的工具不能绕过路径事实。`grep` 或 `glob` 没有 `path` 时搜索 Session cwd，也就是工作区。
 - **授权。** 覆盖解析后路径的 read 或 write 授权都允许读取。策略变更（`session.permission.update`，写成 `permission/changed`）只包含预设和工具名，从不包含路径。FileStorage 根和记住的决定都不授予读取权限。
 - **FileStorage 根不授予任何东西。** 把数据库目录登记为 FileStorage 根（§3.1），只是让 SessionStore 能通过 FileStorage 在那里写入。`read` 从不查询 FileStorage 根；Session 自有事实来自 `sessionFiles.owns`，不是文件根授权。
@@ -368,7 +368,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
  ~/.dimcode/                            product home: auth.json and others
    rust/                                database directory, a FileStorage root
      dimcode.sqlite                     native store; read refuses .sqlite as binary
-     command-output/<sessionId>/        WorkspaceTools output, Session-owned (ADR 013)
+     command-output/<sessionId>/        WorkspaceTools output; owned once #784 lands
      dimcode.sqlite.session-files/
        <fileId S owns>/paste.txt        path returned by a put for S
        <fileId T owns>/notes.md         Session T's file, unowned here
@@ -386,7 +386,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 1. **拥有的文件读取时不询问。** Session 读取它拥有的 Session 文件时不审批、不记录决定，所以 Attachments 从不弹出审批。这样的读取不派生任何授权。
 2. **由所有权而不是位置决定。** 在决定访问时，或在隔离进程启动时，Session S 可以读取 SessionStore 的行中 S 拥有的每个文件的 `<db>.session-files/<fileId>/`。这个集合从不覆盖整个 `<db>.session-files/`、数据库目录或产品目录；只有 S 拥有另一个 Session 的文件时才包含它（分叉拥有源的文件）。
 
-SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 `(session_id, file_id)` 服务这个查询，所以 v15 不需要为此修改。`sessionFiles.owns` 就是该查询；[ADR 014](../../../adr/014-file-access-facts.md) 把它作为读写共用的 Session 自有事实，[ADR 013](../../../adr/013-command-output-ownership.md) 的输出表扩展它。
+SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 `(session_id, file_id)` 服务这个查询，所以 v15 不需要为此修改。`sessionFiles.owns` 就是该查询；[ADR 014](../../../adr/014-file-access-facts.md) 把它作为读写共用的 Session 自有事实，[ADR 013](../../../adr/013-command-output-ownership.md) 的输出表在 [#784](https://github.com/arcships/dim/pull/784) 中扩展它。
 
 被否决的方案：
 

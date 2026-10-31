@@ -121,8 +121,11 @@ component, and a write requires a write grant. Permission applies no grant by
 itself, so there is one path resolver. A grant read failure denies; a cancelled
 read propagates. No grant becomes a Timeline fact, preset or
 output-directory exemption. A write grant also admits a read; a read grant
-never admits a write. Session attachments and command output are
-Session-owned facts, so reading them needs no grant. Host-generated output and
+never admits a write. Session attachments are Session-owned facts, so reading
+them needs no grant; ADR 013's output table extends `owns` to command output in
+[#784](https://github.com/arcships/dim/pull/784), and until it lands a
+command-output read is outside the facts, so it asks under `read-only` and
+`workspace-write`. Host-generated output and
 configured commands retain their own execution contracts under ADR 003. This is
 tool admission, not an OS filesystem sandbox against concurrent filesystem
 mutation.
