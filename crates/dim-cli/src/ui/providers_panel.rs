@@ -173,6 +173,10 @@ impl ProvidersPanel {
         }
     }
 
+    pub fn native_selection(&self) -> bool {
+        self.oauth.as_ref().is_some_and(OauthView::native_selection)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         if let Some(view) = &mut self.oauth {
             return match view.handle_key(key) {

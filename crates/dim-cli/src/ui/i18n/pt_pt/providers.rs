@@ -55,11 +55,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Email" => "Email",
         "Continue" => "Continuar",
         "Browser login" => "Início de sessão no navegador",
-        "Print verification URL + pairing code again" => {
-            "Mostrar de novo URL de verificação + código"
-        }
         "Restart device login" => "Reiniciar início de sessão no dispositivo",
-        "Print OAuth URL again" => "Mostrar de novo URL OAuth",
+        "Select to copy · Enter opens link" => "Selecionar para copiar · Enter abre a ligação",
         "Callback URL" => "URL de callback",
         "Submit callback" => "Enviar callback",
         "The browser could not be opened. Open the link manually, then return here." => {

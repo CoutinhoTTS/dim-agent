@@ -1060,6 +1060,30 @@ A conflicting connection edit keeps its fields until the user confirms a retry:
 
 The account directory follows the entry the CLI was started from, and the user never sets it: the npm launcher passes its package name as `DIMCODE_NPM_PACKAGE`, a standalone binary goes by its command name. `dimagent` signs in at `https://dimagent.com`; `dimcode`, `dim` and any other entry at `https://dimagent.cn`. `dimcode login PROVIDER` uses the same directory unless `--directory URL` is given. Without the account plugin, `/login` says so.
 
+In both TUI modes, authorization links stay in the sign-in dialog, not the transcript.
+The complete URL wraps inside the dialog's continuous border. To copy a wrapped
+link, use the terminal's rectangular selection to exclude the border and its own
+copy command, without a CLI clipboard API.
+Mouse reporting is temporarily disabled while the link is shown, then restored to
+the configured setting when the dialog leaves that step. The link carries its full
+OSC 8 target; Windows Terminal opens it with `Ctrl+click`. The focused link also
+opens with `Enter`. There is no copy button or automatic clipboard write.
+Device sign-in shows its pairing code separately from the verification link.
+Windows opens authorization links with the system URL handler, without PowerShell.
+If the browser cannot open, the full link and callback input remain available.
+
+```text
++-- DimAgent OAuth ------------------------------------+
+| Browser login                                        |
+| https://dimagent.cn/oauth/authorize?state=example&r  |
+| edirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fauth%2F |
+| callback                                             |
+|   Callback URL: (paste here)                         |
+|   Submit callback                                    |
+| Select to copy · Enter opens link                    |
++------------------------------------------------------+
+```
+
 ```text
 > /login
 ╭─ DimAgent OAuth ─────────────────────────╮

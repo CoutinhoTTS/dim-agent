@@ -47,9 +47,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Email" => "邮箱",
         "Continue" => "继续",
         "Browser login" => "浏览器登录",
-        "Print verification URL + pairing code again" => "再次输出验证 URL 和配对码",
         "Restart device login" => "重新开始设备登录",
-        "Print OAuth URL again" => "再次输出 OAuth URL",
+        "Select to copy · Enter opens link" => "拖选手动复制 · Enter 打开链接",
         "Callback URL" => "回调 URL",
         "Submit callback" => "提交回调",
         "The browser could not be opened. Open the link manually, then return here." => {
