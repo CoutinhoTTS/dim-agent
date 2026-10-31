@@ -168,6 +168,76 @@ impl HistoryRenderer {
             Err(error) => Err(AgentError::fault("History", error)),
         }
     }
+
+    /// Streams a branch in batches and returns only the projection. `fallback`
+    /// means the caller must use the full `rendered_context` path (ancestry,
+    /// compaction, or an empty range).
+    pub async fn rendered_stream(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+        batch: u64,
+    ) -> dim_agent_runtime::Result<StreamedContext> {
+        let ancestors = timeline.ancestors();
+        if !ancestors.is_empty() {
+            return Ok(StreamedContext::fallback());
+        }
+        if batch == 0 {
+            return Ok(StreamedContext::fallback());
+        }
+        if self.render as usize != project_context_history as usize {
+            return Ok(StreamedContext::fallback());
+        }
+        let mut state = None;
+        let mut history = Vec::new();
+        let mut start = 1;
+        while start <= through {
+            let end = (start + batch - 1).min(through);
+            let events = timeline.local(start..=end).await?;
+            if events.is_empty() {
+                return Ok(StreamedContext::fallback());
+            }
+            let projected = project_batch(&events, state.as_ref())
+                .map_err(|error| AgentError::fault("History", error))?;
+            if projected.compacted {
+                return Ok(StreamedContext::fallback());
+            }
+            history.extend(projected.history);
+            state = Some(projected.state);
+            start = end + 1;
+        }
+        let state = state.unwrap_or_default();
+        Ok(StreamedContext {
+            history,
+            configuration: state.configuration,
+            prompt: PromptSnapshot::from_checkpoint(&state.prompts).revision,
+            ancestry: ancestors.into_iter().map(|(branch, _)| branch).collect(),
+            fallback: false,
+        })
+    }
+}
+
+/// The projection of a streamed branch. The events are not retained.
+#[derive(Debug, Clone)]
+pub struct StreamedContext {
+    pub history: Vec<HistoryEntry>,
+    pub configuration: Option<ContextConfiguredData>,
+    pub prompt: Option<PromptReference>,
+    pub ancestry: Vec<String>,
+    /// The caller must use the full `rendered_context` path.
+    pub fallback: bool,
+}
+
+impl StreamedContext {
+    fn fallback() -> Self {
+        Self {
+            history: Vec::new(),
+            configuration: None,
+            prompt: None,
+            ancestry: Vec::new(),
+            fallback: true,
+        }
+    }
 }
 
 /// Read the shared prompt/input/output projection using its supported cache.
@@ -286,6 +356,31 @@ struct Projection {
     history: Vec<HistoryEntry>,
     origins: Vec<usize>,
     state: ProjectionCheckpointState,
+}
+
+/// One batch of a streaming projection.
+#[derive(Debug, Clone)]
+pub struct ProjectedBatch {
+    pub history: Vec<HistoryEntry>,
+    pub state: ProjectionCheckpointState,
+    pub compacted: bool,
+}
+
+/// Projects one contiguous event batch from `initial` without retaining the
+/// events. Callers concatenate `history` and pass `state` to the next batch;
+/// a batch that contains compaction requires a full replay.
+pub fn project_batch(
+    events: &[Arc<AgentEvent>],
+    initial: Option<&ProjectionCheckpointState>,
+) -> Result<ProjectedBatch, String> {
+    let projection = replay(events, initial)?;
+    Ok(ProjectedBatch {
+        history: projection.history,
+        state: projection.state,
+        compacted: events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ContextCompaction(_))),
+    })
 }
 
 fn replay(
