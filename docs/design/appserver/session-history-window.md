@@ -106,12 +106,15 @@ turn consumed.
 | D1 | Extend `session.history` with two optional request fields (`latestTurn`, `before`) and two optional reply fields (`turnStart`, `nextBefore`) | A new method, `session.history.latest` | The watermark, the batch rules, the v3 event filter and the error set are the same read. A second method would duplicate them, need its own feature entry and split clients between two paging loops. Older clients ignore the new reply fields, and a request without the new fields is today's read (D9) |
 | D2 | Window boundaries are sequence bounds, not opaque cursors | An opaque cursor or turn id | Clients already hold sequences, pin a watermark and key events by sequence. A turn id would need a second lookup and would not fix the paging; a sequence is the same currency as `after`, `through` and `nextAfter` |
 | D3 | The window is `(windowStart - 1, through]`: the newest turn at or below `through` together with the `input/message` events that turn consumed (§4.2); with no `turn/start` the window starts at the branch start | Start at `turn/start` only | The prompting input precedes the turn start, and clients render it as their user row (§1.2). A window from `turn/start` gives a turn without its prompt. A fixed number of events before the turn start is arbitrary: a queued input can be much older |
-| D4 | A `latestTurn` page is the newest part of the window, up to `HISTORY_TURN_LIMIT` (4,096) events; when the window is larger, the reply is its newest 4,096 events and `nextBefore` names the cursor for the rest | Always return the whole turn, or impose no cap and let the client's `limit` decide | A turn has no size bound. The v3 method has no upper bound today, so this mode carries one; otherwise a client could ask for "the latest turn" of an arbitrarily long turn and materialize it in one reply. 4,096 events makes the measured 1,956- and 3,122-event turns one reply and the 6,862-event turn one reply plus one backfill page |
+| D4 | A `latestTurn` page is the newest part of the window, bounded by `HISTORY_TURN_LIMIT` (4,096 raw events) **and** `HISTORY_TURN_BYTES` (4 MiB of encoded visible events); when the window is larger the reply is its newest part and `nextBefore` names the cursor for the rest. Trimming happens on batch boundaries and never splits a batch. If the newest batch alone encodes to more than 4 MiB, the call fails `history_too_large` | An event-count bound alone, no bound, or returning the newest batch over budget | Events have no size bound: 4,096 events of large tool results can exceed the 16 MiB transport frame (`MAX_FRAME_BYTES`, [outbound.rs:6](../../../crates/dim-app-server/src/outbound.rs#L6)) and kill the connection. 4 MiB leaves room for the envelope and other frames, and 4,096 events makes the measured 1,956- and 3,122-event turns one reply and the 6,862-event turn two. A batch is the Timeline's atomic unit, so the window cannot trim inside one; a batch above the budget cannot be made to fit, and an error is better than a frame the writer drops |
 | D5 | `before` adds backward paging: the page ends at the last batch end at or below `before - 1`, and starts at a batch start, so `after = from - 1` reads the same page forward | Read the newest page as `after = head - N`, as [#276](https://github.com/arcships/dim/issues/276) suggested | `after` must end a batch; `head - N` need not, and when it does not the read fails with "cursor is inside an atomic batch", so the client has to search for a boundary. A backward page has to walk batches from their ends |
-| D6 | The turn start and the prompting input are store lookups through one partial index, not a scan and not state rebuilt during restore | Fold the newest turn start and the consumed inputs during restore validation; keep them in process memory | [#601](https://github.com/arcships/dim/issues/601) makes a re-acquired Session skip validation, so a value rebuilt there would be missing exactly when the read is cheap. Process memory would be dropped on unload. The lookups are single statements, independent of the turn's size |
+| D6 | The turn start and the prompting input are store lookups through one derived partial index, not a scan and not state rebuilt during restore | Fold the newest turn start and the consumed inputs during restore validation; keep them in process memory; or take a native format version | [#601](https://github.com/arcships/dim/issues/601) makes a re-acquired Session skip validation, so a value rebuilt there would be missing exactly when the read is cheap. Process memory would be dropped on unload. The lookups are single statements, independent of the turn's size. The index changes no row and no decode, so it is created at open rather than as a format step (§5.1) |
 | D7 | A whole-history read keeps using forward paging; the window is opt-in | Replace `after`-paging with backward paging | Clients that show scrollback (CLI, web, export) read from the start and need no window; replacing the direction would change every one of them and the export's fixed-prefix rule |
 | D8 | `sessions.history` (the process service) does not gain the fields | Mirror the fields in both reads | It has no consumer that opens a thread; the fields are a client read. Adding them would advertise a contract nothing uses, and the service can adopt the read when a consumer needs it |
 | D9 | All new request and reply fields are optional; a request without them keeps today's meaning, limits and errors | A protocol version bump | The wire stays v3; replies only gain fields, and request decoding is strict only for fields the client sends. A client learns the feature from `hello.features` (`session.history.latestTurn`), so it never sends the fields to an older daemon that would reject them as unknown |
+| D10 | The first page of a window is the newest part, and the client backfills towards the turn start | The oldest part, so the client folds forward while live events arrive | A thread opens to show the newest content; the oldest part would show the turn's beginning and hide the running output. Live events after the pin arrive as `session.event` either way, and `session.model.progress` keys the open blocks |
+| D11 | The forward mode keeps today's contract, including its unlimited `limit`; only `latestTurn` adds a bound | Apply the 4,096-event and 4 MiB bound to every `after` read | Existing clients and the export page with their own limits; changing their accepted requests would break callers without reducing any measured cost |
+| D12 | If the pin is the `turn/start` itself and the turn's first request is not committed at `through`, the window starts at the newest `input/message` at or below the turn start; a later read with a new pin can start earlier | Wait for the first request before replying; keep no prompt; treat it as an error | Waiting would make a pinned read depend on events above the pin. The fallback keeps the prompting input in the window. A new pin may legitimately produce an earlier window start, and the same pin keeps every candidate at or below it, so the reply is stable |
 
 ## 4. Contract
 
@@ -120,11 +123,11 @@ turn consumed.
 | Field | Meaning |
 | --- | --- |
 | `sessionId`, `branchId?` | Unchanged |
-| `through?` | The fixed upper watermark, unchanged: default the published head, must not exceed the dispatched position, and the call waits until the branch dispatches up to it. It must end a batch, as today |
-| `after?` | Unchanged forward cursor: exclusive, must end a batch. Absent in a window read; default 0 otherwise |
-| `before?` | Backward cursor: exclusive upper bound. The page ends at the last batch end at or below `before - 1` and never above `through`. Must be at least 1 and at most `through`. Mutually exclusive with `after` |
-| `latestTurn?` | `true` selects the turn window (§4.2). Mutually exclusive with `after`. `false` behaves as absent |
-| `limit?` | Events per page before the page runs to its batch boundary. Without `latestTurn`: positive, no upper bound (unchanged), default 256 when absent. With `latestTurn`: 1 to 4096, default 4096 |
+| `through?` | The fixed upper watermark, unchanged: default the published head, must not exceed the dispatched position, and the call waits until the branch dispatches up to it. It must end a batch, as today. It also bounds the window: a `latestTurn` read chooses the newest `turn/start` at or below it, and a `before` read never returns events above it. It is accepted together with `latestTurn` and `before` |
+| `after?` | Unchanged forward cursor: exclusive, must end a batch. Absent in a window read (rejected there); default 0 otherwise |
+| `before?` | Backward cursor: exclusive upper bound. The page ends at the last batch end at or below `before - 1` and never above `through`. Must be at least 1 and at most `through`. Mutually exclusive with `after`; accepted with and without `latestTurn` (without it, the window is the whole branch). Absent on the first window page, where the top is `through` |
+| `latestTurn?` | `true` selects the turn window (§4.2). Mutually exclusive with `after`. `false` behaves as absent. It requires the native Session store, like `session.catalog` |
+| `limit?` | Raw events per page before the page runs to its batch boundary. Without `latestTurn`: positive, no upper bound (unchanged), default 256 when absent. With `latestTurn`: 1 to 4096, default 4096. The encoded-byte budget of §4.4 can make the page shorter in both window modes |
 
 A `latestTurn` read is newest-first. A read with `before` and without `latestTurn`
 is newest-first over the branch. A read with neither is today's forward read.
@@ -145,19 +148,33 @@ latestTurn, larger window:
            then history {latestTurn:true, before:F, through:H} returns [I..F-1]
 ```
 
-The window starts at the smallest of:
+`T` is the sequence of the newest `turn/start` of the branch at or below
+`through`. Without such an event the window is the whole branch: `windowStart`
+is 1 and `turnStart` is absent.
 
-- `T`, the sequence of the newest `turn/start` of the branch at or below
-  `through`;
-- the `input/message` sequence of each input the turn's first request consumed,
-  read from the `input/consumed` events between `T` and that request's
-  `step/model-start`, both at or below `through`;
-- the newest `input/message` at or below `T`, which keeps the prompting input in
-  the window when the first request is not committed at `through` yet.
+With `T`, `windowStart` is chosen in this order:
 
-With no `turn/start` at or below `through` the window is the whole branch,
-starting at sequence 1, and `turnStart` is absent. Every candidate is at or
-below `through`, so the window is stable while `through` is pinned.
+1. If the turn's first request has `input/consumed` events between `T` and its
+   `step/model-start` (both at or below `through`), `windowStart` is the
+   smallest of `T` and the sequence of the `input/message` each consumed id
+   names. `T` stays the lower bound, so `turn/start` is always in the window
+   even when a message was appended between `T` and the request.
+2. Otherwise `windowStart` is the smallest of `T` and the newest
+   `input/message` at or below `T`. This is the pin-at-`turn/start` case of D12:
+   the prompting input stays in the window even though the first request is not
+   committed at the pin. With no such message, `windowStart` is `T`.
+
+Every candidate is at or below `through`, so the window is stable while
+`through` is pinned.
+
+The rule does not bring in an input consumed by the previous turn:
+`input/consumed` is read only in `(T, first model-start]`, which is inside this
+turn, and the ids it names are this turn's inputs. The contiguous range from
+`windowStart` to `through` can contain the previous turn's tail when the
+prompting input was written while that turn ran. That is deliberate: those
+events are a valid prefix, the client folds them as it would fold them in a
+full read, and nothing is attributed to the new turn. The cost is bounded by
+the event and byte limits like any other window.
 
 ### 4.3 Reply
 
@@ -174,6 +191,11 @@ below `through`, so the window is stable while `through` is pinned.
 
 - `limit` counts raw events, as it does today; the visible page can be smaller
   because `ProductEvent` filters kinds.
+- The byte budget counts the encoded `ProductEvent`s the reply carries, not the
+  raw rows and not the envelope. A batch is kept whole; the page never ends
+  inside one. When the newest batch alone is above the budget the call fails
+  `history_too_large` (§4.5); the client can still read that turn with the
+  forward paging of §1.1.
 - A page is batch-complete at both ends. Forward: it takes `limit` events and
   runs to the end of that batch. Backward: it takes up to `limit` events
   downward from the top and runs to the start of the batch that holds the oldest
@@ -195,40 +217,67 @@ below `through`, so the window is stable while `through` is pinned.
 - `latestTurn` with `limit` at or above the window size is one reply and folds
   like today's read of that turn.
 
-### 4.5 Validation and errors
+### 4.5 Validation
 
-| Condition | Result |
-| --- | --- |
-| `latestTurn` with `after` | `invalid`: the window chooses its own lower bound |
-| `before` with `after` | `invalid`: one page has one direction |
-| `before > through`, or `before == 0` | `invalid` |
-| `limit` not positive, or above 4096 in a `latestTurn` read | `invalid`, as today |
-| `after > through`, `after` inside a batch | `invalid`, as today |
-| `through` beyond the dispatched position | `invalid`, as today; the call waits for dispatch up to `through` |
-| `through` inside a batch | As today: the store rejects the page as not ending on a batch boundary |
+Validation runs in this order; the first failure decides the reply. `invalid` is
+the existing `-32602 invalid_params`.
+
+| # | Input | Result |
+| --- | --- | --- |
+| 1 | `latestTurn` is `true` and `after` is present | `invalid`: a window chooses its own lower bound |
+| 2 | `before` is present and `after` is present | `invalid`: one page has one direction |
+| 3 | `before` is present and is 0 | `invalid` |
+| 4 | `limit` is 0 | `invalid` (unchanged) |
+| 5 | `latestTurn` is `true` and `limit` is above 4096 | `invalid`: the window's page limit |
+| 6 | `latestTurn` or `before` is present and the host has no native Session store | `invalid`: the window requires the store; the feature is advertised only with one (§7) |
+| 7 | Session or branch resolution | `session_closed`, `branch_missing` (unchanged) |
+| 8 | `through` is above the dispatched position | `invalid` (unchanged); otherwise the call waits for dispatch up to `through` |
+| 9 | `through` is inside a batch | storage error (unchanged) |
+| 10 | `after` is above `through`, or `after` is inside a batch | `invalid` (unchanged) |
+| 11 | `before` is above `through` | `invalid` |
+| 12 | `latestTurn` is true and the newest batch of the page encodes to more than 4 MiB | `-32000 history_too_large` |
+
+Every other combination is accepted: `latestTurn` with or without `through`;
+`latestTurn` with or without `before`; `before` with or without `latestTurn`;
+`limit` absent (256 forward, 4096 window); `through` absent (pinned at the
+published head). `latestTurn: false` is the same as absent. Protocol v1 and v2
+never reach the method (unchanged).
 
 ## 5. Storage
 
-### 5.1 Format decision
+### 5.1 The derived index
 
-The native store moves from v27 to **v28**: one partial index, no column and
-no row change.
+The index is created at every store open, inside the format transaction, and
+does not take a native format version:
 
 ```sql
-CREATE INDEX timeline_history_anchors
+CREATE INDEX IF NOT EXISTS timeline_history_anchors
   ON timeline_events(session_id, branch_id, kind, sequence)
   WHERE kind IN ('turn/start', 'input/message');
 ```
 
-The upgrade creates it in the same startup transaction as the existing v27
-step, and the marker becomes 28. A v27 daemon refuses a v28 store as it refuses
-any newer format. The index holds one row per turn and one per user input,
-unlike the per-event indexes that dominate write amplification
-([#588](https://github.com/arcships/dim/issues/588)); it is a partial index on
-`kind`, like `timeline_tool_use_starts`
-([sqlite.rs:90](../../../crates/dim-app-server/src/storage/sqlite.rs#L90)). The
-[storage format](native-storage-format.md) owner records the v28 step when the
-implementation lands.
+It is not a format step because it carries no data and no decode rule. Every
+supported format's rows produce the same index, it is fully derivable from
+`timeline_events`, and a store with or without it decodes to the same events.
+The gate in `SqliteStorage::open` ([sqlite.rs:336](../../../crates/dim-app-server/src/storage/sqlite.rs#L336))
+still compares the exact schema, except for this one name: `schema()` omits it,
+so a v28 store without the index is recognised, upgraded if needed, and gets the
+index in the same transaction; a store with the index is recognised the same
+way. Any other unexpected object still rejects the store.
+
+Consequences:
+
+- The marker stays 28 and a newer daemon can open every older v28 store.
+- An older daemon that predates this change rejects a store that already has the
+  index, because its gate does not know the name. Its message says the schema is
+  unsupported; no row is changed, and the newer daemon opens the store again.
+  The alternative, a format bump, has the same downgrade result for a different
+  reason (an unknown version), and the next free version is contested by the
+  command output and file access changes ([#691](https://github.com/arcships/dim/issues/691)).
+- The index holds one row per turn and one per user input, unlike the per-event
+  indexes that dominate write amplification ([#588](https://github.com/arcships/dim/issues/588));
+  it is a partial index on `kind`, like `timeline_tool_use_starts`
+  ([sqlite.rs:90](../../../crates/dim-app-server/src/storage/sqlite.rs#L90)).
 
 ### 5.2 Queries
 
@@ -263,9 +312,11 @@ and `read_tool_use_starts`
 The window is not a Timeline mechanism: it names a turn fact, a message lookup
 and a sequence range, and it is reached from `Connection::history` through
 `AgentIndex`, as `read_tool_use_starts` is
-([agents.rs:670](../../../crates/dim-app-server/src/agents.rs#L670)). A host
-without a native store (tests, `ServerConfig.database_path: None`) answers the
-same contract from the loaded branch through the Session facade.
+([agents.rs:670](../../../crates/dim-app-server/src/agents.rs#L670)). The window
+requires the native store: a host without one (`ServerConfig.database_path:
+None`) advertises no `session.history.latestTurn` and answers a window request
+`invalid`, as `session.catalog` is advertised only with a database path. No
+second paging implementation is added.
 
 The runtime, the Session facade and `sessions.history` are untouched;
 `session.attach`, `session.event`, `session.state` and the live delivery path
@@ -278,7 +329,7 @@ Desktop, opening main (H = the sequence from session.attach)
   session.attach {sessionId}                                  -> SessionInfo, H
   session.history {sessionId, branchId:"main", latestTurn:true,
                    through:H}                                 -> turn window
-       the window with its inputs, or its newest 4,096 events + nextBefore
+       the window with its inputs, or its newest part + nextBefore
   session.event ...                                            live events after H
   scroll up inside the window:
   session.history {..., latestTurn:true, before:nextBefore,
@@ -361,10 +412,11 @@ does not need the mode (D8).
 The implementation PR carries these; this design phase has no code.
 
 1. **One request for the newest turn.** A turn larger than one client page
-   (the measured 512-event pages contain no `turn/start`) is served by one
+   whose newest 512-event page contains no `turn/start` is served by one
    `session.history {latestTurn: true, through}` reply: the whole window when it
-   holds at most 4,096 events, otherwise its newest 4,096 events with
-   `nextBefore` and `turnStart`.
+   holds at most 4,096 events, otherwise its newest part with `nextBefore` and
+   `turnStart`. The reply also stays within 4 MiB of encoded events; a second
+   `before` request finishes the window.
 2. **The prompt is in the window.** The reply contains the `input/message` of
    the input that started the turn, and of every input the first request
    consumed, even when those events precede `turn/start`. A queued input older
@@ -385,12 +437,18 @@ The implementation PR carries these; this design phase has no code.
 7. **Compatibility.** A request without the new fields behaves as today, and a
    v3 client that does not read the new fields still folds pages.
    `hello.features` lists `session.history.latestTurn`.
-8. **Format.** A v27 store upgrades in place to v28 with the index and no row
-   change; a v28 daemon opens it; reopening does not upgrade again.
-9. **Measurement.** The implementation reports request count and latency for
-   the 1.9k / 3.1k / 6.9k-event heads with the Desktop reader or an equivalent
-   harness, and the encoded size of the largest reply, so the 4,096-event
-   constant can be reviewed.
+8. **Index at open.** A v28 store opened by the new daemon contains
+   `timeline_history_anchors`; dropping the index and reopening recreates it;
+   reopening does not change the marker; `open_read_only` accepts a store with
+   and without it. No row changes and no version bump.
+9. **Byte bound.** A turn whose newest part encodes to more than 4 MiB is
+   trimmed on batch boundaries, and its second page continues without a gap; a
+   batch alone above 4 MiB replies `history_too_large`.
+10. **Measurement.** A flow test builds turns of about 1,900, 3,100 and 6,900
+    events and reports, for each, the number of `session.history` requests the
+    client needs for the whole turn, the encoded reply bytes and the call
+    latency; it asserts the request counts (1, 1, 2) and both bounds, and prints
+    the byte and latency table in the PR.
 
 ## 12. Rejected alternatives
 
@@ -419,26 +477,6 @@ The implementation PR carries these; this design phase has no code.
 | Document | Change |
 | --- | --- |
 | [Documentation index](../../INDEX.md) | Add this design |
-| [Native storage format](native-storage-format.md) | The v28 step and the index, when the implementation lands |
+| [Native storage format](native-storage-format.md) | State that the derived index is created at open and is not part of the v28 schema gate |
 | [Clients](../clients.md) | None now; a client document that describes opening a thread can link this window instead of forward paging |
 | [sessions service](sessions-service.md), [session access](../contracts/session-access.md) | None (D8) |
-
-## 14. Open questions
-
-1. Is 4,096 events the right ceiling, or should the bound be bytes? A count
-   matches the existing page unit, but a single event's size is not bounded by
-   the protocol. The measurement in §11 is meant to settle it.
-2. Should the first page of a turn be its newest part, as designed, or its
-   oldest part so a client can fold forward as live events arrive? Newest-first
-   matches "open a thread and see the newest content"; oldest-first would show
-   the turn's beginning and hide the running output.
-3. Should `sessions.history` adopt the fields once a process caller needs a
-   tail? Nothing needs it today (D8).
-4. Should the forward mode gain the same 4,096-event cap? Today it accepts any
-   positive `limit`, and a change would alter existing callers; this design
-   leaves it and bounds only the new mode.
-5. When the pinned head is the `turn/start` itself and the first request is not
-   committed at `through`, the window starts at the newest input message
-   (§4.2). A later read with a new pin can start earlier. Is that acceptable?
-   The design keeps every candidate at or below the pin so a pinned read is
-   stable.
