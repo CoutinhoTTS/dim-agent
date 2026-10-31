@@ -199,6 +199,10 @@ impl Matcher {
 pub struct HookHandler {
     pub event: HookEvent,
     pub source: HookSourceId,
+    /// The directory of the plugin whose document carries this handler, which
+    /// its commands read as `DIM_PLUGIN_ROOT`; `None` for the user and project
+    /// sources (A.3).
+    pub plugin_root: Option<std::path::PathBuf>,
     /// The document command, which de-duplicates handlers at one point.
     pub command: String,
     /// The Windows replacement, used on a Windows node.
@@ -295,7 +299,11 @@ pub fn handlers(
                 }
                 handlers.push(HookHandler {
                     event,
-                    source: source.id,
+                    source: source.id.clone(),
+                    plugin_root: match &source.id {
+                        HookSourceId::Plugin(_) => source.path.clone(),
+                        HookSourceId::User | HookSourceId::Project => None,
+                    },
                     command,
                     command_windows: setting.command_windows.clone(),
                     timeout: setting
@@ -329,7 +337,7 @@ pub fn entries(snapshot: &HookSourcesSnapshot) -> Vec<HookEntry> {
                         (false, state) => state,
                     };
                     entries.push(HookEntry {
-                        source: source.id,
+                        source: source.id.clone(),
                         event: event.clone(),
                         matcher: group.matcher.clone(),
                         command: setting.command.clone(),

@@ -529,7 +529,9 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::hooks",
       "file": "crates/dim-agent-capabilities/src/hooks/sources.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "write"
+      ]
     },
     {
       "id": "dim_agent_capabilities::host",
@@ -8125,6 +8127,7 @@
         "mod document",
         "use document::HookEntry",
         "use document::HookEvent",
+        "use document::HookGroup",
         "use document::HookHandler",
         "use document::HookState",
         "use document::HooksDocument",
@@ -8176,6 +8179,8 @@
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
         "path HookSourceId",
+        "path HookSourceId::Plugin",
+        "path HookSourceId::Project",
         "path HookSourceId::User",
         "path HookSourceState::Ok",
         "path HookSourcesSnapshot",
@@ -14758,6 +14763,7 @@
       "to": "dim_app_server::hooks_settings",
       "references": [
         "mod hooks_settings",
+        "path hooks_settings::HooksService",
         "path hooks_settings::HooksSettingsPlugin::new"
       ]
     },
@@ -17632,9 +17638,11 @@
       "from": "dim_app_server::hooks_settings",
       "to": "dim_agent_capabilities::hooks::document",
       "references": [
+        "path HookGroup",
         "path HooksDocument",
         "path dim_agent_capabilities::hooks::HookEntry",
         "path entries",
+        "use dim_agent_capabilities::hooks::HookGroup",
         "use dim_agent_capabilities::hooks::HooksDocument",
         "use dim_agent_capabilities::hooks::entries"
       ]
@@ -17643,6 +17651,7 @@
       "from": "dim_app_server::hooks_settings",
       "to": "dim_agent_capabilities::hooks::sources",
       "references": [
+        "path HookSourceId::Plugin",
         "path HookSourceId::Project",
         "path HookSourceId::User",
         "path HookSourceSnapshot",
@@ -33598,6 +33607,14 @@
     {
       "module": "dim_agent_capabilities::hooks::runner::tests",
       "path": "ShellStatus::Available"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::sources",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::hooks::sources",
+      "path": "S::Ok"
     },
     {
       "module": "dim_agent_capabilities::host",

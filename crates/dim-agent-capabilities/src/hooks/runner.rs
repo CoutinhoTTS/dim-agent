@@ -51,11 +51,12 @@ const MAIN_BRANCH: &str = "main";
 /// from one that has not run it.
 const SESSION_START_KEY: &str = "hooks:session-start/";
 /// Variables the hook environment sets and never inherits.
-const MANAGED_ENV: [&str; 6] = [
+const MANAGED_ENV: [&str; 7] = [
     "DIM_PROJECT_DIR",
     "DIM_HOOK_EVENT",
     "DIM_SESSION_ID",
     "DIMCODE_HOME",
+    "DIM_PLUGIN_ROOT",
     "CLAUDE_PLUGIN_ROOT",
     "GROK_PLUGIN_ROOT",
 ];
@@ -136,7 +137,7 @@ impl HooksRuntime {
             let mut fields = payload.clone();
             fields.insert(
                 "dim_source".into(),
-                Value::String(handler.source.as_str().into()),
+                Value::String(handler.source.to_string()),
             );
             let stdin = serde_json::to_vec(&Value::Object(fields)).unwrap_or_default();
             if handler.asynchronous {
@@ -279,7 +280,7 @@ impl HooksRuntime {
             return;
         };
         tracing::warn!(
-            source = handler.source.as_str(),
+            source = %handler.source,
             event = handler.event.name(),
             reason = %reason,
             duration_ms = duration.as_millis() as u64,
@@ -298,6 +299,9 @@ impl HooksRuntime {
         ];
         if let Some(home) = self.sources.0.home() {
             vars.push(("DIMCODE_HOME", home.into_os_string()));
+        }
+        if let Some(root) = &handler.plugin_root {
+            vars.push(("DIM_PLUGIN_ROOT", root.clone().into_os_string()));
         }
         vars
     }

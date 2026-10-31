@@ -12,7 +12,8 @@ mod sources;
 pub(crate) use runner::HooksRuntime;
 
 pub use document::{
-    HookEntry, HookEvent, HookHandler, HookState, HooksDocument, OnFailure, entries, handlers,
+    HookEntry, HookEvent, HookGroup, HookHandler, HookState, HooksDocument, OnFailure, entries,
+    handlers,
 };
 pub use sources::{
     HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost, HookSourcesSnapshot,

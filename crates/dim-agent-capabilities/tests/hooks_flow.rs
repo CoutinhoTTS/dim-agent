@@ -103,6 +103,8 @@ struct Sources {
     user: Mutex<Option<HooksDocument>>,
     /// Whether the workspace's hooks are enabled, and its document.
     project: Mutex<Option<(bool, HooksDocument)>>,
+    /// The documents plugins registered, with their directories.
+    plugins: Mutex<Vec<(String, PathBuf, HooksDocument)>>,
     home: Mutex<Option<PathBuf>>,
 }
 impl Sources {
@@ -112,11 +114,18 @@ impl Sources {
     fn set_project(&self, document: HooksDocument, enabled: bool) {
         *self.project.lock().unwrap() = Some((enabled, document));
     }
+    fn set_plugin(&self, id: &str, dir: &Path, document: HooksDocument) {
+        self.plugins
+            .lock()
+            .unwrap()
+            .push((id.to_owned(), dir.to_owned(), document));
+    }
 }
 impl ReadHookSources for Sources {
     fn sources(&self, _: &Path, _: CancellationToken) -> HostFuture<'_, HookSourcesSnapshot> {
         let user = self.user.lock().unwrap().clone();
         let project = self.project.lock().unwrap().clone();
+        let plugins = self.plugins.lock().unwrap().clone();
         Box::pin(async move {
             let mut sources = vec![HookSourceSnapshot {
                 id: HookSourceId::User,
@@ -134,6 +143,15 @@ impl ReadHookSources for Sources {
                     id: HookSourceId::Project,
                     path: None,
                     enabled,
+                    state: HookSourceState::Ok,
+                    document: Some(document),
+                });
+            }
+            for (id, dir, document) in plugins {
+                sources.push(HookSourceSnapshot {
+                    id: HookSourceId::Plugin(id),
+                    path: Some(dir),
+                    enabled: true,
                     state: HookSourceState::Ok,
                     document: Some(document),
                 });
@@ -1124,6 +1142,86 @@ async fn disable_all_hooks_turns_every_source_off() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!runs.exists());
     assert!(hook_blocks(&session, "session-start").await.is_empty());
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_source_runs_like_any_other_source() {
+    let env = Env::new().await;
+    let plugin = env.path("plugin");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let seen = env.path("plugin-environment");
+    let payload_file = env.path("plugin-payload");
+    let user_seen = env.path("user-environment");
+    env.sources.set(document(serde_json::json!({
+        "SessionStart": [
+            command(serde_json::json!({
+                "type": "command",
+                "command": format!("printf 'user context'; env > {}", user_seen.display()),
+            })),
+            command(serde_json::json!({"type": "command", "command": "printf 'shared'"})),
+        ],
+    })));
+    env.sources.set_plugin(
+        "kit",
+        &plugin,
+        document(serde_json::json!({
+            "SessionStart": [
+                command(serde_json::json!({
+                    "type": "command",
+                    "command": format!(
+                        "printf 'plugin context'; env > {}; cat > {}",
+                        seen.display(),
+                        payload_file.display()
+                    ),
+                })),
+                command(serde_json::json!({"type": "command", "command": "printf 'shared'"})),
+            ],
+        })),
+    );
+    let session = env.session().await;
+    let blocks = wait_blocks(&session, "session-start", 3).await;
+    assert_eq!(blocks.len(), 3, "{blocks:?}");
+    assert!(blocks[0].contains("user context"), "{blocks:?}");
+    assert!(blocks[1].contains("shared"), "{blocks:?}");
+    assert!(blocks[2].contains("plugin context"), "{blocks:?}");
+
+    // The plugin's command reads its directory; the user's reads none.
+    let environment = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == format!("DIM_PLUGIN_ROOT={}", plugin.display())),
+        "{environment}"
+    );
+    assert!(
+        !environment
+            .lines()
+            .any(|line| line.starts_with("CLAUDE_PLUGIN_ROOT=")),
+        "{environment}"
+    );
+    let user_environment = std::fs::read_to_string(&user_seen).unwrap();
+    assert!(
+        !user_environment
+            .lines()
+            .any(|line| line.starts_with("DIM_PLUGIN_ROOT=")),
+        "{user_environment}"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&payload_file).unwrap().trim()).unwrap();
+    assert_eq!(payload["dim_source"], "plugin:kit");
+
+    // `disableAllHooks` in the user document turns the plugin source off too.
+    let mut off = document(serde_json::json!({
+        "SessionStart": [command(serde_json::json!({
+            "type": "command", "command": "printf 'user context'"
+        }))],
+    }));
+    off.disable_all_hooks = true;
+    env.sources.set(off);
+    let second = env.session().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(hook_blocks(&second, "session-start").await.is_empty());
     env.close().await;
 }
 
