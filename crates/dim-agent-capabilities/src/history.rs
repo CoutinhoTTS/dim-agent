@@ -185,7 +185,7 @@ impl HistoryRenderer {
         if batch == 0 {
             return Ok(StreamedContext::fallback());
         }
-        if self.render as usize != project_context_history as usize {
+        if self.render as *const () as usize != project_context_history as *const () as usize {
             return Ok(StreamedContext::fallback());
         }
         let mut state = None;
