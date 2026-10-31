@@ -140,7 +140,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Session record, owner, branches, events, content, snapshots | Native store | Step 4, one transaction |
 | Session-file ownership | `session_file_owners` (S5a) | Step 4. Files left without an owner go in S5a's sweep |
 | Title metadata | Native store, S5b's `session_metadata` row ([title metadata](session-title-metadata.md#9-lifecycle)) | Step 4, same transaction |
-| File grants | Native store, `session_grants` rows (v27, [ADR 012](../../adr/012-session-grants.md) D1) | Step 4, same transaction |
+| File grants | Native store, `session_grants` rows (v28, [ADR 012](../../adr/012-session-grants.md) D1) | Step 4, same transaction |
 | Exec output and offloaded `read` results | `<database directory>/command-output/<S>/` | Step 3 |
 | Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
 | Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
