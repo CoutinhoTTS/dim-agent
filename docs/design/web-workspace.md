@@ -344,7 +344,7 @@ optional account feature must not prevent identity or usage from loading.
 | --- | --- |
 | Appearance | Language, system/light/dark theme and text size, applied immediately |
 | Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
-| Modality | Default model selection for image generation, editing and understanding |
+| Modality | Operation defaults for image generation and editing from `modality.capabilities`, written with `modality.configure` and its snapshot revision; image understanding stays with the Session model on Agent defaults |
 | MCP | List, add/edit transports, enable/disable, test, authentication/sign-out and confirmed removal, preserving secret fields omitted from edits |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | List, enable/disable, source installation, update and confirmed removal |
@@ -437,6 +437,41 @@ project-origin input and safe reads, plus rendered Web verification. This adds
 no part, event, service, configuration or stored document; §7 applies unchanged
 and no requirement is raised to a mechanism owner.
 
+#### Modality defaults
+
+The current page writes Provider model capability declarations through
+`provider.models.edit`; that is not a runtime default. The page is replaced by
+the owner contract; Provider records, model descriptors, Agent defaults, chat
+model selection and Session behavior are unchanged.
+
+The page renders one row per operation the owner reports for the `image`
+category. It offers the owner's `options`, an Automatic choice when no default is
+pinned, and shows `effective` so automatic resolution is visible. An unavailable
+default stays selected with its reason; the page never replaces it with another
+model. Save sends one `modality.configure` per changed key, using the revision
+from the previous reply; a conflict stops the loop and keeps the draft, and keys
+already accepted stay saved. A `modality_conflict` keeps the typed draft,
+disables Save until reload and offers the owner's new snapshot; a stale page
+reloads after any Provider or model mutation made in the Web session. A missing
+owner method or an unavailable category is an actionable error, not an empty
+success. The page does not edit Provider model capability declarations; those
+are Provider metadata, not a routing default.
+
+Image understanding is the Session model: `read` and attachments send images to
+the model the Session adopted. Agent defaults already pins that model through
+`provider.select`, with the same Automatic fallback, so the Modality page adds no
+second understanding row and clearing that default restores Provider's automatic
+selection.
+
+```text
+┌ Modality ────────────────────────────────────────────────┐
+│ Image generation   [Automatic — currently P / M      ▾]  │
+│ Image editing      [P / M                             ▾]  │
+│ Image understanding uses the Agent default (Session).     │
+│ reasons: no adapter in this build                         │
+└───────────────────────────────────────────────────────────┘
+```
+
 #### Admission and sensitive data
 
 Replace the read-only exception with an explicit, reviewed method allowlist for
@@ -445,6 +480,8 @@ whole management namespaces. Daemon shutdown, Web-entry management, UI-host
 control and arbitrary file access remain unavailable. Unauthenticated and bare
 WebSocket clients gain no management access. Advertised methods must use the same
 filter as dispatch so the UI cannot mistake a blocked method for an available one.
+Only `modality.capabilities` and `modality.configure` are admitted from the
+`modality` namespace; task and realtime methods remain unavailable.
 
 Audit every added read for secret-bearing fields before enabling it. Return only
 owner-provided safe projections; any missing safe projection is a requirement for
@@ -504,7 +541,7 @@ defaults, archive flags or copied credentials cannot substitute for owner behavi
 
 | Owner | Problem and why existing mechanisms do not suffice | Required capability and ordering |
 | --- | --- | --- |
-| [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing or understanding tasks | Typed default selection and task routing consumed by the runtime; persist the selection before reporting success |
+| [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing or understanding tasks | Typed per-operation defaults with owner-computed options, effective automatic resolution and actionable reasons; `modality.capabilities`/`modality.configure` consumed by task dispatch; save persists before success; exactly those two methods admitted on the Web entry. Image understanding remains the Session model on Agent defaults. |
 | [Session catalog](appserver/session-catalog.md) | A saved Session is not necessarily archived; reopening it cannot represent restore | Durable archive classification with search, restore and confirmed deletion; commit classification before publishing the new catalog view |
 | Skills | Plugin packages do not cover manifest-free skill repositories or selective installation | Owner-managed repository preview, selected installation and loose-skill update/removal, with explicit overwrite confirmation and catalog publication after persistence |
 | MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | An owner operation for scope migration that preserves hidden values and checks both source revisions; publish success only after the move commits |
