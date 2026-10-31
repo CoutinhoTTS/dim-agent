@@ -26,7 +26,7 @@ Aimux 无目录或 Session 依赖，独占可释放的 HTTP client。卸载关�
 
 请求的 `ModelProtocol` 是 anthropic 时，`src/request.rs` 的转换器在请求里标两个提示缓存断点；其他协议不带断点，Bedrock 不变。放在哪里是 dim 的产品决定：aimux 只负责线上编码（part 或消息上的 `providerOptions.anthropic.cacheControl`，每个请求至多四个断点），自己不放断点。
 
-- **System 末尾**：System 的最后一个块标一个断点，工具声明与 System 因此合成一个缓存前缀。System 已带显式断点（`SystemPromptPart::Text` 的 `cache_control`）时原样保留，不再加 System 断点。
+- **System 末尾**：System 的最后一个块标一个断点，工具声明与 System 因此合成一个缓存前缀。这个前缀在一次 Session 内保持一份，因为 System 只放静态文本（[model-prompts §5 第 3 条](../../docs/design/model-prompts.md#5-scopes)）；System 已带显式断点（`SystemPromptPart::Text` 的 `cache_control`）时原样保留，不再加 System 断点。
 - **最后一条用户或工具结果消息**：在消息级 `providerOptions.anthropic.cacheControl` 标一个断点，由转换器落在该消息最后一个可缓存块上；只有请求仍在四个断点以内时加。
 - **生命周期**：用 API 默认的五分钟，每次使用刷新；一小时的长期缓存不用。
 - **其他尾部**：最后一条消息既不是用户消息也不是工具结果消息时，不加消息断点。
