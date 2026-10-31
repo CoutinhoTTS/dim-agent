@@ -196,28 +196,33 @@ threshold = B − reserve
   conversation. Its whole input — the strategy's own System and the single user message that carries
   the transcript — is a cache write at 1.25×, and no later request reads that transcript, because
   the compaction replaces it. The message breakpoint on that user message is what makes the write;
-  the System breakpoint caches the strategy's own System, which the later chunk requests of the same
-  compaction can read back at 0.1×, a small part of the request. So the summary call's input costs
-  1.25 times its input price instead of 1: the accepted cost of marking every request the same way.
+  the System breakpoint caches nothing, because the strategy's own System is shorter than the
+  model's minimum cacheable prefix
+  ([Anthropic cache breakpoints](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)). So
+  the summary call's input costs 1.25 times its input price instead of 1: the accepted cost of
+  marking every request the same way.
 - [Judgment] Whether compacting earlier costs more depends on what follows. With the breakpoints in
-  place, an ordinary call reads the prefix it shares with the previous call at 0.1× and writes only
-  its new tail at 1.25×, so an earlier compaction saves 0.1× the tokens it removes on each later
-  call, not their full price. The compaction pays the summarizer's whole input as a 1.25× write that
-  is never read, the summary's output, and the rebuild of the new prefix (replacement, baseline and
-  kept tail) at 1.25×. It pays off once
-  `1.25 × summary input + summary output + 1.25 × rebuilt prefix < 0.1 × Σ (old prompt − compacted prompt)`
-  over the later calls that would otherwise carry the old prefix. For example, `C = 100k` shrunk to
-  `S = 20k` saves 8k input-price units per later call, so a compaction whose summarizer input is the
-  replaced range and whose rebuilt prefix is `S` costs about 150k input-price units before the
-  summary's own output and is repaid within about twenty calls. Many later small calls with a warm
-  cache can repay an early compaction; few later calls, or a cache that expires between them, favour
-  a late trigger. This depends on call count, growth and cache lifetime, none of which this note
-  measured, so cost does not decide the trigger. The late trigger of §3.3 rests on overflow safety
-  (§3) and on keeping context the model may still need; it remains a heuristic. The cheaper lever is
-  the summarizer: reusing the conversation prefix (Claude Code's approach) would let it read that
-  cached prefix at 0.1× instead of writing the whole transcript at 1.25×, an order-of-magnitude cut
-  in input price on the shared part — arithmetic on the published price ratios, not a measurement.
-  That changes the strategy's request shape and is a separate follow-up.
+  place, an ordinary call reads the prefix it shares with the previous call at the read price `r`
+  (0.1, or 0.05 on Opus 5.5 and Sonnet 5.5) and writes only its new tail at 1.25×, so an earlier
+  compaction saves `r` times the tokens it removes on each later call, not their full price. The
+  compaction pays the summarizer's whole input as a 1.25× write that is never read, the summary's
+  output, and the rebuild of the new prefix (replacement, baseline and kept tail) at 1.25×. It pays
+  off once
+  `1.25 × summary input + summary output + 1.25 × rebuilt prefix < r × Σ (old prompt − compacted prompt)`
+  over the later calls that would otherwise carry the old prefix. For example, at `r = 0.1`,
+  `C = 100k` shrunk to `S = 20k` saves 8k input-price units per later call, so a compaction whose
+  summarizer input is the replaced range and whose rebuilt prefix is `S` costs about 150k
+  input-price units before the summary's own output and is repaid within about twenty calls; at
+  `r = 0.05` the saving is 4k per call and repayment takes about twice as many calls. Many later
+  small calls with a warm cache can repay an early compaction; few later calls, or a cache that
+  expires between them, favour a late trigger. This depends on call count, growth and cache
+  lifetime, none of which this note measured, so cost does not decide the trigger. The late trigger
+  of §3.3 rests on overflow safety (§3) and on keeping context the model may still need; it remains
+  a heuristic. The cheaper lever is the summarizer: reusing the conversation prefix (Claude Code's
+  approach) would let it read that cached prefix at `r` instead of writing the whole transcript at
+  1.25×, an order-of-magnitude cut in input price on the shared part — arithmetic on the published
+  price ratios, not a measurement. That changes the strategy's request shape and is a separate
+  follow-up.
 
 ### 5.2 Budget-exhaustion recovery
 
