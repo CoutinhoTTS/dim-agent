@@ -1,6 +1,6 @@
 use crate::{
     context_policy::{ContextPolicy, PolicyContext, configured_request},
-    history::{HistoryRenderer, context_configuration, context_messages},
+    history::{HistoryRenderer, context_configuration},
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::{PromptSnapshot, scope_is_visible},
@@ -617,24 +617,18 @@ impl ContextPreparation {
             .rendered_stream(&self.timeline, source.through, 256)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let (context, history) = if streamed.fallback || self.policy.is_some() {
-            self.history
+        let (context, history) = if streamed.fallback {
+            let (context, history) = self
+                .history
                 .rendered_context(&self.timeline, source.through)
                 .await
-                .map_err(|error| HostError::failed(error.to_string()))?
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            (PolicyContext::from_context(context), history)
         } else {
-            (
-                dim_agent_runtime::ContextHistory {
-                    checkpoint: None,
-                    ancestry: streamed.ancestry,
-                    events: Vec::new(),
-                    positions: Vec::new(),
-                },
-                streamed.history,
-            )
+            (PolicyContext::from_stream(&streamed), streamed.history)
         };
         crate::context_policy::check_cancel(&cancel)?;
-        let prefix = context_messages(&context, &history);
+        let prefix = context.messages(&history);
         if request.messages.len() < prefix.len()
             || !prefix
                 .iter()
@@ -670,13 +664,7 @@ impl ContextPreparation {
                     .map_err(|error| HostError::failed(error.to_string()))?;
                 policy
                     .prepare(
-                        request,
-                        &source,
-                        PolicyContext::from_context(context),
-                        history,
-                        facts,
-                        cancel,
-                        &cancelled,
+                        request, &source, context, history, facts, cancel, &cancelled,
                     )
                     .await
             }

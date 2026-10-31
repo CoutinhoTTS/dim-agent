@@ -1,7 +1,7 @@
 use crate::{
     history::{
-        HistoryEntry, HistoryRenderer, context_compaction, context_configuration, context_messages,
-        digest_message, retained_entry, truncate_middle, user_message,
+        HistoryEntry, HistoryRenderer, context_compaction, context_configuration, digest_message,
+        truncate_middle, user_message,
     },
     host::*,
 };
@@ -938,13 +938,25 @@ impl ContextPolicy {
             });
         if request.is_ok() {
             let saved = async {
-                let snapshot = self.history.snapshot(
-                    view.context
-                        .full()
-                        .ok_or("streamed context has no snapshot history")?,
-                    retain_from,
-                    &fact,
-                )?;
+                let snapshot = match (view.context.full(), view.context.checkpoint()) {
+                    (Some(context), _) => {
+                        Some(self.history.snapshot(context, retain_from, &fact)?)
+                    }
+                    (None, Some(checkpoint)) => {
+                        Some(self.history.snapshot_from_checkpoint(checkpoint, &fact)?)
+                    }
+                    (None, None) => {
+                        let (context, _) = self
+                            .history
+                            .rendered_context(&self.timeline, view.facts.through)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Some(self.history.snapshot(&context, retain_from, &fact)?)
+                    }
+                };
+                let Some(snapshot) = snapshot else {
+                    return Ok(());
+                };
                 self.timeline
                     .save_snapshot(snapshot)
                     .await

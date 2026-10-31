@@ -1,6 +1,6 @@
 use crate::{
     context_policy::{CompactionStep, ContextPolicy, configured_request},
-    history::{HistoryRenderer, context_configuration, context_messages},
+    history::{HistoryRenderer, context_configuration},
     host::{CompactionStrategyHost, ContextModelHost, HostError, PrepareModelHost},
     prompt_state::PromptSnapshot,
     steer::REPLACED_BY_STEER,
@@ -677,28 +677,28 @@ impl AgentLoop {
                     .rendered_stream(&owner.timeline, through, 256)
                     .await?;
                 let (prefix, entries, configuration, prompt) =
-                    if streamed.fallback || owner.policy.is_some() {
+                    if streamed.fallback {
                     let (prefix, entries) = owner
                         .history
                         .rendered_context(&owner.timeline, through)
                         .await?;
                     let configuration = context_configuration(&prefix);
                     let prompt = PromptSnapshot::from_context(&prefix).revision;
-                    (prefix, entries, configuration, prompt)
+                    (
+                        crate::context_policy::PolicyContext::from_context(prefix),
+                        entries,
+                        configuration,
+                        prompt,
+                    )
                 } else {
                     (
-                        dim_agent_runtime::ContextHistory {
-                            checkpoint: None,
-                            ancestry: streamed.ancestry,
-                            events: Vec::new(),
-                            positions: Vec::new(),
-                        },
+                        crate::context_policy::PolicyContext::from_stream(&streamed),
                         streamed.history,
                         streamed.configuration,
                         streamed.prompt,
                     )
                 };
-                let history = context_messages(&prefix, &entries);
+                let history = prefix.messages(&entries);
                 let settings = match &configuration {
                     Some(data) => crate::host::ModelSettings {
                         provider_id: data.settings.provider_id.clone(),
