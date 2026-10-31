@@ -293,14 +293,6 @@ impl ContextPolicy {
                 request.clone(),
             ),
         };
-        let facts = if context_compaction(&context).is_some() {
-            PolicyFacts {
-                through: facts.through,
-                events: context.events.clone(),
-            }
-        } else {
-            facts
-        };
         let mut events = facts.events.clone();
         events.extend(reusable);
         Ok(View {
