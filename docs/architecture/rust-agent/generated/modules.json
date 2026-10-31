@@ -31448,6 +31448,7 @@
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path ThemeContext",
         "path WebOpened",
         "path banner",
         "path boxed",
@@ -33723,6 +33724,18 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Appearance::Light"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "ColorMode::Ansi16"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "ColorMode::Ansi256"
     },
     {
       "module": "dim_cli::ui::tui::tests",
