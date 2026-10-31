@@ -62,6 +62,7 @@ use crate::ui::transcript::tool_group::{
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
+use crate::wire::Configuration;
 
 const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
@@ -683,6 +684,45 @@ enum Outcome {
     Exit(i32),
 }
 
+/// The adopted model as the label draws it: `provider / model`, and the
+/// reasoning effort the configuration sends when it carries one.
+struct ModelLabel {
+    model: String,
+    effort: Option<String>,
+}
+
+impl ModelLabel {
+    fn new(configuration: &Configuration) -> Self {
+        Self {
+            model: format!("{} / {}", configuration.provider_id, configuration.model_id),
+            effort: configuration
+                .model_preferences
+                .as_ref()
+                .and_then(|preferences| preferences.reasoning_effort.clone()),
+        }
+    }
+
+    fn full(&self) -> String {
+        match &self.effort {
+            Some(effort) => format!("{} · {effort}", self.model),
+            None => self.model.clone(),
+        }
+    }
+
+    /// The first shape of the label that `fits`, whole before whole minus the
+    /// effort; `None` when even the model alone does not fit.
+    fn fitted(&self, fits: impl Fn(&str) -> bool) -> Option<String> {
+        let full = self.full();
+        if fits(&full) {
+            return Some(full);
+        }
+        if self.effort.is_some() && fits(&self.model) {
+            return Some(self.model.clone());
+        }
+        None
+    }
+}
+
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -702,8 +742,8 @@ struct App {
     reports: Vec<(String, Tone)>,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
-    /// `provider / model` once the session exists.
-    label: Option<String>,
+    /// The adopted model and its reasoning effort, once the session exists.
+    label: Option<ModelLabel>,
     failure: Option<String>,
     /// The App Server asked this interface to leave: one more frame shows
     /// why, then the interface exits and the Session carries on.
@@ -1363,8 +1403,8 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Ready { provider, model } => {
-                self.label = Some(format!("{provider} / {model}"));
+            Update::Ready(configuration) => {
+                self.label = Some(ModelLabel::new(&configuration));
             }
             Update::ModelFeatures {
                 images,
@@ -2694,7 +2734,7 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             approvals: t(status_label(&self.approvals)).to_owned(),
-            model: self.label.clone(),
+            model: self.label.as_ref().map(ModelLabel::full),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -3366,8 +3406,14 @@ impl App {
         if self.fullscreen {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
+            let room = outer.saturating_sub(2);
+            let left = title.as_ref().map_or(0, |(text, _)| width_of(text) + 3);
+            let model = self
+                .label
+                .as_ref()
+                .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
+                .map(|label| fg(&label, &p.highlight));
             let title = title.map(|(text, label)| label(text));
-            let model = self.label.as_deref().map(|label| fg(label, &p.highlight));
             let docked = self.dock_status(status.as_deref());
             let place = fg(
                 &fit_place(self.place_label(), docked.as_deref(), outer),
@@ -4262,12 +4308,16 @@ impl App {
             left.push_str(&slot);
         }
         let total = cols.saturating_sub(2);
-        let line = match &self.label {
-            Some(label) if width_of(&left) + 2 + width_of(label) <= total => {
-                let gap = total - width_of(&left) - width_of(label);
+        let label = self
+            .label
+            .as_ref()
+            .and_then(|label| label.fitted(|text| width_of(&left) + 2 + width_of(text) <= total));
+        let line = match label {
+            Some(label) => {
+                let gap = total - width_of(&left) - width_of(&label);
                 format!("{left}{}{label}", " ".repeat(gap))
             }
-            _ => clip(&left, total).0,
+            None => clip(&left, total).0,
         };
         if let Some((text, _)) = &self.notice
             && let Some(at) = line.find(text.as_str())

@@ -454,9 +454,13 @@ struct Created {
 /// The record `session.attach` replies for the Session it opened. A server
 /// from before the record existed replies `{}`.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Attached {
     #[serde(default)]
     model: Option<ModelId>,
+    /// The adopted configuration's preferences; absent when it carries none.
+    #[serde(default)]
+    model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
 
 #[derive(Deserialize)]
@@ -765,24 +769,24 @@ impl Worker {
             .await?;
         // Without a record, find the model in the catalog: this is the only
         // caller of `list()` besides `/resume`, and only for an older server.
+        let model_preferences = attached.model_preferences;
         let model = match model.or(attached.model) {
             Some(model) => model,
             None => self.model_of(&session_id).await?,
         };
+        let configuration = Configuration {
+            provider_id: model.provider_id.clone(),
+            model_id: model.model_id.clone(),
+            model_preferences,
+        };
         self.session_id = session_id.clone();
         self.register_ui().await;
         self.mcp_required.clear();
-        self.model = Some(Configuration {
-            provider_id: model.provider_id.clone(),
-            model_id: model.model_id.clone(),
-        });
+        self.model = Some(configuration.clone());
         self.discover_branch("main");
         self.poll_task_history().await?;
         let features = self.model_features(&model).await;
-        self.send(Update::Ready {
-            provider: model.provider_id,
-            model: model.model_id,
-        });
+        self.send(Update::Ready(configuration));
         self.send(features);
         if self.client.supports(&permission::PRESET_METHODS) {
             let preset = permission::read(&mut self.client, &session_id)
@@ -2796,14 +2800,13 @@ impl Worker {
                 model_id,
             };
             let features = self.model_features(&model).await;
-            self.model = Some(Configuration {
+            let configuration = Configuration {
                 provider_id: model.provider_id.clone(),
                 model_id: model.model_id.clone(),
-            });
-            self.send(Update::Ready {
-                provider: model.provider_id.clone(),
-                model: model.model_id.clone(),
-            });
+                model_preferences: None,
+            };
+            self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration));
             self.send(features);
             model
         } else {
@@ -2825,10 +2828,24 @@ impl Worker {
                 }
             };
             let features = self.model_features(&updated.model).await;
-            self.send(Update::Ready {
-                provider: updated.model.provider_id.clone(),
-                model: updated.model.model_id.clone(),
-            });
+            // Re-picking the model the label already shows keeps its
+            // preferences: an `unchanged` outcome publishes no fact, and when
+            // the model changed the adopted fact draws the new ones.
+            let model_preferences = self
+                .model
+                .as_ref()
+                .filter(|shown| {
+                    shown.provider_id == updated.model.provider_id
+                        && shown.model_id == updated.model.model_id
+                })
+                .and_then(|shown| shown.model_preferences.clone());
+            let configuration = Configuration {
+                provider_id: updated.model.provider_id.clone(),
+                model_id: updated.model.model_id.clone(),
+                model_preferences,
+            };
+            self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration));
             self.send(features);
             self.context_stale = true;
             updated.model
@@ -3380,6 +3397,7 @@ impl Worker {
             && let EventContent::Configuration(configuration) = &event.content
         {
             self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration.clone()));
         }
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content

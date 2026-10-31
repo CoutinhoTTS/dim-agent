@@ -1290,6 +1290,10 @@ impl Connection {
                 provider_id: session.config().model.provider_id.clone(),
                 model_id: session.config().model.model_id.clone(),
             },
+            model_preferences: crate::provider::adopted_selection_preferences(
+                session.config().model.config.as_ref(),
+                session.config().model.metadata.as_ref(),
+            ),
             sequence: session.sequence("main").map_err(RpcError::from)?,
         }))
     }

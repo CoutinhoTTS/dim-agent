@@ -1731,6 +1731,248 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The public `context/configured` view carries the effective preferences of
+/// the adopted configuration: what a client can draw and send back, the same
+/// after the Session is reopened, and absent when the configuration carries
+/// none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_configured_view_reads_back_the_adopted_model_preferences() {
+    let home = std::env::temp_dir().join(format!("dim-effort-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let provider = "018ec73f-0000-7000-8000-000000000001";
+    let entry = |id: &str, reasoning: bool| {
+        let capabilities = dim_agent_types::CatalogCapabilities {
+            reasoning,
+            ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 4_096)
+        };
+        let mut entry =
+            json!({"modelId":id,"displayName":id,"status":"active","capabilities":capabilities});
+        if reasoning {
+            entry["metadata"] = json!({
+                "reasoning":{"supported":true,"effortOptions":["low","high"],
+                    "off":{"kind":"thinking_type","value":"disabled"}},
+                "serviceTier":{"supported":true,"options":["priority","default"]}
+            });
+        }
+        entry
+    };
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({"providerId":provider,"displayName":"Fixture",
+                    "connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1",
+                        "auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},
+                    "models":[entry("reasoning",true),entry("plain",false)],"enabled":true}),
+            )
+            .await,
+    );
+
+    /// The `context/configured` payload of the newest public history read.
+    async fn configured(client: &mut Client, session_id: &str) -> Value {
+        let attached = client
+            .rpc("session.attach", json!({"sessionId":session_id}))
+            .await;
+        let through = attached["result"]["sequence"].as_u64().unwrap();
+        let history = client
+            .rpc(
+                "session.history",
+                json!({"sessionId":session_id,"branchId":"main","after":0,
+                    "limit":9007199254740991u64,"through":through}),
+            )
+            .await;
+        history["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|event| event["type"] == "context" && event["name"] == "configured")
+            .expect("the branch adopted a configuration")["data"]
+            .clone()
+    }
+
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"provider":provider,"modelId":"reasoning"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    // The first adoption through the public flow: the explicit target starts
+    // from the catalog defaults, and nothing names a preference of its own.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "providerId":provider,"modelId":"reasoning"}),
+            )
+            .await,
+    );
+    let data = configured(&mut client, &session_id).await;
+    assert_eq!(data["model_id"], "reasoning");
+    assert!(data.get("model_preferences").is_none(), "{data}");
+
+    // `/effort high` reports the value the configuration will send.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":"high"}}),
+            )
+            .await,
+    );
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        json!({"reasoningEffort":"high"})
+    );
+
+    // `/fast on` keeps the effort and adds the tier.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"serviceTier":"priority"}}),
+            )
+            .await,
+    );
+    let adopted = json!({"reasoningEffort":"high","serviceTier":"priority"});
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        adopted
+    );
+
+    // A Session reopened on another connection reads the same values.
+    let mut reopened = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        configured(&mut reopened, &session_id).await["model_preferences"],
+        adopted
+    );
+
+    // A model whose configuration carries no preference shows no field.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "providerId":provider,"modelId":"plain"}),
+            )
+            .await,
+    );
+    let data = configured(&mut client, &session_id).await;
+    assert_eq!(data["model_id"], "plain");
+    assert!(data.get("model_preferences").is_none(), "{data}");
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The creation and attach replies name the preferences the Session's adopted
+/// configuration sends, so a client can label a Session that has not run yet;
+/// a configuration with no preference replies without the field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_creation_replies_name_the_adopted_model_preferences() {
+    let home = std::env::temp_dir().join(format!("dim-effort-create-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let provider = "018ec73f-0000-7000-8000-000000000002";
+    let entry = json!({"modelId":"reasoning","displayName":"reasoning","status":"active",
+        "capabilities":dim_agent_types::CatalogCapabilities {
+            reasoning: true,
+            ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 4_096)
+        },
+        "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],
+            "off":{"kind":"thinking_type","value":"disabled"}}}});
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({"providerId":provider,"displayName":"Fixture",
+                    "connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1",
+                        "auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},
+                    "models":[entry],"enabled":true}),
+            )
+            .await,
+    );
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"provider":provider,"modelId":"reasoning"},
+                "modelPreferences":{"reasoningEffort":"high"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let adopted = json!({"reasoningEffort":"high"});
+    assert_eq!(created["result"]["modelPreferences"], adopted, "{created}");
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_ok(&attached);
+    assert_eq!(
+        attached["result"]["modelPreferences"], adopted,
+        "{attached}"
+    );
+
+    // The same live Session lists without the field: only the create and
+    // attach replies name the preferences.
+    let listed = client.rpc("session.list", json!({})).await;
+    assert_ok(&listed);
+    let item = listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["sessionId"] == session_id.as_str())
+        .expect("the Session is listed");
+    assert!(item.get("modelPreferences").is_none(), "{listed}");
+
+    let plain = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"provider":provider,"modelId":"reasoning"}}),
+        )
+        .await;
+    assert_ok(&plain);
+    assert!(plain["result"].get("modelPreferences").is_none(), "{plain}");
+    let plain_id = plain["result"]["sessionId"].as_str().unwrap().to_owned();
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":plain_id}))
+        .await;
+    assert_ok(&attached);
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Each Session's ModelProvider progress cell. The writer lands separately;
 /// the test sets the cell as ModelProvider would.
 struct ProgressCapture {

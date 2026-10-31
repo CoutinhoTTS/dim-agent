@@ -163,6 +163,24 @@ impl Wire {
         let detach = self.read("session.detach");
         self.reply(&detach, json!({}));
     }
+    /// Holds the connection open until the client leaves, answering nothing:
+    /// a flow the test drives with notices instead of replies.
+    fn hold(&mut self) {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match self.0.read_line(&mut line) {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+        }
+    }
 }
 
 /// The record `session.attach` replies for the Session it names: that
@@ -177,6 +195,22 @@ fn attach_record(request: &Value) -> Value {
         "sequence": 8,
         "attachedClients": 1,
     })
+}
+
+/// The public `context/configured` event: the adopted model, and the
+/// preferences the configuration carries when it carries any.
+fn configured_event(sequence: u64, model_id: &str, preferences: Value) -> Value {
+    let mut data = json!({
+        "timeline":"main","revision":"revision-1",
+        "provider_id":"test","model_id":model_id
+    });
+    if preferences
+        .as_object()
+        .is_some_and(|preferences| !preferences.is_empty())
+    {
+        data["model_preferences"] = preferences;
+    }
+    json!({"id":format!("configured-{sequence}"),"sequence":sequence,"create_at":1,"type":"context","name":"configured","data":data})
 }
 
 fn wait(mut child: Child) -> Output {
@@ -3571,6 +3605,338 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
         "{}",
         terminal.transcript
     );
+}
+
+/// The model label carries the reasoning effort the Session adopted, in both
+/// terminal modes, and no suffix when the configuration carries none.
+#[test]
+fn the_model_label_shows_the_adopted_reasoning_effort_in_both_modes() {
+    for fullscreen in [false, true] {
+        for (preferences, expected) in [
+            (json!({"reasoningEffort":"high"}), "test / model · high"),
+            (json!({}), "test / model"),
+        ] {
+            let home = Home::new();
+            let event = configured_event(4, "model", preferences.clone());
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                wire.created();
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[event],"through":8,"nextAfter":8,"done":true}),
+                );
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                wire.hold();
+            });
+            let mut command = home.command();
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until(expected);
+            if preferences
+                .as_object()
+                .is_some_and(|value| value.is_empty())
+            {
+                assert!(
+                    !terminal.transcript.contains("· high"),
+                    "a configuration without a preference drew a suffix: {}",
+                    terminal.transcript
+                );
+            }
+            terminal.signal(libc::SIGKILL);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
+    }
+}
+
+/// A Session created with an effort shows it before its first turn, in both
+/// terminal modes: the create and attach replies name the adopted
+/// configuration's preferences, before any `context/configured` fact exists.
+#[test]
+fn a_new_session_shows_the_effort_its_creation_adopted() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (calls, observed) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            let mut capabilities =
+                serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384))
+                    .unwrap();
+            capabilities["reasoning"] = json!(true);
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                line.clear();
+                calls.send(request.clone()).unwrap();
+                if request["method"] == "session.context.usage" {
+                    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method: session.context.usage",
+                        "data":{"appError":"unknown_method"}}}));
+                    continue;
+                }
+                let result = match request["method"].as_str().unwrap() {
+                    "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
+                        "protocolVersion":3,"daemonProfile":{"kind":"product"},
+                        "features":["session.create","session.history","provider.list",
+                            "provider.catalog","provider.management"]}),
+                    "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                    "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                        "displayName":"Test","enabled":true,"version":1,"connection":null,
+                        "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
+                    "provider.catalog" => json!({"catalog":{"models":[{"id":"model",
+                        "capabilities":capabilities}]}}),
+                    "session.create" => json!({"sessionId":"session","sequence":8,
+                        "model":{"providerId":"test","modelId":"model"},
+                        "modelPreferences":{"reasoningEffort":"high"}}),
+                    "session.attach" => {
+                        let mut record = attach_record(&request);
+                        record["modelPreferences"] = json!({"reasoningEffort":"high"});
+                        record
+                    }
+                    "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                    "session.idle" => json!({"sequence":8}),
+                    "account.providers" => json!([]),
+                    _ => json!({}),
+                };
+                wire.reply(&request, result);
+            }
+        });
+        let mut command = home.command();
+        command.args(["--provider", "test", "--model", "model"]);
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model · high");
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+        let calls: Vec<Value> = observed.try_iter().collect();
+        let create = calls
+            .iter()
+            .find(|call| call["method"] == "session.create")
+            .expect("the Session was created");
+        assert_eq!(
+            create["params"]["modelPreferences"],
+            json!({"reasoningEffort":"high"})
+        );
+    }
+}
+
+/// Re-picking the model the label already shows keeps its effort: an
+/// `unchanged` adoption publishes no `context/configured` fact to redraw it.
+#[test]
+fn repicking_the_current_model_keeps_the_effort() {
+    let home = Home::new();
+    let (calls, observed) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        let mut capabilities =
+            serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384))
+                .unwrap();
+        capabilities["reasoning"] = json!(true);
+        let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
+            "id":"model","name":"Model","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effort":"high",
+                "effortOptions":["low","high"]}}
+        }]}});
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            calls.send(request.clone()).unwrap();
+            if request["method"] == "session.context.usage" {
+                wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method: session.context.usage",
+                    "data":{"appError":"unknown_method"}}}));
+                continue;
+            }
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
+                    "protocolVersion":3,"daemonProfile":{"kind":"product"},
+                    "features":["session.create","session.history","provider.list",
+                        "provider.catalog","provider.management","provider.selection","provider.select"]}),
+                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.catalog" => catalog.clone(),
+                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                    "displayName":"Test","enabled":true,"version":1,"connection":null,
+                    "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,
+                    "model":{"providerId":"test","modelId":"model"}}),
+                "session.attach" => attach_record(&request),
+                "session.history" => json!({"events":[
+                    configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                    "through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "account.providers" => json!([]),
+                "session.model.update" => json!({"outcome":"unchanged",
+                    "model":{"providerId":"test","modelId":"model"}}),
+                "provider.selection" => json!({"selection":{"version":1}}),
+                "provider.select" => json!({}),
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model · high");
+    terminal.write(b"/models\r");
+    terminal.until("‹ high ›");
+    terminal.write(b"\r");
+    terminal.until("Ask anything...");
+    terminal.until("test / model · high");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    let calls: Vec<Value> = observed.try_iter().collect();
+    let update = calls
+        .iter()
+        .find(|call| call["method"] == "session.model.update")
+        .unwrap_or_else(|| panic!("the model was re-picked: {calls:?}"));
+    assert_eq!(
+        update["params"],
+        json!({"sessionId":"session","branchId":"main","providerId":"test","modelId":"model",
+            "modelPreferences":{"reasoningEffort":"high"}})
+    );
+}
+
+/// A resumed Session draws the model and effort its history adopted, not the
+/// model its `session.attach` record names.
+#[test]
+fn a_resumed_session_draws_the_adopted_model_and_effort() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[configured_event(4, "second", json!({"reasoningEffort":"high"}))],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.hold();
+    });
+    let mut command = home.command();
+    command.arg("--resume").arg("session");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / second · high");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// An adoption written by another client reaches the label as it arrives.
+#[test]
+fn another_clients_adoption_redraws_the_model_label() {
+    let home = Home::new();
+    let (adopt, adopting) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        adopting.recv_timeout(PATIENCE).unwrap();
+        wire.notice(
+            "session.event",
+            json!({"sessionId":"session","branchId":"main",
+                "event":configured_event(9, "model", json!({"reasoningEffort":"low"}))}),
+        );
+        wire.hold();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    adopt.send(()).unwrap();
+    terminal.until("test / model · low");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The command with the terminal already laid out `cols` wide by the time the
+/// interface starts, so its first frame is drawn at that width.
+fn sized(command: &mut Command, cols: u16, rows: u16) {
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, move || {
+            let size = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            if libc::ioctl(0, libc::TIOCSWINSZ, &size) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// A composer too narrow for the whole label sheds the effort first and the
+/// model second.
+#[test]
+fn a_narrow_composer_drops_the_effort_before_the_model() {
+    for cols in [80, 26, 18] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[configured_event(4, "model", json!({"reasoningEffort":"high"}))],
+                    "through":8,"nextAfter":8,"done":true}),
+            );
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            wire.hold();
+        });
+        let mut command = home.command();
+        command.arg("--fullscreen");
+        sized(&mut command, cols, 24);
+        let mut terminal = Terminal::launch_tui(command);
+        match cols {
+            80 => terminal.until("test / model · high"),
+            26 => {
+                terminal.until("test / model");
+                assert!(
+                    !terminal.transcript.contains("· high"),
+                    "26 columns drew the effort: {}",
+                    terminal.transcript
+                );
+            }
+            _ => {
+                terminal.until("╭");
+                assert!(
+                    !terminal.transcript.contains("test / model"),
+                    "18 columns drew the model label: {}",
+                    terminal.transcript
+                );
+            }
+        }
+        terminal.signal(libc::SIGKILL);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]

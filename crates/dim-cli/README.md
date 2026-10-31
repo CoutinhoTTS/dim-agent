@@ -702,7 +702,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
  answer row                                                     ▁   scrollbar: last column,
  answer row (streaming tail scrolls with the transcript)        █   thumb in eighths of a row
                                                                 █
- ╭──────────────────────────────────────── provider / model ─╮      dock: queue, composer
+ ╭─────────────────────────────── provider / model · effort ─╮      dock: queue, composer
  │                                                            │      and panels stay pinned
  │                                                            │      to the bottom; the box
  │                                                            │      borders carry the model,
@@ -747,7 +747,7 @@ answer text (including its retained streaming tail)
 · stopped
 ```
 
-The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
+The composer box: no prompt mark or placeholder, the adopted model and, when its configuration carries one, the reasoning effort it sends (`provider / model · effort`) at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. A box too narrow for the whole label drops the effort first, then the label. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
 
 The Git branch label follows branch switches in both modes, including switches made by tools or another terminal. At startup the client resolves the workspace's own Git `HEAD` path (including linked worktrees); the existing UI timer reads that file at most once every 10 seconds, without spawning more Git processes, and requests a repaint only when the name changes. Detached HEAD displays `HEAD`; a transient read failure keeps the last known name until the next check.
 

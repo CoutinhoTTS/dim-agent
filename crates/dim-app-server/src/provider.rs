@@ -11,6 +11,7 @@ mod preferences;
 mod remote;
 mod secrets;
 mod view;
+pub use dim_agent_types::ModelPreferences;
 pub use editing::{ConnectionInput, CreateProvider, ProbeProvider, ProbeResult, ProviderPatch};
 pub use legacy::{
     ImportResult, LEGACY_METADATA_FIELDS, LEGACY_PROVIDER_FIELDS, LegacyConversion, LegacyRow,
@@ -18,7 +19,6 @@ pub use legacy::{
     legacy_omitted_fields, read_legacy_source,
 };
 pub use models::PreferencesPatch;
-pub use preferences::ModelPreferences;
 use secrets::StaticCredential;
 pub use secrets::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
 pub use view::{ManagementProvider, ManagementView, ModelsListed};
@@ -1765,8 +1765,7 @@ impl ProviderService {
                 },
             )
             .map_err(|error| failure(error.to_string()))?;
-            let config = preferences
-                .configure(&snapshot, protocol, &model.config)
+            let config = preferences::configure(&preferences, &snapshot, protocol, &model.config)
                 .map_err(failure)?;
             return Ok(ModelSelection {
                 provider_id: id.clone(),
@@ -1827,9 +1826,8 @@ impl ProviderService {
             },
         )
         .map_err(|error| failure(error.to_string()))?;
-        let config = preferences
-            .configure(&snapshot, protocol, &base)
-            .map_err(failure)?;
+        let config =
+            preferences::configure(&preferences, &snapshot, protocol, &base).map_err(failure)?;
         Ok(ModelSelection {
             provider_id: current.provider_id.clone(),
             model_id: current.model_id.clone(),
@@ -2346,4 +2344,25 @@ impl DynPlugin for ProviderPlugin {
             Ok(Effect::Done)
         })
     }
+}
+
+/// The model protocol recorded on an adopted selection, when it carries a
+/// readable one. For readback only: the route guards compare the recorded
+/// value itself, so an unreadable one is rejected rather than ignored.
+pub(crate) fn provider_protocol(
+    metadata: Option<&dim_agent_types::RequestMetadata>,
+) -> Option<ModelProtocol> {
+    metadata?
+        .extensions
+        .get("providerProtocol")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+/// The preferences an adopted configuration sends, derived from the
+/// configuration and the protocol recorded beside it. Absent when either is.
+pub(crate) fn adopted_selection_preferences(
+    config: Option<&ModelConfig>,
+    metadata: Option<&dim_agent_types::RequestMetadata>,
+) -> Option<ModelPreferences> {
+    dim_agent_capabilities::host::adopted_preferences(config?, provider_protocol(metadata)?)
 }
