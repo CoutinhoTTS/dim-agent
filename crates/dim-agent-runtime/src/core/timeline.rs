@@ -781,10 +781,51 @@ impl Timeline {
         cut: &str,
     ) -> Result<PolicyWindow> {
         let through = self.through(Some(through))?;
-        self.0
+        let mut window = self
+            .0
             .store
             .policy_window(&self.0.key, through, turn_id, cut)
-            .await
+            .await?;
+        let current = std::mem::take(&mut window.tool_results);
+        let mut cut_sequence = window.cut_sequence;
+        for (branch, segment_through) in &self.0.ancestors {
+            if *segment_through == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            let ancestor = self
+                .0
+                .store
+                .policy_window(&key, *segment_through, turn_id, cut)
+                .await?;
+            if cut_sequence == 0 {
+                cut_sequence = ancestor.cut_sequence;
+            }
+            if !window.events.iter().any(|event| event.id == cut) {
+                window.events.extend(
+                    ancestor
+                        .events
+                        .iter()
+                        .filter(|event| event.id == cut)
+                        .cloned(),
+                );
+            }
+            for event in ancestor.tool_results {
+                if !window.tool_results.iter().any(|seen| seen.id == event.id) {
+                    window.tool_results.push(event);
+                }
+            }
+        }
+        for event in current {
+            if !window.tool_results.iter().any(|seen| seen.id == event.id) {
+                window.tool_results.push(event);
+            }
+        }
+        window.cut_sequence = cut_sequence;
+        Ok(window)
     }
     /// Select an interpreter-compatible cache before decoding or trimming facts.
     /// Invalid caches are disposable; failures reading required facts are not.
