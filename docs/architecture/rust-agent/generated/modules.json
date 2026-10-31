@@ -1257,6 +1257,13 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::memory",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/memory.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_runtime::memory_timeline_store",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -1354,6 +1361,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/timeline_store.rs",
       "unexpandedMacros": [
+        "matches",
         "vec"
       ]
     },
@@ -6672,6 +6680,8 @@
         "path ContextPolicy",
         "path ContextPolicy::bind",
         "path configured_request",
+        "path crate::context_policy::PolicyContext::from_context",
+        "path crate::context_policy::PolicyContext::from_stream",
         "use crate::context_policy::CompactionStep",
         "use crate::context_policy::ContextPolicy",
         "use crate::context_policy::configured_request"
@@ -6683,10 +6693,8 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
-        "path context_messages",
         "use crate::history::HistoryRenderer",
-        "use crate::history::context_configuration",
-        "use crate::history::context_messages"
+        "use crate::history::context_configuration"
       ]
     },
     {
@@ -6820,6 +6828,14 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PolicyFacts::from_context",
+        "use dim_agent_runtime::PolicyFacts"
       ]
     },
     {
@@ -7152,18 +7168,17 @@
         "path HistoryRenderer",
         "path context_compaction",
         "path context_configuration",
-        "path context_messages",
+        "path crate::history::StreamedContext",
         "path digest_message",
-        "path retained_entry",
+        "path projection_checkpoint",
         "path truncate_middle",
         "path user_message",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
-        "use crate::history::context_messages",
         "use crate::history::digest_message",
-        "use crate::history::retained_entry",
+        "use crate::history::projection_checkpoint",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
       ]
@@ -7200,6 +7215,27 @@
         "path Timeline",
         "use dim_agent_runtime::ContextHistory",
         "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PolicyFacts",
+        "path PolicyOrder",
+        "path PolicyOrderEvent",
+        "path PolicyWindow",
+        "use dim_agent_runtime::PolicyFacts",
+        "use dim_agent_runtime::PolicyOrder",
+        "use dim_agent_runtime::PolicyOrderEvent",
+        "use dim_agent_runtime::PolicyWindow"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path ProjectionCheckpoint"
       ]
     },
     {
@@ -7274,7 +7310,8 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::prompt",
       "references": [
-        "path ContextBaselineEntry"
+        "path ContextBaselineEntry",
+        "path ContextConfiguredData"
       ]
     },
     {
@@ -7293,9 +7330,12 @@
       "references": [
         "path ContextPolicy",
         "path ContextPolicy::bind",
+        "path PolicyContext::from_context",
+        "path PolicyContext::from_stream",
         "path configured_request",
         "path crate::context_policy::check_cancel",
         "use crate::context_policy::ContextPolicy",
+        "use crate::context_policy::PolicyContext",
         "use crate::context_policy::configured_request"
       ]
     },
@@ -7305,11 +7345,9 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
-        "path context_messages",
         "path crate::history::read_context",
         "use crate::history::HistoryRenderer",
-        "use crate::history::context_configuration",
-        "use crate::history::context_messages"
+        "use crate::history::context_configuration"
       ]
     },
     {
@@ -7421,6 +7459,14 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PolicyFacts::from_context",
+        "use dim_agent_runtime::PolicyFacts"
       ]
     },
     {
@@ -7968,9 +8014,17 @@
       "from": "dim_agent_capabilities::history",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::PolicyOrderEvent"
       ]
     },
     {
@@ -7987,7 +8041,9 @@
         "path ProjectionCheckpoint",
         "path ProjectionCheckpointState",
         "path RecoverySnapshot",
-        "path checkpoint"
+        "path checkpoint",
+        "path dim_agent_types::ProjectionCheckpoint",
+        "path dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -8041,7 +8097,8 @@
       "to": "dim_agent_types::prompt",
       "references": [
         "path ContextBaselineEntry",
-        "path ContextConfiguredData"
+        "path ContextConfiguredData",
+        "path PromptReference"
       ]
     },
     {
@@ -12514,6 +12571,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::memory",
+      "references": [
+        "mod memory"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::memory_timeline_store",
       "references": [
         "mod memory_timeline_store"
@@ -12580,7 +12644,11 @@
       "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "mod timeline_store"
+        "mod timeline_store",
+        "use timeline_store::PolicyFacts",
+        "use timeline_store::PolicyOrder",
+        "use timeline_store::PolicyOrderEvent",
+        "use timeline_store::PolicyWindow"
       ]
     },
     {
@@ -12705,6 +12773,13 @@
         "path lifecycle",
         "use crate::lifecycle::CloseOnce",
         "use crate::lifecycle::guarded"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::agent",
+      "to": "dim_agent_runtime::memory",
+      "references": [
+        "path crate::memory::trim_if_large"
       ]
     },
     {
@@ -13166,9 +13241,15 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path PolicyFacts",
+        "path PolicyOrder",
+        "path PolicyWindow",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use crate::PolicyFacts",
+        "use crate::PolicyOrder",
+        "use crate::PolicyWindow",
         "use crate::StoredEvent",
         "use crate::TimelineKey",
         "use crate::TimelineStore"
@@ -13636,6 +13717,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path TimelineTrace",
+        "path crate::ContextHistory",
         "use crate::TimelineTrace"
       ]
     },
@@ -13661,7 +13743,17 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "use dim_agent_types::AgentEvent"
+        "path ContextCompactionResult::Completed",
+        "path EventKind",
+        "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
+        "path EventKind::InputConsumed",
+        "path EventKind::ModelCall",
+        "path EventKind::ModelUsage",
+        "path EventKind::TurnStart",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::ContextCompactionResult",
+        "use dim_agent_types::EventKind"
       ]
     },
     {
@@ -21637,6 +21729,7 @@
         "path AgentError",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
+        "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
@@ -21655,11 +21748,19 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path PolicyFacts",
+        "path PolicyOrder",
+        "path PolicyOrderEvent",
+        "path PolicyWindow",
         "path PublishCallback",
         "path StoredBranch",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use dim_agent_runtime::PolicyFacts",
+        "use dim_agent_runtime::PolicyOrder",
+        "use dim_agent_runtime::PolicyOrderEvent",
+        "use dim_agent_runtime::PolicyWindow",
         "use dim_agent_runtime::PublishCallback",
         "use dim_agent_runtime::StoredBranch",
         "use dim_agent_runtime::StoredEvent",

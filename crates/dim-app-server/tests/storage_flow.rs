@@ -1,7 +1,7 @@
 use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
-    TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
+    AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
+    Timeline, TimelineKey, TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
 };
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -3646,11 +3646,17 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
             },
         ];
         assert_eq!(
-            context_messages(&full, &project_context_history(&full).unwrap()),
+            context_messages(&full, &project_context_history(&full).unwrap())
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
             expected
         );
         assert_eq!(
-            context_messages(&recovered, &project_context_history(&recovered).unwrap()),
+            context_messages(&recovered, &project_context_history(&recovered).unwrap())
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect::<Vec<_>>(),
             expected
         );
         assert_eq!(recovered.checkpoint.is_some(), intact);
@@ -3838,7 +3844,10 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             context_messages(
                 &accelerated,
                 &project_context_history(&accelerated).unwrap()
-            ),
+            )
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
             [summary_message("retained summary")]
         );
         assert_eq!(
@@ -4072,7 +4081,10 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     assert!(early_context.checkpoint.is_none());
     assert_eq!(early_context.events.len(), 2);
     assert_eq!(
-        project_context_history(&early_context).unwrap()[0].message,
+        project_context_history(&early_context).unwrap()[0]
+            .message
+            .as_ref()
+            .clone(),
         Message::text(Role::User, "earlier input")
     );
     let child = Timeline::restore(
@@ -4135,7 +4147,10 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
         [("main", 3), ("main", 4), ("child", 1), ("child", 2)]
     );
     assert_eq!(
-        context_messages(&context, &project_context_history(&context).unwrap()),
+        context_messages(&context, &project_context_history(&context).unwrap())
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect::<Vec<_>>(),
         [
             dim_agent_capabilities::history::summary_message("earlier summary"),
             Message::text(Role::User, "queued across compaction")
@@ -4929,7 +4944,7 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             assert_eq!(
                 history
                     .iter()
-                    .map(|entry| &entry.message)
+                    .map(|entry| entry.message.as_ref())
                     .collect::<Vec<_>>(),
                 vec![&assistant]
             );
@@ -5647,6 +5662,278 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
         before
     );
 }
+
+#[tokio::test]
+async fn policy_window_keeps_a_queued_input_consumed_after_turn_start() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("queued", Some(InputMode::Queue))),
+            ),
+            record(
+                2,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            text(4, "anchor"),
+        ],
+    )
+    .await
+    .unwrap();
+    let window = store
+        .policy_window(&key("session", "main"), 4, "turn", "event-4")
+        .await
+        .unwrap();
+    let ids: Vec<_> = window
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    assert!(ids.contains(&"event-1"), "{ids:?}");
+    assert!(ids.contains(&"event-2"), "{ids:?}");
+    assert!(ids.contains(&"event-3"), "{ids:?}");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_facts_keeps_a_queued_input_consumed_after_turn_start() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("queued", Some(InputMode::Queue))),
+            ),
+            record(
+                2,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            text(4, "after"),
+        ],
+    )
+    .await
+    .unwrap();
+    let facts = store
+        .policy_facts(&key("session", "main"), 4, "turn")
+        .await
+        .unwrap();
+    let ids: Vec<_> = facts.events.iter().map(|event| event.id.as_str()).collect();
+    assert!(ids.contains(&"event-1"), "{ids:?}");
+    assert!(ids.contains(&"event-2"), "{ids:?}");
+    assert!(ids.contains(&"event-3"), "{ids:?}");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_facts_selects_latest_completed_compaction_in_both_stores() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = MemoryTimelineStore::default();
+    sqlite
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    memory
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let diagnostics: Box<CompactionDiagnosticsRecord> = serde_json::from_value(serde_json::json!({
+        "reason": "auto", "trigger": "threshold", "estimatedInputTokens": 1,
+        "entriesReplaced": 1, "modelCallCount": 1, "durationMs": 1,
+        "strategy": {"kind": "summary"}
+    }))
+    .unwrap();
+    let events = vec![
+        record(
+            1,
+            EventKind::ContextCompaction(completed("event-0", "summary", 1)),
+        ),
+        record(
+            2,
+            EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: None,
+                request_id: None,
+                command: None,
+                start: None,
+                through: 1,
+                outcome: ContextCompactionResult::Failed {
+                    error: "failed".into(),
+                    diagnostics: None,
+                },
+            }),
+        ),
+        record(
+            3,
+            EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: None,
+                request_id: None,
+                command: None,
+                start: None,
+                through: 1,
+                outcome: ContextCompactionResult::Skipped {
+                    reason: "skipped".into(),
+                    diagnostics,
+                },
+            }),
+        ),
+    ];
+    append(&sqlite, key("session", "main"), events.clone())
+        .await
+        .unwrap();
+    memory
+        .append(
+            key("session", "main"),
+            events,
+            Box::new(|result| assert!(result.is_ok())),
+        )
+        .unwrap();
+    let sqlite_facts = sqlite
+        .policy_facts(&key("session", "main"), 3, "")
+        .await
+        .unwrap();
+    let memory_facts = memory
+        .policy_facts(&key("session", "main"), 3, "")
+        .await
+        .unwrap();
+    let sqlite_ids: Vec<_> = sqlite_facts
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    let memory_ids: Vec<_> = memory_facts
+        .events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect();
+    assert_eq!(sqlite_ids, memory_ids);
+    assert_eq!(sqlite_ids, ["event-1"]);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn streamed_context_reads_complete_batches_across_the_window() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let singles: Vec<_> = (1..=254).map(|sequence| text(sequence, "line")).collect();
+    append(&store, key("session", "main"), singles)
+        .await
+        .unwrap();
+    let mut batch = vec![text(255, "a"), text(256, "b"), text(257, "c")];
+    for record in &mut batch {
+        record.batch_end = 257;
+    }
+    append(&store, key("session", "main"), batch).await.unwrap();
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let streamed = HistoryRenderer::default()
+        .rendered_stream(&timeline, 257, 256)
+        .await
+        .unwrap();
+    assert!(!streamed.fallback);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn policy_facts_ranges_end_at_the_atomic_batch() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut batch = vec![
+        text(1, "prefix"),
+        text(2, "prefix"),
+        record(
+            3,
+            EventKind::InputMessage(InputMessageData::text("a", Some(InputMode::Queue))),
+        ),
+        record(
+            4,
+            EventKind::InputMessage(InputMessageData::text("b", Some(InputMode::Queue))),
+        ),
+        text(5, "anchor"),
+    ];
+    for record in &mut batch {
+        record.batch_end = 5;
+    }
+    append(&store, key("session", "main"), batch).await.unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                6,
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: "turn".into(),
+                }),
+            ),
+            record(
+                7,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-3".into(),
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let facts = store
+        .policy_facts(&key("session", "main"), 7, "turn")
+        .await
+        .unwrap();
+    let ids: Vec<_> = facts.events.iter().map(|event| event.id.as_str()).collect();
+    assert!(ids.contains(&"event-3"), "{ids:?}");
+    assert!(ids.contains(&"event-4"), "{ids:?}");
+    db.close().await.unwrap();
+}
+
 /// The step that adds a column to two tables alters them before v27's indexes
 /// exist, and keeps every business row.
 #[tokio::test]

@@ -6,6 +6,7 @@ mod contracts;
 pub mod core;
 mod error;
 mod lifecycle;
+mod memory;
 mod memory_timeline_store;
 pub mod names;
 mod parts;
@@ -31,6 +32,7 @@ pub use names::Names;
 pub use parts::{Feature, Generator, Mount, PartRegistry, PartScope};
 pub use registrations::{Registration, Registrations};
 pub use rutis::host::BoxFuture;
+pub use timeline_store::{PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow};
 
 pub use scope::*;
 pub use state::*;

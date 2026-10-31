@@ -343,7 +343,7 @@ fn prepare(
     &self,
     turn_id: &str,
     request_id: &str,
-    history: &[Message],
+    history: &[Arc<Message>],
     available_tools: &[ToolDefinition],
 ) -> Result<ModelSettings, HostError>;
 ```

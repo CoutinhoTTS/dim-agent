@@ -13,13 +13,45 @@ use dim_agent_runtime::{testing::MinimalHost, *};
 use rutis::host::CtxHost;
 use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, time::Instant};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+    fn mallopt(param: i32, value: i32) -> i32;
+}
+
+fn trim_heap() -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        Some(malloc_trim(0))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        mallopt(-3, 64 * 1024);
+        mallopt(-8, 1);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
+        Some("context-replay") => context_replay().await?,
+        Some("restore-replay") => restore_replay().await?,
+        Some("context-breakdown") => context_breakdown().await?,
         Some("summary-eval") => summary_eval::run().await?,
         Some("scenario-eval") => scenario_eval::run().await?,
         Some("check") => {
@@ -30,7 +62,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|context-replay|restore-replay DB SESSION|context-breakdown DB SESSION|summary-eval [OPTIONS]|scenario-eval [OPTIONS]|check|types"
                     .into(),
             );
         }
@@ -41,6 +73,13 @@ async fn agent() -> dim_agent_runtime::Result<MinimalHost> {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
+    MinimalHost::start(&builder).await
+}
+async fn agent_with_store(store: Arc<dyn TimelineStore>) -> dim_agent_runtime::Result<MinimalHost> {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store);
     MinimalHost::start(&builder).await
 }
 fn root() -> PathBuf {
@@ -433,6 +472,336 @@ async fn measure() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let report = json!({"modelHost": if native { "aimux" } else { "mock" }, "debugAssertions":cfg!(debug_assertions),"runtimeWorkers":2,"taskBaseline":before,"cleanupSettleMs":settling.elapsed().as_secs_f64()*1000.,"tasksAfterAgentClose":tokio::runtime::Handle::current().metrics().num_alive_tasks(),"allocationBytesAfterAgentClose":allocation::live(),"peakRustAllocationBytes":allocation::peak(),"runs":runs,"concurrentMockTurns":concurrent,"agentEventBytes":std::mem::size_of::<dim_agent_types::AgentEvent>(),"modelRequestBytes":std::mem::size_of::<dim_agent_types::ModelRequest>()});
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// Opt-in baseline: 100 turns of 10k characters through the mock model, no
+/// compaction. Run with `cargo run --release -p xtask -- context-replay`.
+async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    const TURNS: usize = 100;
+    const CHARS_PER_TURN: usize = 10_000;
+    let chunk = "x".repeat(CHARS_PER_TURN);
+    let baseline = allocation::live();
+    let rss_baseline = rss_kb();
+    let directory = std::env::temp_dir().join(format!("dim-context-replay-{}", std::process::id()));
+    std::fs::create_dir_all(&directory)?;
+    let database = directory.join("timeline.sqlite");
+    let db = dim_app_server::storage::SqliteStorage::open(database.clone())?;
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let store_handle = store.clone();
+    let agent = agent_with_store(store).await?;
+    let live_agent = allocation::live();
+    let rss_agent = rss_kb();
+    let session = agent.create_session(SessionConfig::default()).await?;
+    let live_session = allocation::live();
+    let rss_session = rss_kb();
+    let mut steps = Vec::new();
+    for turn in 1..=TURNS {
+        let start = Instant::now();
+        session
+            .submit(
+                format!("Turn {turn}: {chunk}"),
+                dim_agent_types::InputMode::Queue,
+                "main",
+            )
+            .await?;
+        let live_submit = allocation::live();
+        session.idle("main").await?;
+        steps.push(json!({
+            "turn": turn,
+            "liveSubmit": live_submit,
+            "live": allocation::live(),
+            "peak": allocation::peak(),
+            "rssKb": rss_kb(),
+            "elapsedMs": start.elapsed().as_secs_f64() * 1000.,
+        }));
+    }
+    let live_active = allocation::live();
+    let peak = allocation::peak();
+    let rss_active = rss_kb();
+    let tasks_active = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    session.close().await?;
+    let live_close_immediate = allocation::live();
+    let tasks_close_immediate = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let live_settled = allocation::live();
+    let tasks_settled = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let rss_settled = rss_kb();
+    agent.close().await?;
+    let live_after_agent = allocation::live();
+    let rss_after_agent = rss_kb();
+    store_handle.close().await?;
+    db.close().await?;
+    std::fs::remove_dir_all(&directory)?;
+    let report = json!({
+        "modelHost": "mock",
+        "store": "sqlite",
+        "platform": std::env::consts::OS,
+        "debugAssertions": cfg!(debug_assertions),
+        "turns": TURNS,
+        "charsPerTurn": CHARS_PER_TURN,
+        "approxInputTokens": TURNS * CHARS_PER_TURN * 2 / 4,
+        "liveBaseline": baseline,
+        "liveAfterAgent": live_agent,
+        "liveSession": live_session,
+        "liveActive": live_active,
+        "peak": peak,
+        "liveCloseImmediate": live_close_immediate,
+        "liveSettled": live_settled,
+        "liveAfterAgentClose": live_after_agent,
+        "rssKb": {
+            "baseline": rss_baseline,
+            "agent": rss_agent,
+            "session": rss_session,
+            "active": rss_active,
+            "settled": rss_settled,
+            "afterAgentClose": rss_after_agent,
+        },
+        "tasks": {
+            "active": tasks_active,
+            "closeImmediate": tasks_close_immediate,
+            "settled": tasks_settled,
+        },
+        "steps": steps,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Measures the four context stages of one stored branch: read, project,
+/// messages, request. Run with
+/// `cargo run --release -p xtask -- context-breakdown DB SESSION`.
+async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let (database, session_id) = match args.as_slice() {
+        [database, session] => (PathBuf::from(database), session.clone()),
+        _ => return Err("context-breakdown needs DB and SESSION".into()),
+    };
+    let (directory, database) = disposable_database(&database)?;
+    let db = dim_app_server::storage::SqliteStorage::open(database)?;
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let agent = agent_with_store(store).await?;
+    let session = agent.restore_session(session_id.clone()).await?;
+    let through = session.sequence("main")?;
+    let mut phases = Vec::new();
+    let read_start = allocation::live();
+    let context = session.context("main", through).await?;
+    phases.push(json!({
+        "phase": "read",
+        "live": allocation::live(),
+        "delta": allocation::live() - read_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let project_start = allocation::live();
+    let history = dim_agent_capabilities::history::project_context_history(&context)?;
+    phases.push(json!({
+        "phase": "project",
+        "live": allocation::live(),
+        "delta": allocation::live() - project_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let history_entries = history.len();
+    let baseline_entries: usize = history.iter().map(|entry| entry.baseline.len()).sum();
+    let entry_message_bytes: usize = history
+        .iter()
+        .map(|entry| {
+            serde_json::to_vec(entry.message.as_ref())
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let baseline_message_bytes: usize = history
+        .iter()
+        .flat_map(|entry| entry.baseline.iter())
+        .map(|entry| {
+            serde_json::to_vec(&entry.message)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let messages_start = allocation::live();
+    let messages = dim_agent_capabilities::history::context_messages(&context, &history);
+    phases.push(json!({
+        "phase": "messages",
+        "live": allocation::live(),
+        "delta": allocation::live() - messages_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let request_start = allocation::live();
+    let request =
+        dim_agent_capabilities::host::ModelSettings::new("mock", "deterministic").request(messages);
+    let request_messages = request.messages.len();
+    phases.push(json!({
+        "phase": "request",
+        "live": allocation::live(),
+        "delta": allocation::live() - request_start,
+        "peak": allocation::peak(),
+        "rssKb": rss_kb(),
+    }));
+    let live_held = allocation::live();
+    let peak_held = allocation::peak();
+    drop(request);
+    let live_after_request = allocation::live();
+    drop(history);
+    let live_after_history = allocation::live();
+    drop(context);
+    let live_after_context = allocation::live();
+    let report = json!({
+        "store": "sqlite",
+        "sessionId": session_id,
+        "through": through,
+        "historyEntries": history_entries,
+        "baselineEntries": baseline_entries,
+        "baselineSlotsBytes": baseline_entries * std::mem::size_of::<dim_agent_types::ContextBaselineEntry>(),
+        "entryMessageBytes": entry_message_bytes,
+        "baselineMessageBytes": baseline_message_bytes,
+        "phases": phases,
+        "liveHeld": live_held,
+        "peakHeld": peak_held,
+        "liveAfterRequest": live_after_request,
+        "liveAfterHistory": live_after_history,
+        "liveAfterContext": live_after_context,
+        "requestMessages": request_messages,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    session.close().await?;
+    agent.close().await?;
+    drop(db);
+    std::fs::remove_dir_all(&directory)?;
+    Ok(())
+}
+
+/// Restores one stored Session from a prepared SQLite copy and runs one mock
+/// turn, so the real event/tool shape is replayed without the provider.
+/// Run with `cargo run --release -p xtask -- restore-replay DB SESSION`.
+async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let (database, session_id) = match args.as_slice() {
+        [database, session] => (PathBuf::from(database), session.clone()),
+        _ => return Err("restore-replay needs DB and SESSION".into()),
+    };
+    let baseline = allocation::live();
+    let rss_baseline = rss_kb();
+    let (directory, database) = disposable_database(&database)?;
+    let db = dim_app_server::storage::SqliteStorage::open(database)?;
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let agent = agent_with_store(store).await?;
+    let live_agent = allocation::live();
+    let rss_agent = rss_kb();
+    let start = Instant::now();
+    let session = agent.restore_session(session_id.clone()).await?;
+    let restore_ms = start.elapsed().as_secs_f64() * 1000.;
+    let live_restored = allocation::live();
+    let peak_restored = allocation::peak();
+    let rss_restored = rss_kb();
+    let trim_restored = trim_heap();
+    let rss_restored_trim = rss_kb();
+    allocation::reset_peak_now();
+    session
+        .submit(
+            "measure restored context".into(),
+            dim_agent_types::InputMode::Queue,
+            "main",
+        )
+        .await?;
+    session.idle("main").await?;
+    let live_active = allocation::live();
+    let peak = allocation::peak();
+    let rss_active = rss_kb();
+    let trim_active = trim_heap();
+    let rss_active_trim = rss_kb();
+    let tasks_active = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    session.close().await?;
+    let live_close_immediate = allocation::live();
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let live_settled = allocation::live();
+    let tasks_settled = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let rss_settled = rss_kb();
+    agent.close().await?;
+    let live_after_agent = allocation::live();
+    let rss_after_agent = rss_kb();
+    drop(db);
+    std::fs::remove_dir_all(&directory)?;
+    let trim_result = trim_heap();
+    let rss_after_trim = rss_kb();
+    let live_after_trim = allocation::live();
+    let report = json!({
+        "modelHost": "mock",
+        "store": "sqlite",
+        "platform": std::env::consts::OS,
+        "debugAssertions": cfg!(debug_assertions),
+        "sessionId": session_id,
+        "restoreMs": restore_ms,
+        "trimResult": trim_result,
+        "liveAfterTrim": live_after_trim,
+        "rssAfterTrim": rss_after_trim,
+        "liveBaseline": baseline,
+        "liveAfterAgent": live_agent,
+        "liveRestored": live_restored,
+        "liveActive": live_active,
+        "peak": peak_restored.max(peak),
+        "peakRestored": peak_restored,
+        "peakTurn": peak,
+        "liveCloseImmediate": live_close_immediate,
+        "liveSettled": live_settled,
+        "liveAfterAgentClose": live_after_agent,
+        "trimRestored": trim_restored,
+        "rssRestoredTrim": rss_restored_trim,
+        "trimActive": trim_active,
+        "rssActiveTrim": rss_active_trim,
+        "rssKb": {
+            "baseline": rss_baseline,
+            "agent": rss_agent,
+            "restored": rss_restored,
+            "active": rss_active,
+            "settled": rss_settled,
+            "afterAgentClose": rss_after_agent,
+        },
+        "tasks": {
+            "active": tasks_active,
+            "settled": tasks_settled,
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn disposable_database(
+    database: &std::path::Path,
+) -> std::result::Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let directory = std::env::temp_dir().join(format!("dim-replay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory)?;
+    let copy = directory.join("timeline.sqlite");
+    let source = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    source.backup(rusqlite::MAIN_DB, &copy, None)?;
+    Ok((directory, copy))
+}
+
+fn rss_kb() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")
+                    .and_then(|value| value.trim().trim_end_matches(" kB").parse().ok())
+            })
+        })
 }
 
 fn instances(

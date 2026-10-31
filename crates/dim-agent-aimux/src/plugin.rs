@@ -223,7 +223,7 @@ impl PrepareModel for Prepare {
         &self,
         turn_id: &str,
         request_id: &str,
-        _: &[Message],
+        _: &[Arc<Message>],
         available_tools: &[ToolDefinition],
     ) -> Result<ModelSettings, HostError> {
         let mut settings =
