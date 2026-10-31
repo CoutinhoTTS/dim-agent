@@ -9,7 +9,7 @@ use crate::{
     approval::Approval,
     branch_input::append_own,
     context_block::{element, raw},
-    hooks::{HookEvent, HookHandler, HookSourcesHost, HookSourcesSnapshot, handlers},
+    hooks::{HookEvent, HookHandler, HookSourcesHost, HookSourcesSnapshot, OnFailure, handlers},
     host_platform::{HostPlatform, Os},
 };
 use dim_agent_runtime::{
@@ -25,7 +25,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     path::Path,
     sync::{Arc, Mutex},
@@ -70,12 +70,20 @@ pub enum HookResult {
     Blocked { reason: String },
     /// Any other exit, a signal, a timeout, a cancellation or an oversized
     /// stdout.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+        /// The first [`STDERR_LIMIT`] bytes of its standard error, which the
+        /// diagnostic carries (§7). Never standard output or the payload.
+        stderr: String,
+    },
 }
 /// One handler's run, at its catalog position.
 #[derive(Clone, Debug)]
 pub struct HookRun {
     pub result: HookResult,
+    /// What the handler asks for when its command fails, times out or is
+    /// cancelled (A.5).
+    pub on_failure: OnFailure,
 }
 
 /// The Session service that reads the sources and runs commands.
@@ -148,6 +156,7 @@ impl HooksRuntime {
             waiting.push(async move {
                 HookRun {
                     result: self.run_one(&handler, stdin, cancel).await,
+                    on_failure: handler.on_failure,
                 }
             });
         }
@@ -187,9 +196,7 @@ impl HooksRuntime {
         {
             Ok((spec, _)) => spec,
             Err(error) => {
-                let result = HookResult::Failed {
-                    reason: format!("{}: {}", error.code, error.reason),
-                };
+                let result = failed(format!("{}: {}", error.code, error.reason), &[]);
                 self.report(handler, &result, started.elapsed());
                 return result;
             }
@@ -198,9 +205,7 @@ impl HooksRuntime {
         let mut tree = match self.platform.spawn_with_stdin(spec, stdin) {
             Ok(tree) => tree,
             Err(error) => {
-                let result = HookResult::Failed {
-                    reason: format!("spawn failed: {error}"),
-                };
+                let result = failed(format!("spawn failed: {error}"), &[]);
                 self.report(handler, &result, started.elapsed());
                 return result;
             }
@@ -231,29 +236,27 @@ impl HooksRuntime {
         let result = match end {
             End::Cancelled => {
                 let _ = tree.terminate().await;
-                HookResult::Failed {
-                    reason: "cancelled".into(),
-                }
+                failed("cancelled", &[])
             }
             End::TimedOut => {
                 let _ = tree.terminate().await;
-                HookResult::Failed {
-                    reason: format!("timed out after {}s", handler.timeout.as_secs()),
-                }
+                failed(
+                    format!("timed out after {}s", handler.timeout.as_secs()),
+                    &[],
+                )
             }
             End::Done((bytes, overflow), (stderr, _), status) => {
                 let status = match status {
                     Ok(status) => status,
+                    // A run whose end cannot be read still reports (§7).
                     Err(error) => {
-                        return HookResult::Failed {
-                            reason: format!("wait failed: {error}"),
-                        };
+                        let result = failed(format!("wait failed: {error}"), &stderr);
+                        self.report(handler, &result, started.elapsed());
+                        return result;
                     }
                 };
                 if overflow {
-                    HookResult::Failed {
-                        reason: "stdout exceeded 64 KiB".into(),
-                    }
+                    failed("stdout exceeded 64 KiB", &stderr)
                 } else if status.code() == Some(2) {
                     HookResult::Blocked {
                         reason: String::from_utf8_lossy(&stderr).into_owned(),
@@ -263,9 +266,7 @@ impl HooksRuntime {
                         stdout: String::from_utf8_lossy(&bytes).into_owned(),
                     }
                 } else {
-                    HookResult::Failed {
-                        reason: format!("exited with {status}"),
-                    }
+                    failed(format!("exited with {status}"), &stderr)
                 }
             }
         };
@@ -276,13 +277,14 @@ impl HooksRuntime {
     /// Diagnostics keep only source, event, exit status, duration and a
     /// bounded stderr excerpt (Hooks §7).
     fn report(&self, handler: &HookHandler, result: &HookResult, duration: Duration) {
-        let HookResult::Failed { reason } = result else {
+        let HookResult::Failed { reason, stderr } = result else {
             return;
         };
         tracing::warn!(
             source = %handler.source,
             event = handler.event.name(),
             reason = %reason,
+            stderr = %stderr,
             duration_ms = duration.as_millis() as u64,
             "hook command failed"
         );
@@ -344,6 +346,15 @@ async fn read_capped<R: AsyncRead + Unpin>(reader: &mut R, limit: usize) -> (Vec
     }
 }
 
+/// A failed run: its reason and the first [`STDERR_LIMIT`] bytes of its
+/// standard error, which its diagnostic carries (§7).
+fn failed(reason: impl Into<String>, stderr: &[u8]) -> HookResult {
+    HookResult::Failed {
+        reason: reason.into(),
+        stderr: String::from_utf8_lossy(&stderr[..stderr.len().min(STDERR_LIMIT)]).into_owned(),
+    }
+}
+
 /// Bounds one hook's context at 16 KiB and drops an empty one (A.4).
 fn capped(text: &str) -> Option<String> {
     let text = text.trim();
@@ -399,6 +410,48 @@ fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
     }
 }
 
+/// One `Stop` run's parts. Only a block writes a follow-up (§3.4); its
+/// context rides along with a block from any handler (A.4).
+#[derive(Default)]
+struct StopOutput {
+    /// The reason the handler blocks with: exit 2's stderr, or
+    /// `decision: "block"` with its `reason`.
+    reason: Option<String>,
+    /// `hookSpecificOutput.additionalContext`.
+    context: Option<String>,
+}
+
+/// The `Stop` parts of one run (A.4). A failure is a diagnostic only (A.5).
+fn stop_output(run: &HookRun) -> StopOutput {
+    match &run.result {
+        HookResult::Failed { .. } => StopOutput::default(),
+        HookResult::Blocked { reason } => StopOutput {
+            reason: capped(reason),
+            context: None,
+        },
+        HookResult::Success { stdout } => {
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                return StopOutput::default();
+            }
+            let Ok(Value::Object(object)) = serde_json::from_str::<Value>(trimmed) else {
+                return StopOutput::default();
+            };
+            report_ignored_fields(&object);
+            let reason = (object.get("decision").and_then(Value::as_str) == Some("block"))
+                .then(|| object.get("reason").and_then(Value::as_str))
+                .flatten()
+                .and_then(capped);
+            let context = object
+                .get("hookSpecificOutput")
+                .and_then(|output| output.get("additionalContext"))
+                .and_then(Value::as_str)
+                .and_then(capped);
+            StopOutput { reason, context }
+        }
+    }
+}
+
 /// Output fields this build knows and ignores, at the top level or under
 /// `hookSpecificOutput` (A.4).
 const IGNORED_OUTPUT: [&str; 10] = [
@@ -435,14 +488,17 @@ fn report_ignored_fields(object: &serde_json::Map<String, Value>) {
     }
 }
 
-/// The decision a `PermissionRequest` run asks for (A.4).
+/// The decision a `PermissionRequest` run asks for (A.4, A.5).
 fn permission_decision(run: &HookRun) -> Option<ApprovalDecision> {
-    let HookRun {
-        result: HookResult::Success { stdout },
-        ..
-    } = run
-    else {
-        return None;
+    let stdout = match &run.result {
+        HookResult::Success { stdout } => stdout,
+        // Exit 2 is ignored for this event (A.4).
+        HookResult::Blocked { .. } => return None,
+        // A failure, timeout or cancellation is the handler's `onFailure`:
+        // `block` denies and `continue` has no opinion (A.5).
+        HookResult::Failed { .. } => {
+            return (run.on_failure == OnFailure::Block).then_some(ApprovalDecision::Deny);
+        }
     };
     let value: Value = serde_json::from_str(stdout.trim()).ok()?;
     if let Value::Object(object) = &value {
@@ -531,13 +587,26 @@ enum Job {
     Stop { trigger: u64, from_follow_up: bool },
 }
 
+/// What a written output must still hold after its commands ran (§3.4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Validity {
+    /// Any point but `SessionStart`: no interrupt or newer operator input.
+    Branch,
+    /// `SessionStart`: the Session has not started either.
+    Unstarted,
+}
+
 /// What a branch consumed, folded from its events.
 #[derive(Default)]
 struct View {
+    /// The sequence of the last consumed event.
+    last: u64,
     /// The last consumed `stop/interrupt`.
     interrupted: u64,
-    /// The last consumed input carrying the operator's own content.
+    /// The last consumed input that was the operator's own (§3.4).
     spoken: u64,
+    /// The ids of written operator inputs the branch has not consumed yet.
+    operator_inputs: HashSet<String>,
     /// Tool calls by `call_id`, from `step/tool-call`.
     calls: HashMap<String, (String, JsonObject, String)>,
     /// Tool aliases for matchers, from the adopted `context/configured`.
@@ -555,23 +624,37 @@ struct View {
 
 impl View {
     fn fold(&mut self, event: &AgentEvent) -> Option<Job> {
+        self.last = event.sequence;
         match &event.kind {
             EventKind::StopInterrupt(_) => {
                 self.interrupted = event.sequence;
             }
             EventKind::InputMessage(data) => {
-                if data.user.is_some() {
-                    self.spoken = event.sequence;
+                if operator_input(data) {
+                    self.operator_inputs.insert(event.id.clone());
                 }
                 if session_started(event) {
                     self.started = true;
                 }
+                if follow_up_input(event) {
+                    self.follow_up_input = Some(event.id.clone());
+                    self.follow_ups += 1;
+                }
             }
             EventKind::InputConsumed(data) => {
+                if self.operator_inputs.remove(&data.input_id) {
+                    self.spoken = event.sequence;
+                }
                 if self.follow_up_input.as_deref() == Some(data.input_id.as_str()) {
                     self.consuming = true;
                     self.follow_up_input = None;
                 }
+            }
+            EventKind::InputDeleted(data) => {
+                // A withdrawn input ends without being consumed: the queue
+                // writes input/deleted for an input it still holds
+                // (input_queue.rs). It must not stay an operator input.
+                self.operator_inputs.remove(&data.input_id);
             }
             EventKind::TurnStart(_) => {
                 self.started = true;
@@ -774,9 +857,15 @@ impl Branch {
         if self.branch_id != MAIN_BRANCH {
             return;
         }
-        if self.view.lock().unwrap().started {
-            return;
-        }
+        // The branch as it stood when the point was decided; anything the
+        // branch consumes later invalidates the output (§3.4).
+        let trigger = {
+            let view = self.view.lock().unwrap();
+            if view.started {
+                return;
+            }
+            view.last
+        };
         let Some(snapshot) = self.runtime.snapshot().await else {
             return;
         };
@@ -803,15 +892,7 @@ impl Branch {
         if blocks.is_empty() {
             return;
         }
-        let _ = append_own(
-            &self.timeline,
-            InputMessageData {
-                blocks,
-                mode: Some(InputMode::Append),
-                ..InputMessageData::default()
-            },
-            Vec::new(),
-        );
+        self.write(trigger, InputMode::Append, blocks, Validity::Unstarted);
     }
 
     async fn post_tools(self: &Arc<Self>, trigger: u64, calls: Vec<ToolRun>) {
@@ -865,7 +946,7 @@ impl Branch {
         if blocks.is_empty() {
             return;
         }
-        self.write(trigger, InputMode::Append, blocks, false);
+        self.write(trigger, InputMode::Append, blocks, Validity::Branch);
     }
 
     async fn stop(self: &Arc<Self>, trigger: u64, from_follow_up: bool) {
@@ -883,15 +964,26 @@ impl Branch {
         let mut payload = self.runtime.payload(HookEvent::Stop, &self.branch_id);
         payload.insert("stop_hook_active".into(), Value::Bool(from_follow_up));
         let runs = self.runtime.run(&matching, &payload, &self.cancel).await;
-        let context: Vec<String> = runs
+        let outputs: Vec<StopOutput> = runs.iter().map(stop_output).collect();
+        let mut parts: Vec<String> = outputs
             .iter()
-            .filter_map(|run| contribution_of(HookEvent::Stop, run))
+            .filter_map(|out| out.reason.clone())
             .collect();
-        if context.is_empty() {
+        if parts.is_empty() {
+            // A Stop context alone does not drive a turn (§3.4, §5).
+            if outputs.iter().any(|out| out.context.is_some()) {
+                tracing::info!("Stop context ignored: no handler blocked");
+            }
             return;
         }
-        let text = element("dim-hooks", &[("kind", "follow-up")], &context.join("\n"));
-        self.write(trigger, InputMode::Queue, vec![raw(text, None)], true);
+        parts.extend(outputs.iter().filter_map(|out| out.context.clone()));
+        let text = element("dim-hooks", &[("kind", "follow-up")], &parts.join("\n"));
+        self.write(
+            trigger,
+            InputMode::Queue,
+            vec![raw(text, None)],
+            Validity::Branch,
+        );
     }
 
     async fn approval(self: &Arc<Self>, data: ApprovalRequestData, cancel: CancellationToken) {
@@ -914,6 +1006,11 @@ impl Branch {
         let Some(runs) = runs else {
             return;
         };
+        // A cancelled point responds nothing: the request was answered or
+        // `approval/cancelled` was consumed while its commands ran (A.5).
+        if cancel.is_cancelled() {
+            return;
+        }
         let decision = runs.iter().filter_map(permission_decision).fold(
             None,
             |acc: Option<ApprovalDecision>, next| match (acc, next) {
@@ -930,17 +1027,20 @@ impl Branch {
         }
     }
 
-    /// Writes an input unless an interrupt or a newer operator input was
-    /// consumed after the triggering fact (§3.4).
+    /// Writes an input unless the branch moved on after the triggering fact:
+    /// an interrupt or a newer operator input was consumed, or, for
+    /// `SessionStart`, the Session started (§3.4).
     fn write(
         &self,
         trigger: u64,
         mode: InputMode,
         blocks: Vec<InputBlock>,
-        follow_up: bool,
+        validity: Validity,
     ) -> Option<Arc<AgentEvent>> {
-        let mut view = self.view.lock().unwrap();
-        if view.interrupted > trigger || view.spoken > trigger {
+        let view = self.view.lock().unwrap();
+        let moved_on = view.interrupted > trigger || view.spoken > trigger;
+        let started = validity == Validity::Unstarted && view.started;
+        if moved_on || started {
             tracing::warn!("hook output dropped: the branch moved on");
             return None;
         }
@@ -959,12 +1059,6 @@ impl Branch {
                 return None;
             }
         };
-        // Recorded under the same lock the fold takes, so the consumed input
-        // is always recognised.
-        if follow_up {
-            view.follow_up_input = Some(event.id.clone());
-            view.follow_ups += 1;
-        }
         Some(event)
     }
 }
@@ -1037,6 +1131,32 @@ async fn approval_point(
         payload.insert(key, value);
     }
     Some(runtime.run(&asking, &payload, cancel).await)
+}
+
+/// Whether `data` is the operator's own submission rather than a source
+/// input. Every source input starts with a `<dim-…>` marker block (session
+/// access A.1, A.2) and the operator's words arrive without one (the prompt
+/// guide); only the first block decides, and nothing reads its content.
+fn operator_input(data: &InputMessageData) -> bool {
+    data.user.is_some()
+        && !matches!(
+            data.blocks.first(),
+            Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-")
+        )
+}
+
+/// Whether `event` is a follow-up input Hooks wrote: its block carries the
+/// `follow-up` marker (§3.4). Only Hooks writes `dim-hooks` markers.
+fn follow_up_input(event: &AgentEvent) -> bool {
+    let EventKind::InputMessage(data) = &event.kind else {
+        return false;
+    };
+    data.blocks.iter().any(|block| {
+        matches!(
+            block,
+            InputBlock::Raw { text, .. } if text.starts_with("<dim-hooks kind=\"follow-up\">")
+        )
+    })
 }
 
 fn session_started(event: &AgentEvent) -> bool {
@@ -1163,7 +1283,10 @@ mod tests {
         HookSourceId, HookSourceSnapshot, HookSourceState, HooksDocument, ReadHookSources,
     };
     use crate::host::HostFuture;
-    use dim_agent_types::{ApprovalCallData, ToolCall, ToolCallData, ToolResult, ToolResultData};
+    use dim_agent_types::{
+        ApprovalCallData, ContentBlock, InputConsumedData, InputDeletedData, ToolCall,
+        ToolCallData, ToolResult, ToolResultData, TurnEndData, UserInput,
+    };
     use std::path::PathBuf;
 
     fn event(sequence: u64, kind: EventKind) -> AgentEvent {
@@ -1174,6 +1297,22 @@ mod tests {
             tags: None,
             kind,
         }
+    }
+
+    /// §7: a failed run's diagnostic carries a bounded standard-error
+    /// excerpt and nothing of the standard output or the payload.
+    #[test]
+    fn a_failure_keeps_a_bounded_stderr_excerpt() {
+        let long = vec![b'x'; STDERR_LIMIT * 2];
+        let HookResult::Failed { reason, stderr } = failed("exited with 1", &long) else {
+            panic!("a failure");
+        };
+        assert_eq!(reason, "exited with 1");
+        assert_eq!(stderr.len(), STDERR_LIMIT);
+        let HookResult::Failed { stderr, .. } = failed("exited with 1", b"denied\n") else {
+            panic!("a failure");
+        };
+        assert_eq!(stderr, "denied\n");
     }
 
     /// F4: a result settles its call, and the call's input (whole file
@@ -1218,6 +1357,89 @@ mod tests {
             view.calls.is_empty(),
             "a settled call stayed in the folded view"
         );
+    }
+
+    /// §3.4 and AGENTS rule 4: a withdrawn operator input ends without being
+    /// consumed, so it leaves the set, and a later consumption of that id
+    /// does not move `spoken`.
+    #[test]
+    fn a_deleted_operator_input_is_forgotten() {
+        let input = event(
+            1,
+            EventKind::InputMessage(InputMessageData {
+                user: Some(UserInput {
+                    content: vec![ContentBlock::Text {
+                        text: "hello".into(),
+                    }],
+                }),
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            }),
+        );
+        let mut view = View::default();
+        view.fold(&input);
+        assert!(view.operator_inputs.contains(&input.id));
+        view.fold(&event(
+            2,
+            EventKind::InputDeleted(InputDeletedData {
+                input_id: input.id.clone(),
+            }),
+        ));
+        assert!(
+            view.operator_inputs.is_empty(),
+            "a deleted input stayed in the set"
+        );
+        view.fold(&event(
+            3,
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: input.id.clone(),
+            }),
+        ));
+        assert_eq!(view.spoken, 0, "a deleted input moved spoken");
+    }
+
+    /// AGENTS rule 4: the follow-up identity and count are read from the
+    /// branch, so a replay folds the same state a live fold held. A turn the
+    /// follow-up drove keeps the count; an operator turn resets it.
+    #[test]
+    fn the_follow_up_state_is_rebuilt_from_the_branch() {
+        let follow_up = event(
+            1,
+            EventKind::InputMessage(InputMessageData {
+                blocks: vec![raw(
+                    element("dim-hooks", &[("kind", "follow-up")], "reason"),
+                    None,
+                )],
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            }),
+        );
+        let turn_end = |sequence| {
+            event(
+                sequence,
+                EventKind::TurnEnd(TurnEndData {
+                    turn_id: "turn".into(),
+                    outcome: TurnOutcome::Completed {
+                        reason: "stop".into(),
+                    },
+                }),
+            )
+        };
+        let mut view = View::default();
+        view.fold(&follow_up);
+        assert_eq!(view.follow_ups, 1, "the follow-up was not counted");
+        assert_eq!(view.follow_up_input.as_deref(), Some(follow_up.id.as_str()));
+        view.fold(&event(
+            2,
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: follow_up.id.clone(),
+            }),
+        ));
+        assert!(view.consuming, "the follow-up turn was not recognized");
+        view.fold(&turn_end(3));
+        assert_eq!(view.follow_ups, 1, "a follow-up turn reset the count");
+        view.fold(&turn_end(4));
+        assert_eq!(view.follow_ups, 0, "an operator turn did not reset it");
     }
 
     /// F10: `fold` registers the run's token before its task starts, so the

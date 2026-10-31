@@ -29,6 +29,9 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  hooks list                       List hook handlers, their sources and states\n\
+  hooks enable                     Run this workspace's .dimcode/hooks.json\n\
+  hooks disable                    Stop running this workspace's hooks\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\

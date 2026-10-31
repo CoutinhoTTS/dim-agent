@@ -78,7 +78,11 @@ Its token is registered before the task starts, and the live
 `approval/respond` or `approval/cancelled` cancels it. A run that finds its
 token cancelled, before it starts or after the source read, starts no command.
 Before writing, the branch rechecks the consumed view: output whose triggering
-fact an interrupt or a newer operator input has overtaken is dropped.
+fact an interrupt or a newer *consumed* operator input has overtaken is
+dropped. An input counts as the operator's when it carries `user` content and
+its first block is not a `<dim-…>` source marker (session access A.1–A.2), and
+only its `input/consumed` counts, so a queued input or another source's input
+drops nothing.
 
 Commands run outside the branch's commit path and never take the commit lock.
 Each handler gets a timeout; the process tree is terminated when it expires,
@@ -88,11 +92,14 @@ error at 2 KiB for a failure or blocking reason, and a context block at 16 KiB.
 The README of the local profile carries the process facts; the timeout,
 `onFailure`, `async` and de-duplication rules are the design's.
 
-`Stop` writes a `<dim-hooks kind="follow-up">` input that queues a new turn,
-bounded at three consecutive follow-ups; a turn driven by an operator input
-resets the count. The follow-up is recognized by the id of the input Hooks
-wrote, recorded under the view lock when it was appended, so another source's
-queued input is never counted as one.
+`Stop` writes a `<dim-hooks kind="follow-up">` input only when at least one
+handler blocks, carrying the block reasons and then the contexts in catalog
+order; a context alone contributes nothing. The input queues a new turn,
+bounded at three consecutive follow-ups, and a turn driven by an operator
+input resets the count. The follow-up is recognized from its own
+`dim-hooks kind="follow-up"` marker as the view folds the branch, so the
+identity and the count are rebuilt from the Timeline when the part or the
+Session restores, and another source's queued input is never counted.
 
 `SessionStart` is derived on `main` from the folded view: it runs only when no
 `turn/start` and no Session-start block was seen; it runs at most once per
@@ -132,6 +139,8 @@ reported by `hooks.catalog` rather than at the hook point.
 
 [hooks_flow.rs](../../../../crates/dim-agent-capabilities/tests/hooks_flow.rs):
 `session_start_writes_one_keyed_block_per_hook_and_the_model_sees_it`,
+`session_start_context_is_dropped_once_the_first_turn_has_run`,
+`session_start_context_is_dropped_by_an_interrupt`,
 `a_second_session_start_does_not_run_the_hooks_again`,
 `the_session_start_block_is_still_in_context_after_compaction`,
 `post_tool_use_follows_the_protocol_for_success_block_and_failure`,
@@ -139,12 +148,20 @@ reported by `hooks.catalog` rather than at the hook point.
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
 `stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns`,
+`a_context_only_stop_writes_no_follow_up_and_starts_no_turn`,
+`a_stop_follow_up_carries_the_block_reason_then_the_context`,
 `only_the_follow_ups_turn_reports_stop_hook_active`,
+`the_follow_up_state_is_rebuilt_from_the_branch`,
 `permission_request_answers_through_approval`,
+`a_failed_permission_request_with_block_denies_the_approval`,
+`a_failed_permission_request_with_continue_answers_allow`,
+`a_timed_out_permission_request_with_block_denies_the_approval`,
 `a_user_answer_cancels_the_hook_and_does_not_delay_the_next_point`,
 `a_permission_request_does_not_wait_for_a_running_post_tool_hook`,
 `notification_runs_on_an_approval_and_writes_nothing`,
 `hook_output_is_dropped_after_an_interrupt`,
+`a_queued_operator_input_does_not_drop_the_turns_post_tool_output`,
+`a_source_input_with_user_content_does_not_drop_the_output`,
 `an_async_handler_does_not_delay_the_turn_or_the_next_point`,
 `a_hook_sees_its_environment_and_no_plugin_root`,
 `a_project_source_runs_nothing_until_the_user_enables_it`,
@@ -155,7 +172,8 @@ that a settled call's input does not stay in the folded view;
 `a_live_request_registers_its_token_before_its_task_starts`,
 `an_answer_folded_before_the_task_starts_runs_no_permission_command` and
 `an_answer_folded_during_the_read_runs_no_permission_command` pin that an
-answered request starts no command; and
+answered request starts no command; `a_failure_keeps_a_bounded_stderr_excerpt`
+pins the diagnostic's excerpt; and
 `hooks_settings.rs`'s `a_hook_point_reads_sources_without_authorizing_a_project`
 pins that reading a Session's sources never authorizes a workspace.
 [hooks_settings_flow.rs](../../../../crates/dim-app-server/tests/hooks_settings_flow.rs):

@@ -515,6 +515,7 @@
         "json",
         "matches",
         "tokio::select",
+        "tracing::info",
         "tracing::warn",
         "vec"
       ]
@@ -526,7 +527,9 @@
       "file": "crates/dim-agent-capabilities/src/hooks/runner.rs",
       "unexpandedMacros": [
         "assert",
+        "assert_eq",
         "format",
+        "panic",
         "serde_json::json",
         "vec"
       ]
@@ -8293,9 +8296,12 @@
         "path HookEvent::SessionStart",
         "path HookEvent::Stop",
         "path HookHandler",
+        "path OnFailure",
+        "path OnFailure::Block",
         "path handlers",
         "use crate::hooks::HookEvent",
         "use crate::hooks::HookHandler",
+        "use crate::hooks::OnFailure",
         "use crate::hooks::handlers"
       ]
     },
@@ -8400,6 +8406,7 @@
         "path EventKind::ApprovalRespond",
         "path EventKind::ContextConfigured",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
         "path EventKind::ToolCall",
@@ -8457,10 +8464,12 @@
       "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_capabilities::hooks::runner",
       "references": [
+        "path HookResult::Failed",
         "path HooksRuntime",
         "path Pending::default",
         "path View::default",
-        "path approval_point"
+        "path approval_point",
+        "path failed"
       ]
     },
     {
@@ -8509,6 +8518,13 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -8516,13 +8532,29 @@
         "path ApprovalRequestData",
         "path BranchSource::Host",
         "path EventKind",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputMessage",
         "path EventKind::ToolCall",
         "path EventKind::ToolResult",
+        "path EventKind::TurnEnd",
+        "path InputConsumedData",
+        "path InputDeletedData",
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMode::Queue",
         "path ToolCallData",
         "path ToolResultData",
+        "path TurnEndData",
+        "path TurnOutcome::Completed",
+        "path UserInput",
         "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::InputConsumedData",
+        "use dim_agent_types::InputDeletedData",
         "use dim_agent_types::ToolCallData",
-        "use dim_agent_types::ToolResultData"
+        "use dim_agent_types::ToolResultData",
+        "use dim_agent_types::TurnEndData",
+        "use dim_agent_types::UserInput"
       ]
     },
     {

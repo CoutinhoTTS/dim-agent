@@ -171,6 +171,10 @@ impl ReadHookSources for Sources {
 struct Model {
     requests: Mutex<Vec<Arc<ModelRequest>>>,
     exhaust: bool,
+    /// Holds request number `hold_from` (1-based) until `release` fires, so
+    /// a turn stays open while the test acts.
+    hold_from: Mutex<Option<usize>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 impl ModelDriver for Model {
     fn invoke(
@@ -179,7 +183,30 @@ impl ModelDriver for Model {
         connection: ModelConnection,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
-        self.requests.lock().unwrap().push(request.clone());
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            requests.len()
+        };
+        if self
+            .hold_from
+            .lock()
+            .unwrap()
+            .is_some_and(|from| index >= from)
+        {
+            let receiver = self.release.lock().unwrap().take();
+            if let Some(receiver) = receiver {
+                return Box::pin(async move {
+                    tokio::select! {
+                        _ = receiver => {}
+                        _ = cancel.cancelled() => {}
+                    }
+                    dim_agent_capabilities::adapters::EchoModel
+                        .invoke(request, connection, cancel)
+                        .await
+                });
+            }
+        }
         if self.exhaust {
             return Box::pin(async {
                 Err(HostError::Failed {
@@ -203,6 +230,14 @@ impl ModelDriver for Model {
 impl Model {
     fn requests(&self) -> Vec<Arc<ModelRequest>> {
         self.requests.lock().unwrap().clone()
+    }
+    /// Holds request `index` (1-based) and later ones until the returned
+    /// sender fires, and returns that sender.
+    fn hold(&self, index: usize) -> tokio::sync::oneshot::Sender<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        *self.hold_from.lock().unwrap() = Some(index);
+        *self.release.lock().unwrap() = Some(receiver);
+        sender
     }
 }
 
@@ -373,6 +408,17 @@ async fn hook_blocks(session: &Session, kind: &str) -> Vec<String> {
 }
 
 /// Waits for a hook block of `kind` to be written.
+/// Waits for the command's marker file.
+async fn wait_file(path: &Path, message: &str) {
+    for _ in 0..500 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{message}");
+}
+
 async fn wait_blocks(session: &Session, kind: &str, count: usize) -> Vec<String> {
     for _ in 0..500 {
         let found = hook_blocks(session, kind).await;
@@ -442,6 +488,102 @@ async fn session_start_writes_one_keyed_block_per_hook_and_the_model_sees_it() {
     assert!(
         request.contains("first context"),
         "the first request carries it"
+    );
+    env.close().await;
+}
+
+/// §3.4: `SessionStart`'s output is dropped when the branch moved on while
+/// its command ran. The command announces that it started and waits on a
+/// gate; the first turn runs to its `turn/end` before the test releases the
+/// gate, and the command writes `finished` after it. The next turn is the
+/// barrier: the point's write, if any, happens right after that marker and
+/// so before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_context_is_dropped_once_the_first_turn_has_run() {
+    let env = Env::new().await;
+    let entered = env.path("session-start-entered");
+    let gate = env.path("session-start-gate");
+    let finished = env.path("session-start-finished");
+    env.sources.set(document(serde_json::json!({
+        "SessionStart": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf 'late context'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    for _ in 0..500 {
+        if entered.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(entered.exists(), "the SessionStart hook did not start");
+    turn(&session, "hello").await;
+    std::fs::write(&gate, "").unwrap();
+    for _ in 0..500 {
+        if finished.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(finished.exists(), "the SessionStart command did not end");
+    turn(&session, "again").await;
+    let late = hook_blocks(&session, "session-start").await;
+    assert!(
+        late.is_empty(),
+        "SessionStart context was appended after the first turn: {late:?}"
+    );
+    env.close().await;
+}
+
+/// §3.4: an interrupt while the `SessionStart` command runs drops its output
+/// too. The interrupt is committed on an idle `main`, which is a
+/// `stop/interrupt` fact like any other; the turn after the marker is the
+/// barrier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_context_is_dropped_by_an_interrupt() {
+    let env = Env::new().await;
+    let entered = env.path("session-start-interrupt-entered");
+    let gate = env.path("session-start-interrupt-gate");
+    let finished = env.path("session-start-interrupt-finished");
+    env.sources.set(document(serde_json::json!({
+        "SessionStart": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf 'late context'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    for _ in 0..500 {
+        if entered.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(entered.exists(), "the SessionStart hook did not start");
+    session.interrupt("main", "stop".into()).unwrap();
+    std::fs::write(&gate, "").unwrap();
+    for _ in 0..500 {
+        if finished.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(finished.exists(), "the SessionStart command did not end");
+    turn(&session, "after").await;
+    let late = hook_blocks(&session, "session-start").await;
+    assert!(
+        late.is_empty(),
+        "SessionStart context was appended after an interrupt: {late:?}"
     );
     env.close().await;
 }
@@ -619,6 +761,85 @@ async fn stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns() {
     env.close().await;
 }
 
+/// §3.4: a Stop follow-up is written by a block, not by context alone. Each
+/// Stop point runs the handler once, and the drain runs the points in order,
+/// so a second `run` line proves the first point has written everything it
+/// would write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_only_stop_writes_no_follow_up_and_starts_no_turn() {
+    let env = Env::new().await;
+    let runs = env.path("stop-runs");
+    env.sources.set(document(serde_json::json!({
+        "Stop": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'run\\n' >> {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"stop context\"}}}}'",
+                runs.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    turn(&session, "first").await;
+    turn(&session, "barrier").await;
+    for _ in 0..500 {
+        let count = std::fs::read_to_string(&runs)
+            .map(|text| text.lines().count())
+            .unwrap_or(0);
+        if count >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        2,
+        "the second Stop point did not run"
+    );
+    assert!(
+        hook_blocks(&session, "follow-up").await.is_empty(),
+        "a context-only Stop wrote a follow-up"
+    );
+    let starts = events(&session)
+        .await
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert_eq!(starts, 2, "a context-only Stop started a turn");
+    env.close().await;
+}
+
+/// A4: the follow-up carries the block reasons first, then the contexts, in
+/// catalog order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_follow_up_carries_the_block_reason_then_the_context() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "Stop": [{
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "printf '{\"decision\":\"block\",\"reason\":\"stop reason\"}'",
+                },
+                {
+                    "type": "command",
+                    "command": "printf '{\"hookSpecificOutput\":{\"additionalContext\":\"stop context\"}}'",
+                },
+            ],
+        }],
+    })));
+    let session = env.session().await;
+    turn(&session, "first").await;
+    let blocks = wait_blocks(&session, "follow-up", 1).await;
+    let text = &blocks[0];
+    let reason = text.find("stop reason").expect("the block reason");
+    let context = text.find("stop context").expect("the context");
+    assert!(reason < context, "the reason comes first: {text:?}");
+    env.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_async_handler_does_not_delay_the_turn_or_the_next_point() {
     let env = Env::new().await;
@@ -693,6 +914,106 @@ async fn permission_request_answers_through_approval() {
         }))],
     })));
     turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert_eq!(last_result(&session).await.is_error, Some(true));
+    env.close().await;
+}
+
+/// A5: a failed `PermissionRequest` handler follows its `onFailure`. `turn`
+/// returns only after the approval is answered and the turn ended, so the
+/// hook has finished and its decision is committed before the test reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_permission_request_with_block_denies_the_approval() {
+    let env = Env::new().await;
+    let failed = env.path("blocked-failure");
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [command(serde_json::json!({
+            "type": "command",
+            "command": format!("printf 'failed' > {}; exit 1", failed.display()),
+            "onFailure": "block",
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert!(failed.exists(), "the hook command did not run");
+    assert_eq!(
+        wait_event(&session, |kind| match kind {
+            EventKind::ApprovalRespond(data) => Some(data.decision),
+            _ => None,
+        })
+        .await,
+        ApprovalDecision::Deny
+    );
+    assert_eq!(last_result(&session).await.is_error, Some(true));
+    env.close().await;
+}
+
+/// A5: `onFailure: continue` leaves a failed `PermissionRequest` with no
+/// opinion. A second handler at the same point answers Allow, so the hook's
+/// own answer is what the test reads: A.5 turns no deny plus an allow into
+/// allow, and a failure counted as a deny would win the combination instead.
+/// `turn` returns only after the approval is answered and the turn ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_permission_request_with_continue_answers_allow() {
+    let env = Env::new().await;
+    let failed = env.path("continued-failure");
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [{
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": format!("printf 'failed' > {}; exit 1", failed.display()),
+                    "onFailure": "continue",
+                },
+                {
+                    "type": "command",
+                    "command": "printf '{\"hookSpecificOutput\":{\"decision\":{\"behavior\":\"allow\"}}}'",
+                },
+            ],
+        }],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert!(failed.exists(), "the failing handler did not run");
+    let answered: Vec<ApprovalDecision> = events(&session)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ApprovalRespond(data) => Some(data.decision),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, vec![ApprovalDecision::Allow]);
+    assert_eq!(last_result(&session).await.is_error, None);
+    env.close().await;
+}
+
+/// A5: a handler that times out with `onFailure: block` denies too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timed_out_permission_request_with_block_denies_the_approval() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [command(serde_json::json!({
+            "type": "command",
+            "command": "sleep 5",
+            "timeout": 1,
+            "onFailure": "block",
+        }))],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
+    let started = std::time::Instant::now();
+    turn(&session, "tool:exec {\"command\":\"true\"}").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the hook was not cut off"
+    );
+    assert_eq!(
+        wait_event(&session, |kind| match kind {
+            EventKind::ApprovalRespond(data) => Some(data.decision),
+            _ => None,
+        })
+        .await,
+        ApprovalDecision::Deny
+    );
     assert_eq!(last_result(&session).await.is_error, Some(true));
     env.close().await;
 }
@@ -1020,6 +1341,119 @@ async fn hook_output_is_dropped_after_an_interrupt() {
         hook_blocks(&session, "post-tool").await.is_empty(),
         "an interrupt drops the output"
     );
+    env.close().await;
+}
+
+/// §3.4 drops an output only for operator input the branch *consumed*. An
+/// input queued during a turn is not consumed until the turn ends, so a slow
+/// `PostToolUse` hook still writes its context. The model holds the turn's
+/// second request, so the turn cannot end while the test acts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_operator_input_does_not_drop_the_turns_post_tool_output() {
+    let env = Env::new().await;
+    let (entered, gate, finished) = (
+        env.path("queued-entered"),
+        env.path("queued-gate"),
+        env.path("queued-finished"),
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"post-tool context\"}}}}'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let release = env.model.hold(2);
+    let session = env.session().await;
+    let note = env.path("work/note.txt");
+    std::fs::write(&note, "note\n").unwrap();
+    session
+        .submit(
+            format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&entered, "the PostToolUse hook did not start").await;
+    session
+        .submit("queued".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    std::fs::write(&gate, "").unwrap();
+    wait_file(&finished, "the PostToolUse hook did not end").await;
+    let blocks = wait_blocks(&session, "post-tool", 1).await;
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    let _ = release.send(());
+    session.idle("main").await.unwrap();
+    env.close().await;
+}
+
+/// §3.4: a source input is not the operator's, even when it carries `user`
+/// content. Every source input starts with its `<dim-…>` marker block
+/// (session access A.2), and such an input drops nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_source_input_with_user_content_does_not_drop_the_output() {
+    let env = Env::new().await;
+    let (entered, gate, finished) = (
+        env.path("source-entered"),
+        env.path("source-gate"),
+        env.path("source-finished"),
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"post-tool context\"}}}}'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let release = env.model.hold(2);
+    let session = env.session().await;
+    let note = env.path("work/note.txt");
+    std::fs::write(&note, "note\n").unwrap();
+    session
+        .submit(
+            format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&entered, "the PostToolUse hook did not start").await;
+    session
+        .input(
+            InputMessageData {
+                blocks: vec![InputBlock::Raw {
+                    text: "<dim-scheduler kind=\"wake\">\nsource note\n</dim-scheduler>".into(),
+                    key: None,
+                    retire: false,
+                }],
+                user: Some(UserInput {
+                    content: vec![ContentBlock::Text {
+                        text: "scheduler note".into(),
+                    }],
+                }),
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    std::fs::write(&gate, "").unwrap();
+    wait_file(&finished, "the PostToolUse hook did not end").await;
+    let blocks = wait_blocks(&session, "post-tool", 1).await;
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    let _ = release.send(());
+    session.idle("main").await.unwrap();
     env.close().await;
 }
 
