@@ -160,7 +160,7 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 
 | 状态 | 事实 | 模型读到了吗 | 画成 |
 | --- | --- | --- | --- |
-| queue | `input/message`，InputQueue 还压着 | 否 | line 运行期间 composer 上方的队列条 |
+| queue | `input/message`，InputQueue 还压着 | 否 | 线运行期间 composer 上方的队列条 |
 | applied | `input/applied`，等 Loop 的下一个请求 | 否 | 虚化的消息行 |
 | consumed | `input/consumed`，已进入携带它的那次请求 | 是 | 正常的用户消息行 |
 
