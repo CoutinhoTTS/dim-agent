@@ -1064,41 +1064,58 @@ In both TUI modes, authorization links stay in the sign-in dialog, not the trans
 The complete URL wraps inside the dialog's continuous border. To copy a wrapped
 link, use the terminal's rectangular selection to exclude the border and its own
 copy command, without a CLI clipboard API.
+In short windows the URL preview ends with `…` and a shortened-link hint; the
+callback field and submission action remain visible. Enlarge the terminal to
+select the complete URL. Both the OSC 8 target and Enter always open the full URL.
 Mouse reporting is temporarily disabled while the link is shown, then restored to
 the configured setting when the dialog leaves that step. The link carries its full
 OSC 8 target; Windows Terminal opens it with `Ctrl+click`. The focused link also
 opens with `Enter`. There is no copy button or automatic clipboard write.
 Device sign-in shows its pairing code separately from the verification link.
 Windows opens authorization links with the system URL handler, without PowerShell.
-If the browser cannot open, the full link and callback input remain available.
+If the browser cannot open, the link and callback input remain available.
 
 ```text
-+-- DimAgent OAuth ------------------------------------+
-| Browser login                                        |
-| https://dimagent.cn/oauth/authorize?state=example&r  |
-| edirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fauth%2F |
-| callback                                             |
-|   Callback URL: (paste here)                         |
-|   Submit callback                                    |
-| Select to copy · Enter opens link                    |
-+------------------------------------------------------+
+╭──────────────────────────────────────────────────────╮
+│ DimAgent OAuth                                       │
+│                                                      │
+│   Browser login                                      │
+│ https://dimagent.cn/oauth/authorize?state=example&r  │
+│ edirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fauth%2F │
+│ callback                                             │
+│   Callback URL: (paste here)                         │
+│   Submit callback                                    │
+│                                                      │
+│ Select to copy · Enter opens link                    │
+╰──────────────────────────────────────────────────────╯
 ```
 
 ```text
 > /login
-╭─ DimAgent OAuth ─────────────────────────╮
-│  Signed in: 3f9c…                         │
-│  › Login with DimAgent                    │
-│    Enterprise login                       │
-│    Device login                           │
-│                                           │
-│  ↑↓ move · enter activate · esc back      │
-╰───────────────────────────────────────────╯
+╭──────────────────────────────────────────╮
+│ DimAgent OAuth                           │
+│                                          │
+│   Not signed in                          │
+│                                          │
+│ › Login with DimAgent                    │
+│   Enterprise login                       │
+│   Device login                           │
+│                                          │
+│ ↑↓ move · enter activate · esc close     │
+╰──────────────────────────────────────────╯
         │ Device login
         ▼
-│  [ ] Browser mode / [x] Device mode       │
-│  Enter code ABCD-EFGH at https://…        │
-│  Waiting for authorization                │
+╭──────────────────────────────────────────╮
+│ DimAgent OAuth                           │
+│                                          │
+│   Device login                           │
+│   Enter code:    ABCD-EFGH               │
+│ https://dimagent.cn/device               │
+│   Restart device login                   │
+│   Waiting for authorization              │
+│                                          │
+│ Select to copy · Enter opens link        │
+╰──────────────────────────────────────────╯
         │ completed
         ▼
 Connected dimcode-api-oauth → /models opens

@@ -3472,32 +3472,40 @@ impl App {
         };
         let margin = " ".repeat(panel_margin);
         let composer_rows = if replaced { 0 } else { rows.len() + 2 };
-        let panel_rows = (size.1 as usize)
-            .saturating_sub(composer_rows + 1 + 4 + 1)
-            .min(18);
-        let panel_cursor = |width: usize| match &self.prompt {
+        let panel_rows = if native_selection {
+            size.1 as usize
+        } else {
+            (size.1 as usize)
+                .saturating_sub(composer_rows + 1 + 4 + 1)
+                .min(18)
+        };
+        let panel_cursor = |width: usize, height: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
+            Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Ask(_)) if command_entry => None,
             Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
         };
         if self.fullscreen {
-            let budget = (size.1 as usize)
-                .saturating_sub(composer_rows + 2 + 2)
-                .min(OVERLAY_MAX_ROWS);
+            let budget = if native_selection {
+                size.1 as usize
+            } else {
+                (size.1 as usize)
+                    .saturating_sub(composer_rows + 2 + 2)
+                    .min(OVERLAY_MAX_ROWS)
+            };
             let list_width = if native_selection {
                 cols
             } else {
                 cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH)
             };
-            let caret = panel_cursor(list_width)
+            let caret = panel_cursor(list_width, budget)
                 .flatten()
                 .map(|(row, column)| (row as u16, column as u16));
             let list = |rows: Vec<String>| {
@@ -3528,7 +3536,7 @@ impl App {
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
-                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, p)),
+                Some(Prompt::Login(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Language(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -3551,7 +3559,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
-            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, p)),
+            Some(Prompt::Login(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Language(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -3578,7 +3586,7 @@ impl App {
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
         );
-        frame.cursor = match panel_cursor(outer) {
+        frame.cursor = match panel_cursor(outer, panel_rows) {
             None => (!replaced).then_some(composer_cursor),
             Some(_) if self.fullscreen && !matches!(self.prompt, Some(Prompt::Ask(_))) => None,
             Some(caret) => caret.map(|(row, column)| {
@@ -6032,8 +6040,15 @@ mod tests {
         use crate::ui::render::panel::strip_escapes;
 
         let url = "https://dimagent.cn/oauth/authorize?state=sample&redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fauth%2Fcallback&code_challenge=abcdefghijklmnopqrstuvwxyz0123456789";
-        for fullscreen in [false, true] {
-            for size in [(80, 24), (48, 18)] {
+        let typical = format!("{url}&scope={}", "a".repeat(339 - url.len() - 7));
+        let long = format!("{url}&scope={}", "a".repeat(602 - url.len() - 7));
+        for fullscreen in [true, false] {
+            for (size, url, shortened) in [
+                ((80, 24), url, false),
+                ((48, 18), url, false),
+                ((40, 12), typical.as_str(), true),
+                ((48, 18), long.as_str(), true),
+            ] {
                 for mode in ["opened", "manual", "device", "device_complete"] {
                     let mut drawn = Drawn::new(size, None, true);
                     drawn.app.fullscreen = fullscreen;
@@ -6080,14 +6095,19 @@ mod tests {
                         strip_escapes(&frame.live.join("\n"))
                     };
                     assert!(drawn.app.native_selection());
+                    if fullscreen {
+                        assert!(frame.overlay.as_ref().unwrap().rows.len() <= size.1 as usize);
+                    }
                     let rows = text.lines().collect::<Vec<_>>();
                     let start = rows
                         .iter()
                         .position(|row| row.contains("https://dimagent.cn/"))
                         .unwrap();
-                    let count = expected.len().div_ceil(size.0 as usize - 4);
-                    let selected = rows[start..start + count]
+                    let selected = rows[start..]
                         .iter()
+                        .take_while(|row| {
+                            !row.contains("Callback URL") && !row.contains("Restart device login")
+                        })
                         .map(|row| {
                             row.trim()
                                 .strip_prefix('│')
@@ -6098,7 +6118,13 @@ mod tests {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    assert_eq!(url::Url::parse(&selected).unwrap().as_str(), expected);
+                    if shortened && !mode.starts_with("device") {
+                        let prefix = selected.replace('\n', "");
+                        assert!(prefix.ends_with('…'));
+                        assert!(expected.starts_with(prefix.trim_end_matches('…')));
+                    } else {
+                        assert_eq!(url::Url::parse(&selected).unwrap().as_str(), expected);
+                    }
                     let rendered = if fullscreen {
                         frame.overlay.as_ref().unwrap().rows.join("\n")
                     } else {
@@ -6134,6 +6160,17 @@ mod tests {
                             &frame.live
                         };
                         assert!(rows[row as usize].contains("Callback URL"));
+                        let Some(Prompt::Login(view)) = &mut drawn.app.prompt else {
+                            panic!("the callback stays in the sign-in dialog");
+                        };
+                        let callback =
+                            "http://localhost:54321/auth/callback?code=example&state=sample";
+                        view.paste(callback);
+                        view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE));
+                        assert!(matches!(
+                            view.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                            Effect::OauthPaste(url) if url == callback
+                        ));
                     } else {
                         drawn.app.apply(Update::Oauth {
                             attempt: 1_001,

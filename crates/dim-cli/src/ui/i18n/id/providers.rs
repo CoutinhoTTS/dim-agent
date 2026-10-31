@@ -55,12 +55,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Browser login" => "Masuk via browser",
         "Restart device login" => "Ulangi masuk perangkat",
         "Select to copy · Enter opens link" => "Pilih untuk menyalin · Enter buka tautan",
+        "Link shortened · Enter opens link" => "Tautan dipendekkan · Enter buka",
         "Callback URL" => "URL callback",
         "Submit callback" => "Kirim callback",
         "The browser could not be opened. Open the link manually, then return here." => {
             "Browser tak bisa dibuka. Buka tautan manual, lalu kembali ke sini."
         }
-        "Enter code {code} at {url}" => "Masukkan kode {code} di {url}",
         "Waiting for authorization" => "Menunggu otorisasi",
         "{name} device login" => "Masuk perangkat {name}",
         "Open this URL: {url}" => "Buka URL ini: {url}",

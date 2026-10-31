@@ -591,9 +591,17 @@ impl OauthView {
         }
     }
 
+    fn link_height(&self, height: usize) -> usize {
+        let reserved = 5
+            + self.rows(0, None).len()
+            + usize::from(self.message.is_some())
+            + usize::from(self.error.is_some());
+        height.saturating_sub(reserved).max(1)
+    }
+
     /// The focused field's caret: its row among the rows drawn and its
     /// column after the border, the marker and the label.
-    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+    pub fn cursor(&self, width: usize, height: usize) -> Option<(usize, usize)> {
         let (phase, focus) = (self.phase, self.focus);
         let field = match (phase, focus) {
             (Phase::Email, Focus::Email) => &self.email,
@@ -609,7 +617,7 @@ impl OauthView {
             .iter()
             .map(|(row, label)| {
                 if *row == Row::Action(Focus::Link) {
-                    wrap_cells(label, inner).len()
+                    wrap_cells(label, inner).len().min(self.link_height(height))
                 } else {
                     1
                 }
@@ -705,7 +713,7 @@ impl OauthView {
         })
     }
 
-    pub fn render(&self, width: usize, p: &Palette) -> Vec<String> {
+    pub fn render(&self, width: usize, height: usize, p: &Palette) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
         let mut content = vec![
             title_plain(&tf("{name} OAuth", &[("name", &self.name)]), inner, p),
@@ -713,6 +721,7 @@ impl OauthView {
         ];
         let restart = matches!(self.phase, Phase::Error | Phase::Cancelled);
         let rows = self.rows(inner.saturating_sub(2), Some(p));
+        let mut shortened = false;
         for (row, label) in &rows {
             match row {
                 Row::Section => content.push(format!(
@@ -721,7 +730,15 @@ impl OauthView {
                 )),
                 Row::Styled => content.push(format!("{IDLE_MARKER}{label}")),
                 Row::Action(Focus::Link) => {
-                    for line in wrap_cells(label, inner) {
+                    let mut lines = wrap_cells(label, inner);
+                    let limit = self.link_height(height);
+                    if lines.len() > limit {
+                        shortened = true;
+                        lines.truncate(limit);
+                        let last = lines.last_mut().unwrap();
+                        *last = truncate_cells(&format!("{last}…"), inner);
+                    }
+                    for line in lines {
                         content.push(fg(
                             &crate::ui::render::osc8::hyperlink(label, &line),
                             &p.accent,
@@ -771,7 +788,12 @@ impl OauthView {
             ));
         }
         content.push(String::new());
-        content.push(fg(&truncate_cells(self.hint(), inner), &p.muted));
+        let hint = if shortened && self.focus == Focus::Link {
+            t("Link shortened · Enter opens link")
+        } else {
+            self.hint()
+        };
+        content.push(fg(&truncate_cells(hint, inner), &p.muted));
         bordered(&content, width, None, &p.border, None, None)
     }
 }

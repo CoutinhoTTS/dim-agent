@@ -55,12 +55,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Browser login" => "Browser-Login",
         "Restart device login" => "Geräte-Login neu starten",
         "Select to copy · Enter opens link" => "Zum Kopieren markieren · Enter öffnet Link",
+        "Link shortened · Enter opens link" => "Link gekürzt · Enter öffnet Link",
         "Callback URL" => "Callback-URL",
         "Submit callback" => "Callback senden",
         "The browser could not be opened. Open the link manually, then return here." => {
             "Browser-Start fehlgeschlagen. Link manuell öffnen, dann zurückkehren."
         }
-        "Enter code {code} at {url}" => "Code {code} auf {url} eingeben",
         "Waiting for authorization" => "Warte auf Autorisierung",
         "{name} device login" => "{name}-Geräte-Login",
         "Open this URL: {url}" => "Diese URL öffnen: {url}",

@@ -2858,8 +2858,7 @@
         "json",
         "println",
         "tokio::pin",
-        "tokio::select",
-        "vec"
+        "tokio::select"
       ]
     },
     {
@@ -23242,6 +23241,13 @@
     },
     {
       "from": "dim_cli::login",
+      "to": "dim_cli::browser",
+      "references": [
+        "path crate::browser::open"
+      ]
+    },
+    {
+      "from": "dim_cli::login",
       "to": "dim_cli::input",
       "references": [
         "path Input::new",
@@ -23321,18 +23327,17 @@
     },
     {
       "from": "dim_cli::mcp_command",
-      "to": "dim_cli::input",
+      "to": "dim_cli::browser",
       "references": [
-        "path Input",
-        "use crate::input::Input"
+        "path crate::browser::open"
       ]
     },
     {
       "from": "dim_cli::mcp_command",
-      "to": "dim_cli::login",
+      "to": "dim_cli::input",
       "references": [
-        "path open_browser",
-        "use crate::login::open_browser"
+        "path Input",
+        "use crate::input::Input"
       ]
     },
     {

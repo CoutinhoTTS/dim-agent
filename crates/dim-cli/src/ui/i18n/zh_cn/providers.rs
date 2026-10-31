@@ -49,12 +49,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Browser login" => "浏览器登录",
         "Restart device login" => "重新开始设备登录",
         "Select to copy · Enter opens link" => "拖选手动复制 · Enter 打开链接",
+        "Link shortened · Enter opens link" => "链接已缩略 · Enter 打开完整链接",
         "Callback URL" => "回调 URL",
         "Submit callback" => "提交回调",
         "The browser could not be opened. Open the link manually, then return here." => {
             "无法打开浏览器，请手动打开链接，完成后返回。"
         }
-        "Enter code {code} at {url}" => "在 {url} 输入配对码 {code}",
         "Waiting for authorization" => "等待授权",
         "{name} device login" => "{name} 设备登录",
         "Open this URL: {url}" => "打开此 URL：{url}",

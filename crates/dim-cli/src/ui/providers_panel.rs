@@ -384,9 +384,9 @@ impl ProvidersPanel {
 
     /// The list's filter caret, or the form's focused field's; the OAuth
     /// step draws its own.
-    pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
+    pub fn cursor(&self, width: usize, rows: usize) -> Option<(usize, usize)> {
         if let Some(view) = &self.oauth {
-            return view.cursor(width);
+            return view.cursor(width, rows);
         }
         let Some(form) = &self.form else {
             return self.list.cursor(width);
@@ -416,7 +416,7 @@ impl ProvidersPanel {
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
         if let Some(view) = &self.oauth {
-            return view.render(width, p);
+            return view.render(width, rows, p);
         }
         let Some(form) = &self.form else {
             return self.list.render(width, rows, p);
@@ -725,7 +725,7 @@ mod tests {
             form.rows(),
             vec![Field::Name, Field::BaseUrl, Field::ApiKey]
         );
-        assert_eq!(panel.cursor(40), Some((2, 2 + 2 + 4 + 2)));
+        assert_eq!(panel.cursor(40, 24), Some((2, 2 + 2 + 4 + 2)));
         for c in "My LLM!".chars() {
             panel.handle_key(key(KeyCode::Char(c)));
         }
