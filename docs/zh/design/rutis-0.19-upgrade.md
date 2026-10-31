@@ -2,7 +2,8 @@
 
 [English](../../design/rutis-0.19-upgrade.md)
 
-状态：草案。
+状态：已实现，放置步骤（M6）在 [#721](https://github.com/arcships/dim/pull/721)，步骤 1–6 在
+[#730](https://github.com/arcships/dim/pull/730)；§6 的度量证据尚未补齐。
 
 Issue：[#681](https://github.com/arcships/dim/issues/681)。
 

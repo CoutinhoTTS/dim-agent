@@ -1,6 +1,8 @@
 # Upgrading to rutis 0.19.2
 
-Status: Draft.
+Status: implemented, the placement step (M6) in [#721](https://github.com/arcships/dim/pull/721) and
+steps 1–6 in [#730](https://github.com/arcships/dim/pull/730); the measurement evidence of §6 is
+still outstanding.
 
 Issue: [#681](https://github.com/arcships/dim/issues/681).
 
