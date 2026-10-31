@@ -220,7 +220,7 @@ impl PrepareModel for DefaultPrepareModel {
         &self,
         _: &str,
         _: &str,
-        _: &[Message],
+        _: &[Arc<Message>],
         available_tools: &[ToolDefinition],
     ) -> Result<ModelSettings, HostError> {
         let mut settings =

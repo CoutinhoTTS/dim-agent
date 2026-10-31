@@ -507,7 +507,7 @@ async fn a_preparing_request_keeps_its_contributor_generation() {
             &self,
             turn_id: &str,
             request_id: &str,
-            history: &[Message],
+            history: &[Arc<Message>],
             available_tools: &[ToolDefinition],
         ) -> std::result::Result<ModelSettings, HostError> {
             let settings = dim_agent_capabilities::adapters::DefaultPrepareModel {
@@ -631,7 +631,7 @@ async fn custom_preparation_keeps_none_empty_and_filtered_declarations() {
             &self,
             _: &str,
             _: &str,
-            _: &[Message],
+            _: &[Arc<Message>],
             available_tools: &[ToolDefinition],
         ) -> std::result::Result<ModelSettings, HostError> {
             assert!(available_tools.iter().any(|tool| tool.name == "optional"));

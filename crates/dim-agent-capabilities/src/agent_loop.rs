@@ -1,6 +1,6 @@
 use crate::{
     context_policy::{CompactionStep, ContextPolicy, configured_request},
-    history::{HistoryRenderer, context_configuration, context_messages},
+    history::{HistoryRenderer, context_configuration},
     host::{CompactionStrategyHost, ContextModelHost, HostError, PrepareModelHost},
     prompt_state::PromptSnapshot,
     steer::REPLACED_BY_STEER,
@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, LoopPhase, LoopSnapshot, LoopState,
-    Names, Result, StateCell, Timeline, TimelineIdentity,
+    Names, PolicyFacts, Result, StateCell, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -356,11 +356,21 @@ impl AgentLoop {
             .history
             .rendered_context(&self.timeline, through)
             .await?;
-        let Some(request) = configured_request(&context, &history) else {
+        let Some(request) = configured_request(
+            &crate::context_policy::PolicyContext::from_context(context.clone()),
+            &history,
+        ) else {
             return failed("Context is not configured; adopt a model first".into());
         };
+        let facts = PolicyFacts::from_context(&context, through);
         let view = policy
-            .view(request, context, history, Vec::new())
+            .view(
+                request,
+                crate::context_policy::PolicyContext::from_context(context),
+                history,
+                facts,
+                Vec::new(),
+            )
             .map_err(|error| AgentError::fault("Loop", error.to_string()))?;
         let model = match policy
             .resolver
@@ -662,13 +672,33 @@ impl AgentLoop {
                     source.request_id = request_id.clone();
                     return Ok(source);
                 }
-                let (prefix, entries) = owner
+                let streamed = owner
                     .history
-                    .rendered_context(&owner.timeline, through)
+                    .rendered_stream(&owner.timeline, through, 256)
                     .await?;
-                let configuration = context_configuration(&prefix);
-                let prompt = PromptSnapshot::from_context(&prefix).revision;
-                let history = context_messages(&prefix, &entries);
+                let (prefix, entries, configuration, prompt) =
+                    if streamed.fallback {
+                    let (prefix, entries) = owner
+                        .history
+                        .rendered_context(&owner.timeline, through)
+                        .await?;
+                    let configuration = context_configuration(&prefix);
+                    let prompt = PromptSnapshot::from_context(&prefix).revision;
+                    (
+                        crate::context_policy::PolicyContext::from_context(prefix),
+                        entries,
+                        configuration,
+                        prompt,
+                    )
+                } else {
+                    (
+                        crate::context_policy::PolicyContext::from_stream(&streamed),
+                        streamed.history,
+                        streamed.configuration,
+                        streamed.prompt,
+                    )
+                };
+                let history = prefix.messages(&entries);
                 let settings = match &configuration {
                     Some(data) => crate::host::ModelSettings {
                         provider_id: data.settings.provider_id.clone(),

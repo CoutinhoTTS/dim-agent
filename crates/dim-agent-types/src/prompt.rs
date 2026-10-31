@@ -1,5 +1,6 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
@@ -189,5 +190,5 @@ pub struct ContextScopeData {
 pub struct ContextBaselineEntry {
     pub key: String,
     pub source_event: String,
-    pub message: Message,
+    pub message: Arc<Message>,
 }

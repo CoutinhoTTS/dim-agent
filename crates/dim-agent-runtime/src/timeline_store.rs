@@ -1,5 +1,5 @@
 use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
-use dim_agent_types::{AgentEvent, RecoverySnapshot};
+use dim_agent_types::{AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot};
 use std::{ops::RangeInclusive, sync::Arc};
 
 /// Storage address of one Timeline inside an Agent's shared store.
@@ -7,6 +7,77 @@ use std::{ops::RangeInclusive, sync::Arc};
 pub struct TimelineKey {
     pub session_id: String,
     pub branch_id: String,
+}
+
+/// The events `ContextPolicy` needs, without the rest of the Timeline.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyFacts {
+    pub through: u64,
+    pub events: Vec<Arc<AgentEvent>>,
+}
+
+impl PolicyFacts {
+    /// Builds facts from an already decoded context, for callers that have it.
+    pub fn from_context(context: &crate::ContextHistory, through: u64) -> Self {
+        Self {
+            through,
+            events: context
+                .events
+                .iter()
+                .filter(|event| policy_event(event))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// The events a compaction cut needs for pinning: its anchor plus the turn's
+/// input window. The caller supplies the cut, so no full history is decoded.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyWindow {
+    pub through: u64,
+    pub cut: String,
+    pub cut_sequence: u64,
+    pub events: Vec<Arc<AgentEvent>>,
+    pub tool_results: Vec<Arc<AgentEvent>>,
+}
+
+/// The event ids and turn starts a compaction needs to enumerate legal cuts,
+/// without decoding event bodies.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyOrder {
+    pub through: u64,
+    pub events: Vec<PolicyOrderEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyOrderEvent {
+    pub id: String,
+    pub branch_id: String,
+    pub sequence: u64,
+    pub turn_start: bool,
+    pub compaction_start: Option<u64>,
+}
+
+fn window_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::TurnStart(_) | EventKind::InputMessage(_) | EventKind::InputConsumed(_)
+    )
+}
+
+fn policy_event(event: &AgentEvent) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::ContextConfigured(_)
+            | EventKind::ContextCompaction(_)
+            | EventKind::ContextBudget(_)
+            | EventKind::ModelUsage(_)
+            | EventKind::ModelCall(_)
+            | EventKind::TurnStart(_)
+            | EventKind::InputMessage(_)
+            | EventKind::InputConsumed(_)
+    )
 }
 
 /// One stored event and its atomic publication boundary.
@@ -125,6 +196,191 @@ pub trait TimelineStore: Send + Sync + 'static {
         session_id: &'a str,
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>>;
+    /// The policy-relevant events at `through`. Stores may filter before
+    /// decoding; the default reads the prefix and keeps the known kinds.
+    fn policy_facts<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        turn_id: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyFacts>> {
+        Box::pin(async move {
+            if through == 0 {
+                return Ok(PolicyFacts::default());
+            }
+            let records = self.read(key, 1..=through).await?;
+            let latest = |predicate: &dyn Fn(&EventKind) -> bool| {
+                records
+                    .iter()
+                    .rev()
+                    .find(|record| predicate(&record.event.kind))
+                    .map(|record| record.event.sequence)
+            };
+            let configured = latest(&|kind| matches!(kind, EventKind::ContextConfigured(_)));
+            let compaction = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ContextCompaction(data)
+                        if matches!(
+                            data.outcome,
+                            dim_agent_types::ContextCompactionResult::Completed { .. }
+                        ) =>
+                    {
+                        Some(record.event.sequence)
+                    }
+                    _ => None,
+                });
+            let usage = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ModelUsage(data) => {
+                        Some((record.event.sequence, data.request_id.clone()))
+                    }
+                    _ => None,
+                });
+            let call = usage.as_ref().and_then(|(_, request_id)| {
+                records
+                    .iter()
+                    .rev()
+                    .find_map(|record| match &record.event.kind {
+                        EventKind::ModelCall(data) if data.request_id == *request_id => {
+                            Some(record.event.sequence)
+                        }
+                        _ => None,
+                    })
+            });
+            let turn = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::TurnStart(data) if data.turn_id == turn_id => {
+                        Some(record.event.sequence)
+                    }
+                    _ => None,
+                });
+            let consumed: Vec<String> = turn.map_or_else(Vec::new, |turn| {
+                records
+                    .iter()
+                    .filter(|record| record.event.sequence >= turn)
+                    .filter_map(|record| match &record.event.kind {
+                        EventKind::InputConsumed(data) => Some(data.input_id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            Ok(PolicyFacts {
+                through,
+                events: records
+                    .into_iter()
+                    .filter(|record| {
+                        let sequence = record.event.sequence;
+                        Some(sequence) == configured
+                            || Some(sequence) == compaction
+                            || usage.as_ref().is_some_and(|(usage, _)| *usage == sequence)
+                            || Some(sequence) == call
+                            || Some(sequence) == turn
+                            || turn.is_some_and(|turn| {
+                                sequence >= turn
+                                    && matches!(
+                                        record.event.kind,
+                                        EventKind::TurnStart(_)
+                                            | EventKind::InputMessage(_)
+                                            | EventKind::InputConsumed(_)
+                                            | EventKind::ContextBudget(_)
+                                    )
+                            })
+                            || consumed.iter().any(|id| record.event.id == *id)
+                    })
+                    .map(|record| record.event)
+                    .collect(),
+            })
+        })
+    }
+
+    /// The event order for legal compaction cuts.
+    fn policy_order<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+    ) -> BoxFuture<'a, Result<PolicyOrder>> {
+        Box::pin(async move {
+            let records = self.read(key, 1..=through).await?;
+            let branch_id = key.branch_id.clone();
+            Ok(PolicyOrder {
+                through,
+                events: records
+                    .into_iter()
+                    .map(|record| PolicyOrderEvent {
+                        turn_start: matches!(&record.event.kind, EventKind::TurnStart(_)),
+                        compaction_start: match &record.event.kind {
+                            EventKind::ContextCompactionStart(data) => Some(data.through),
+                            _ => None,
+                        },
+                        id: record.event.id.clone(),
+                        branch_id: branch_id.clone(),
+                        sequence: record.event.sequence,
+                    })
+                    .collect(),
+            })
+        })
+    }
+
+    /// The anchor and turn window for a known compaction cut.
+    fn policy_window<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        _turn_id: &'a str,
+        cut: &'a str,
+    ) -> BoxFuture<'a, Result<PolicyWindow>> {
+        Box::pin(async move {
+            let records = self.read(key, 1..=through).await?;
+            let previous_cut = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ContextCompaction(data) => match &data.outcome {
+                        ContextCompactionResult::Completed { retain_from, .. } => {
+                            Some(retain_from.as_str())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+            let previous_sequence = previous_cut.and_then(|cut| {
+                records
+                    .iter()
+                    .find(|record| record.event.id == cut)
+                    .map(|record| record.event.sequence)
+            });
+            let mut events = Vec::new();
+            let mut tool_results = Vec::new();
+            let mut cut_sequence = 0u64;
+            for record in records {
+                if matches!(&record.event.kind, EventKind::ToolResult(_))
+                    && previous_sequence.is_none_or(|cut| record.event.sequence >= cut)
+                {
+                    tool_results.push(record.event.clone());
+                }
+                if record.event.id == cut {
+                    cut_sequence = record.event.sequence;
+                }
+                if record.event.id == cut || window_event(&record.event) {
+                    events.push(record.event);
+                }
+            }
+            Ok(PolicyWindow {
+                through,
+                cut: cut.to_owned(),
+                cut_sequence,
+                events,
+                tool_results,
+            })
+        })
+    }
+
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,

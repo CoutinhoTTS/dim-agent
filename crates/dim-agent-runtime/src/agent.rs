@@ -125,7 +125,9 @@ impl Agent {
             .session_config(&id)
             .await?
             .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
-        self.create(id, config, SessionStart::Restore, None).await
+        let session = self.create(id, config, SessionStart::Restore, None).await?;
+        crate::memory::trim_if_large();
+        Ok(session)
     }
     async fn create(
         &self,
@@ -501,7 +503,11 @@ impl Session {
     /// Waits for branch execution to idle and returns its dispatched cutoff.
     /// Later input may advance the Timeline without changing this cutoff.
     pub async fn idle(&self, branch: &str) -> Result<u64> {
-        self.published(branch)?.idle().await
+        let idle = self.published(branch)?.idle().await;
+        if idle.is_ok() {
+            crate::memory::trim_if_large();
+        }
+        idle
     }
     pub async fn context(&self, branch: &str, through: u64) -> Result<ContextHistory> {
         self.published(branch)?.context(through).await

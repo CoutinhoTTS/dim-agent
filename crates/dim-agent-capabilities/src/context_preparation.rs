@@ -1,6 +1,6 @@
 use crate::{
-    context_policy::{ContextPolicy, configured_request},
-    history::{HistoryRenderer, context_configuration, context_messages},
+    context_policy::{ContextPolicy, PolicyContext, configured_request},
+    history::{HistoryRenderer, context_configuration},
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::{PromptSnapshot, scope_is_visible},
@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, BranchPhase, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
-    Timeline, TimelineIdentity,
+    PolicyFacts, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -549,10 +549,17 @@ impl ContextPreparation {
             .rendered_context(&self.timeline, through)
             .await
             .map_err(ContextOpError::Read)?;
-        let request =
-            configured_request(&context, &history).ok_or(ContextOpError::NotConfigured)?;
+        let request = configured_request(&PolicyContext::from_context(context.clone()), &history)
+            .ok_or(ContextOpError::NotConfigured)?;
+        let facts = PolicyFacts::from_context(&context, through);
         let view = policy
-            .view(request, context, history, Vec::new())
+            .view(
+                request,
+                PolicyContext::from_context(context),
+                history,
+                facts,
+                Vec::new(),
+            )
             .map_err(ContextOpError::Model)?;
         let model = policy
             .resolver
@@ -605,18 +612,28 @@ impl ContextPreparation {
         validate_capability_snapshot(&request)?;
         *self.prepared.lock().unwrap() =
             Some((source.turn_id.clone(), source.through, request.clone()));
-        let (context, history) = self
+        let streamed = self
             .history
-            .rendered_context(&self.timeline, source.through)
+            .rendered_stream(&self.timeline, source.through, 256)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
+        let (context, history) = if streamed.fallback {
+            let (context, history) = self
+                .history
+                .rendered_context(&self.timeline, source.through)
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            (PolicyContext::from_context(context), history)
+        } else {
+            (PolicyContext::from_stream(&streamed), streamed.history)
+        };
         crate::context_policy::check_cancel(&cancel)?;
-        let prefix = context_messages(&context, &history);
+        let prefix = context.messages(&history);
         if request.messages.len() < prefix.len()
             || !prefix
                 .iter()
                 .zip(&request.messages)
-                .all(|(entry, message)| entry == message.as_ref())
+                .all(|(entry, message)| entry.as_ref() == message.as_ref())
         {
             return Err(HostError::failed(
                 "Context preparation must preserve the timeline history prefix; additional messages may be appended.",
@@ -640,8 +657,15 @@ impl ContextPreparation {
         };
         match &self.policy {
             Some(policy) => {
+                let facts = self
+                    .timeline
+                    .policy_facts(source.through, &source.turn_id)
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
                 policy
-                    .prepare(request, &source, context, history, cancel, &cancelled)
+                    .prepare(
+                        request, &source, context, history, facts, cancel, &cancelled,
+                    )
                     .await
             }
             None => Ok(request),
