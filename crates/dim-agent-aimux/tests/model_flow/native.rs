@@ -1514,10 +1514,13 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 assert_eq!(headers.get_all(header).iter().count(),1);
                 assert_eq!(headers.get_all("content-type").iter().count(),1,"{kind}");
                 assert!(!request.to_string().contains("native-secret"));
+                if kind != "anthropic" {
+                    assert!(!request.to_string().contains("cache_control"), "{kind}: {request}");
+                }
             }
             let first = &requests[0].2;
             match kind {
-                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE}})),
+                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE},"cache_control":{"type":"ephemeral"}})),
                 "gemini" => assert_eq!(*first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).find(|part|part.get("inlineData").is_some()).unwrap(),json!({"inlineData":{"mimeType":"image/png","data":IMAGE}})),
                 "openai-responses" => assert_eq!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")})),
                 _ => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}})),
@@ -1624,6 +1627,198 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
             server.close().await;
         }
     }).await.unwrap();
+}
+
+struct SystemCacheBreaks {
+    breaks: usize,
+    timeline: rutis::host::Key<Timeline>,
+}
+impl rutis::host::DynPlugin for SystemCacheBreaks {
+    fn name(&self) -> &str {
+        "test.system-cache-breaks"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let breaks = self.breaks;
+            timeline.before(ctx, self.name(), &["model/call"], move |mut event| {
+                let EventKind::ModelCall(call) = &mut event.kind else {
+                    unreachable!()
+                };
+                let request = Arc::make_mut(&mut call.request);
+                request.system = Some(Arc::new(SystemPrompt::Parts(
+                    (0..breaks)
+                        .map(|index| SystemPromptPart::Text {
+                            text: format!("system part {index}"),
+                            cache_control: Some(CacheControl::Ephemeral),
+                        })
+                        .collect(),
+                )));
+                Ok(event)
+            })?;
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_requests_mark_the_system_and_the_conversation_tail_for_cache() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let server = NativeServer::start("anthropic").await;
+        let agent = model_agent(server.models(), None).await;
+        let session = agent.create_session(server.session_config()).await.unwrap();
+        session
+            .submit("tool".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        session
+            .submit("text".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let requests = server.endpoint.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        let breakpoint = json!({"type": "ephemeral"});
+        for (_, _, request) in &requests {
+            let system = request["system"].as_array().unwrap();
+            assert_eq!(system.last().unwrap()["cache_control"], breakpoint);
+            assert_eq!(
+                request.to_string().matches("\"cache_control\"").count(),
+                2,
+                "{request}"
+            );
+            for tool in request["tools"].as_array().unwrap() {
+                assert!(tool.get("cache_control").is_none(), "{tool}");
+            }
+            let last = request["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(
+                last["content"].as_array().unwrap().last().unwrap()["cache_control"],
+                breakpoint,
+                "{last}"
+            );
+        }
+        let first = requests[0].2["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(first["role"], "user");
+        assert_eq!(first["content"][0]["type"], "text");
+        let second = requests[1].2["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(second["role"], "user");
+        assert_eq!(second["content"][0]["type"], "tool_result");
+        let third = requests[2].2["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(third["role"], "user");
+        assert_eq!(third["content"][0]["type"], "text");
+        for request in &requests {
+            assert_eq!(request.2["system"], requests[0].2["system"]);
+        }
+        agent.close().await.unwrap();
+        server.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_system_breakpoints_stay_within_the_four_breakpoint_limit() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for breaks in [2usize, 4, 5] {
+            let emitted = breaks.min(4);
+            let message_mark = usize::from(breaks < 4);
+            let server = NativeServer::start("anthropic").await;
+            let models = server.models();
+            let mut builder = builder(models.clone(), Arc::new(MockTools));
+            builder.require_feature(Feature::new("test.system-cache-breaks").branch(
+                "test.system-cache-breaks",
+                move |names| {
+                    Ok(Box::new(SystemCacheBreaks {
+                        breaks,
+                        timeline: names.key()?,
+                    }))
+                },
+            ));
+            let agent = model_agent(models, Some(builder)).await;
+            let session = agent.create_session(server.session_config()).await.unwrap();
+            session
+                .submit("tool".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+            let events = session.history("main", None).await.unwrap();
+            let last = &events.last().unwrap().kind;
+            if breaks < 5 {
+                assert!(
+                    matches!(
+                        last,
+                        EventKind::TurnEnd(TurnEndData {
+                            outcome: TurnOutcome::Completed { .. },
+                            ..
+                        })
+                    ),
+                    "breaks {breaks}: {events:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        last,
+                        EventKind::TurnEnd(TurnEndData {
+                            outcome: TurnOutcome::Failed { error, .. },
+                            ..
+                        }) if error.contains("cacheControl breakpoint limit")
+                    ),
+                    "breaks {breaks}: the dropped mark is reported as unsupported: {events:?}"
+                );
+            }
+            let requests = server.endpoint.requests.lock().unwrap().clone();
+            assert!(!requests.is_empty(), "breaks {breaks}");
+            for (_, _, request) in &requests {
+                let system = request["system"].as_array().unwrap();
+                assert_eq!(system.len(), breaks, "breaks {breaks}: {request}");
+                for (index, part) in system.iter().enumerate() {
+                    if index < emitted {
+                        assert_eq!(
+                            part["cache_control"],
+                            json!({"type": "ephemeral"}),
+                            "breaks {breaks}: {request}"
+                        );
+                    } else {
+                        assert!(
+                            part.get("cache_control").is_none(),
+                            "breaks {breaks}: {request}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    request.to_string().matches("\"cache_control\"").count(),
+                    emitted + message_mark,
+                    "breaks {breaks}: {request}"
+                );
+            }
+            agent.close().await.unwrap();
+            server.close().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 struct ErrorEcho;

@@ -34,6 +34,15 @@ const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as t
 /// Names the tool call an image came from, before that image.
 const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
+/// Anthropic's limit on cache breakpoints in one request.
+const ANTHROPIC_CACHE_BREAKPOINTS: usize = 4;
+
+/// The breakpoint this port marks on the System and the conversation tail: the
+/// API's five-minute lifetime, refreshed on each use.
+fn cache_breakpoint() -> Value {
+    json!({"anthropic": {"cacheControl": {"type": "ephemeral"}}})
+}
+
 pub(crate) fn convert(
     request: &ModelRequest,
     kind: &ProviderKind,
@@ -41,11 +50,34 @@ pub(crate) fn convert(
 ) -> Result<PreparedRequest, HostError> {
     let mut tool_names = ToolNames::default();
     let mut prompt = Vec::new();
+    let mut cache_breakpoints = 0;
     match request.system.as_deref() {
         Some(SystemPrompt::Text(text)) => {
-            prompt.push(message(AimuxRole::System, vec![ContentPart::text(text)]))
+            let provider_options = (*kind == ProviderKind::Anthropic).then(cache_breakpoint);
+            cache_breakpoints = usize::from(provider_options.is_some());
+            prompt.push(message(
+                AimuxRole::System,
+                vec![ContentPart::Text {
+                    text: text.clone(),
+                    provider_options,
+                }],
+            ));
         }
         Some(SystemPrompt::Parts(parts)) => {
+            let explicit = parts
+                .iter()
+                .filter(|part| {
+                    matches!(
+                        part,
+                        SystemPromptPart::Text {
+                            cache_control: Some(_),
+                            ..
+                        }
+                    )
+                })
+                .count();
+            let implicit = *kind == ProviderKind::Anthropic && explicit == 0 && !parts.is_empty();
+            cache_breakpoints = explicit + usize::from(implicit);
             for (
                 index,
                 SystemPromptPart::Text {
@@ -61,10 +93,16 @@ pub(crate) fn convert(
                         "cache control is only supported by Anthropic",
                     ));
                 }
+                let provider_options = if let Some(control) = cache_control {
+                    Some(json!({"anthropic":{"cacheControl":control}}))
+                } else if implicit && index + 1 == parts.len() {
+                    Some(cache_breakpoint())
+                } else {
+                    None
+                };
                 let part = ContentPart::Text {
                     text: text.clone(),
-                    provider_options: cache_control
-                        .map(|control| json!({"anthropic":{"cacheControl":control}})),
+                    provider_options,
                 };
                 prompt.push(message(AimuxRole::System, vec![part]));
             }
@@ -209,6 +247,13 @@ pub(crate) fn convert(
     }
     if !following.is_empty() {
         prompt.push(message(AimuxRole::User, following));
+    }
+    if *kind == ProviderKind::Anthropic
+        && cache_breakpoints < ANTHROPIC_CACHE_BREAKPOINTS
+        && let Some(last) = prompt.last_mut()
+        && matches!(last.role, AimuxRole::User | AimuxRole::Tool)
+    {
+        last.provider_options = Some(cache_breakpoint());
     }
 
     let mut options = CallOptions {

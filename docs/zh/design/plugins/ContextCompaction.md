@@ -699,7 +699,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 摘要工作量 | 每次压缩至多 `chunkCount + 8` 个请求，每个在发出时计数，重新规划的两遍合计；`modelCallCount` 和 `durationMs` 报告它们，`modelUsage` 累加它们的用量（§5.2、§4.3） |
 | 摘要实质性 | 非空在每条回复上强制，所以提交的摘要从不为空；各部分在 [#429 的产品策略](../../../design/compaction-quality.md#77-model-facing-prompts-429) 声明它们时一并加入检查（§5.2） |
 
-待定：F1 之外的 #128 后续工作（复用对话前缀的摘要请求、Anthropic 缓存断点、把提供方报告的溢出映射到恢复）。
+待定：F1 之外的 #128 后续工作（复用对话前缀的摘要请求、把提供方报告的溢出映射到恢复）。请求的缓存断点是端口自己的规则，不是待办（[dim-agent-aimux README](../../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)）。
 
 ## 11. 验收（流程测试）
 
@@ -778,7 +778,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 摘要请求的推理 | `off`。`summary_request` 复制 `input.request.config` 并设置 `maxTokens = output_tokens`；策略随后把这份副本映射为模型的关闭声明（§13.2），模型与协议没有该声明时保持 `inherit`（[summary_strategy.rs](../../../../crates/dim-agent-capabilities/src/summary_strategy.rs)） | §13.4 的规则在跑过的推理类别上：`off` 在 `F`、`X`、`V` 与失败数上都不劣，延迟与花费低于 `inherit`。思考与摘要正文共用 `max_tokens`，且不是每个模型都能控制思考长度，所以在每个模型上都花调用与延迟；在测过的类别上，评估没有发现它换来质量 |
 | 目标长度 | 不加指令。固定的 `SYSTEM` 提示只说“简洁”，不写长度 | §13.3：Phase 2 每个臂都通过，且不加指令臂的截断与失败数不高于任何目标臂，所以写明长度只是加一条证据不支持的约束 |
 
-不在范围内：单独的摘要模型（§10）、摘要请求复用前缀与缓存断点（#128 的后续）、以及对分块、截断规则、保留量或触发点的任何改动。
+不在范围内：单独的摘要模型（§10）、摘要请求复用前缀（#128 的后续）、以及对分块、截断规则、保留量或触发点的任何改动。
 
 ### 13.2 `summaryReasoning`
 

@@ -271,6 +271,9 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
         let requests = server.endpoint.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert!(!request.to_string().contains("cache_control"), "{request}");
+        }
         assert_eq!(requests[0]["model"], "test-model");
         assert_eq!(requests[0]["temperature"].as_f64(), Some(0.));
         let system = requests[0]["messages"][0]["content"]
