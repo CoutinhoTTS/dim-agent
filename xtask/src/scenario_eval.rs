@@ -3972,7 +3972,13 @@ mod tests {
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
-            assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
+            // A steer taken inside the first turn joins it and starts no turn
+            // of its own; one taken after the turn ends starts the second
+            // turn. The scenario format's trigger is a tool call and this run
+            // makes none, so the steer stays on the wall clock and either
+            // shape may come out.
+            let turns = record["turns"].as_u64().unwrap_or_default();
+            assert!((1..=2).contains(&turns), "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         let current = fixture.arm("current");
