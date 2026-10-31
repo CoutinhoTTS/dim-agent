@@ -5,8 +5,9 @@ The Permission plugin registers two branch parts: Permission, which decides each
 ## Permission
 
 Owner: [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs).
-Evaluates tool risk, workspace write targets, explicit allow/deny policy and the user's command rules,
-and exposes versioned branch-local permission state.
+Evaluates tool risk, workspace write targets, explicit allow/deny policy, the
+user's command rules and the Session's file grants, and exposes versioned
+branch-local permission state.
 
 `PermissionState` is serializable for read-only generated host exports. Agents'
 `sessionPermissions.permission` reads this same dispatched state through the
@@ -21,6 +22,10 @@ cache or event.
 | `S:CommandRulesHost` | Read the user's command rules when deciding a command call. |
 | `B:Dispatcher` | Replay local policies, apply committed policy changes and settle update waiters. |
 | `B:Timeline` | Write changes and read ancestor policies. |
+
+`S:SessionGrantsHost` is read optionally at each `Ask`; a composition without
+the App Server `SessionGrants` part reads no grants. It is not an injected
+dependency, so its absence does not gate the part.
 
 ### Events and lifetime
 
@@ -65,31 +70,45 @@ outside the async executor. Read the dispatched policy after this I/O so a polic
 change while it waits takes effect. Approval rechecks the path and policy before
 an approved call starts, using its existing call-specific request and response.
 
-There is no remembered path grant, output-directory exemption, new permission
-preset, event or persistence field. Reads stay path-independent, including
-Session attachments and command output. Host-generated output and configured
-commands retain their own execution contracts under ADR 003. This is tool
-admission, not an OS filesystem sandbox against concurrent filesystem mutation.
+### Session grants
+
+[ADR 012](../../../adr/012-session-grants.md) stores the user's
+"Allow for this session" answers in `session_grants`, owned by the App Server
+`SessionGrants` part. Permission applies them only after its own decision is
+`Ask`: `Deny`, `read-only` writes and `disallowedTools` stay as decided. It
+resolves the call's target with the same canonical boundary as WorkspaceTools
+and matches the stored canonical path: a file grant matches the exact path, a
+directory grant matches by component, and a write requires a write grant. A
+read grant never authorizes a write. A grant read failure denies; a cancelled
+read propagates. No grant becomes a Timeline fact, preset or
+output-directory exemption. Reads stay path-independent under the current
+presets, including Session attachments and command output; ADR 014's outside
+read ask will use the same match. Host-generated output and configured commands
+retain their own execution contracts under ADR 003. This is tool admission, not
+an OS filesystem sandbox against concurrent filesystem mutation.
 
 The CLI uses its existing approval prompt, with the resolved outside target in
-the reason and no permanent-allow action for file tools:
+the reason and a Session-scoped grant action for file tools:
 
 ```text
 [approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
   path: /home/user/.zshrc
-Allow once or deny? [y/N] _
+› Allow once   Allow for this session   Reject   Full access
 ```
 
 ### Rule check
 
 - §1 and ADR 002 D1–D3: the existing branch Permission and Approval Capabilities
   own admission and approval facts. WorkspaceTools owns file execution; no
-  plugin, wiring part, lifecycle or isolation dependency is added.
+  plugin, wiring part, lifecycle or isolation dependency is added. The grant
+  store and `session.grants.*` belong to the App Server `SessionGrants` Session
+  part (ADR 012); Permission only reads them at an Ask.
 - §4 rules 1–6 and 9: existing approval requests/responses and tool results
   carry the decision and outcome; handlers retain their existing tasks,
   cancellation and cleanup. No new event or context input path is introduced.
-- §4 rule 7: Permission reads its declared Session configuration; WorkspaceTools
-  uses its existing HostPlatform dependency. The bound handler's `resolve_write`
+- §4 rule 7: Permission reads its declared Session configuration and command
+  rules, plus the optional grant service at an Ask; WorkspaceTools uses its
+  existing HostPlatform dependency. The bound handler's `resolve_write`
   prepares the actual call at its external path boundary before admission; it
   reads metadata and performs no file mutation or process execution.
 - ADR 002 D4–D5: policy state and public request/reply formats stay unchanged.
@@ -116,7 +135,13 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `allow_rules_answer_approval_only_for_simple_commands_within_the_preset`,
 `deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_time`,
 `unreadable_rules_deny_command_calls_only`,
-`a_policy_tightened_during_the_rules_read_decides_the_call`.
+`a_policy_tightened_during_the_rules_read_decides_the_call`,
+`a_composition_without_grants_builds_and_asks`,
+`a_session_grant_matches_only_the_canonical_target_and_mode`.
+
+[session_grants.rs](../../../../crates/dim-app-server/tests/transport_flow/session_grants.rs)
+covers the four `session.grants.*` methods and a write grant admitting the next
+outside write without an approval request.
 
 [local_product.rs](../../../../tests/integration/tests/local_product.rs) verifies
 real workspace writes, per-call external write/edit approvals despite explicit

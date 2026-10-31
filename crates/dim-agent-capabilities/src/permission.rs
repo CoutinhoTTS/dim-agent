@@ -2,10 +2,12 @@
 //! The policy is `SessionConfig.permission_policy` folded with this branch's
 //! dispatched `permission/changed` events. The user's command rules, read
 //! through the Session's `CommandRulesHost` on each decision, deny or approve
-//! commands of process-starting calls.
+//! commands of process-starting calls. The Session's grants, read through
+//! `SessionGrantsHost` when the policy asks, can turn only that Ask into an
+//! Allow.
 use crate::{
     host::{HostError, HostFuture},
-    session_grants::SessionGrantsHost,
+    session_grants::{SessionGrantsHost, resolve_grant_path},
     workspace_tools::files::canonical_prefix,
 };
 use dim_agent_runtime::{
@@ -14,7 +16,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
     CommandRuleDecision, EventKind, PermissionChangedData, PermissionPolicy, PermissionPreset,
-    grant::{GrantKind, GrantMode, SessionGrant},
+    grant::GrantMode,
 };
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
@@ -80,7 +82,8 @@ pub struct Permission {
     timeline: Arc<Timeline>,
     state: Arc<StateCell<PermissionState>>,
     rules: Arc<CommandRulesHost>,
-    grants: Arc<SessionGrantsHost>,
+    /// Absent compositions have no grant source; every Ask stays an Ask.
+    grants: Option<Arc<SessionGrantsHost>>,
     config: Arc<SessionConfig>,
     inner: Mutex<Inner>,
 }
@@ -125,17 +128,9 @@ impl Permission {
             },
             None => None,
         };
-        let grant_target = matches!(Risk::of(risk), Risk::Read | Risk::Write)
+        let grant_path = matches!(Risk::of(risk), Risk::Read | Risk::Write)
             .then(|| call.input.get("path").and_then(|path| path.as_str()))
-            .flatten()
-            .map(|path| {
-                let path = std::path::Path::new(path);
-                if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    PathBuf::from(&self.config.cwd).join(path)
-                }
-            });
+            .flatten();
         let policy = self.state.get().policy;
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
@@ -162,12 +157,15 @@ impl Permission {
                         .into(),
                 },
             };
-            return Ok(self
-                .apply_grant(decision, Risk::Write, grant_target.as_deref(), cancel)
-                .await);
+            return self
+                .apply_grant(decision, Risk::Write, grant_path, cancel)
+                .await;
         }
         let (Some(command), Some(rules)) = (command, rules) else {
-            return Ok(decide(&policy, name, risk));
+            let decision = decide(&policy, name, risk);
+            return self
+                .apply_grant(decision, Risk::of(risk), grant_path, cancel)
+                .await;
         };
         let rules = match rules {
             Ok(rules) => rules,
@@ -205,32 +203,56 @@ impl Permission {
             }
             decision => decision,
         };
-        Ok(self
-            .apply_grant(decision, Risk::of(risk), grant_target.as_deref(), cancel)
-            .await)
+        self.apply_grant(decision, Risk::of(risk), grant_path, cancel)
+            .await
     }
 
+    /// Applies a matching Session grant only to an Ask. The target is
+    /// resolved against the Session workspace to the same canonical path the
+    /// grant store holds. A grant read failure denies, as ADR 012 D2
+    /// requires; a cancelled read propagates.
     async fn apply_grant(
         &self,
         decision: Decision,
         risk: Risk,
-        target: Option<&std::path::Path>,
+        path: Option<&str>,
         cancel: &CancellationToken,
-    ) -> Decision {
-        let (Decision::Ask { .. }, Some(target)) = (&decision, target) else {
-            return decision;
+    ) -> Result<Decision, HostError> {
+        let (Decision::Ask { .. }, Some(path), Some(grants)) = (&decision, path, &self.grants)
+        else {
+            return Ok(decision);
         };
-        let Ok(grants) = self.grants.0.grants(cancel.clone()).await else {
-            return decision;
+        let cwd = PathBuf::from(&self.config.cwd);
+        let path = path.to_owned();
+        let target = tokio::task::spawn_blocking(move || resolve_grant_path(&cwd, &path));
+        let target = tokio::select! {
+            result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
+            _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
         };
-        if grants
-            .iter()
-            .any(|grant| grant_matches(grant, risk, target))
-        {
+        // An unresolvable target cannot match a canonical grant; the base
+        // decision (Ask or Deny) stands.
+        let Ok(target) = target else {
+            return Ok(decision);
+        };
+        let grants = match grants.0.grants(cancel.clone()).await {
+            Ok(grants) => grants,
+            Err(HostError::Cancelled(reason)) => return Err(HostError::Cancelled(reason)),
+            Err(error) => {
+                return Ok(Decision::Deny {
+                    reason: format!("Session grants could not be read: {error}"),
+                });
+            }
+        };
+        let mode = if risk == Risk::Write {
+            GrantMode::Write
+        } else {
+            GrantMode::Read
+        };
+        Ok(if grants.iter().any(|grant| grant.matches(&target, mode)) {
             Decision::Allow
         } else {
             decision
-        }
+        })
     }
     /// Writes `permission/changed` when `expected` is the last written
     /// version; returns the new version once it is dispatched.
@@ -356,16 +378,6 @@ fn matches(rule: &CommandRule, command: &str) -> bool {
 }
 
 /// `allowedTools`, then the preset by risk; `disallowedTools` comes first.
-fn grant_matches(grant: &SessionGrant, risk: Risk, target: &std::path::Path) -> bool {
-    if risk == Risk::Write && grant.mode != GrantMode::Write {
-        return false;
-    }
-    match grant.kind {
-        GrantKind::File => target == grant.path,
-        GrantKind::Dir => target.starts_with(&grant.path),
-    }
-}
-
 fn decide(policy: &PermissionPolicy, name: &str, risk: Option<&str>) -> Decision {
     if policy.allowed_tools.iter().any(|item| item == name) {
         return Decision::Allow;
@@ -430,7 +442,6 @@ impl DynPlugin for PermissionPlugin {
         vec![
             self.config.erase(),
             self.rules.erase(),
-            self.grants.erase(),
             self.timeline.erase(),
             self.dispatcher.erase(),
         ]
@@ -439,7 +450,9 @@ impl DynPlugin for PermissionPlugin {
         Box::pin(async move {
             let config = ctx.require_at(&self.config)?;
             let rules = ctx.require_at(&self.rules)?;
-            let grants = ctx.require_at(&self.grants)?;
+            // A composition without a grants part has no stored grants; its
+            // Ask decisions stay asks.
+            let grants = ctx.get_at(&self.grants);
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let service = Arc::new(Permission {

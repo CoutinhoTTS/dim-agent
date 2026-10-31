@@ -3,7 +3,10 @@ use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
     TimelineStore, TimelineTrace, TraceStep, testing::MinimalHost,
 };
-use dim_agent_types::*;
+use dim_agent_types::{
+    grant::{GrantKind, GrantMode, SessionGrant},
+    *,
+};
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
@@ -195,13 +198,15 @@ const BUSINESS_TABLES: &[&str] = &[
     "timeline_snapshots",
     "session_files",
     "session_file_owners",
+    "session_grants",
     "session_metadata",
     "session_catalog",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's; v17, v18,
-/// v19 through v22 and v24 add none.
+/// The business tables each upgrade step adds: v15's, then v16's and v28's;
+/// v17, v18, v19 through v22 and v24 add none; v27 only alters columns.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
+const V28_TABLES: [&str; 1] = ["session_grants"];
 /// Inserts the rows of `tables` from the complete record example in
 /// native-storage-format.md.
 fn insert_documented_records(connection: &Connection, tables: &[&str]) {
@@ -288,7 +293,6 @@ const V27_ADDITIONS: &[&str] = &[
 ];
 const V28_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_grants (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')), mode TEXT NOT NULL CHECK (mode IN ('read', 'write')), PRIMARY KEY (session_id, path))",
-    "CREATE INDEX session_grants_by_path ON session_grants(path)",
 ];
 const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
@@ -2760,6 +2764,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .filter(|_| from < 16)
         .chain(V15_TABLES.iter().filter(|_| from < 15))
         .chain(["session_catalog"].iter().filter(|_| from < 23))
+        .chain(V28_TABLES.iter().filter(|_| from < 28))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -5671,4 +5676,74 @@ async fn a_v27_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 27).await;
     let connection = Connection::open(&database.0).unwrap();
     assert!(rows(&connection, "session_grants").is_empty());
+}
+
+/// Grants upsert without downgrading write, survive a restart, are absent
+/// from a fork, and remove takes the same path it added.
+#[tokio::test]
+async fn session_grants_upsert_remove_survive_restart_and_are_not_forked() {
+    let database = Database::new();
+    let notes = PathBuf::from("/work/notes.md");
+    let directory = PathBuf::from("/work/notes");
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("s", &SessionConfig::default())
+        .await
+        .unwrap();
+    sessions
+        .add_grant("s", notes.clone(), GrantKind::File, GrantMode::Write)
+        .await
+        .unwrap();
+    sessions
+        .add_grant("s", notes.clone(), GrantKind::File, GrantMode::Read)
+        .await
+        .unwrap();
+    sessions
+        .add_grant("s", directory.clone(), GrantKind::Dir, GrantMode::Write)
+        .await
+        .unwrap();
+    assert_eq!(
+        sessions.grants("s").await.unwrap(),
+        vec![
+            SessionGrant {
+                path: directory,
+                kind: GrantKind::Dir,
+                mode: GrantMode::Write,
+            },
+            SessionGrant {
+                path: notes.clone(),
+                kind: GrantKind::File,
+                mode: GrantMode::Write,
+            },
+        ]
+    );
+
+    sessions.fork_session("s", "f", 0).await.unwrap();
+    assert!(sessions.grants("f").await.unwrap().is_empty());
+
+    drop(sessions);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = SqliteTimelineStore::new(db.clone());
+    assert_eq!(sessions.grants("s").await.unwrap().len(), 2);
+    sessions.remove_grant("s", notes.clone()).await.unwrap();
+    assert_eq!(
+        sessions.grants("s").await.unwrap(),
+        vec![SessionGrant {
+            path: PathBuf::from("/work/notes"),
+            kind: GrantKind::Dir,
+            mode: GrantMode::Write,
+        }]
+    );
+
+    drop(sessions);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }

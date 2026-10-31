@@ -92,14 +92,14 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `session_files.writer` | `TEXT` | 是 | 隐式 `NULL` | 写入未完成时是 SessionStore 代次 ID；提交或放弃后为 `NULL` |
 | `session_file_owners.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)` |
 | `session_file_owners.file_id` | `TEXT` | 否 | — | 联合主键第 2 列；外键到 `session_files(file_id)` |
+| `session_grants.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)`；随 Session 删除（v28） |
+| `session_grants.path` | `TEXT` | 否 | — | 联合主键第 2 列；规范绝对路径；文件 grant 精确匹配，目录 grant 按路径分量包含子项 |
+| `session_grants.kind` | `TEXT` | 否 | — | `CHECK (kind IN ('file', 'dir'))` |
+| `session_grants.mode` | `TEXT` | 否 | — | `CHECK (mode IN ('read', 'write'))`；write 同时允许读，read 不降级已有 write |
 | `session_metadata.session_id` | `TEXT` | 否 | — | 主键；外键到 `agent_sessions(session_id)`；每个 Session 至多一行，没有行表示修订号 0、没有标题（v16） |
 | `session_metadata.revision` | `INTEGER` | 否 | — | `CHECK(revision > 0)`；该 Session 已提交 `setTitle` 的次数，`setTitle` 的 CAS 修订号 |
 | `session_metadata.title` | `TEXT` | 是 | 隐式 `NULL` | 标题文本，原样保存；清除后为 `NULL`，行保留 |
 | `session_metadata.title_source` | `TEXT` | 是 | 隐式 `NULL` | `CHECK(title_source IN ('auto', 'manual'))`；表级 `CHECK((title IS NULL) = (title_source IS NULL))` |
-| `session_grants.session_id` | `TEXT` | No | — | Composite primary key; foreign key to `agent_sessions(session_id)` |
-| `session_grants.path` | `TEXT` | No | — | Composite primary key; canonical absolute path |
-| `session_grants.kind` | `TEXT` | No | — | `CHECK(kind IN ('file', 'dir'))` |
-| `session_grants.mode` | `TEXT` | No | — | `CHECK(mode IN ('read', 'write'))` |
 
 v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、before 轨迹和检查点位置都是 JSON 内关系，必须在存储读取边界校验。`timeline_content` 的地址是小写十六进制 `SHA-256(kind + NUL + body)`，其中 `body` 是写入的原始 JSON 字符串字节；同一内容只在同一 Session 内共享。创建 Session、owner 和 `main` 分支是同一事务；写入轮把事件、首次出现的内容、由 `branch/create` 生成的分支目录及分支 head 放在同一事务，提交后才发布。
 
@@ -438,10 +438,10 @@ ProjectionCheckpoint = {
 
 [Session grants](../../adr/012-session-grants.md) 的原生存储格式为 **v28**，从 #593 的 v27 原地升级。v27 保留委派归属的两列和两个索引。
 
-- **新增结构**：`session_grants(session_id, path, kind, mode)` 和 `session_grants_by_path` 索引，列、主键、外键与约束见当前表定义；其他 SQL 结构和持久化 JSON 不变。
-- **升级**：空库创建 v28；精确匹配且标记相符的 v27 库在现有启动准入事务内创建空的 grants 表和索引，重建标记表并写入 28。更早的受支持格式先执行已有步骤，再执行本步。失败回滚；旧业务行及委派归属列原值不变，不从历史审批生成 grants。
+- **新增结构**：`session_grants(session_id, path, kind, mode)`，列、主键、外键与约束见当前表定义；其他 SQL 结构和持久化 JSON 不变。主键服务 Session 内的读取、upsert 和删除；`session.grants.lookup` 按 Session 读取后匹配，没有按路径的单列查询，因此不另建索引。
+- **升级**：空库创建 v28；精确匹配且标记相符的 v27 库在现有启动准入事务内创建空的 grants 表，重建标记表并写入 28。更早的受支持格式先执行已有步骤，再执行本步。失败回滚；旧业务行及委派归属列原值不变，不从历史审批生成 grants。
 - **单向**：v27 守护进程拒绝 v28 库；不降级。准入仍要求精确 SQL 结构及对应标记，不能将不同结构共用同一编号。
-- **验证**：`storage_flow.rs` 的 `a_v27_store_upgrades_in_place_once` 核对 v27 原地升级、业务行保持、grants 初始为空和再次打开不再升级；既有各格式升级测试核对完整升级链。
+- **验证**：`storage_flow.rs` 的 `a_v27_store_upgrades_in_place_once` 核对 v27 原地升级、业务行保持、grants 初始为空和再次打开不再升级；`documented_native_records_restore_with_legacy_snapshot_bypassed` 经完整记录示例的 grants 行核对重启后原样恢复；`a_delete_removes_the_sessions_grants` 核对删除事务同时清掉 grants；既有各格式升级测试核对完整升级链。
 
 ### #593 v27 格式决定
 
@@ -564,6 +564,7 @@ ProjectionCheckpoint = {
 | v23 `session_catalog_by_activity` | `(updated_at_ms DESC, session_id)` | 目录键集分页 |
 | v23 `session_catalog_with_preview` | `(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL` | 过滤无预览行的目录分页 |
 | v16 主键 `session_metadata` | `(session_id)` | `read`、`setTitle`、列表联结标题、删除与创建回滚按 Session 删除 |
+| v28 主键 `session_grants` | `(session_id, path)` | 一个 Session 的 grant 读取、add 的 upsert、remove 与 delete 按 Session 定点删除 |
 
 ## 分页查询
 
@@ -579,7 +580,7 @@ ProjectionCheckpoint = {
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v26；v27 未改动这些行）
+## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -592,7 +593,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 26}],
+  "agent_store_format": [{"version": 28}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
@@ -737,6 +738,7 @@ current manual title.
   }],
   "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
   "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],
+  "session_grants": [{"session_id": "s1", "path": "/work/notes.md", "kind": "file", "mode": "write"}],
   "session_metadata": [{"session_id": "s1", "revision": 2, "title": "Example conversation", "title_source": "manual"}]
 }
 ```

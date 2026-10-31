@@ -106,10 +106,6 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "CREATE TABLE session_grants (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')), mode TEXT NOT NULL CHECK (mode IN ('read', 'write')), PRIMARY KEY (session_id, path))",
     ),
     (
-        "session_grants_by_path",
-        "CREATE INDEX session_grants_by_path ON session_grants(path)",
-    ),
-    (
         "session_metadata",
         "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
     ),
@@ -180,7 +176,7 @@ const UPGRADES: [(u32, &[&str]); 14] = [
     (25, &[]),
     // #593: a delegation's owner and a member Session's leader.
     (26, &["agents_by_owner", "agent_sessions_by_leader"]),
-    (27, &["session_grants", "session_grants_by_path"]),
+    (27, &["session_grants"]),
 ];
 
 fn format_table(version: u32) -> String {

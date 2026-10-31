@@ -849,8 +849,9 @@ impl SessionStore {
             })
             .await
     }
-    /// Adds a canonical user grant for `session_id`. A write grant is not
-    /// downgraded by a later read grant; a read grant may become write.
+    /// Adds a canonical user grant for `session_id`. The caller resolves
+    /// `path`; a write grant is not downgraded by a later read grant, and a
+    /// read grant may become write.
     pub async fn add_grant(
         &self,
         session_id: &str,
@@ -858,11 +859,8 @@ impl SessionStore {
         kind: GrantKind,
         mode: GrantMode,
     ) -> Result<()> {
-        let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
-            AgentError::Storage(format!("grant path {}: {error}", path.display()))
-        })?;
         let id = session_id.to_owned();
-        let path = canonical.to_string_lossy().into_owned();
+        let path = path.to_string_lossy().into_owned();
         let kind = match kind {
             GrantKind::File => "file",
             GrantKind::Dir => "dir",
@@ -886,9 +884,11 @@ impl SessionStore {
             })
             .await
     }
-    pub async fn remove_grant(&self, session_id: &str, path: &str) -> Result<()> {
+    /// Removes the grant at the canonical `path`; the caller resolves it the
+    /// same way `add_grant` does.
+    pub async fn remove_grant(&self, session_id: &str, path: PathBuf) -> Result<()> {
         let id = session_id.to_owned();
-        let path = path.to_owned();
+        let path = path.to_string_lossy().into_owned();
         self.timeline
             .db
             .run(move |connection| {
@@ -1180,8 +1180,10 @@ impl SessionStore {
     /// `at` with the content rows its events reference and the snapshots
     /// anchored on them, a directory without events for every branch `main`
     /// created by then, and an owner row for every Session file the source
-    /// owns. Rows are copied as stored. A source whose delete committed first
-    /// is `Closed`. The runtime validates the copy when it builds the fork.
+    /// owns. Rows are copied as stored, except grants: a fork is a new
+    /// Session and does not inherit them. A source whose delete committed
+    /// first is `Closed`. The runtime validates the copy when it builds the
+    /// fork.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
         let (source, fork) = (source.to_owned(), fork.to_owned());
         self.timeline
@@ -1324,11 +1326,8 @@ impl SessionStore {
                 }
                 super::catalog::initialize_session_catalog(&tx, &fork)?;
                 files::share(&tx, &source, &fork).map_err(error)?;
-                tx.execute(
-                    "INSERT INTO session_grants (session_id, path, kind, mode) SELECT ?2, path, kind, mode FROM session_grants WHERE session_id=?1",
-                    params![source, fork],
-                )
-                .map_err(error)?;
+                // A fork is a new Session and does not inherit grants
+                // (ADR 012 D1).
                 tx.commit().map_err(error)
             })
             .await

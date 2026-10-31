@@ -441,19 +441,17 @@ impl PermissionPrompt {
         )
     }
 
+    /// The grant a prompt may offer. `read`, `write` and `edit` all name a
+    /// file, so the kind does not depend on the client's filesystem: the
+    /// daemon resolves the path against the Session workspace.
     fn grant_for(tool: &str, input: &Value) -> Option<crate::model::session::GrantRequest> {
         if !matches!(tool, "read" | "write" | "edit") {
             return None;
         }
         let path = input.get("path")?.as_str()?.to_owned();
-        let kind = if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
-            "dir"
-        } else {
-            "file"
-        };
         Some(crate::model::session::GrantRequest {
             path,
-            kind: kind.into(),
+            kind: "file".into(),
             mode: if tool == "read" { "read" } else { "write" }.into(),
         })
     }
