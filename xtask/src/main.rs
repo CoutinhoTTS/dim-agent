@@ -469,6 +469,8 @@ async fn context_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_active = allocation::live();
     let peak = allocation::peak();
     let rss_active = rss_kb();
+    let trim_active = unsafe { malloc_trim(0) };
+    let rss_active_trim = rss_kb();
     let tasks_active = tokio::runtime::Handle::current()
         .metrics()
         .num_alive_tasks();
@@ -647,6 +649,8 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_restored = allocation::live();
     let peak_restored = allocation::peak();
     let rss_restored = rss_kb();
+    let trim_restored = unsafe { malloc_trim(0) };
+    let rss_restored_trim = rss_kb();
     allocation::reset_peak_now();
     session
         .submit(
@@ -659,6 +663,8 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
     let live_active = allocation::live();
     let peak = allocation::peak();
     let rss_active = rss_kb();
+    let trim_active = unsafe { malloc_trim(0) };
+    let rss_active_trim = rss_kb();
     let tasks_active = tokio::runtime::Handle::current()
         .metrics()
         .num_alive_tasks();
@@ -695,6 +701,10 @@ async fn restore_replay() -> std::result::Result<(), Box<dyn std::error::Error>>
         "liveCloseImmediate": live_close_immediate,
         "liveSettled": live_settled,
         "liveAfterAgentClose": live_after_agent,
+        "trimRestored": trim_restored,
+        "rssRestoredTrim": rss_restored_trim,
+        "trimActive": trim_active,
+        "rssActiveTrim": rss_active_trim,
         "rssKb": {
             "baseline": rss_baseline,
             "agent": rss_agent,
