@@ -1210,8 +1210,14 @@ mod tests {
             "type": "input", "name": "message",
             "data": {"user": {"content": content}, "mode": "queue"},
         });
+        let applied = serde_json::json!({
+            "id": "applied", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied",
+            "data": {"input_id": "input"},
+        });
         let mut projection = crate::projection::Projection::default();
         projection.apply("main", &serde_json::from_value(input).unwrap());
+        projection.apply("main", &serde_json::from_value(applied).unwrap());
         let row = &projection.snapshot().rows[0];
         row.display.clone().unwrap_or_else(|| row.text.clone())
     }

@@ -85,6 +85,12 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
                     "session.event",
                     json!({"sessionId":"session","branchId":"main","event":{"id":"input-9","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"accepted first message"}]},"mode":"queue"}}}),
                 );
+                for (sequence, name) in [(10, "applied"), (11, "consumed")] {
+                    wire.notice(
+                        "session.event",
+                        json!({"sessionId":"session","branchId":"main","event":{"id":format!("input-{sequence}"),"sequence":sequence,"create_at":1,"type":"input","name":name,"data":{"input_id":"input-9"}}}),
+                    );
+                }
                 wire.no_context();
                 let mut line = String::new();
                 while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
