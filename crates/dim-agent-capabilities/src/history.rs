@@ -141,6 +141,56 @@ impl HistoryRenderer {
         Ok(snapshot)
     }
 
+    /// Builds the checkpoint for `retain_from` while streaming batches, so a
+    /// compaction snapshot does not need the full `ContextHistory`.
+    pub async fn stream_checkpoint(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+        retain_from: &str,
+        batch: u64,
+    ) -> dim_agent_runtime::Result<ProjectionCheckpoint> {
+        if !timeline.ancestors().is_empty() || batch == 0 {
+            return Err(AgentError::InvalidInput(
+                "streamed checkpoint needs a local branch".into(),
+            ));
+        }
+        let order = timeline.policy_order(through).await?;
+        let position = order
+            .events
+            .iter()
+            .find(|event| event.id == retain_from)
+            .ok_or_else(|| {
+                AgentError::InvalidInput("compaction cut is outside the branch".into())
+            })?;
+        let resume = dim_agent_types::TimelinePosition {
+            branch_id: position.branch_id.clone(),
+            sequence: position.sequence,
+        };
+        let mut state: Option<ProjectionCheckpointState> = None;
+        let mut start = 1;
+        while start <= through {
+            let end = (start + batch - 1).min(through);
+            let events = timeline.stored_local(start..=end).await?;
+            if let Some(index) = events.iter().position(|event| event.id == retain_from) {
+                let mut state = replay(&events[..index], state.as_ref())
+                    .map_err(|error| AgentError::fault("History", error))?
+                    .state;
+                state.retain_from = retain_from.to_owned();
+                return Ok(ProjectionCheckpoint { resume, state });
+            }
+            state = Some(
+                project_batch(&events, state.as_ref())
+                    .map_err(|error| AgentError::fault("History", error))?
+                    .state,
+            );
+            start = end + 1;
+        }
+        Err(AgentError::InvalidInput(
+            "compaction cut was not read".into(),
+        ))
+    }
+
     /// The context at `through` alone, for readers that inspect events instead
     /// of rendering them. A checkpoint is validated by rendering it once and
     /// discarding that render; without a checkpoint no render is made, and a
