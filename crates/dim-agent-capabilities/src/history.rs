@@ -460,15 +460,20 @@ pub fn project_batch(
                     .is_some_and(|index| *index >= cut)
             })
             .unwrap_or(projection.history.len());
-        checkpoint = projection.history.get(kept).and_then(|entry| {
-            let resume = order.get(entry.source.as_str()).copied()?;
+        checkpoint = (|| {
+            let resume_event = projection
+                .history
+                .get(kept)
+                .map(|entry| entry.source.clone())
+                .or_else(|| events.last().map(|event| event.id.clone()))?;
+            let resume = order.get(resume_event.as_str()).copied()?;
             let mut state = replay(events[..resume].as_ref(), initial).ok()?.state;
             state.retain_from = retain_from.clone();
             Some(StreamedState {
-                resume_event: entry.source.clone(),
+                resume_event,
                 state,
             })
-        });
+        })();
         projection.history.drain(..kept);
         projection.state.retain_from = retain_from.clone();
     }
