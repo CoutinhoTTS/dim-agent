@@ -436,7 +436,7 @@ stored entry does not mark it, and only a limit no source declares is deleted.
 A process owner that routes work by model capability cannot keep its own copy of
 Provider's availability rules. Provider owns one side-effect-free read of the
 models it would serve, with the identifiers and declared capabilities a routing
-decision needs. This read is a process service, not a management method: it is
+decision needs. This read is a process host port, not a management method: it is
 not on the `provider` namespace, is not served over RPC, and does not change
 `provider.catalog`.
 

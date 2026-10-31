@@ -323,7 +323,7 @@ Session 保留已采用的能力快照。模型变为未声明的 Session 仍可
 
 按模型能力路由工作的进程 owner 不能自留一份 Provider 可用性规则。Provider 只提供一次
 无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。这次读取是进程
-服务，不是管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
+host 端口，不是管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
 
 **合同（语言中立）。** 进程 host 端口，无实例键，由 Provider 提供：操作 `selectableModels`，
 异步，请求 `{}`，回复 `{models: ModelCapabilitySnapshot[]}`。元素就是既有
