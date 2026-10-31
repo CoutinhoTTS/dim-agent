@@ -162,7 +162,7 @@ flowchart LR
 | SessionTitle | Session | 由首条被采纳的用户输入生成标题；`session.rename` | P1 | TypeScript 优先 | [SessionTitle](plugins/SessionTitle.md) |
 | Goal | Session + 分支 | 目标状态由 `goal:objective` 与 `goal:status` 输入块折叠得出；续跑；`goal_update`；`session.goal.*` | P2 | TypeScript 优先 | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`、`web_fetch` | P2 | TypeScript 优先 | [Web](plugins/Web.md) |
-| Hooks | 进程 + Session + 分支 | 使用 Dim 自有配置的命令 Hook，文档形状与脚本协议兼容 Claude Code / Codex，挂在业务所有者上：Permission（工具前建议）、Approval（权限请求）、操作者输入入口（提示词检查）、分支输入（工具后、Stop、Session 启动） | M2 | Rust | [Hooks](plugins/Hooks.md)（草案） |
+| Hooks | 进程 + Session + 分支 | 使用 Dim 自有配置的命令 Hook，文档形状与脚本协议兼容 Claude Code / Codex，挂在业务所有者上：Permission（工具前建议）、Approval（权限请求）、操作者输入入口（提示词检查）、分支输入（工具后、Stop、Session 启动） | M1 | Rust | [Hooks](plugins/Hooks.md) |
 | Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果报告 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |

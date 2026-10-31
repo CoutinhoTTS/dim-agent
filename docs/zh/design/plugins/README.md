@@ -21,7 +21,7 @@
 | [Prompt](Prompt.md) | — | `guideEntries`：输入指南的框架、生效的条目及其组合 | `Prompt`：它发布的配置所采用的 System 携带按生效条目组合出的指南；宿主准备的请求承载同一份组合，由 Loop 放置 | #548 |
 | [PromptSources](PromptSources.md) | — | 具名来源、它们在出厂配置里的策略文字，以及状态与规则两条条目 | — | #548 |
 | [Recall](Recall.md) | — | `recall` 工具（把分支历史讲给模型：轮次、一轮、一件事的全文、检索） | — | M2；#129 |
-| [Hooks](Hooks.md) | App Server 中的 `HooksSettings`：来源 `hooks`（用户）与 `hooks-projects`，经 FileStorage 读取的项目文件 `.dimcode/hooks.json`，`hooks.*` 方法 | Hook 目录、执行器、向 `submitChecks` 登记供用户输入入口使用的提交检查（`UserPromptSubmit`） | 工具建议、权限请求、工具后（`PostToolUse`、`PostToolUseFailure`）、Stop 与 Session 启动 Hook | M2 |
+| [Hooks](Hooks.md) | App Server 中的 `HooksSettings`：来源 `hooks`（用户）、`hooks-projects` 与 `hooks-plugins`，经 FileStorage 读取的项目文件 `.dimcode/hooks.json`，`hooks.*` 方法与插件登记 | Hook 目录、执行器、向 `submitChecks` 登记供用户输入入口使用的提交检查（`UserPromptSubmit`） | 工具建议、权限请求、工具后（`PostToolUse`、`PostToolUseFailure`）、Stop 与 Session 启动 Hook | M1；#755 |
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
