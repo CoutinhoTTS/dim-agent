@@ -331,8 +331,11 @@ impl Connection {
                 "Connection request limit reached",
             ));
         }
-        let cancel = matches!(request.call, Call::Catalog(_) | Call::Summaries(_))
-            .then(|| self.closed.child_token());
+        let cancel = matches!(
+            request.call,
+            Call::Catalog(_) | Call::Summaries(_) | Call::List(_)
+        )
+        .then(|| self.closed.child_token());
         ids.insert(request.id.clone(), cancel);
         Ok(Inflight {
             connection: self.clone(),
@@ -768,12 +771,22 @@ impl Connection {
                         },
                     );
                 }
+                let cancel = self.ids.lock().expect("request identities")[&id]
+                    .clone()
+                    .expect("listing reads have cancellation");
                 let mut records = match rpc
                     .index
-                    .session_directory(filter.clone(), self.protocol_version())
+                    .session_directory(filter.clone(), self.protocol_version(), cancel)
                     .await
                 {
                     Ok(Some(records)) => records,
+                    Err(AgentError::Cancelled(_)) => {
+                        return Some(Err(RpcError::app(
+                            -32000,
+                            "cancelled",
+                            "Session listing cancelled",
+                        )));
+                    }
                     Err(error) => return Some(Err(RpcError::from(error))),
                     Ok(None) => match rpc
                         .index
@@ -1299,12 +1312,12 @@ impl Connection {
     async fn ui(&self, call: Call) -> Result<Reply, RpcError> {
         let ui = &self.hub.ui;
         Ok(match call {
-            Call::UiOpen(params) => Reply::UiOpened(ui.open(&self.hub, self, params).await?),
+            Call::UiOpen(params) => Reply::UiOpened(ui.open(self, params).await?),
             Call::UiClose(params) => {
                 ui.close(&self.hub, &params.ui_id, params.reason).await?;
                 Reply::empty()
             }
-            Call::UiAttach(params) => Reply::UiAttached(ui.attach(self, &params)?),
+            Call::UiAttach(params) => Reply::UiAttached(ui.attach(&self.hub, self, &params).await?),
             Call::UiStatus => Reply::UiStatus(ui.status(&self.hub)),
             Call::UiShutdown(params) => {
                 ui.shutdown(&self.hub, &params.ui_id, params.reason)?;

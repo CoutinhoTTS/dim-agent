@@ -1,8 +1,9 @@
 # 空闲 Session 卸载
 
 状态：已在 [#331](https://github.com/arcships/dim/pull/331) 实现。实现在原处修正了一处表述：检查轮次在准入闸门下再次确认的是 acquire
-计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了三种情况：临时 Agent 的一个 Session 关闭时，另一个已卸载；删除已卸载的
-Session，Agents 用一个进程事件告知 Collaboration；以及临时 Agent 的最后两个 Session 同时结束，这是已知限制。§2 末尾是实现的测量。
+计数，而不是 `uses`（§6.1 第 4 步）。实现还在 §7 补充了两种情况：被拥有 Agent 的一个 Session 关闭时，另一个已卸载；以及删除已卸载的
+Session，Agents 用一个进程事件告知 Collaboration。被拥有 Agent 的记录随其成员 Session 的行存在
+（[Collaboration §6](../plugins/Collaboration.md#6-委派的所有权与寿命)），因此关闭会保留它，删除最后一个成员时会删除它。§2 末尾是实现的测量。
 [#345](https://github.com/arcships/dim/issues/345) 让准入槽有界：标记持有其 Session 的槽，每一轮结束时移除不再需要的槽（§6.1、§6.4、D12）。路线图：Agents 负责线（[#126](https://github.com/arcships/dim/issues/126)），即
 [S2 §8.6](sessions-service.md#86-目标空闲卸载后续项) 的目标。它把 S3 的 Session 活动句柄
 （[#57](https://github.com/arcships/dim/issues/57)、[ShellInput A.5](../plugins/ShellInput.md#a5-对其他插件的改动)）
@@ -305,11 +306,10 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 | S 卸载期间的 `session.list`、`session.summaries` 或 Collaboration 的 `agent` 读取 | 先找到已装载的 S，随后 S 被释放 | 对已装载实例的读取因 S 被释放而失败，改读存储（D8）；调用不会失败，也不会漏掉 S | Agents、Rpc |
 | 已卸载成员的 Collaboration Team 状态 | 任意 | `idle`，与任何可用的 Session 一样 | Collaboration |
 | 对已卸载成员的 Collaboration 请求 | leader 的工具调用 | `lookup` 恢复成员；`SessionRestored` 让 Collaboration 重新观察它；关系保留 | Collaboration |
-| 临时 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：Collaboration 只在业务关闭或删除其最后一个 Session 后才关闭它 | Collaboration |
-| 临时 Agent 的一个 Session 关闭时，另一个已卸载 | 业务关闭 | Agent 保留：除已装载的 Session 外，Collaboration 还计入该 Agent 已卸载的 Session（即 Agents 报告的、已存储且在本进程中既未装载也未关闭的 Session）。leader 的下一个请求会恢复已卸载的成员，之后该成员自己的关闭才会关闭这个 Agent | Collaboration |
-| 删除已卸载 Session 的 `session.delete` / `sessions.delete` | 在闸门下删除；S 在本进程中既未装载也未关闭 | 没有关闭来结束 S，Collaboration 对它的观察也已随卸载结束。行删除、S 不再属于该 Agent 的已卸载 Session 之后，Agents 发出带 Agent id 和 Session id 的 `UnloadedSessionDeleted`，与恢复时发出 `SessionRestored` 相同。Collaboration 像结束已关闭的 Session 一样结束 S：移除 S 的关系；临时 Agent 若已没有任何 Session（无论已装载还是已卸载），随之关闭。已装载的 S 改由其关闭结束，因此不会重复执行 | Agents、Collaboration |
-| 已卸载 Session 的删除在 Agents 重载期间结束 | `sessions.delete` 跨重载执行到它自己的结果，而 Agents 重载会连带重载 Collaboration | Agents 在进程根上发出 `UnloadedSessionDeleted`，因此在下一代 Collaboration 订阅之后结束的删除仍会送达。在 Collaboration 重载期间结束的删除没有监听者，因此 Collaboration 在订阅之后、提供服务之前做一次核对：移除指向索引已不再知道的 Session 的关系，并关闭已没有任何 Session（无论已装载还是已卸载）的临时 Agent。事件和核对都覆盖到的 Session 只结束一次，第二次不改变任何东西 | Agents、Collaboration |
-| 临时 Agent 的最后两个 Session 同时结束，其中一个经 `session.close` | 并发结束 | 已知限制：该 Agent 可能在没有 Session 的情况下一直保留到进程退出。`session.close` 在关闭返回后才把 Session 的槽位标为已关闭，在此之前另一个结束可能把这个 Session 算作已卸载，于是两个结束都发现对方仍在。`session.close` 返回后，其 Session 不再被计入；删除则在 Session 的结束处理运行前就关闭槽位 | Collaboration |
+| 被拥有 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：卸载保留 Session 的行，因此记录保留该 Agent，其实例也保持装载 | Agents |
+| 被拥有 Agent 的一个 Session 关闭时，另一个已卸载 | 业务关闭 | Agent 保留：关闭的成员保留其行，因此记录保留该 Agent。leader 的下一个请求会恢复已卸载的成员 | Agents、Collaboration |
+| 删除已卸载 Session 的 `session.delete` / `sessions.delete` | 在闸门下删除；S 在本进程中既未装载也未关闭 | Agents 删除 S 的行并发出带 Agent id 和 Session id 的 `UnloadedSessionDeleted`，与恢复时发出 `SessionRestored` 相同。删除 S 的最后一个成员 Session 时还会关闭该 Agent 并删除其记录。Collaboration 在观察到事件时移除 S 的关系；没有成员的被拥有 Agent 在启动时清理 | Agents、Collaboration |
+| 已卸载 Session 的删除在 Agents 重载期间结束 | `sessions.delete` 跨重载执行到它自己的结果，而 Agents 重载会连带重载 Collaboration | Agents 在进程根上发出 `UnloadedSessionDeleted`，因此在下一代 Collaboration 订阅之后结束的删除仍会送达。在 Collaboration 重载期间结束的删除没有监听者，因此 Collaboration 在订阅之后、提供服务之前做一次核对：从存储的 leader 重建关系，行已消失的成员不再是成员 | Agents、Collaboration |
 | C4 leaf 观察者 | 任意 | 这些行在各自的 `closing` 结算时停止接纳工作，并随 Session 卸载；恢复后的 Session 的行重新监听 | C4 |
 | 卸载期间的 C6 通知 | 没有监听者 | 丢弃，与任何没有 attach 客户端的 Session 一样；之后 attach 的客户端经 `session.list` 读取当前状态（[C6](https://github.com/arcships/dim/pull/85)） | C6 |
 | 卸载前已受理的 S5b `setTitle` | 任意 | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
@@ -330,7 +330,7 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 | 卸载检查 | agents.rs | 有原生存储时由 `AgentsPlugin` 为本代索引启动；本代的清理停止它并等待其完成。其标记持有各自的槽，每一轮结束时移除可以移除的槽（§6.1、§6.4） |
 | 读取关闭标志 | agents.rs `session_directory`、`session_available` | 查找槽而不是创建槽（§6.4） |
 | 不取租约的读取 | agents.rs `session_directory`、`session_summary`、`read_page` | 已装载的 Session 在读取过程中被释放时，改读存储（D8） |
-| Agent 的已卸载 Session | agents.rs `unloaded_sessions` | 该 Agent 已存储、在本进程中既未装载也未关闭的 Session；Collaboration 在关闭临时 Agent 前会计入它们（§7） |
+| Agent 的已卸载 Session | agents.rs `unloaded_sessions` | 该 Agent 已存储、在本进程中既未装载也未关闭的 Session；由 Agents 报告，Collaboration 不再用它们结束被拥有 Agent（其记录随成员行，§7） |
 | 删除已卸载的 Session | agents.rs `delete`、`UnloadedSessionDeleted` | 一个既未装载也未关闭的 Session 的行删除后，把它的 Agent id 和 Session id 告知进程状态的所有者。它在进程根上发出，因为删除可能比它所在的索引代活得更久。Collaboration 像监听 `SessionRestored` 一样监听它，按关闭后的方式结束该 Session，并在装载时核对因重载而错过的删除（§7） |
 | `ServerConfig.idle_unload_after` | App Server `lib.rs` | 一个字段及其默认值，属于装配负责线（zerob13），与 S2 在那里加的一行相同 |
 

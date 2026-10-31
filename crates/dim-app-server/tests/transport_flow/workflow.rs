@@ -173,7 +173,7 @@ async fn report_restart(kill_runtime: bool) {
         kill_node(before["result"]["pid"].as_u64().unwrap()).await;
     }
     let name = if kill_runtime {
-        "SessionNodeRuntime"
+        "session-node"
     } else {
         "workflow"
     };
@@ -344,7 +344,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     } else {
         kill_node(before["result"]["pid"].as_u64().unwrap()).await;
         drop(release);
-        loader.restart("SessionNodeRuntime").await.unwrap();
+        loader.restart("session-node").await.unwrap();
     }
     ready(&mut client).await;
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1490,7 +1490,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             assert_ok(&probe);
             kill_node(probe["result"]["pid"].as_u64().unwrap()).await;
             drop(release);
-            loader.restart("SessionNodeRuntime").await.unwrap();
+            loader.restart("session-node").await.unwrap();
             ready(&mut client).await;
             let run = settled(&mut client, id).await;
             assert_eq!(run["state"], "interrupted", "{run}");
@@ -1948,15 +1948,14 @@ async fn native_retention(fault: &str) {
     assert_ok(&fork);
     let fork = fork["result"]["sessionId"].as_str().unwrap().to_owned();
 
-    loader
-        .set_overlay(
-            "retention-fixture",
-            Some(vec![
-                serde_json::from_value(json!({"id":"workflow","disabled":true})).unwrap(),
-            ]),
-        )
-        .await
-        .unwrap();
+    session_typescript::fixture_layer(
+        &loader,
+        "retention-fixture",
+        Some(vec![
+            serde_json::from_value(json!({"id":"workflow","disabled":true})).unwrap(),
+        ]),
+    )
+    .await;
     assert!(loader.get("workflow").unwrap().view.is_none());
     let runs: Vec<_> = (0..102)
         .map(|index| {
@@ -1987,7 +1986,7 @@ async fn native_retention(fault: &str) {
             .kind(),
         std::io::ErrorKind::PermissionDenied
     );
-    loader.set_overlay("retention-fixture", None).await.unwrap();
+    session_typescript::fixture_layer(&loader, "retention-fixture", None).await;
     ready(&mut client).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -2086,7 +2085,7 @@ async fn native_retention(fault: &str) {
             "failed atomic replacement retains the last ownership record"
         );
         kill_node(observed["result"]["pid"].as_u64().unwrap()).await;
-        loader.restart("SessionNodeRuntime").await.unwrap();
+        loader.restart("session-node").await.unwrap();
         ready(&mut client).await;
     } else if fault == "read" {
         let mode = std::fs::metadata(&path).unwrap().permissions();
