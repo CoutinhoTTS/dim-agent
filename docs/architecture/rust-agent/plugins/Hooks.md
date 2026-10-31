@@ -70,7 +70,11 @@ Its token is registered before the task starts, and the live
 `approval/respond` or `approval/cancelled` cancels it. A run that finds its
 token cancelled, before it starts or after the source read, starts no command.
 Before writing, the branch rechecks the consumed view: output whose triggering
-fact an interrupt or a newer operator input has overtaken is dropped.
+fact an interrupt or a newer *consumed* operator input has overtaken is
+dropped. An input counts as the operator's when it carries `user` content and
+its first block is not a `<dim-…>` source marker (session access A.1–A.2), and
+only its `input/consumed` counts, so a queued input or another source's input
+drops nothing.
 
 Commands run outside the branch's commit path and never take the commit lock.
 Each handler gets a timeout; the process tree is terminated when it expires,
@@ -146,6 +150,8 @@ that excerpt, and a handler whose document does not parse is reported by
 `a_permission_request_does_not_wait_for_a_running_post_tool_hook`,
 `notification_runs_on_an_approval_and_writes_nothing`,
 `hook_output_is_dropped_after_an_interrupt`,
+`a_queued_operator_input_does_not_drop_the_turns_post_tool_output`,
+`a_source_input_with_user_content_does_not_drop_the_output`,
 `an_async_handler_does_not_delay_the_turn_or_the_next_point`,
 `a_hook_sees_its_environment_and_no_plugin_root`,
 `a_project_source_runs_nothing_until_the_user_enables_it`,

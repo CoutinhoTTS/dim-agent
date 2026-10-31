@@ -153,6 +153,10 @@ impl ReadHookSources for Sources {
 struct Model {
     requests: Mutex<Vec<Arc<ModelRequest>>>,
     exhaust: bool,
+    /// Holds request number `hold_from` (1-based) until `release` fires, so
+    /// a turn stays open while the test acts.
+    hold_from: Mutex<Option<usize>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 impl ModelDriver for Model {
     fn invoke(
@@ -161,7 +165,30 @@ impl ModelDriver for Model {
         connection: ModelConnection,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
-        self.requests.lock().unwrap().push(request.clone());
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            requests.len()
+        };
+        if self
+            .hold_from
+            .lock()
+            .unwrap()
+            .is_some_and(|from| index >= from)
+        {
+            let receiver = self.release.lock().unwrap().take();
+            if let Some(receiver) = receiver {
+                return Box::pin(async move {
+                    tokio::select! {
+                        _ = receiver => {}
+                        _ = cancel.cancelled() => {}
+                    }
+                    dim_agent_capabilities::adapters::EchoModel
+                        .invoke(request, connection, cancel)
+                        .await
+                });
+            }
+        }
         if self.exhaust {
             return Box::pin(async {
                 Err(HostError::Failed {
@@ -185,6 +212,14 @@ impl ModelDriver for Model {
 impl Model {
     fn requests(&self) -> Vec<Arc<ModelRequest>> {
         self.requests.lock().unwrap().clone()
+    }
+    /// Holds request `index` (1-based) and later ones until the returned
+    /// sender fires, and returns that sender.
+    fn hold(&self, index: usize) -> tokio::sync::oneshot::Sender<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        *self.hold_from.lock().unwrap() = Some(index);
+        *self.release.lock().unwrap() = Some(receiver);
+        sender
     }
 }
 
@@ -355,6 +390,17 @@ async fn hook_blocks(session: &Session, kind: &str) -> Vec<String> {
 }
 
 /// Waits for a hook block of `kind` to be written.
+/// Waits for the command's marker file.
+async fn wait_file(path: &Path, message: &str) {
+    for _ in 0..500 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{message}");
+}
+
 async fn wait_blocks(session: &Session, kind: &str, count: usize) -> Vec<String> {
     for _ in 0..500 {
         let found = hook_blocks(session, kind).await;
@@ -1277,6 +1323,119 @@ async fn hook_output_is_dropped_after_an_interrupt() {
         hook_blocks(&session, "post-tool").await.is_empty(),
         "an interrupt drops the output"
     );
+    env.close().await;
+}
+
+/// §3.4 drops an output only for operator input the branch *consumed*. An
+/// input queued during a turn is not consumed until the turn ends, so a slow
+/// `PostToolUse` hook still writes its context. The model holds the turn's
+/// second request, so the turn cannot end while the test acts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_operator_input_does_not_drop_the_turns_post_tool_output() {
+    let env = Env::new().await;
+    let (entered, gate, finished) = (
+        env.path("queued-entered"),
+        env.path("queued-gate"),
+        env.path("queued-finished"),
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"post-tool context\"}}}}'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let release = env.model.hold(2);
+    let session = env.session().await;
+    let note = env.path("work/note.txt");
+    std::fs::write(&note, "note\n").unwrap();
+    session
+        .submit(
+            format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&entered, "the PostToolUse hook did not start").await;
+    session
+        .submit("queued".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    std::fs::write(&gate, "").unwrap();
+    wait_file(&finished, "the PostToolUse hook did not end").await;
+    let blocks = wait_blocks(&session, "post-tool", 1).await;
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    let _ = release.send(());
+    session.idle("main").await.unwrap();
+    env.close().await;
+}
+
+/// §3.4: a source input is not the operator's, even when it carries `user`
+/// content. Every source input starts with its `<dim-…>` marker block
+/// (session access A.2), and such an input drops nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_source_input_with_user_content_does_not_drop_the_output() {
+    let env = Env::new().await;
+    let (entered, gate, finished) = (
+        env.path("source-entered"),
+        env.path("source-gate"),
+        env.path("source-finished"),
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"post-tool context\"}}}}'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let release = env.model.hold(2);
+    let session = env.session().await;
+    let note = env.path("work/note.txt");
+    std::fs::write(&note, "note\n").unwrap();
+    session
+        .submit(
+            format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&entered, "the PostToolUse hook did not start").await;
+    session
+        .input(
+            InputMessageData {
+                blocks: vec![InputBlock::Raw {
+                    text: "<dim-scheduler kind=\"wake\">\nsource note\n</dim-scheduler>".into(),
+                    key: None,
+                    retire: false,
+                }],
+                user: Some(UserInput {
+                    content: vec![ContentBlock::Text {
+                        text: "scheduler note".into(),
+                    }],
+                }),
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    std::fs::write(&gate, "").unwrap();
+    wait_file(&finished, "the PostToolUse hook did not end").await;
+    let blocks = wait_blocks(&session, "post-tool", 1).await;
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    let _ = release.send(());
+    session.idle("main").await.unwrap();
     env.close().await;
 }
 

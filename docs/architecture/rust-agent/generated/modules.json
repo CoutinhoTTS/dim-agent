@@ -527,6 +527,7 @@
       "file": "crates/dim-agent-capabilities/src/hooks/runner.rs",
       "unexpandedMacros": [
         "assert",
+        "assert_eq",
         "format",
         "serde_json::json",
         "vec"
@@ -8399,6 +8400,7 @@
         "path EventKind::ApprovalRespond",
         "path EventKind::ContextConfigured",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
         "path EventKind::ToolCall",
@@ -8508,6 +8510,13 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -8515,13 +8524,25 @@
         "path ApprovalRequestData",
         "path BranchSource::Host",
         "path EventKind",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputMessage",
         "path EventKind::ToolCall",
         "path EventKind::ToolResult",
+        "path InputConsumedData",
+        "path InputDeletedData",
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMode::Queue",
         "path ToolCallData",
         "path ToolResultData",
+        "path UserInput",
         "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::InputConsumedData",
+        "use dim_agent_types::InputDeletedData",
         "use dim_agent_types::ToolCallData",
-        "use dim_agent_types::ToolResultData"
+        "use dim_agent_types::ToolResultData",
+        "use dim_agent_types::UserInput"
       ]
     },
     {

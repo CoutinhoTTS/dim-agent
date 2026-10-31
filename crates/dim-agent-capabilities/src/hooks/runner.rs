@@ -25,7 +25,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     path::Path,
     sync::{Arc, Mutex},
@@ -592,8 +592,10 @@ struct View {
     last: u64,
     /// The last consumed `stop/interrupt`.
     interrupted: u64,
-    /// The last consumed input carrying the operator's own content.
+    /// The last consumed input that was the operator's own (§3.4).
     spoken: u64,
+    /// The ids of written operator inputs the branch has not consumed yet.
+    operator_inputs: HashSet<String>,
     /// Tool calls by `call_id`, from `step/tool-call`.
     calls: HashMap<String, (String, JsonObject, String)>,
     /// Tool aliases for matchers, from the adopted `context/configured`.
@@ -617,18 +619,27 @@ impl View {
                 self.interrupted = event.sequence;
             }
             EventKind::InputMessage(data) => {
-                if data.user.is_some() {
-                    self.spoken = event.sequence;
+                if operator_input(data) {
+                    self.operator_inputs.insert(event.id.clone());
                 }
                 if session_started(event) {
                     self.started = true;
                 }
             }
             EventKind::InputConsumed(data) => {
+                if self.operator_inputs.remove(&data.input_id) {
+                    self.spoken = event.sequence;
+                }
                 if self.follow_up_input.as_deref() == Some(data.input_id.as_str()) {
                     self.consuming = true;
                     self.follow_up_input = None;
                 }
+            }
+            EventKind::InputDeleted(data) => {
+                // A withdrawn input ends without being consumed: the queue
+                // writes input/deleted for an input it still holds
+                // (input_queue.rs). It must not stay an operator input.
+                self.operator_inputs.remove(&data.input_id);
             }
             EventKind::TurnStart(_) => {
                 self.started = true;
@@ -1121,6 +1132,18 @@ async fn approval_point(
     Some(runtime.run(&asking, &payload, cancel).await)
 }
 
+/// Whether `data` is the operator's own submission rather than a source
+/// input. Every source input starts with a `<dim-…>` marker block (session
+/// access A.1, A.2) and the operator's words arrive without one (the prompt
+/// guide); only the first block decides, and nothing reads its content.
+fn operator_input(data: &InputMessageData) -> bool {
+    data.user.is_some()
+        && !matches!(
+            data.blocks.first(),
+            Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-")
+        )
+}
+
 fn session_started(event: &AgentEvent) -> bool {
     let EventKind::InputMessage(data) = &event.kind else {
         return false;
@@ -1245,7 +1268,10 @@ mod tests {
         HookSourceId, HookSourceSnapshot, HookSourceState, HooksDocument, ReadHookSources,
     };
     use crate::host::HostFuture;
-    use dim_agent_types::{ApprovalCallData, ToolCall, ToolCallData, ToolResult, ToolResultData};
+    use dim_agent_types::{
+        ApprovalCallData, ContentBlock, InputConsumedData, InputDeletedData, ToolCall,
+        ToolCallData, ToolResult, ToolResultData, UserInput,
+    };
     use std::path::PathBuf;
 
     fn event(sequence: u64, kind: EventKind) -> AgentEvent {
@@ -1300,6 +1326,45 @@ mod tests {
             view.calls.is_empty(),
             "a settled call stayed in the folded view"
         );
+    }
+
+    /// §3.4 and AGENTS rule 4: a withdrawn operator input ends without being
+    /// consumed, so it leaves the set, and a later consumption of that id
+    /// does not move `spoken`.
+    #[test]
+    fn a_deleted_operator_input_is_forgotten() {
+        let input = event(
+            1,
+            EventKind::InputMessage(InputMessageData {
+                user: Some(UserInput {
+                    content: vec![ContentBlock::Text {
+                        text: "hello".into(),
+                    }],
+                }),
+                mode: Some(InputMode::Queue),
+                ..InputMessageData::default()
+            }),
+        );
+        let mut view = View::default();
+        view.fold(&input);
+        assert!(view.operator_inputs.contains(&input.id));
+        view.fold(&event(
+            2,
+            EventKind::InputDeleted(InputDeletedData {
+                input_id: input.id.clone(),
+            }),
+        ));
+        assert!(
+            view.operator_inputs.is_empty(),
+            "a deleted input stayed in the set"
+        );
+        view.fold(&event(
+            3,
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: input.id.clone(),
+            }),
+        ));
+        assert_eq!(view.spoken, 0, "a deleted input moved spoken");
     }
 
     /// F10: `fold` registers the run's token before its task starts, so the
