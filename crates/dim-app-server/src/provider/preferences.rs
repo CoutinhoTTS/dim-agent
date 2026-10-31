@@ -88,7 +88,9 @@ pub(super) fn restore_reasoning(
     let declared_options = declared.provider_options.as_ref();
     match protocol {
         ModelProtocol::Anthropic => {
-            let declared = declared_options.and_then(|options| options.anthropic.as_ref());
+            let declared = declared_options
+                .and_then(|options| options.anthropic.as_ref())
+                .filter(|value| value.effort.is_some() || value.thinking.is_some());
             if let Some(options) = options_for(config, declared, |options| &mut options.anthropic) {
                 restore(
                     &mut options.effort,
@@ -101,7 +103,13 @@ pub(super) fn restore_reasoning(
             }
         }
         ModelProtocol::OpenaiCompatible => {
-            let declared = declared_options.and_then(|options| options.openai_compatible.as_ref());
+            let declared = declared_options
+                .and_then(|options| options.openai_compatible.as_ref())
+                .filter(|value| {
+                    value.reasoning_effort.is_some()
+                        || value.thinking.is_some()
+                        || value.enable_thinking.is_some()
+                });
             if let Some(options) =
                 options_for(config, declared, |options| &mut options.openai_compatible)
             {
@@ -120,7 +128,9 @@ pub(super) fn restore_reasoning(
             }
         }
         ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => {
-            let declared = declared_options.and_then(|options| options.openai.as_ref());
+            let declared = declared_options
+                .and_then(|options| options.openai.as_ref())
+                .filter(|value| value.reasoning_effort.is_some());
             if let Some(options) = options_for(config, declared, |options| &mut options.openai) {
                 restore(
                     &mut options.reasoning_effort,
@@ -129,7 +139,9 @@ pub(super) fn restore_reasoning(
             }
         }
         ModelProtocol::Xai | ModelProtocol::XaiResponses => {
-            let declared = declared_options.and_then(|options| options.xai.as_ref());
+            let declared = declared_options
+                .and_then(|options| options.xai.as_ref())
+                .filter(|value| value.reasoning_effort.is_some());
             if let Some(options) = options_for(config, declared, |options| &mut options.xai) {
                 restore(
                     &mut options.reasoning_effort,
@@ -179,7 +191,9 @@ pub(super) fn restore_service_tier(
     let declared_options = declared.provider_options.as_ref();
     match protocol {
         ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => {
-            let declared = declared_options.and_then(|options| options.openai.as_ref());
+            let declared = declared_options
+                .and_then(|options| options.openai.as_ref())
+                .filter(|value| value.service_tier.is_some());
             if let Some(options) = options_for(config, declared, |options| &mut options.openai) {
                 restore(
                     &mut options.service_tier,
@@ -188,7 +202,9 @@ pub(super) fn restore_service_tier(
             }
         }
         ModelProtocol::OpenaiCompatible => {
-            let declared = declared_options.and_then(|options| options.openai_compatible.as_ref());
+            let declared = declared_options
+                .and_then(|options| options.openai_compatible.as_ref())
+                .filter(|value| value.service_tier.is_some());
             if let Some(options) =
                 options_for(config, declared, |options| &mut options.openai_compatible)
             {
@@ -199,5 +215,56 @@ pub(super) fn restore_service_tier(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A declared option group that carries no preference control must not
+    /// leave an empty group behind, or a no-op clear would look adopted.
+    #[test]
+    fn a_declared_group_without_controls_leaves_the_config_unchanged() {
+        let declared = ModelConfig {
+            provider_options: Some(ProviderOptions {
+                anthropic: Some(Default::default()),
+                openai_compatible: Some(Default::default()),
+                openai: Some(Default::default()),
+                xai: Some(Default::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for protocol in [
+            ModelProtocol::Anthropic,
+            ModelProtocol::OpenaiCompatible,
+            ModelProtocol::OpenaiChat,
+            ModelProtocol::OpenaiResponses,
+            ModelProtocol::Xai,
+            ModelProtocol::XaiResponses,
+        ] {
+            let mut config = ModelConfig::default();
+            restore_reasoning(&mut config, &declared, protocol);
+            restore_service_tier(&mut config, &declared, protocol);
+            assert_eq!(config, ModelConfig::default(), "{protocol:?}");
+        }
+    }
+
+    #[test]
+    fn a_declared_group_with_an_unrelated_field_does_not_create_one() {
+        let declared = ModelConfig {
+            provider_options: Some(ProviderOptions {
+                anthropic: Some(AnthropicProviderOptions {
+                    interleaved_thinking: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut config = ModelConfig::default();
+        restore_reasoning(&mut config, &declared, ModelProtocol::Anthropic);
+        assert_eq!(config, ModelConfig::default());
     }
 }
