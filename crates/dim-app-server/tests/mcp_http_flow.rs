@@ -154,6 +154,7 @@ struct Remote {
     deleting: Notify,
     release_delete: Notify,
     repeating: AtomicBool,
+    nullable: AtomicBool,
     events: broadcast::Sender<String>,
 }
 impl Remote {
@@ -168,6 +169,7 @@ impl Remote {
             deleting: Notify::new(),
             release_delete: Notify::new(),
             repeating: AtomicBool::new(false),
+            nullable: AtomicBool::new(false),
             events: broadcast::channel(16).0,
         })
     }
@@ -199,7 +201,13 @@ async fn rpc(
                     json!({"tools":[{"name":"slow","inputSchema":{"type":"object"}}]})
                 }
             } else {
-                json!({"tools":[{"name":"echo","description":"Echo arguments","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}}],"nextCursor":"next"})
+                let mut tools = vec![
+                    json!({"name":"echo","description":"Echo arguments","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}}),
+                ];
+                if remote.nullable.load(Ordering::SeqCst) {
+                    tools.push(json!({"name":"spaces","inputSchema":{"type":"object","properties":{"space_id":{"type":["string","null"]}}}}));
+                }
+                json!({"tools":tools,"nextCursor":"next"})
             }
         }
         "tools/call" => {
@@ -454,7 +462,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     remote.repeating.store(true, Ordering::SeqCst);
     assert!(matches!(
         connection.tools(&cancel).await,
-        Err(McpServerError::InvalidResponse)
+        Err(McpServerError::InvalidResponse(_))
     ));
     let cancelled = CancellationToken::new();
     let worker = {
@@ -607,6 +615,41 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     tokio::time::timeout(Duration::from_secs(5), rejected.close())
         .await
         .unwrap();
+    fixture.close().await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn http_plugin_accepts_a_type_array_and_stores_the_canonical_form() {
+    let remote = Remote::new();
+    remote.nullable.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/mcp", post(rpc).get(events).delete(delete))
+                .with_state(remote.clone()),
+        )
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future(),
+    );
+    let fixture = Fixture::new(&url, "fixture-only").await;
+    let cancel = CancellationToken::new();
+    let connection = fixture
+        .mcp
+        .server(None, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    let tools = connection.tools(&cancel).await.unwrap();
+    let spaces = tools.iter().find(|tool| tool.name == "spaces").unwrap();
+    assert_eq!(
+        serde_json::to_value(&spaces.input_schema).unwrap(),
+        json!({"type":"object","properties":{"space_id":{"anyOf":[{"type":"string"},{"type":"null"}]}}})
+    );
     fixture.close().await;
     stop.cancel();
     server.await.unwrap().unwrap();
