@@ -1979,6 +1979,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
             "status": "Ready"
@@ -1986,13 +1991,26 @@
         ],
         "resolved": [
           {
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "scope": null,
+            "provider": 1,
+            "generation": 0
+          },
+          {
             "service": "dim_agent_capabilities::file_storage::FileStorage",
             "scope": null,
             "provider": 4,
             "generation": 1
           }
         ],
-        "reads": []
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+            "provider": 1,
+            "declared": true,
+            "external": false
+          }
+        ]
       },
       {
         "id": 4,

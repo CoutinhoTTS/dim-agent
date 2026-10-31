@@ -312,7 +312,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Mouse (fullscreen)" => "鼠标（全屏）",
         "Permissions" => "权限",
         "Tool approvals" => "工具审批",
-        "Command isolation" => "命令隔离",
+        "Execution" => "执行",
         "Models" => "模型",
         "Model" => "模型",
         "not set" => "未设置",

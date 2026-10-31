@@ -44,6 +44,9 @@ async fn projected(session: &dim_agent_runtime::Session, branch: &str) -> Vec<Me
     let context = session.context(branch, through).await.unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
+        .into_iter()
+        .map(Arc::unwrap_or_clone)
+        .collect()
 }
 
 /// Asks the branch to compact and waits for that command's fact.

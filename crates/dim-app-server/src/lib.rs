@@ -7,9 +7,10 @@ pub mod collaboration;
 mod collaboration_model_policy;
 mod connection;
 mod control;
+mod exec_shell_settings;
+mod execution_settings;
 pub mod grok_oauth;
 pub mod hooks_settings;
-mod isolation_policy;
 mod managed_oauth;
 pub mod managed_provider;
 pub mod mcp;
@@ -507,6 +508,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
+    if let Some(index) = execution_root {
+        let legacy = config.file_roots[index].join("host-isolation.json");
+        if legacy.is_file() {
+            eprintln!(
+                "Ignoring {}: command isolation is a user setting in /settings > Execution; delete the file.",
+                legacy.display()
+            );
+        }
+    }
     // SessionStore keeps Session files next to the native database, below
     // the database directory as a FileStorage root (session-files §3.1).
     let session_files_root = match &config.database_path {
@@ -701,6 +711,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             builder.catalog(),
             move |names| Ok(Box::new(mcp::McpPlugin::new(names, home_root)?)),
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(execution_settings::ExecutionSettingsPlugin::new(
+                names,
+            )?))
+        })?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -709,15 +724,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
+                            execution: names.key()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                            isolation_file: Some((home_root, "host-isolation.json".into())),
                         },
                     )?,
                 ))
             },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(isolation_policy::IsolationPolicyPlugin::new(
+            Ok(Box::new(exec_shell_settings::ExecShellSettingsPlugin::new(
                 names,
             )?))
         })?);

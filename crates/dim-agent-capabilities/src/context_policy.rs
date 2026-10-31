@@ -1,11 +1,13 @@
 use crate::{
     history::{
-        HistoryEntry, HistoryRenderer, context_compaction, context_configuration, context_messages,
-        digest_message, retained_entry, truncate_middle, user_message,
+        HistoryEntry, HistoryRenderer, context_compaction, context_configuration, digest_message,
+        projection_checkpoint, truncate_middle, user_message,
     },
     host::*,
 };
-use dim_agent_runtime::{ContextHistory, Timeline};
+use dim_agent_runtime::{
+    ContextHistory, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow, Timeline,
+};
 use dim_agent_types::*;
 use std::{
     collections::HashMap,
@@ -62,14 +64,151 @@ pub(crate) struct CompactionStep {
 
 /// A request's context at a fixed boundary, projected under the compaction
 /// in effect for it.
+/// The context a policy preparation consumes. The full history is retained
+/// only for compaction snapshots; streamed preparations omit it.
+pub(crate) struct PolicyContext {
+    configuration: Option<ContextConfiguredData>,
+    compaction: Option<ContextCompactionData>,
+    order: Vec<PolicyOrderEvent>,
+    full: Option<ContextHistory>,
+    checkpoint: Option<ProjectionCheckpoint>,
+}
+
+impl PolicyContext {
+    pub fn from_context(context: ContextHistory) -> Self {
+        let configuration = context_configuration(&context);
+        let compaction = context_compaction(&context).cloned();
+        let order = context
+            .events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| PolicyOrderEvent {
+                id: event.id.clone(),
+                branch_id: context
+                    .positions
+                    .get(index)
+                    .map_or_else(String::new, |position| position.branch_id.clone()),
+                sequence: event.sequence,
+                turn_start: matches!(&event.kind, EventKind::TurnStart(_)),
+                compaction_start: match &event.kind {
+                    EventKind::ContextCompactionStart(data) => Some(data.through),
+                    _ => None,
+                },
+            })
+            .collect();
+        Self {
+            configuration,
+            compaction,
+            order,
+            full: Some(context),
+            checkpoint: None,
+        }
+    }
+
+    pub fn from_stream(streamed: &crate::history::StreamedContext) -> Self {
+        let compaction = streamed
+            .compaction
+            .as_ref()
+            .and_then(|event| match &event.kind {
+                EventKind::ContextCompaction(data) => Some(data.clone()),
+                _ => None,
+            });
+        Self {
+            configuration: streamed.configuration.clone(),
+            compaction,
+            order: streamed.order.clone(),
+            full: None,
+            checkpoint: streamed.checkpoint.clone(),
+        }
+    }
+
+    pub fn configuration(&self) -> Option<&ContextConfiguredData> {
+        self.configuration.as_ref()
+    }
+
+    pub fn compaction(&self) -> Option<&ContextCompactionData> {
+        self.compaction.as_ref()
+    }
+
+    pub fn messages_len(&self, history: &[HistoryEntry]) -> usize {
+        let mut len = history.len();
+        if let Some(ContextCompactionData {
+            outcome:
+                ContextCompactionResult::Completed {
+                    replacement,
+                    context_baseline,
+                    ..
+                },
+            ..
+        }) = self.compaction()
+        {
+            len += replacement.len() + context_baseline.len();
+        }
+        len
+    }
+
+    pub fn messages(&self, history: &[HistoryEntry]) -> Vec<Arc<Message>> {
+        let mut messages = Vec::with_capacity(self.messages_len(history));
+        if let Some(ContextCompactionData {
+            outcome:
+                ContextCompactionResult::Completed {
+                    replacement,
+                    context_baseline,
+                    ..
+                },
+            ..
+        }) = self.compaction()
+        {
+            messages.extend(replacement.iter().cloned().map(Arc::new));
+            messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));
+        }
+        messages.extend(history.iter().map(|entry| entry.message.clone()));
+        messages
+    }
+
+    pub fn retained_entry(&self, history: &[HistoryEntry], cut: &str) -> Result<usize, String> {
+        let cut = self
+            .order
+            .iter()
+            .position(|event| event.id == cut)
+            .ok_or_else(|| format!("Compaction cut {cut} is outside the policy order"))?;
+        Ok(history
+            .iter()
+            .position(|entry| {
+                self.order
+                    .iter()
+                    .position(|event| event.id == entry.source)
+                    .is_some_and(|index| index >= cut)
+            })
+            .unwrap_or(history.len()))
+    }
+
+    pub fn full(&self) -> Option<&ContextHistory> {
+        self.full.as_ref()
+    }
+
+    pub fn checkpoint(&self) -> Option<&ProjectionCheckpoint> {
+        self.checkpoint.as_ref()
+    }
+
+    pub fn sequence(&self, id: &str) -> Option<u64> {
+        self.order
+            .iter()
+            .find(|event| event.id == id)
+            .map(|event| event.sequence)
+    }
+}
+
 pub(crate) struct View {
     /// The request as built from the Timeline, with the history prefix.
     request: Arc<ModelRequest>,
     prefix_len: usize,
-    context: ContextHistory,
+    context: PolicyContext,
     /// The entries from the cut in effect on.
     history: Vec<HistoryEntry>,
-    /// The fixed context and the facts a retry may reuse.
+    /// The policy facts at the boundary.
+    facts: PolicyFacts,
+    /// The facts and the events a retry may reuse.
     events: Vec<Arc<AgentEvent>>,
     checkpoint: Option<CompactionCheckpoint>,
     /// `request` projected under `checkpoint`.
@@ -141,6 +280,7 @@ impl Pass<'_> {
     /// request.
     fn compose(
         &self,
+        window: &PolicyWindow,
         retain_from: String,
         strategy_messages: Vec<Message>,
     ) -> Result<Composed, &'static str> {
@@ -150,13 +290,7 @@ impl Pass<'_> {
             .iter()
             .find(|cut| cut.retain_from == retain_from)
             .ok_or_else(|| {
-                if self
-                    .view
-                    .context
-                    .events
-                    .iter()
-                    .any(|event| event.id == retain_from)
-                {
+                if window.events.iter().any(|event| event.id == retain_from) {
                     "Compaction cut separates a tool call from its results or context."
                 } else {
                     "Compaction cut is outside the fixed context history."
@@ -165,8 +299,8 @@ impl Pass<'_> {
         if !(cut.within_limit || (!within && (self.recovery || cut.entry < self.history.len()))) {
             return Err("Compaction cut lies inside the retained tail.");
         }
-        let pinned = pinned_inputs(self.view, self.turn, &retain_from, self.model);
-        let digest = digest_entries(self.view, &retain_from, self.model);
+        let pinned = pinned_inputs(self.view, Some(window), self.turn, &retain_from, self.model);
+        let digest = digest_entries(self.view, window, self.model);
         let message = digest
             .as_ref()
             .map(|digest| digest_message(&digest.entries, digest.dropped));
@@ -219,10 +353,10 @@ fn checkpoint(data: &ContextCompactionData) -> Option<CompactionCheckpoint> {
 /// adopted configuration and system with the projected messages. Tools are
 /// declared but not bound; nothing executes them.
 pub(crate) fn configured_request(
-    context: &ContextHistory,
+    context: &PolicyContext,
     history: &[HistoryEntry],
 ) -> Option<Arc<ModelRequest>> {
-    let data = context_configuration(context)?;
+    let data = context.configuration()?;
     Some(Arc::new(
         ModelSettings {
             provider_id: data.settings.provider_id.clone(),
@@ -233,7 +367,7 @@ pub(crate) fn configured_request(
             config: data.settings.config.clone(),
             metadata: data.settings.metadata.clone(),
         }
-        .request(context_messages(context, history)),
+        .request(context.messages(history)),
     ))
 }
 
@@ -264,14 +398,16 @@ impl ContextPolicy {
     pub fn view(
         &self,
         request: Arc<ModelRequest>,
-        context: ContextHistory,
+        context: PolicyContext,
         history: Vec<HistoryEntry>,
+        facts: PolicyFacts,
         reusable: Vec<Arc<AgentEvent>>,
     ) -> Result<View, HostError> {
-        let prefix_len = context_messages(&context, &history).len();
+        let prefix_len = context.messages_len(&history);
         let reused = reusable.iter().rev().find_map(|event| match &event.kind {
             EventKind::ContextCompaction(data) => checkpoint(data).and_then(|checkpoint| {
-                retained_entry(&context, &history, &checkpoint.retain_from)
+                context
+                    .retained_entry(&history, &checkpoint.retain_from)
                     .ok()
                     .map(|kept| (checkpoint, kept))
             }),
@@ -291,46 +427,51 @@ impl ContextPolicy {
             }
             None => (
                 history,
-                context_compaction(&context).and_then(checkpoint),
+                context.compaction().and_then(checkpoint),
                 request.clone(),
             ),
         };
-        let mut events = context.events.clone();
+        let mut events = facts.events.clone();
         events.extend(reusable);
         Ok(View {
             request,
             prefix_len,
             context,
             history,
+            facts,
             events,
             checkpoint,
             prepared,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare(
         &self,
         request: Arc<ModelRequest>,
         source: &ContextPrepareData,
-        context: ContextHistory,
+        context: PolicyContext,
         history: Vec<HistoryEntry>,
+        facts: PolicyFacts,
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<Arc<ModelRequest>, HostError> {
         let (request, input) = self
-            .prepare_estimated(request, source, context, history, cancel, cancelled)
+            .prepare_estimated(request, source, context, history, facts, cancel, cancelled)
             .await?;
         *self.prepared.lock().unwrap() = Some((request.clone(), input));
         Ok(request)
     }
 
     /// The prepared request and the trigger's estimate of it.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_estimated(
         &self,
         request: Arc<ModelRequest>,
         source: &ContextPrepareData,
-        context: ContextHistory,
+        context: PolicyContext,
         history: Vec<HistoryEntry>,
+        facts: PolicyFacts,
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<(Arc<ModelRequest>, f64), HostError> {
@@ -349,7 +490,7 @@ impl ContextPolicy {
                 _ => false,
             })
             .collect();
-        let view = self.view(request, context, history, reusable)?;
+        let view = self.view(request, context, history, facts, reusable)?;
         let model = self
             .resolver
             .resolve(view.prepared.clone(), cancel.clone())
@@ -372,8 +513,14 @@ impl ContextPolicy {
                 .into(),
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
+        let policy_order = self
+            .timeline
+            .policy_order(source.through)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
         if source.recovery.is_none()
-            && (estimate.input < model.threshold_tokens() || !regrown(&view, model.as_ref()))
+            && (estimate.input < model.threshold_tokens()
+                || !regrown(&view, &policy_order, model.as_ref()))
         {
             return Ok((view.prepared, estimate.input));
         }
@@ -451,7 +598,12 @@ impl ContextPolicy {
         let turn = turn_id.map(|turn| (turn, carried.as_ref()));
         let manual = step.trigger == CompactionTrigger::Manual;
         let rule = Retention::new(view, model.as_ref(), turn, manual);
-        let mut cuts = legal_cuts(&view.context, &view.history);
+        let policy_order = self
+            .timeline
+            .policy_order(view.facts.through)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let mut cuts = legal_cuts(&policy_order, &view.history);
         let limit = rule.limit(
             &view.history,
             &cuts,
@@ -611,7 +763,9 @@ impl ContextPolicy {
                 // replacement's actual size, and a later cut re-runs the
                 // strategy once as a rolling continuation of this one.
                 let redo = (composed.tokens > BOUND_SHARE * input_budget(model.as_ref()))
-                    .then(|| replanned(view, model.as_ref(), turn, manual, &composed))
+                    .then(|| {
+                        replanned(view, model.as_ref(), turn, manual, &composed, &policy_order)
+                    })
                     .flatten();
                 match redo {
                     None => completed(composed, diagnostics, limit_from),
@@ -718,10 +872,11 @@ impl ContextPolicy {
         let dropped = count(
             view.history[..cut.entry]
                 .iter()
-                .map(|entry| entry.message.clone())
+                .map(|entry| entry.message.as_ref().clone())
                 .collect(),
         ) - empty;
-        let pinned = count(pinned_inputs(view, turn, &cut.retain_from, model).messages) - empty;
+        let pinned =
+            count(pinned_inputs(view, None, turn, &cut.retain_from, model).messages) - empty;
         let previous = view.checkpoint.as_ref().map_or(0., |checkpoint| {
             let len = checkpoint.replacement.len();
             let strategy = checkpoint
@@ -772,7 +927,9 @@ impl ContextPolicy {
                 request: None,
             });
         };
-        let request = retained_entry(&view.context, &view.history, retain_from)
+        let request = view
+            .context
+            .retained_entry(&view.history, retain_from)
             .map_err(HostError::failed)
             .and_then(|kept| {
                 view.compacted(model.as_ref(), kept, replacement, context_baseline)
@@ -781,7 +938,38 @@ impl ContextPolicy {
             });
         if request.is_ok() {
             let saved = async {
-                let snapshot = self.history.snapshot(&view.context, retain_from, &fact)?;
+                let snapshot = match (view.context.full(), view.context.checkpoint()) {
+                    (Some(context), _) => {
+                        Some(self.history.snapshot(context, retain_from, &fact)?)
+                    }
+                    (None, Some(checkpoint)) => {
+                        Some(self.history.snapshot_from_checkpoint(checkpoint, &fact)?)
+                    }
+                    (None, None)
+                        if std::ptr::eq(
+                            self.history.checkpoint as *const (),
+                            projection_checkpoint as *const (),
+                        ) =>
+                    {
+                        let checkpoint = self
+                            .history
+                            .stream_checkpoint(&self.timeline, view.facts.through, retain_from, 256)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Some(self.history.snapshot_from_checkpoint(&checkpoint, &fact)?)
+                    }
+                    (None, None) => {
+                        let (context, _) = self
+                            .history
+                            .rendered_context(&self.timeline, view.facts.through)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Some(self.history.snapshot(&context, retain_from, &fact)?)
+                    }
+                };
+                let Some(snapshot) = snapshot else {
+                    return Ok(());
+                };
                 self.timeline
                     .save_snapshot(snapshot)
                     .await
@@ -814,17 +1002,34 @@ impl ContextPolicy {
                 retain_from,
                 replacement,
                 diagnostics,
-            }) => match pass.compose(retain_from.clone(), replacement) {
-                Ok(composed) => StepOutcome::Completed {
-                    composed,
-                    diagnostics,
-                },
-                Err(error) => StepOutcome::Failed {
-                    retain_from: Some(retain_from),
-                    error: error.into(),
-                    diagnostics: Some(diagnostics),
-                },
-            },
+            }) => {
+                let turn_id = pass.turn.map_or("", |(turn_id, _)| turn_id);
+                let window = match self
+                    .timeline
+                    .policy_window(pass.view.facts.through, turn_id, &retain_from)
+                    .await
+                {
+                    Ok(window) => window,
+                    Err(error) => {
+                        return StepOutcome::Failed {
+                            retain_from: Some(retain_from),
+                            error: error.to_string(),
+                            diagnostics: Some(diagnostics),
+                        };
+                    }
+                };
+                match pass.compose(&window, retain_from.clone(), replacement) {
+                    Ok(composed) => StepOutcome::Completed {
+                        composed,
+                        diagnostics,
+                    },
+                    Err(error) => StepOutcome::Failed {
+                        retain_from: Some(retain_from),
+                        error: error.into(),
+                        diagnostics: Some(diagnostics),
+                    },
+                }
+            }
             Ok(StrategyOutcome::Skipped {
                 reason,
                 diagnostics,
@@ -870,12 +1075,12 @@ impl ContextPolicy {
         let input = match prepared {
             Some(input) => input,
             None => {
-                let context = self
-                    .history
-                    .context(&self.timeline, self.timeline.committed())
+                let facts = self
+                    .timeline
+                    .policy_facts(self.timeline.committed(), "")
                     .await
-                    .map_err(|e| HostError::failed(e.to_string()))?;
-                self.estimate(&request, model.as_ref(), &context.events)?
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                self.estimate(&request, model.as_ref(), &facts.events)?
                     .input
             }
         };
@@ -1009,8 +1214,8 @@ fn project(
         .iter()
         .cloned()
         .map(Arc::new)
-        .chain(baseline.iter().map(|entry| Arc::new(entry.message.clone())))
-        .chain(kept.iter().map(|entry| Arc::new(entry.message.clone())))
+        .chain(baseline.iter().map(|entry| entry.message.clone()))
+        .chain(kept.iter().map(|entry| entry.message.clone()))
         .chain(request.messages[prefix_len..].iter().cloned())
         .collect();
     Arc::new(result)
@@ -1042,7 +1247,7 @@ struct Pinned {
 /// (ContextCompaction §5.3, §5.9).
 struct CarriedPins {
     pins: Vec<Pin>,
-    from: usize,
+    from: u64,
 }
 
 impl CarriedPins {
@@ -1059,12 +1264,7 @@ impl CarriedPins {
         });
         let ids = ids.filter(|ids| ids.len() == pinned.len());
         let pins = group_pins(pinned, ids);
-        let from = view
-            .context
-            .events
-            .iter()
-            .position(|event| event.id == retain_from)
-            .unwrap_or(0);
+        let from = view.context.sequence(retain_from).unwrap_or(0);
         Self { pins, from }
     }
 }
@@ -1099,7 +1299,7 @@ fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
 /// its events nor as the compaction it applies.
 fn digest_entries(
     view: &View,
-    retain_from: &str,
+    window: &PolicyWindow,
     model: &dyn ContextModel,
 ) -> Option<DigestEntries> {
     // The compaction in effect is the latest completed record of the view,
@@ -1118,113 +1318,83 @@ fn digest_entries(
             }
             _ => None,
         });
-    let events = &view.context.events;
-    let end = events.iter().position(|event| event.id == retain_from)?;
-    let (start, mut entries, mut dropped) = match previous {
-        Some(data) => {
-            let ContextCompactionResult::Completed {
-                retain_from: cut,
-                digest_entries,
-                ..
-            } = &data.outcome
-            else {
-                unreachable!("matched a completed compaction")
-            };
-            // The scan of the events since that cut starts at the first event
-            // the fixed context carries at or after it, in timeline order
-            // (§5.10).
-            let order: HashMap<&str, usize> = view
-                .events
-                .iter()
-                .enumerate()
-                .map(|(index, event)| (event.id.as_str(), index))
-                .collect();
-            let start = match order.get(cut.as_str()) {
-                Some(&cut) => events
-                    .iter()
-                    .position(|event| {
-                        order
-                            .get(event.id.as_str())
-                            .is_some_and(|index| *index >= cut)
-                    })
-                    .unwrap_or(end),
-                // The view carries no event at that cut. It still places it
-                // when it is the cut the view's compaction applied: the
-                // replay then begins at or after it, so every event the
-                // context carries is at or after it and the scan starts at
-                // the replay's first event. A cut the view can place neither
-                // way records no digest.
-                None => {
-                    let applied = view
-                        .checkpoint
+    {
+        let (mut entries, mut dropped) = match previous {
+            Some(data) => {
+                let ContextCompactionResult::Completed { digest_entries, .. } = &data.outcome
+                else {
+                    unreachable!("matched a completed compaction")
+                };
+                (
+                    digest_entries
                         .as_ref()
-                        .is_some_and(|checkpoint| checkpoint.retain_from == *cut);
-                    if !applied {
-                        return None;
-                    }
-                    0
-                }
+                        .map(|digest| digest.entries.clone())
+                        .unwrap_or_default(),
+                    digest_entries.as_ref().is_some_and(|digest| digest.dropped),
+                )
             }
-            .min(end);
-            (
-                start,
-                digest_entries
-                    .as_ref()
-                    .map(|digest| digest.entries.clone())
-                    .unwrap_or_default(),
-                digest_entries.as_ref().is_some_and(|digest| digest.dropped),
-            )
-        }
-        None => (0, Vec::new(), false),
-    };
-    for event in &events[start..end] {
-        let EventKind::ToolResult(data) = &event.kind else {
-            continue;
+            None => (Vec::new(), false),
         };
-        for result in &data.results {
-            for effect in result.result.effects.iter().flatten() {
-                let entry = shortened(effect);
-                let key = digest_key(&entry);
-                if let Some(index) = entries
+        let cut_index = view
+            .context
+            .order
+            .iter()
+            .position(|event| event.id == window.cut);
+        for event in &window.tool_results {
+            let after_cut = cut_index.map_or(event.sequence > window.cut_sequence, |cut| {
+                view.context
+                    .order
                     .iter()
-                    .position(|existing| digest_key(existing) == key)
-                {
-                    entries.remove(index);
-                }
-                entries.push(entry);
+                    .position(|ordered| ordered.id == event.id)
+                    .is_none_or(|index| index >= cut)
+            });
+            if after_cut {
+                continue;
             }
-        }
-    }
-    let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
-    let count = |entries: &[ToolEffect], dropped: bool| {
-        model.count_tokens(&ModelRequest::new(
-            "",
-            "",
-            vec![digest_message(entries, dropped)],
-        )) - empty
-    };
-    let limit = DIGEST_SHARE * input_budget(model);
-    if (dropped || !entries.is_empty()) && count(&entries, dropped) > limit {
-        dropped = true;
-        // Dropping entries from the front only shrinks the rendered message,
-        // so the largest suffix that fits is one binary search rather than
-        // one render per entry. When even the note alone is over the bound,
-        // every entry goes and the note stays.
-        let fits = |kept: usize| count(&entries[kept..], true) <= limit;
-        let (mut low, mut high) = (0, entries.len());
-        if fits(high) {
-            while high - low > 1 {
-                let middle = low + (high - low) / 2;
-                if fits(middle) {
-                    high = middle;
-                } else {
-                    low = middle;
+            let EventKind::ToolResult(data) = &event.kind else {
+                continue;
+            };
+            for result in &data.results {
+                for effect in result.result.effects.iter().flatten() {
+                    let entry = shortened(effect);
+                    let key = digest_key(&entry);
+                    if let Some(index) = entries
+                        .iter()
+                        .position(|existing| digest_key(existing) == key)
+                    {
+                        entries.remove(index);
+                    }
+                    entries.push(entry);
                 }
             }
         }
-        entries = entries.split_off(high);
+        let empty = model.count_tokens(&ModelRequest::new("", "", Vec::new()));
+        let count = |entries: &[ToolEffect], dropped: bool| {
+            model.count_tokens(&ModelRequest::new(
+                "",
+                "",
+                vec![digest_message(entries, dropped)],
+            )) - empty
+        };
+        let limit = DIGEST_SHARE * input_budget(model);
+        if (dropped || !entries.is_empty()) && count(&entries, dropped) > limit {
+            dropped = true;
+            let fits = |kept: usize| count(&entries[kept..], true) <= limit;
+            let (mut low, mut high) = (0, entries.len());
+            if fits(high) {
+                while high - low > 1 {
+                    let middle = low + (high - low) / 2;
+                    if fits(middle) {
+                        high = middle;
+                    } else {
+                        low = middle;
+                    }
+                }
+            }
+            entries = entries.split_off(high);
+        }
+        (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped })
     }
-    (dropped || !entries.is_empty()).then_some(DigestEntries { entries, dropped })
 }
 
 /// A command keeps its first `DIGEST_COMMAND_CHARS` characters, counted
@@ -1307,6 +1477,7 @@ fn carried_pins(view: &View, turn_id: &str) -> Option<CarriedPins> {
 /// its head and tail with a marker naming its `input/message` event id.
 fn pinned_inputs(
     view: &View,
+    window: Option<&PolicyWindow>,
     turn: Option<(&str, Option<&CarriedPins>)>,
     retain_from: &str,
     model: &dyn ContextModel,
@@ -1314,16 +1485,25 @@ fn pinned_inputs(
     let Some((turn_id, carried)) = turn else {
         return Pinned::default();
     };
-    let events = &view.context.events;
+    let Some(window) = window else {
+        return Pinned::default();
+    };
+    let events = &window.events;
     let Some(cut) = events.iter().position(|event| event.id == retain_from) else {
         return Pinned::default();
     };
     let start = events[..cut].iter().rposition(
         |event| matches!(&event.kind, EventKind::TurnStart(data) if data.turn_id == turn_id),
     );
-    let from = match (carried, start) {
-        (Some(carried), Some(start)) => carried.from.max(start + 1),
-        (Some(carried), None) => carried.from,
+    let carried_from = carried.map(|carried| {
+        events
+            .iter()
+            .position(|event| event.sequence >= carried.from)
+            .unwrap_or(cut)
+    });
+    let from = match (carried_from, start) {
+        (Some(carried), Some(start)) => carried.max(start + 1),
+        (Some(carried), None) => carried,
         (None, Some(start)) => start + 1,
         (None, None) => return Pinned::default(),
     };
@@ -1336,8 +1516,8 @@ fn pinned_inputs(
         .collect();
     let checkpointed = view
         .context
-        .checkpoint
-        .as_ref()
+        .full()
+        .and_then(|context| context.checkpoint.as_ref())
         .map(|checkpoint| checkpoint.state.inputs.as_slice())
         .unwrap_or_default();
     let mut pins = carried
@@ -1481,23 +1661,22 @@ fn truncate_pin(id: Option<&str>, text: &str, share: f64, model: &dyn ContextMod
 /// and an entry is new when its own event follows that one in the context's
 /// order: a child branch's smaller local sequences are still new after an
 /// inherited attempt.
-fn regrown(view: &View, model: &dyn ContextModel) -> bool {
-    let context = &view.context;
-    let Some(start) = context
+fn regrown(view: &View, order: &PolicyOrder, model: &dyn ContextModel) -> bool {
+    let Some(start) = order
         .events
         .iter()
-        .rposition(|event| matches!(&event.kind, EventKind::ContextCompactionStart(_)))
+        .rposition(|event| event.compaction_start.is_some())
     else {
         return true;
     };
-    let EventKind::ContextCompactionStart(data) = &context.events[start].kind else {
-        unreachable!("matched a start")
+    let Some(through) = order.events[start].compaction_start else {
+        return true;
     };
-    let branch = &context.positions[start].branch_id;
-    let boundary = context.positions[..start]
+    let branch = &order.events[start].branch_id;
+    let boundary = order.events[..start]
         .iter()
-        .rposition(|position| position.branch_id == *branch && position.sequence <= data.through);
-    let order: HashMap<&str, usize> = context
+        .rposition(|event| event.branch_id == *branch && event.sequence <= through);
+    let positions: HashMap<&str, usize> = order
         .events
         .iter()
         .enumerate()
@@ -1509,14 +1688,14 @@ fn regrown(view: &View, model: &dyn ContextModel) -> bool {
         .history
         .iter()
         .filter(|entry| {
-            order
+            positions
                 .get(entry.source.as_str())
                 .is_some_and(|index| match boundary {
                     Some(boundary) => *index > boundary,
                     None => true,
                 })
         })
-        .map(|entry| count(vec![entry.message.clone()]) - empty)
+        .map(|entry| count(vec![entry.message.as_ref().clone()]) - empty)
         .sum();
     new >= RETAINED_SHARE * input_budget(model)
 }
@@ -1584,11 +1763,11 @@ impl<'a> Retention<'a> {
             history[cut.entry - 1]
                 .baseline
                 .iter()
-                .map(|entry| entry.message.clone())
+                .map(|entry| entry.message.as_ref().clone())
                 .collect(),
         ) - self.empty;
         let pins =
-            count(pinned_inputs(self.view, self.turn, &cut.retain_from, self.model).messages)
+            count(pinned_inputs(self.view, None, self.turn, &cut.retain_from, self.model).messages)
                 - self.empty;
         self.frame + baseline + pins + DIGEST_SHARE * input_budget(self.model) + replacement_size
     }
@@ -1618,7 +1797,8 @@ impl<'a> Retention<'a> {
         };
         let mut tail = vec![0.; history.len() + 1];
         for (index, entry) in history.iter().enumerate().rev() {
-            tail[index] = tail[index + 1] + count(vec![entry.message.clone()]) - self.empty;
+            tail[index] =
+                tail[index + 1] + count(vec![entry.message.as_ref().clone()]) - self.empty;
         }
         let budget = input_budget(self.model);
         let fits = cuts.iter().position(|cut| {
@@ -1631,10 +1811,9 @@ impl<'a> Retention<'a> {
                 let start = self
                     .view
                     .context
-                    .events
+                    .order
                     .iter()
-                    .rev()
-                    .find(|event| matches!(event.kind, EventKind::TurnStart(_)))?;
+                    .rfind(|event| event.turn_start)?;
                 cuts.iter().position(|cut| cut.retain_from == start.id)
             })
             .flatten();
@@ -1662,6 +1841,7 @@ fn replanned(
     turn: Option<(&str, Option<&CarriedPins>)>,
     manual: bool,
     first: &Composed,
+    policy_order: &PolicyOrder,
 ) -> Option<Replan> {
     let carried = CarriedPins::new(
         view,
@@ -1677,13 +1857,13 @@ fn replanned(
         manual,
     );
     let history = &view.history[first.kept..];
-    let mut cuts = legal_cuts(&view.context, history);
+    let mut cuts = legal_cuts(policy_order, history);
     let strategy = first
         .parts
         .map_or(first.replacement.len(), |parts| parts.strategy as usize)
         .min(first.replacement.len());
     let limit = rule.limit(history, &cuts, rule.tokens(&first.replacement[..strategy]))?;
-    let order = |id: &str| view.context.events.iter().position(|event| event.id == id);
+    let order = |id: &str| policy_order.events.iter().position(|event| event.id == id);
     let later = match (order(&cuts[limit].retain_from), order(&first.retain_from)) {
         (Some(later), Some(first)) => later > first,
         _ => false,
@@ -1747,7 +1927,12 @@ fn resident_parts(
         ),
         (
             InsufficientSpacePartName::KeyedBaseline,
-            count(baseline.iter().map(|entry| entry.message.clone()).collect()) - base,
+            count(
+                baseline
+                    .iter()
+                    .map(|entry| entry.message.as_ref().clone())
+                    .collect(),
+            ) - base,
         ),
         (
             InsufficientSpacePartName::Summary,
@@ -1854,28 +2039,28 @@ fn recovery_overflow(
 /// a tool call from its results or context: turn starts, the events that
 /// place entries and the boundary's own last event (replacing everything),
 /// in order. None is marked within the retention limit yet.
-fn legal_cuts(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<CompactionCut> {
+fn legal_cuts(order: &PolicyOrder, history: &[HistoryEntry]) -> Vec<CompactionCut> {
     let sources: HashMap<&str, ()> = history
         .iter()
         .map(|entry| (entry.source.as_str(), ()))
         .collect();
     let mut kept = 0;
-    let order: HashMap<&str, usize> = context
+    let positions: HashMap<&str, usize> = order
         .events
         .iter()
         .enumerate()
         .map(|(index, event)| (event.id.as_str(), index))
         .collect();
     let mut cuts = Vec::new();
-    for (index, event) in context.events.iter().enumerate() {
-        if !matches!(event.kind, EventKind::TurnStart(_))
+    for (index, event) in order.events.iter().enumerate() {
+        if !event.turn_start
             && !sources.contains_key(event.id.as_str())
-            && index + 1 != context.events.len()
+            && index + 1 != order.events.len()
         {
             continue;
         }
         while kept < history.len()
-            && order
+            && positions
                 .get(history[kept].source.as_str())
                 .is_some_and(|source| *source < index)
         {

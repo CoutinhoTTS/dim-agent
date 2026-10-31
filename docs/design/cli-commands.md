@@ -43,67 +43,78 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
-## Command isolation settings
+## Usage report
 
-The existing `/settings` panel adds a separate `Command isolation` row under Permissions,
-next to `Tool approvals`. This is the only user configuration entry: no native `dimcode isolation`
-command or `/isolation` slash command is added. It uses HostPlatform's
-[trusted local policy management](host-platform-isolation.md#trusted-local-policy-management)
-over the local daemon connection even when model commands cannot run. `/approvals` output
-points to `/settings > Command isolation`; isolation is not another Permission preset.
+In both TUI modes, `/usage` prints the main branch's context usage. When the
+active model uses Dim OAuth, it also queries and prints the account's plan,
+credits, rolling windows and feature meters through the existing
+[account usage contract](../../crates/dim-oauth/docs/runtime-contract.md).
+Other model providers keep context-only output; signing in alone does not
+enable the account report. The `/login` account view remains available.
+
+Context and account failures are reported independently: unavailable context
+usage does not hide account usage, and an account error does not discard the
+context report. Missing optional account fields stay absent. The illustration
+below uses synthetic data; an account need not have a 5h window.
 
 ```text
-Settings > Command isolation
-  Permission preset   full-access (admission only)
-  Execution node      local
-  Isolation tier      workspace >  [workspace | network | host]
-  Wider requests      ask       >  [ask | deny]
-  Advanced                     >  Read paths / Write paths / Environment names
-  Policy source       defaults
-  Policy path         <execution-home>/host-isolation.json
+/usage
+  Context: 1,849 / 256,000 tokens (...) ...
 
-  Save
-  Reset to defaults
-  Applies to new commands and new persistent shells.
+  DimAgent OAuth
+  Pro · active · expires 2026-11-30
+
+  Credits     25,000 / 300,000  8%
+  [###-------------------------------------]
+
+  5h window   9,500 / 10,000  95%
+  [######################################--]
+
+  Web search  211 / 1,500  14%
+  [######----------------------------------]
 ```
 
-Opening the panel reads the policy snapshot and the current `main` Permission preset separately.
-The snapshot revision stays with the draft, not as a user-entered field. Tier and wider-request
-pickers initially select the draft value, or its effective value when omitted, and change the
-draft only. Editing a version 1 policy's tier/escalation explicitly converts
-its effective settings to version 2, preserving optional lists. Save submits the complete draft
-with the inspected revision; Reset to defaults asks for confirmation, then resets through the
-owner with that revision. Neither action retries a stale revision automatically. A conflict
-keeps the draft, displays the error and offers Reload; reload explicitly discards the draft.
-Successful save/reset replaces the draft with the returned snapshot and displays the
-next-process activation notice. Esc/Back returns to Settings, asking before discarding edits.
+## Execution settings
 
-Advanced opens three list editors for `readOnlyPaths`, `writablePaths` and environment **names**.
-Each has a `Use defaults` choice distinct from an explicit list, an Add input, editable/removable
-entries and a clear-list action; an explicit empty list grants none. The panel explains that
-explicit lists replace defaults. Environment values are never read or displayed. Saving one
-field preserves unrelated explicit settings and omitted lists. Validation errors keep the draft
-and show the offending field without changing persisted policy; no live-policy JSON editing,
-external scratch file, export route or force-write option is needed.
+The existing `/settings` panel has one `Execution` row, next to `Tool approvals`. It is the only
+user configuration entry for the process boundary: there is no native `dimcode isolation` command,
+no `/isolation` slash command and no policy file. The switches are the user-scope `execution`
+settings source, read through
+[`settings.read`/`settings.update`](appserver/settings-service.md); what each switch grants is the
+[process isolation design](host-platform-isolation.md)'s contract. `/approvals` output says the
+sandbox is in `/settings > Execution`; the sandbox is not another Permission preset.
 
-Reuse the existing settings/list-panel navigation: arrows select, Enter opens a picker/editor
-or activates an action, Esc returns one level. Only the active panel receives input; a
-confirmation/input overlay returns to its owning panel. Long paths wrap or scroll without
-hiding the controls. At small terminal sizes use the existing panel viewport/scroll behavior,
-not a separate full-screen layout. Loading disables mutation; read failure offers Retry/Back
-without inventing a default snapshot; write failure retains edits. An unavailable management
-method displays an unsupported-daemon error, not a model-exec fallback.
+```text
+Settings > Execution
+  Applies to new processes and persistent shells.
+  Sandbox             off  >                    toggle off | on
+  Network             off  >                    ignored while Sandbox is off, and shown as
+                                                "off (ignored while Sandbox is off)"
+  Save                                          write both switches with the read revision
+  Reset to defaults                             confirm, then write both off
+  Reload              Discard edits and read the current settings
+```
 
-Changing policy is an explicit local-user configuration action, not a model command approval.
-`ask` delegates to Permission/Approval and is not always a prompt. `host` means ordinary
-daemon-user access; `network` changes networking only, not filesystem grants or authentication.
+Opening the panel reads `{source: "execution", scope: "user"}` and keeps the returned revision with
+the draft, not as a user-entered field. ↑↓ move, Enter or Space toggles the selected row, Esc
+closes the panel and asks before discarding edits. Save submits both switches with the inspected
+revision; Reset to defaults asks for confirmation, then writes both switches off with that
+revision. Neither action retries a stale revision automatically: a conflict keeps the draft and
+shows the error, and Reload explicitly discards the draft and reads again. The panel keeps the
+stored Network value visible while Sandbox is off, marked as ignored, so what will apply when
+Sandbox is turned on can be read. Loading disables mutation, and a daemon without the settings
+methods displays an unsupported-daemon error instead of falling back to the host.
 
-Verification exercises fresh native startup independently of `./dev`: default interactive
-approval displays `network`/`host`, allow runs and deny prevents the payload; version 2 omission
-uses `ask`, explicit deny and version 1 remain restrictive. Flow coverage also exercises `full-access`, allowed tools
-and command rules; local-only management, absence, saves preserving lists, reset, invalid
-fields/roots and revision conflicts. A Homebrew executable
-control distinguishes network from executable access without using real credentials.
+The row reports the stored switches, not the boundary of a running command: a running process,
+including a persistent shell, keeps the boundary it started with. A platform without a sandbox
+backend is reported by the next process start as `isolation_unavailable`; showing that state on
+the row is [#691](https://github.com/arcships/dim/issues/691)'s item.
+
+Verification covers what the row shows and what the daemon does with it: the read, the toggle that
+keeps the stored Network value visible while Sandbox is off, the CAS conflict, and a save followed
+by `exec` under the new boundary, where a write outside the workspace fails while the sandbox is on
+and succeeds once it is off. Reset, reload after an external edit, the unsupported-daemon branch
+and a persistent shell started before the change have no flow coverage yet.
 
 ## Commands
 

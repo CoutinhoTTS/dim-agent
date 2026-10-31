@@ -149,7 +149,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | `/settings`: subagent model, auxiliary model, default multimodal model, execution shell, sandbox, prompt language | designed elsewhere, no client UI | — | overview B.1, [Modality](plugins/Modality.md) |
 | `/settings`: VS Code focus, resource monitoring, plan usage display | none | — | |
 | `/settings`: ACP Session display | unsupported: no native persisted client-origin field | — | [AcpGateway](plugins/AcpGateway.md#a5-client-labels) |
-| `/usage` | context usage: done; plan quota is shown in the account view, not in `/usage` | — | |
+| `/usage` | context usage and, for active Dim OAuth models, account usage | — | [CLI usage report](cli-commands.md#usage-report) |
 | `/stats` | out | — | [overview](overview.md) App. A |
 | `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | |
 | `/tui` mode switch | done | — | [Tui](plugins/Tui.md) |

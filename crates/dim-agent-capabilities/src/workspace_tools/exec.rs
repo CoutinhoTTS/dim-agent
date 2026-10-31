@@ -11,7 +11,7 @@ use crate::{
     host::{HostError, ToolExecutionContext},
     host_platform::{
         EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY,
-        Isolation, Os, ProcessTree, Sandbox, ShellKind, TemporaryDirectory,
+        Isolation, Os, ProcessTree, ShellKind, TemporaryDirectory,
     },
     tool_registry::definition,
 };
@@ -71,11 +71,6 @@ pub fn definition_for(platform: &HostPlatform) -> ToolDefinition {
                     "type": "number",
                     "description": "Optional timeout in milliseconds. Estimate how long this command should be allowed to run. If omitted, the command times out after 300000 ms. Negative values disable the total timeout only when runInBackground is true; foreground negative values use the default timeout."
                 },
-                "sandbox": {
-                    "type": "string",
-                    "enum": ["workspace", "network", "host"],
-                    "description": "Process boundary for this command. Omit it to use the node's policy. \"workspace\" writes only inside the session workspace and has no network; \"network\" adds host networking; \"host\" drops isolation. A boundary wider than the node's policy runs only where host-isolation.json sets escalation to \"ask\"; it is approved only where the permission preset asks for this command, and a pre-allowed tool or command runs at the requested boundary without a prompt."
-                }
             },
             "required": ["command"]
         }),
@@ -198,45 +193,24 @@ struct Input {
     run_in_background: bool,
     timeout_ms: u64,
     disable_timeout: bool,
-    sandbox: Option<Sandbox>,
 }
 
 /// Validation of the model's input, the external boundary (TS `validate.ts`).
 /// Errors are the message and code of the failed result.
 fn parse(input: &JsonObject) -> Result<Input, (String, &'static str)> {
-    let removed: Vec<&str> = ["action", "processId", "yieldTimeMs"]
+    let removed: Vec<&str> = ["action", "processId", "yieldTimeMs", "sandbox"]
         .into_iter()
         .filter(|field| input.contains_key(*field))
         .collect();
     if !removed.is_empty() {
         return Err((
             format!(
-                "exec accepts command, cwd, runInBackground, timeoutMs, and sandbox; remove {}.",
+                "exec accepts command, cwd, runInBackground and timeoutMs; a negative timeoutMs disables the background timeout. Remove {}.",
                 removed.join(", ")
             ),
             "exec_invalid_request",
         ));
     }
-    let sandbox = match input.get("sandbox") {
-        None => None,
-        Some(Value::String(value)) => Some(match value.as_str() {
-            "workspace" => Sandbox::Workspace,
-            "network" => Sandbox::Network,
-            "host" => Sandbox::Host,
-            _ => {
-                return Err((
-                    "exec sandbox must be workspace, network or host.".into(),
-                    "exec_invalid_request",
-                ));
-            }
-        }),
-        Some(_) => {
-            return Err((
-                "exec sandbox must be workspace, network or host.".into(),
-                "exec_invalid_request",
-            ));
-        }
-    };
     let timeout = input.get("timeoutMs");
     if let Some(value) = timeout {
         let number = value.as_f64();
@@ -282,7 +256,6 @@ fn parse(input: &JsonObject) -> Result<Input, (String, &'static str)> {
             _ => DEFAULT_EXEC_TIMEOUT_MS,
         },
         disable_timeout: negative,
-        sandbox,
     })
 }
 
@@ -1295,7 +1268,7 @@ pub(super) async fn execute(
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
     let (spec, temporary, isolation) = match platform
-        .prepare_isolated_process(spec, &tools.cwd, None, input.sandbox)
+        .prepare_isolated_process(spec, &tools.cwd, None)
         .await
     {
         Ok(prepared) => prepared,

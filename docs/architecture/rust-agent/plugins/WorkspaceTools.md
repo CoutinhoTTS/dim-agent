@@ -52,9 +52,9 @@ exec uses the returned shell for its own policies. Refusals carry named `code`
 and `reason` fields. `cwd` is the resolved working directory, and missing-directory
 errors retain the builder's resolved path without rewriting its message.
 
-On macOS/Linux the exec declaration adds HostPlatform's static isolation line
+On macOS/Linux the exec declaration adds HostPlatform's static boundary line
 after its environment line, so it stays stable for the Session. Exec keeps the
-`Isolation` that preparation returns with its process. An unsuccessful exit, in
+`Isolation` marker that preparation returns with its process. An unsuccessful exit, in
 the foreground or after the background handoff, appends HostPlatform's failure
 note to the result text when the shown output matches; stops, timeouts and
 offload failures get none. Codes and structured content are unchanged.
@@ -77,12 +77,11 @@ Exec retains its `cwd` argument resolution, POSIX `&` refusal, heavy-search
 refusal, timeouts and background ownership. Its existing `exec_shell_unavailable`
 tool-result code is preserved, with instructions to fix the file and retry.
 
-The `exec` declaration also carries an optional `sandbox` argument
-(`workspace`, `network`, `host`). Exec passes it to HostPlatform's preparation
-unchanged; the node policy decides whether it applies, and a refused wider
-request fails the call with `isolation_denied` before the payload starts. The
-background handoff and the limit above are unchanged: the process keeps the
-tier it started with.
+Exec takes no input that selects a boundary. The user's `Sandbox` and `Network`
+switches in `/settings > Execution` decide it; `exec` passes nothing and cannot widen it. A call
+that still sends `sandbox` is rejected as `exec_invalid_request`, and the background handoff
+keeps the boundary the process started with
+([HostPlatform](HostPlatform.md#events-and-lifetime)).
 
 The same module exports the existing `Decoder::{write,end}`, `sanitize`,
 `truncate_preview` and `EXIT_STDIO_GRACE`, and for ShellInput `capture_preview`,
@@ -185,7 +184,7 @@ is written to.
     if one was observed.
 
   A command that never started — refused input, a refused high-cost scan, a
-  denied isolation tier, an unavailable shell, a cancel before the spawn —
+  boundary that could not be prepared, an unavailable shell, a cancel before the spawn —
   declares nothing.
 - A `write` or `edit` cancelled before it publishes is settled by ToolExecutor
   without a result of its own, so it carries no declaration.

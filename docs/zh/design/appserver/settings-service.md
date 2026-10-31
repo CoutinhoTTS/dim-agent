@@ -280,10 +280,16 @@ impl SettingsService {
 
 - 两种登记都是拥有 `ctx` 的插件的副作用，在它卸载时撤回，并在同一份登记状态下检查（§3.1）。
   `register_declared` 用 `jsonschema` 编译 schema。进程级所有者在 `apply` 中登记：Mcp（`mcp`、
-  `mcp-projects`、`mcp-plugins`）、SkillsCatalog（`skills`）、PermissionRules（`permission`）和
-  CollaborationModelPolicy（`collaboration`）。其他插件中的读取方只读；对某个名字用不是其已登记类型的
+  `mcp-projects`、`mcp-plugins`）、SkillsCatalog（`skills`）、PermissionRules（`permission`）、
+  CollaborationModelPolicy（`collaboration`）和 App Server 的 ExecutionSettings（`execution`）。
+  其他插件中的读取方只读；对某个名字用不是其已登记类型的
   `read::<D>`/`update::<D>` 得到 `UnknownSource`。`settings` 服务的 `register` 以调用行的上下文调用
   `register_declared`。
+- `execution` 只有用户作用域：它不声明项目文件，因此项目作用域的读或写会被拒绝。它持有两个布尔值
+  `sandbox` 和 `network`，默认都是 `false`，revision 就是普通的 CAS revision。`/settings > Execution`
+  和任何本地管理客户端使用 `settings.read`/`settings.update`；所有者的读取方通过
+  `ExecutionSettingsHost` 端口取得文档，那是进程内读取契约，不是管理方法
+  （[ADR 011](../../../adr/011-execution-settings.md) D1）。
 - 文件和原生路径与 `BusinessDocument` 共用，按来源名而不是 `D::NAMESPACE` 取键。CAS、gate、
   lease、unsynced 情形和 `publish` 保持不变。
 - `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope` 和

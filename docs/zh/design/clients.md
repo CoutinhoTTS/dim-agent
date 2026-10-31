@@ -116,7 +116,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | `/settings`：子 agent 模型、辅助模型、默认多模态模型、执行 Shell、沙箱、提示词语言 | 已在别处设计，没有客户端界面 | — | 总体设计 B.1、[Modality](plugins/Modality.md) |
 | `/settings`：VS Code 聚焦、资源监控、套餐用量显示 | 无 | — | |
 | `/settings`：ACP Session 显示 | 不支持：没有原生持久化 client-origin 字段 | — | [AcpGateway](plugins/AcpGateway.md#a5-client-label) |
-| `/usage` | 上下文用量：已实现；套餐额度显示在账号视图里，不在 `/usage` | — | |
+| `/usage` | 上下文用量；当前模型使用 Dim OAuth 时也显示账号用量 | — | [CLI 用量报告](cli-commands.md#用量报告) |
 | `/stats` | 不做 | — | [总体设计](overview.md)附录 A |
 | `/debug`、调试日志配置 | 无（只有 daemon 的 `daemon.log`） | — | |
 | `/tui` 模式切换 | 已实现 | — | [Tui](../../design/plugins/Tui.md) |

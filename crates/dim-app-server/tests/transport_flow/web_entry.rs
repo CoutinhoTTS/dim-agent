@@ -506,6 +506,26 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         )
         .await,
     );
+    let execution = web
+        .rpc(
+            "settings.read",
+            json!({"source":"execution","scope":"user"}),
+        )
+        .await;
+    assert_ok(&execution);
+    assert_eq!(execution["result"]["document"]["sandbox"], false);
+    assert_eq!(execution["result"]["document"]["network"], false);
+    let updated = web
+        .rpc(
+            "settings.update",
+            json!({"source":"execution","scope":"user",
+        "expectedRevision":execution["result"]["revision"],
+        "document":{"sandbox":true,"network":true}}),
+        )
+        .await;
+    assert_ok(&updated);
+    assert_eq!(updated["result"]["document"]["sandbox"], true);
+    assert_eq!(updated["result"]["document"]["network"], true);
     let mut bare = Client::new_version(&server, true, 3).await;
     for method in [
         "provider.management",

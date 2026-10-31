@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readRevision, readRules, type CommandRule, type RulesView } from "../../rpc/general-settings"
-import { readIsolation, type IsolationView } from "../../rpc/management"
+import { readExecutionSettings, readRevision, readRules, type CommandRule, type ExecutionSettings, type RulesView } from "../../rpc/general-settings"
 import { useConnectionStore } from "../../stores/connection"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom } from "./context"
@@ -14,13 +13,13 @@ const rules = ref<CommandRule[]>([])
 const busy = ref(false)
 const error = ref("")
 const saved = ref(false)
-const isolation = ref<IsolationView>()
-const sandbox = ref<IsolationView["effective"]["sandbox"]>("workspace")
-const escalation = ref<IsolationView["effective"]["escalation"]>("ask")
-const isolationError = ref("")
-const isolationDirty = computed(() => isolation.value !== undefined && (sandbox.value !== isolation.value.effective.sandbox || escalation.value !== isolation.value.effective.escalation))
+const execution = ref<ExecutionSettings>()
+const sandbox = ref(false)
+const network = ref(false)
+const executionError = ref("")
+const executionDirty = computed(() => execution.value !== undefined && (sandbox.value !== execution.value.sandbox || network.value !== execution.value.network))
 const rulesDirty = computed(() => snapshot.value !== undefined && JSON.stringify(rules.value) !== JSON.stringify(snapshot.value.commandRules))
-const dirty = computed(() => rulesDirty.value || isolationDirty.value)
+const dirty = computed(() => rulesDirty.value || executionDirty.value)
 bindSettingsDirty(dirty)
 
 async function load(): Promise<void> {
@@ -35,13 +34,13 @@ async function load(): Promise<void> {
     rules.value = snapshot.value.commandRules.map((rule) => ({ ...rule }))
   } catch (cause) { error.value = messageFrom(cause) }
   try {
-    isolationError.value = ""
-    if (connection.supports("host.isolation.get")) {
-      isolation.value = await connection.client.call("host.isolation.get", {}, readIsolation)
-      sandbox.value = isolation.value.effective.sandbox
-      escalation.value = isolation.value.effective.escalation
+    executionError.value = ""
+    if (connection.supports("settings.read")) {
+      execution.value = await connection.client.call("settings.read", { source: "execution", scope: "user" }, readExecutionSettings)
+      sandbox.value = execution.value.sandbox
+      network.value = execution.value.network
     }
-  } catch (cause) { isolationError.value = messageFrom(cause) }
+  } catch (cause) { executionError.value = messageFrom(cause) }
   busy.value = false
 }
 
@@ -62,21 +61,20 @@ async function save(): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-async function saveIsolation(reset = false): Promise<void> {
-  if (!isolation.value || busy.value || (!reset && !isolationDirty.value)) return
-  const tiers = { workspace: 0, network: 1, host: 2 }
-  const increasesAccess = tiers[sandbox.value] > tiers[isolation.value.effective.sandbox] || (escalation.value === "ask" && isolation.value.effective.escalation === "deny")
-  if ((reset || increasesAccess) && !window.confirm(reset ? s('Reset command isolation to workspace-only access with approval for escalation?', '将命令隔离重置为仅工作区访问、提权需审批？') : s('Increase command access on the CLI host? Network allows outbound connections; host removes process isolation. Running processes are unchanged.', '扩大 CLI 主机上的命令访问范围？网络模式允许出站连接，主机模式取消进程隔离。已运行的进程不受影响。'))) return
+async function saveExecution(): Promise<void> {
+  if (!execution.value || busy.value || !executionDirty.value) return
+  const widens = (execution.value.sandbox && !sandbox.value) || (!execution.value.network && network.value)
+  if (widens && !window.confirm(s('New commands will run with less isolation than now. Running processes keep their boundary.', '新命令将以比现在更少的隔离运行。已运行的进程保留原边界。'))) return
   busy.value = true
-  isolationError.value = ""
+  executionError.value = ""
   try {
-    isolation.value = await connection.client.call(reset ? "host.isolation.reset" : "host.isolation.update", {
-      expectedRevision: isolation.value.revision,
-      ...(!reset ? { policy: { version: 2, sandbox: sandbox.value, escalation: escalation.value, ...isolation.value.policy } } : {}),
-    }, readIsolation)
-    sandbox.value = isolation.value.effective.sandbox
-    escalation.value = isolation.value.effective.escalation
-  } catch (cause) { isolationError.value = messageFrom(cause) }
+    execution.value = await connection.client.call("settings.update", {
+      source: "execution", scope: "user", expectedRevision: execution.value.revision,
+      document: { sandbox: sandbox.value, network: network.value },
+    }, readExecutionSettings)
+    sandbox.value = execution.value.sandbox
+    network.value = execution.value.network
+  } catch (cause) { executionError.value = messageFrom(cause) }
   finally { busy.value = false }
 }
 onMounted(load)
@@ -86,15 +84,16 @@ onMounted(load)
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">{{ s('Permissions', '权限') }}</h2><p>{{ s('User-level command rules apply to process-starting agent tools in every session. Deny wins; Allow never overrides a denied permission preset.', '用户命令规则适用于所有会话中启动进程的代理工具。拒绝优先；允许规则不会越过权限预设的拒绝。') }}</p></header>
     <GeneralSettingsStatus :busy="busy" :error="error" :saved="saved && !dirty" @reload="load" />
-    <p v-if="isolationError" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ isolationError }} <button class="ui-button" data-variant="ghost" :disabled="busy" @click="load">{{ s('Reload', '重新加载') }}</button></p>
-    <form v-if="isolation" class="settings-card settings-form" @submit.prevent="saveIsolation()">
-      <h3>{{ s('Command isolation', '命令隔离') }}</h3>
-      <p>{{ s('Applies to new processes on this execution host. Existing processes keep their original boundary. Existing file and environment grants are preserved.', '适用于此执行主机上的新进程。已运行的进程保留原隔离边界。已有文件和环境变量授权保持不变。') }}</p>
-      <fieldset class="settings-form" :disabled="busy || !connection.supports('host.isolation.update')">
-        <label><span>{{ s('Execution and network access', '执行与网络访问') }}</span><select v-model="sandbox" class="ui-field"><option value="workspace">{{ s('Workspace — isolated, no network', '工作区 — 隔离且无网络') }}</option><option value="network">{{ s('Network — isolated, with network', '网络 — 隔离且允许联网') }}</option><option value="host">{{ s('Host — no process isolation', '主机 — 无进程隔离') }}</option></select></label>
-        <label><span>{{ s('Escalation requests', '提权请求') }}</span><select v-model="escalation" class="ui-field"><option value="deny">{{ s('Deny', '拒绝') }}</option><option value="ask">{{ s('Ask for approval', '请求审批') }}</option></select></label>
+    <p v-if="executionError" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ executionError }} <button class="ui-button" data-variant="ghost" :disabled="busy" @click="load">{{ s('Reload', '重新加载') }}</button></p>
+    <form v-if="execution" class="settings-card settings-form" @submit.prevent="saveExecution()">
+      <h3>{{ s('Execution', '执行') }}</h3>
+      <p>{{ s('Applies to new commands on this execution host. Running processes keep their boundary. A platform without a sandbox backend fails the command instead of running it unsandboxed.', '适用于此执行主机上的新命令。已运行的进程保留原边界。没有沙盒后端的平台会让命令失败，而不是不加隔离地运行。') }}</p>
+      <fieldset class="settings-form" :disabled="busy || !connection.supports('settings.update')">
+        <label><input v-model="sandbox" type="checkbox" />{{ s('Sandbox — run commands isolated from the host', '沙盒 — 在隔离环境中运行命令') }}</label>
+        <label><input v-model="network" type="checkbox" />{{ s('Network — allow outbound connections while sandboxed', '网络 — 沙盒内允许出站连接') }}</label>
       </fieldset>
-      <div class="settings-actions"><button class="ui-button" data-variant="secondary" type="button" :disabled="busy || !connection.supports('host.isolation.reset')" @click="saveIsolation(true)">{{ s('Reset isolation', '重置隔离') }}</button><button class="ui-button" data-variant="primary" :disabled="busy || !isolationDirty || !connection.supports('host.isolation.update')">{{ s('Save isolation', '保存隔离设置') }}</button></div>
+      <p class="ui-banner settings-banner" data-tone="warning">{{ s('Network applies only while the sandbox is on. With the sandbox off, commands run as the daemon user with this host\'s files and network.', '网络仅在沙盒开启时生效。沙盒关闭时，命令以守护进程用户的身份、使用此主机的文件和网络运行。') }}</p>
+      <div class="settings-actions"><button class="ui-button" data-variant="primary" :disabled="busy || !executionDirty || !connection.supports('settings.update')">{{ s('Save execution settings', '保存执行设置') }}</button></div>
     </form>
     <form v-if="snapshot" class="settings-form" @submit.prevent="save">
       <section class="settings-card">

@@ -133,20 +133,3 @@ export function readResetBatches(value: unknown): { window: ResetBatch[]; monthl
   const read = (item: unknown): ResetBatch => { const b = object(item); return { grantId: number(b.grantId), remaining: number(b.remaining), expiresAt: string(b.expiresAt), scopeType: string(b.scopeType), subscriptionId: optional(b.subscriptionId, number), sourceType: string(b.sourceType) } }
   return { window: list(v.window, read), monthlyFull: list(v.monthlyFull, read) }
 }
-
-export type IsolationView = {
-  revision: string
-  effective: { sandbox: "workspace" | "network" | "host"; escalation: "deny" | "ask" }
-  policy: { readOnlyPaths?: string[]; writablePaths?: string[]; environment?: string[] }
-}
-export function readIsolation(value: unknown): IsolationView {
-  const v = object(value), effective = object(v.effective), policy = object(v.policy)
-  const sandbox = effective.sandbox, escalation = effective.escalation
-  if (sandbox !== "workspace" && sandbox !== "network" && sandbox !== "host") throw new ProtocolError("Invalid isolation tier")
-  if (escalation !== "deny" && escalation !== "ask") throw new ProtocolError("Invalid isolation escalation")
-  return { revision: string(v.revision), effective: { sandbox, escalation }, policy: {
-    readOnlyPaths: optional(policy.readOnlyPaths, (value) => list(value, string)),
-    writablePaths: optional(policy.writablePaths, (value) => list(value, string)),
-    environment: optional(policy.environment, (value) => list(value, string)),
-  } }
-}

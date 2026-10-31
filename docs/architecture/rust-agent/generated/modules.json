@@ -425,6 +425,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::execution_settings",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/execution_settings.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::file_storage",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -570,20 +577,10 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
-        "assert",
         "assert_eq",
         "cfg",
         "format",
         "vec"
-      ]
-    },
-    {
-      "id": "dim_agent_capabilities::host_platform::isolation_policy",
-      "crate": "dim_agent_capabilities",
-      "parent": "dim_agent_capabilities::host_platform",
-      "file": "crates/dim-agent-capabilities/src/host_platform/isolation_policy.rs",
-      "unexpandedMacros": [
-        "format"
       ]
     },
     {
@@ -1301,6 +1298,13 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::memory",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/memory.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_runtime::memory_timeline_store",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -1398,6 +1402,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/timeline_store.rs",
       "unexpandedMacros": [
+        "matches",
         "vec"
       ]
     },
@@ -1445,13 +1450,6 @@
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
       "file": "crates/dim-agent-types/src/lib.rs",
-      "unexpandedMacros": []
-    },
-    {
-      "id": "dim_agent_types::isolation",
-      "crate": "dim_agent_types",
-      "parent": "dim_agent_types",
-      "file": "crates/dim-agent-types/src/isolation.rs",
       "unexpandedMacros": []
     },
     {
@@ -1533,6 +1531,7 @@
       "parent": null,
       "file": "crates/dim-app-server/src/lib.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "serde_json::json",
         "tracing::error",
@@ -1779,6 +1778,26 @@
       ]
     },
     {
+      "id": "dim_app_server::exec_shell_settings",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/exec_shell_settings.rs",
+      "unexpandedMacros": [
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::execution_settings",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/execution_settings.rs",
+      "unexpandedMacros": [
+        "json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::grok_oauth",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1817,16 +1836,6 @@
         "assert",
         "assert_eq",
         "format",
-        "vec"
-      ]
-    },
-    {
-      "id": "dim_app_server::isolation_policy",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/isolation_policy.rs",
-      "unexpandedMacros": [
-        "unreachable",
         "vec"
       ]
     },
@@ -6307,6 +6316,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "mod execution_settings",
+        "path execution_settings::ExecutionSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "mod file_storage",
@@ -6732,6 +6749,8 @@
         "path ContextPolicy",
         "path ContextPolicy::bind",
         "path configured_request",
+        "path crate::context_policy::PolicyContext::from_context",
+        "path crate::context_policy::PolicyContext::from_stream",
         "use crate::context_policy::CompactionStep",
         "use crate::context_policy::ContextPolicy",
         "use crate::context_policy::configured_request"
@@ -6743,10 +6762,8 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
-        "path context_messages",
         "use crate::history::HistoryRenderer",
-        "use crate::history::context_configuration",
-        "use crate::history::context_messages"
+        "use crate::history::context_configuration"
       ]
     },
     {
@@ -6880,6 +6897,14 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PolicyFacts::from_context",
+        "use dim_agent_runtime::PolicyFacts"
       ]
     },
     {
@@ -7212,18 +7237,17 @@
         "path HistoryRenderer",
         "path context_compaction",
         "path context_configuration",
-        "path context_messages",
+        "path crate::history::StreamedContext",
         "path digest_message",
-        "path retained_entry",
+        "path projection_checkpoint",
         "path truncate_middle",
         "path user_message",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
-        "use crate::history::context_messages",
         "use crate::history::digest_message",
-        "use crate::history::retained_entry",
+        "use crate::history::projection_checkpoint",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
       ]
@@ -7260,6 +7284,27 @@
         "path Timeline",
         "use dim_agent_runtime::ContextHistory",
         "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PolicyFacts",
+        "path PolicyOrder",
+        "path PolicyOrderEvent",
+        "path PolicyWindow",
+        "use dim_agent_runtime::PolicyFacts",
+        "use dim_agent_runtime::PolicyOrder",
+        "use dim_agent_runtime::PolicyOrderEvent",
+        "use dim_agent_runtime::PolicyWindow"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path ProjectionCheckpoint"
       ]
     },
     {
@@ -7334,7 +7379,8 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::prompt",
       "references": [
-        "path ContextBaselineEntry"
+        "path ContextBaselineEntry",
+        "path ContextConfiguredData"
       ]
     },
     {
@@ -7353,9 +7399,12 @@
       "references": [
         "path ContextPolicy",
         "path ContextPolicy::bind",
+        "path PolicyContext::from_context",
+        "path PolicyContext::from_stream",
         "path configured_request",
         "path crate::context_policy::check_cancel",
         "use crate::context_policy::ContextPolicy",
+        "use crate::context_policy::PolicyContext",
         "use crate::context_policy::configured_request"
       ]
     },
@@ -7365,11 +7414,9 @@
       "references": [
         "path HistoryRenderer",
         "path context_configuration",
-        "path context_messages",
         "path crate::history::read_context",
         "use crate::history::HistoryRenderer",
-        "use crate::history::context_configuration",
-        "use crate::history::context_messages"
+        "use crate::history::context_configuration"
       ]
     },
     {
@@ -7481,6 +7528,14 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PolicyFacts::from_context",
+        "use dim_agent_runtime::PolicyFacts"
       ]
     },
     {
@@ -8028,9 +8083,17 @@
       "from": "dim_agent_capabilities::history",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::PolicyOrderEvent"
       ]
     },
     {
@@ -8047,7 +8110,9 @@
         "path ProjectionCheckpoint",
         "path ProjectionCheckpointState",
         "path RecoverySnapshot",
-        "path checkpoint"
+        "path checkpoint",
+        "path dim_agent_types::ProjectionCheckpoint",
+        "path dim_agent_types::TimelinePosition"
       ]
     },
     {
@@ -8101,7 +8166,8 @@
       "to": "dim_agent_types::prompt",
       "references": [
         "path ContextBaselineEntry",
-        "path ContextConfiguredData"
+        "path ContextConfiguredData",
+        "path PromptReference"
       ]
     },
     {
@@ -8578,6 +8644,17 @@
     },
     {
       "from": "dim_agent_capabilities::host_platform",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettingsHost",
+        "path ExecutionSettingsSource",
+        "path crate::execution_settings::ExecutionSettings",
+        "use crate::execution_settings::ExecutionSettingsHost",
+        "use crate::execution_settings::ExecutionSettingsSource"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host_platform",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path FileStorage",
@@ -8602,14 +8679,6 @@
       "to": "dim_agent_capabilities::host_platform::isolation",
       "references": [
         "mod isolation"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform",
-      "to": "dim_agent_capabilities::host_platform::isolation_policy",
-      "references": [
-        "mod isolation_policy",
-        "use isolation_policy::IsolationPolicyError"
       ]
     },
     {
@@ -8646,19 +8715,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path Sandbox",
-        "use dim_agent_types::IsolationEscalation",
-        "use dim_agent_types::IsolationPolicy",
-        "use dim_agent_types::IsolationPolicyEffective",
-        "use dim_agent_types::IsolationPolicySnapshot",
-        "use dim_agent_types::IsolationPolicySource",
-        "use dim_agent_types::Sandbox"
       ]
     },
     {
@@ -8703,14 +8759,6 @@
     },
     {
       "from": "dim_agent_capabilities::host_platform::isolation",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorageError::Io",
-        "use crate::file_storage::FileStorageError"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
@@ -8724,77 +8772,6 @@
         "use super::ProcessSpec",
         "use super::ProcessSpecError",
         "use super::TemporaryDirectory"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation",
-      "to": "dim_agent_capabilities::host_platform::isolation_policy",
-      "references": [
-        "path super::isolation_policy::effective"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path Escalation",
-        "path Escalation::Ask",
-        "path PolicyFile",
-        "path Sandbox",
-        "path Sandbox::Host",
-        "path Sandbox::Network",
-        "path Sandbox::Workspace",
-        "use super::IsolationEscalation",
-        "use super::IsolationPolicy",
-        "use super::Sandbox"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation_policy",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorageError",
-        "path FileStorageError::Io",
-        "use crate::file_storage::FileStorageError"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation_policy",
-      "to": "dim_agent_capabilities::host_platform",
-      "references": [
-        "path HostPlatform",
-        "use super::HostPlatform"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation_policy",
-      "to": "dim_agent_capabilities::host_platform::isolation",
-      "references": [
-        "path super::isolation::roots",
-        "path super::isolation::validate_overlap"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::host_platform::isolation_policy",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path IsolationEscalation::Ask",
-        "path IsolationEscalation::Deny",
-        "path IsolationPolicy",
-        "path IsolationPolicy::default",
-        "path IsolationPolicyEffective",
-        "path IsolationPolicySnapshot",
-        "path IsolationPolicySource::Defaults",
-        "path IsolationPolicySource::File",
-        "path Sandbox::Host",
-        "path Sandbox::Network",
-        "path Sandbox::Workspace",
-        "use dim_agent_types::IsolationEscalation",
-        "use dim_agent_types::IsolationPolicy",
-        "use dim_agent_types::IsolationPolicyEffective",
-        "use dim_agent_types::IsolationPolicySnapshot",
-        "use dim_agent_types::IsolationPolicySource",
-        "use dim_agent_types::Sandbox"
       ]
     },
     {
@@ -12204,18 +12181,6 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::exec",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path Sandbox",
-        "path Sandbox::Host",
-        "path Sandbox::Network",
-        "path Sandbox::Workspace",
-        "path isolation",
-        "use crate::host_platform::Sandbox"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::workspace_tools::exec",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -13005,6 +12970,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::memory",
+      "references": [
+        "mod memory"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::memory_timeline_store",
       "references": [
         "mod memory_timeline_store"
@@ -13071,7 +13043,11 @@
       "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "mod timeline_store"
+        "mod timeline_store",
+        "use timeline_store::PolicyFacts",
+        "use timeline_store::PolicyOrder",
+        "use timeline_store::PolicyOrderEvent",
+        "use timeline_store::PolicyWindow"
       ]
     },
     {
@@ -13196,6 +13172,13 @@
         "path lifecycle",
         "use crate::lifecycle::CloseOnce",
         "use crate::lifecycle::guarded"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::agent",
+      "to": "dim_agent_runtime::memory",
+      "references": [
+        "path crate::memory::trim_if_large"
       ]
     },
     {
@@ -13657,9 +13640,15 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path PolicyFacts",
+        "path PolicyOrder",
+        "path PolicyWindow",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use crate::PolicyFacts",
+        "use crate::PolicyOrder",
+        "use crate::PolicyWindow",
         "use crate::StoredEvent",
         "use crate::TimelineKey",
         "use crate::TimelineStore"
@@ -14127,6 +14116,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path TimelineTrace",
+        "path crate::ContextHistory",
         "use crate::TimelineTrace"
       ]
     },
@@ -14152,7 +14142,17 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "use dim_agent_types::AgentEvent"
+        "path ContextCompactionResult::Completed",
+        "path EventKind",
+        "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
+        "path EventKind::InputConsumed",
+        "path EventKind::ModelCall",
+        "path EventKind::ModelUsage",
+        "path EventKind::TurnStart",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::ContextCompactionResult",
+        "use dim_agent_types::EventKind"
       ]
     },
     {
@@ -14188,13 +14188,6 @@
       "to": "dim_agent_types::finite_number",
       "references": [
         "mod finite_number"
-      ]
-    },
-    {
-      "from": "dim_agent_types",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "mod isolation"
       ]
     },
     {
@@ -14751,6 +14744,22 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::exec_shell_settings",
+      "references": [
+        "mod exec_shell_settings",
+        "path exec_shell_settings::ExecShellSettingsPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::execution_settings",
+      "references": [
+        "mod execution_settings",
+        "path execution_settings::ExecutionSettingsPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "mod grok_oauth",
@@ -14765,14 +14774,6 @@
         "mod hooks_settings",
         "path hooks_settings::HooksService",
         "path hooks_settings::HooksSettingsPlugin::new"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::isolation_policy",
-      "references": [
-        "mod isolation_policy",
-        "path isolation_policy::IsolationPolicyPlugin::new"
       ]
     },
     {
@@ -17517,6 +17518,113 @@
       ]
     },
     {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_capabilities::host_platform::exec_shell_settings",
+      "references": [
+        "path ExecShellSettingsError",
+        "path ExecShellSettingsError::Conflict",
+        "path ExecShellSettingsError::Invalid",
+        "use dim_agent_capabilities::host_platform::ExecShellSettingsError"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::exec_shell_settings",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::execution_settings",
+      "references": [
+        "path ExecutionSettings",
+        "path ExecutionSettingsError",
+        "path ExecutionSettingsError::Failed",
+        "path ExecutionSettingsHost",
+        "path ExecutionSettingsSource",
+        "path SOURCE",
+        "use dim_agent_capabilities::execution_settings::ExecutionSettings",
+        "use dim_agent_capabilities::execution_settings::ExecutionSettingsError",
+        "use dim_agent_capabilities::execution_settings::ExecutionSettingsHost",
+        "use dim_agent_capabilities::execution_settings::ExecutionSettingsSource",
+        "use dim_agent_capabilities::execution_settings::SOURCE"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::execution_settings",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
+      ]
+    },
+    {
       "from": "dim_app_server::grok_oauth",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -17823,84 +17931,6 @@
       "references": [
         "path SettingsService",
         "use crate::settings::SettingsPlugin"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_agent_capabilities::host_platform",
-      "references": [
-        "path HostPlatform",
-        "use dim_agent_capabilities::host_platform::HostPlatform"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_agent_capabilities::host_platform::exec_shell_settings",
-      "references": [
-        "path ExecShellSettingsError",
-        "path ExecShellSettingsError::Conflict",
-        "path ExecShellSettingsError::Invalid",
-        "use dim_agent_capabilities::host_platform::ExecShellSettingsError"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_agent_capabilities::host_platform::isolation_policy",
-      "references": [
-        "path IsolationPolicyError",
-        "path IsolationPolicyError::Conflict",
-        "path IsolationPolicyError::Invalid",
-        "use dim_agent_capabilities::host_platform::IsolationPolicyError"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_agent_capabilities::methods",
-      "references": [
-        "path Interruption::Report",
-        "path MethodDecl::new",
-        "path RpcError",
-        "path RpcError::app",
-        "path RpcError::invalid",
-        "path params",
-        "path reply",
-        "use dim_agent_capabilities::methods::Interruption",
-        "use dim_agent_capabilities::methods::MethodDecl",
-        "use dim_agent_capabilities::methods::RpcError",
-        "use dim_agent_capabilities::methods::params",
-        "use dim_agent_capabilities::methods::reply"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path IsolationPolicy",
-        "use dim_agent_capabilities::host_platform::IsolationPolicy"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_app_server::methods",
-      "references": [
-        "path ManagementMethods",
-        "use crate::methods::ManagementMethods"
-      ]
-    },
-    {
-      "from": "dim_app_server::isolation_policy",
-      "to": "dim_app_server::protocol",
-      "references": [
-        "path Empty",
-        "use crate::protocol::Empty"
       ]
     },
     {
@@ -22212,6 +22242,7 @@
         "path AgentError",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
+        "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
@@ -22230,11 +22261,19 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
+        "path PolicyFacts",
+        "path PolicyOrder",
+        "path PolicyOrderEvent",
+        "path PolicyWindow",
         "path PublishCallback",
         "path StoredBranch",
         "path StoredEvent",
         "path TimelineKey",
         "path TimelineStore",
+        "use dim_agent_runtime::PolicyFacts",
+        "use dim_agent_runtime::PolicyOrder",
+        "use dim_agent_runtime::PolicyOrderEvent",
+        "use dim_agent_runtime::PolicyWindow",
         "use dim_agent_runtime::PublishCallback",
         "use dim_agent_runtime::StoredBranch",
         "use dim_agent_runtime::StoredEvent",
@@ -24273,14 +24312,6 @@
     },
     {
       "from": "dim_cli::model::session",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path dim_agent_types::isolation::IsolationPolicy",
-        "path dim_agent_types::isolation::IsolationPolicySnapshot"
-      ]
-    },
-    {
-      "from": "dim_cli::model::session",
       "to": "dim_agent_types::profile",
       "references": [
         "path dim_agent_types::ModelId"
@@ -25473,6 +25504,7 @@
         "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
+        "path DIM_OAUTH_ID",
         "path DraftPart",
         "path DraftPart::Block",
         "path DraftPart::Paste",
@@ -25483,6 +25515,7 @@
         "path EmptyReason::NoModels",
         "path EmptyReason::Unavailable",
         "path EmptyReason::Unreadable",
+        "path ExecutionSnapshot",
         "path ModelItem",
         "path ModelList",
         "path ModelPolicyUpdate::Conflict",
@@ -25540,14 +25573,18 @@
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
+        "path Update::UsageReport",
         "path Update::Web",
+        "path Usage",
         "use crate::model::session::Account",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
         "use crate::model::session::EmptyProvider",
         "use crate::model::session::EmptyReason",
+        "use crate::model::session::ExecutionSnapshot",
         "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList",
         "use crate::model::session::ModelPolicyUpdate",
@@ -25562,7 +25599,8 @@
         "use crate::model::session::SessionPort",
         "use crate::model::session::SubagentModelPolicy",
         "use crate::model::session::SwitchKind",
-        "use crate::model::session::Update"
+        "use crate::model::session::Update",
+        "use crate::model::session::Usage"
       ]
     },
     {
@@ -27402,29 +27440,10 @@
     },
     {
       "from": "dim_cli::ui::isolation_panel",
-      "to": "dim_agent_types::isolation",
+      "to": "dim_cli::model::session",
       "references": [
-        "path IsolationEscalation",
-        "path IsolationEscalation::Ask",
-        "path IsolationEscalation::Deny",
-        "path IsolationPolicy",
-        "path IsolationPolicySnapshot",
-        "path Sandbox::Host",
-        "path Sandbox::Network",
-        "path Sandbox::Workspace",
-        "use dim_agent_types::isolation::IsolationEscalation",
-        "use dim_agent_types::isolation::IsolationPolicy",
-        "use dim_agent_types::isolation::IsolationPolicySnapshot",
-        "use dim_agent_types::isolation::Sandbox"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::isolation_panel",
-      "to": "dim_cli::ui::line_input",
-      "references": [
-        "path LineInput",
-        "path LineInput::new",
-        "use crate::ui::line_input::LineInput"
+        "path ExecutionSnapshot",
+        "use crate::model::session::ExecutionSnapshot"
       ]
     },
     {
@@ -27461,12 +27480,8 @@
       "from": "dim_cli::ui::isolation_panel",
       "to": "dim_cli::ui::render::panel",
       "references": [
-        "path bordered",
         "path confirm_panel",
-        "path key_hints",
-        "use crate::ui::render::panel::bordered",
-        "use crate::ui::render::panel::confirm_panel",
-        "use crate::ui::render::panel::key_hints"
+        "use crate::ui::render::panel::confirm_panel"
       ]
     },
     {
@@ -27474,19 +27489,10 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Char",
-        "path KeyCode::Delete",
-        "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyEvent",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::isolation_panel",
-      "to": "dim_cli::ui::text",
-      "references": [
-        "path crate::ui::text::wrap_cells"
       ]
     },
     {
@@ -28109,6 +28115,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path AccountInfo",
+        "path DIM_OAUTH_ID",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -28118,9 +28125,17 @@
         "path OauthStart",
         "path Usage",
         "use crate::model::session::Account",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
         "use crate::model::session::Usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::oauth_view",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -28255,6 +28270,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path AccountInfo",
+        "path DIM_OAUTH_ID",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
@@ -28273,7 +28289,6 @@
       "from": "dim_cli::ui::oauth_view::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path DIM_OAUTH_ID",
         "path Focus::Input",
         "path Focus::Submit",
         "path OauthView",
@@ -28581,13 +28596,6 @@
     },
     {
       "from": "dim_cli::ui::prompts",
-      "to": "dim_agent_types::isolation",
-      "references": [
-        "path dim_agent_types::isolation::IsolationPolicy"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::prompts",
       "to": "dim_agent_types::member_approval",
       "references": [
         "path dim_agent_types::MEMBER_APPROVAL_ALLOW",
@@ -28819,11 +28827,13 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::model::session",
       "references": [
+        "path DIM_OAUTH_ID",
         "path OauthEvent",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry"
@@ -28872,11 +28882,9 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path DIM_OAUTH_ID",
         "path OauthView",
         "path OauthView::native_selection",
         "path OauthView::new",
-        "use crate::ui::oauth_view::DIM_OAUTH_ID",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -28976,6 +28984,7 @@
       "from": "dim_cli::ui::providers_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path DIM_OAUTH_ID",
         "path ProviderAction::Create",
         "path ProviderEntry"
       ]
@@ -28985,13 +28994,6 @@
       "to": "dim_cli::ui::line_input",
       "references": [
         "path LineInput::new"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::providers_panel::tests",
-      "to": "dim_cli::ui::oauth_view",
-      "references": [
-        "path DIM_OAUTH_ID"
       ]
     },
     {
@@ -30687,6 +30689,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::block",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path crate::model::session::Usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::block",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellRun",
@@ -30880,6 +30889,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path crate::ui::oauth_view::OauthView::render_usage"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::ui::render::markdown",
       "references": [
         "path MarkdownRenderer",
@@ -30952,6 +30968,7 @@
       "to": "dim_cli::ui::transcript::block",
       "references": [
         "path Block",
+        "path Block::AccountUsage",
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
@@ -31266,6 +31283,7 @@
         "path CompactReply::Skipped",
         "path CompactReply::Unsupported",
         "path ContextReading",
+        "path DIM_OAUTH_ID",
         "path SessionPort",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -31305,11 +31323,13 @@
         "path Update::Upgrade",
         "path Update::UpgradeInstalled",
         "path Update::Usage",
+        "path Update::UsageReport",
         "path Update::Web",
         "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
+        "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -31515,10 +31535,8 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path DIM_OAUTH_ID",
         "path OauthView",
         "path OauthView::new",
-        "use crate::ui::oauth_view::DIM_OAUTH_ID",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -31882,6 +31900,7 @@
       "to": "dim_cli::ui::transcript::block",
       "references": [
         "path Block",
+        "path Block::AccountUsage",
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
@@ -31895,8 +31914,6 @@
         "path Block::Thinking",
         "path Block::ToolGroup",
         "path Block::User",
-        "path Tone",
-        "path Tone::Danger",
         "path Tone::Muted",
         "path Tone::Warning",
         "path group_rows",
@@ -32055,8 +32072,8 @@
         "path Command::ListPlugins",
         "path Command::OpenLine",
         "path Command::Plugin",
-        "path Command::SaveIsolation",
         "path Command::Submit",
+        "path DIM_OAUTH_ID",
         "path SessionPort",
         "path SwitchKind::Forked",
         "path Update",
@@ -32066,6 +32083,8 @@
         "path Update::Plugins",
         "path Update::Snapshot",
         "path Update::Switched",
+        "path Update::UsageReport",
+        "path crate::model::session::Account",
         "path crate::model::session::SwitchKind::Resumed"
       ]
     },
@@ -32097,6 +32116,13 @@
       "to": "dim_cli::projection",
       "references": [
         "path crate::projection::Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::oauth_view",
+      "references": [
+        "path OauthView::new"
       ]
     },
     {
@@ -32171,6 +32197,7 @@
       "to": "dim_cli::ui::theme",
       "references": [
         "path Theme",
+        "path Theme::named",
         "path Theme::system"
       ]
     },
@@ -34551,18 +34578,6 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
-      "path": "IsolationEscalation::Deny"
-    },
-    {
-      "module": "dim_cli::ui::tui::tests",
-      "path": "IsolationPolicy::default"
-    },
-    {
-      "module": "dim_cli::ui::tui::tests",
-      "path": "IsolationPolicySource::File"
-    },
-    {
-      "module": "dim_cli::ui::tui::tests",
       "path": "OauthEvent::Device"
     },
     {
@@ -34580,10 +34595,6 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "Projection::default"
-    },
-    {
-      "module": "dim_cli::ui::tui::tests",
-      "path": "Sandbox::Host"
     },
     {
       "module": "dim_cli::ui::tui::tests",

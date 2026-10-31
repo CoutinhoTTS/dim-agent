@@ -184,7 +184,9 @@ async fn show(
     } else {
         display.record("Command rules: this daemon does not provide them")?;
     }
-    display.record("Permission controls admission, not process isolation. Configure isolation in /settings > Command isolation.")?;
+    display.record(
+        "Permission controls admission; the user turns the sandbox on in /settings > Execution.",
+    )?;
     display.record(USAGE)
 }
 

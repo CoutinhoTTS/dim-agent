@@ -1,13 +1,14 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchLifecycle, FaultReporter, Result, StoredEvent, TimelineKey,
-    TimelineStore,
+    AgentError, BoxFuture, BranchLifecycle, FaultReporter, PolicyFacts, PolicyOrder, PolicyWindow,
+    Result, StoredEvent, TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
     TimelinePosition,
 };
 use rutis::events::SyncCall;
+#[allow(unused_imports)]
 use rutis::host::{CtxHost, ErrorKind, InstanceId};
 use rutis::service;
 use rutis::{Ctx, Disposer, Event};
@@ -734,10 +735,165 @@ impl Timeline {
         let end = self.through(Some(end))?;
         self.records(&self.0.key.branch_id, start, end).await
     }
+    /// Reads complete batches after `after`, targeting `limit` events and
+    /// never ending inside an atomic batch.
+    #[service(skip)]
+    pub async fn stored_page(
+        &self,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let through = self.through(Some(through))?;
+        Ok(self
+            .0
+            .store
+            .read_page(&self.0.key, after, limit, through)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+    /// A local event range read from the store, bypassing the hot cache.
+    #[service(skip)]
+    pub async fn stored_local<R: RangeBounds<u64> + Send>(
+        &self,
+        range: R,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        let start = match range.start_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => n.saturating_add(1),
+            Bound::Unbounded => 1,
+        }
+        .max(1);
+        let end = match range.end_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => n.saturating_sub(1),
+            Bound::Unbounded => self.committed(),
+        };
+        let end = self.through(Some(end))?;
+        Ok(self
+            .0
+            .store
+            .read(&self.0.key, start..=end)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+
     /// Full fact replay; no interpreter or snapshot is required.
     #[service(skip)]
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
         self.context_from(through, None).await
+    }
+    /// The policy-relevant events at `through`, filtered by the store.
+    #[service(skip)]
+    pub async fn policy_facts(&self, through: u64, turn_id: &str) -> Result<PolicyFacts> {
+        let published = self.sequence();
+        if through > published {
+            return Err(AgentError::InvalidInput(format!(
+                "future timeline sequence {through}"
+            )));
+        }
+        let mut events = Vec::new();
+        for (branch, cut) in self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
+        {
+            if cut == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch,
+            };
+            events.extend(self.0.store.policy_facts(&key, cut, turn_id).await?.events);
+        }
+        Ok(PolicyFacts { through, events })
+    }
+    /// The event order for legal compaction cuts.
+    #[service(skip)]
+    pub async fn policy_order(&self, through: u64) -> Result<PolicyOrder> {
+        let through = self.through(Some(through))?;
+        let segments: Vec<_> = self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
+            .collect();
+        let mut events = Vec::new();
+        for (branch, cut) in segments {
+            if cut == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch,
+            };
+            events.extend(self.0.store.policy_order(&key, cut).await?.events);
+        }
+        Ok(PolicyOrder { through, events })
+    }
+
+    /// The anchor and turn window for a known compaction cut.
+    #[service(skip)]
+    pub async fn policy_window(
+        &self,
+        through: u64,
+        turn_id: &str,
+        cut: &str,
+    ) -> Result<PolicyWindow> {
+        let through = self.through(Some(through))?;
+        let mut window = self
+            .0
+            .store
+            .policy_window(&self.0.key, through, turn_id, cut)
+            .await?;
+        let current = std::mem::take(&mut window.tool_results);
+        let mut cut_sequence = window.cut_sequence;
+        for (branch, segment_through) in &self.0.ancestors {
+            if *segment_through == 0 {
+                continue;
+            }
+            let key = TimelineKey {
+                session_id: self.0.key.session_id.clone(),
+                branch_id: branch.clone(),
+            };
+            let ancestor = self
+                .0
+                .store
+                .policy_window(&key, *segment_through, turn_id, cut)
+                .await?;
+            if cut_sequence == 0 {
+                cut_sequence = ancestor.cut_sequence;
+            }
+            if !window.events.iter().any(|event| event.id == cut) {
+                window.events.extend(
+                    ancestor
+                        .events
+                        .iter()
+                        .filter(|event| event.id == cut)
+                        .cloned(),
+                );
+            }
+            for event in ancestor.tool_results {
+                if !window.tool_results.iter().any(|seen| seen.id == event.id) {
+                    window.tool_results.push(event);
+                }
+            }
+        }
+        for event in current {
+            if !window.tool_results.iter().any(|seen| seen.id == event.id) {
+                window.tool_results.push(event);
+            }
+        }
+        window.cut_sequence = cut_sequence;
+        Ok(window)
     }
     /// Select an interpreter-compatible cache before decoding or trimming facts.
     /// Invalid caches are disposable; failures reading required facts are not.
