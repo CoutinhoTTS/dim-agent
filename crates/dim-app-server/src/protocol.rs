@@ -752,8 +752,8 @@ pub struct WebToggled {
 pub struct UiAttach {
     pub session_id: String,
     pub kind: String,
-    /// Present when the daemon started this leaf: its id and the attach
-    /// token it received in the hosted `Tui` config.
+    /// Present for a UI leaf: its id and the attach token from `ui.open`'s
+    /// reply.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub ui_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -765,7 +765,8 @@ pub struct UiAttached {
     pub ui_id: String,
     pub generation: u64,
 }
-/// `ui.open`: link to a UI leaf and host `Tui` in it (Tui design §3.6).
+/// `ui.open`: open a session with a UI leaf, which runs its own `Tui`
+/// (Tui design §3.6).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiOpen {
@@ -775,7 +776,7 @@ pub struct UiOpen {
     pub peer: String,
     /// Where the leaf waits for the daemon's link.
     pub address: String,
-    /// An interface of the same Session to close once this leaf is loaded.
+    /// An interface of the same Session to close once this leaf attaches.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub replace: Option<String>,
     /// The generation `replace` must still have.
@@ -787,8 +788,10 @@ pub struct UiOpen {
 pub struct UiOpened {
     pub ui_id: String,
     pub generation: u64,
+    /// The one-time token the leaf's `Tui` passes to `ui.attach`.
+    pub token: String,
 }
-/// `ui.close`: remove a registration; a leaf is unloaded and its link closed.
+/// `ui.close`: remove a registration; a leaf's session is closed.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiClose {

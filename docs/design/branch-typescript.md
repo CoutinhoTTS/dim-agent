@@ -38,8 +38,8 @@ ordered consumption.
 
 ## Exported services
 
-`Exports::service_in` serves each one inside every instance of its group; a row gets the nearest
-enclosing instance. Its methods are the type's public `&self` methods that can cross languages, all
+The App Server shares each one in its group (`register_shared_instance`), so it is served inside
+every instance of that group; a row gets the nearest enclosing instance. Its methods are the type's public `&self` methods that can cross languages, all
 `async` for the caller. The generator leaves the others out with a build warning.
 
 | Name | Group | Rust type | Methods used by parts |

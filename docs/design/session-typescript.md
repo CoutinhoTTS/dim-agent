@@ -2,7 +2,7 @@
 
 Status: tool/method and leaf broadcast bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63)
 and [#168](https://github.com/arcships/dim/issues/168), following the approved [#174 contract](https://github.com/arcships/dim/pull/174).
-The runtime uses rutis 0.17.1.
+The runtime uses rutis 0.19.2.
 The verification section distinguishes executable acceptance from platform limits.
 The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
@@ -43,8 +43,9 @@ normal Rpc path. The [embedding example](../../crates/dim-app-server/examples/se
 uses a protected Unix connection and a disposable storage home. General CLI installation,
 marketplaces and editable plugin intent remain PluginManager work.
 
-The input contains the existing `LocalRuntime::node` arguments (`node`, `jsRuntime`, `anchor`,
-absolute paths), an optional Python runtime (`python`: an interpreter with the `rutis` package and
+The input contains the Node runtime's paths (`node`, `jsRuntime`, `anchor`, absolute paths), from
+which the App Server builds the launch command of the `session-node` connection row
+([How Dim uses rutis A.4](rutis-usage.md#a4-runtimes-and-sessions)), an optional Python runtime (`python`: an interpreter with the `rutis` package and
 the project directory its `py:<module>` rows are imported from) and `rows`, an array of ordinary
 loader row objects. One Node runtime, and one Python runtime if configured, is shared across the
 rows and Sessions. Its runtime name differs from an account runtime;
@@ -94,22 +95,22 @@ entries are likewise one JSON file the package ships and the host is given; the 
 does not repeat them. A future PluginManager can produce these rows from its package boundary. Its proposed schema 2 is not assumed to be available, and the
 private managed-provider schema 1 is not accepted here.
 
-The static declaration is necessary because `RuntimeResolver` can describe a module only after
-Node starts, while the host registers the names rows provide in the catalog, with their groups,
+The static declaration is necessary because `SessionResolver` can describe a module only once
+the Node runtime's session is there, while the host registers the names rows provide in the catalog, with their groups,
 before the loader starts. C4 does not bootstrap a second runtime to read them. On the existing
 online resolution, compare the Node description's `provides` with the row snapshot before loading
 that row. A mismatch is a row resolution error; it does
-not alter the configured names. The pinned SDK's initial offline placeholder has no `provides`;
-only its existing runtime-source/unavailable-schema marker permits that provisional resolution.
-The SDK later uses `resolve_again` to obtain the online declaration before publishing its
-`RuntimeRows` catalog. An online description must match the snapshot, including when its actual
+not alter the configured names. A name resolved while the runtime's session is not there has no `provides`;
+only rutis's unavailable-schema marker (no schema, and a `meta.schema` text) permits that provisional
+resolution. `SessionResolver` resolves it again with the session before it releases the runtime's
+rows (`SessionRows`). An online description must match the snapshot, including when its actual
 `provides` is empty; missing online declarations are not accepted as placeholders. The same
 resolved factory retains the original schema, dependency declarations, scoped factory, metadata
 and configuration validation.
 
 After process reconciliation releases its loader operation, App Server's existing startup
-readiness waits for the configured runtimes' `RuntimeRows` catalogs as well as their process
-rows. It uses the existing startup deadline and failure cleanup. This orders Session creation
+readiness waits for the configured runtimes' rows (`SessionRows::key(row)`) as well as their
+process rows. It uses the existing startup deadline and failure cleanup. This orders Session creation
 after declaration discovery; it does not wait for genuinely Pending optional Session rows.
 
 Rows naming the same module must use the same snapshot; distinct row ids alone do not make
@@ -446,9 +447,9 @@ services every language reads, so there is no setup method.
 | §4 rule 7 | Named services, C1 and the native Session channel; no private state reads. |
 | §4 rule 8 | Existing resolver, catalog, factory, scope, event and effect APIs; no infrastructure API, optional-dependency semantics or rutis requirement. |
 | §4 rule 9 | Declarations and transient notifications stay out of Timeline; C6 notices retain their own owner. |
-| §1 | Each business part is a Session part a foreign row registers; existing NodeRows owns shared runtime I/O. `sessionLifecycle.closing()` stops owned work. |
+| §1 | Each business part is a Session part a foreign row registers; the runtime's connection row (`RuntimeConnection`) owns shared runtime I/O. `sessionLifecycle.closing()` stops owned work. |
 | ADR 002 D1 | Session state belongs to that part; Node and its loader resources are shared process resources. Branch facts remain branch-owned. |
-| ADR 002 D2 | No new wiring capability or forwarding owner: existing NodeRows and original-row binding own their resources. No registration host or method aggregation plugin. |
+| ADR 002 D2 | No new wiring capability or forwarding owner: the runtime's connection row and original-row binding own their resources. No registration host or method aggregation plugin. |
 | ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry and the Session's method table follow the registrations of rows, which last until their row unloads (#241), and Rpc reads the table per call. Required dependencies remain required. |
 | ADR 002 D4 | Only structural rows enter loader input; business Settings changes do not reload parts. |
 | ADR 002 D5 | Canonical named service/key, data, errors and cancel action; Rust/native details are bindings. Existing unsupported C1 features are explicit. |

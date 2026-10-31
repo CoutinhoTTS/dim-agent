@@ -56,27 +56,47 @@ session: <session-id>
 ```
 
 The composer stays in terminal scrollback. It redraws its own input and suggestion rows and
-keeps the cursor in the draft. Image pixels are not rendered in the terminal. Markers show
-escaped file names or paste line counts; labels are presentation, not model content. An image
-whose sent form differs from its source's says how: both sizes when the size changed, as in
-`[Image 1: photo.jpg · 8064×6048 → 2048×1536]`, both media types when the re-encode changed
-the type, as in `[Image 1: shot.png · image/png → image/jpeg]`, ` · first frame` for an
+keeps the cursor in the draft. Image pixels are not rendered in the terminal. In the line
+client, markers show escaped file names or paste line counts; labels are presentation, not model
+content. An image whose sent form differs from its source's says how: both sizes when the size
+changed, as in `[Image 1: photo.jpg · 8064×6048 → 2048×1536]`, both media types when the re-encode
+changed the type, as in `[Image 1: shot.png · image/png → image/jpeg]`, ` · first frame` for an
 animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image
 sent as it is keeps the plain marker.
-After submission, transcript messages show image blocks as numbered `[Image #N]` markers
-on separate lines in content order, including image-only messages and messages restored
-from history. These fixed tokens do not change with the interface language. Numbering starts
-at 1 for each message; the submitted image block has no filename. Tool results retain their
-existing text-only display. Editing, quoting, branching, forking and withdrawing a queued
-message reuse only its text; display markers are never inserted into those drafts.
+
+**Image markers.** The terminal UI's draft, its sent message and its restored history follow one
+rule: an image submitted as an image block reads the fixed token `[Image #N]`, where N is the
+image's position among the images of that message, and a path the model receives as a link keeps
+`[name]`. The draft recomputes N in content order whenever an image is added or removed, so a
+draft number is the number the message will show, and it chooses between the marker and the name
+by the same model capability that decides what the submission carries. The token is never
+translated, so both ends read alike under any interface language. What an attach adds after it may
+be: both sizes when the size changed, `[Image #1 · 8064×6048 → 2048×1536]`, both media types when
+the re-encode changed the type, `[Image #1 · image/png → image/jpeg]`, ` · first frame` for an
+animation, and ` · re-encoded` when the re-encode kept both the size and the type; an image sent
+as it is keeps the plain marker. The marker is display text. A token's buffer holds a file's
+name, its `@` path, or `[Image]` for a clipboard image, and never the numbered marker; what the
+token submits and the input history keeps is a file's link, or nothing for a clipboard image. So
+the marker never enters the message text, the input history or a model request, and a draft
+recalled with Up carries the image's link or nothing. A draft set aside for the command palette
+(Ctrl+O or Ctrl+P) or for an older input-history entry comes back as its buffer text, so a
+clipboard image in it comes back as the literal `[Image]` without the image.
 
 ```text
+> What is this? [Image #1] [Image #2]
 ┃ What is this?
 ┃ [Image #1]
+┃ [Image #2]
 ┃  [Pasted text: /files/paste.txt (1 lines)]
 
 ┃ [Image #1]
 ```
+
+After submission, the transcript draws the message's image blocks as those markers on separate
+lines in content order, including image-only messages and messages restored from history; a
+submitted image block has no filename. Tool results retain their existing text-only display.
+Editing, quoting, branching, forking and withdrawing a queued message reuse only its text;
+display markers are never inserted into those drafts.
 
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
 or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.
@@ -142,19 +162,16 @@ newlines. Count lines as Rust `str::lines()` does: a trailing newline adds no ex
 ### Terminal UI composer
 
 The terminal UI (scrollback and fullscreen) follows the TypeScript TUI's markers, which differ
-from the line client's above:
+from the line client's above. Image markers are the rule stated under scrollback layout:
 
 - **Dropped or pasted paths.** A terminal delivers a drag as a paste of the path. A paste naming
   only existing files or directories (one path or several per line, one line per path or group)
-  inserts one atomic `[name]` marker per path; a repeated name reads `[name #2]`. A backslash
-  escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a shell-mode draft the
-  paste stays text.
-- **Clipboard images** read `[Image #N]`, counting the draft's images. An image whose sent form
-  differs from its source's says how: both sizes when the size changed,
-  `[Image #1 · 8064×6048 → 2048×1536]`, both media types when the re-encode changed the type,
-  `[Image #1 · image/png → image/jpeg]`, ` · first frame` for an animation, and ` · re-encoded`
-  when the re-encode kept both the size and the type; an image sent as it is keeps the plain
-  marker.
+  inserts one atomic marker per path: a path the model receives as a link reads `[name]`, a
+  repeated name reads `[name #2]`, and an image the model takes reads that rule's token instead.
+  A backslash escapes any character on Unix, as a shell's drag writes `\(` or `\ `. Into a
+  shell-mode draft the paste stays text.
+- **Clipboard images.** `Ctrl+V` inserts an image token of that rule; a clipboard image has no
+  name to read.
 - **Pasted text.** A paste of fewer than 4 lines and 201 characters is typed into the draft. A
   longer one is one atomic `[... N lines]` marker (over 5,000 characters `[Text: preview (N
   chars)]`), and on submission it is stored with `attachment.put` and sent as
@@ -163,8 +180,10 @@ from the line client's above:
 - **`@` mentions.** `@` at the start of the draft or after a space or punctuation opens a file
   picker for the path query before the cursor. Up/Down select (wrapping), Enter or Tab accepts,
   Esc closes it for that query. A directory is typed in as `@dir/` and the picker stays open; a
-  file becomes an atomic `@relative/path` marker followed by a space. `~/`, absolute and `../`
-  prefixes list that directory. Hidden entries are offered only when the query names one.
+  file becomes an atomic token followed by a space: a path the model receives as a link keeps
+  `@relative/path`, and an image it takes reads that rule's token instead. `~/`,
+  absolute and `../` prefixes list that directory. Hidden entries are offered only when the query
+  names one.
   A pending clipboard read does not block accepting a file or entering a directory. Only
   submission waits for the clipboard result:
 
@@ -177,11 +196,11 @@ from the line client's above:
   (`[name](/abs/path)`, `[@src/a.rs](/abs/src/a.rs)`); its bytes are not uploaded, and the model
   reads it with its tools. An image path is read and scaled (A.1) when it is attached if the
   session's model takes image input — its `provider.catalog` entry has `vision`, or `image`
-  among its `modalities` — and the token says what the sent form changed, as in
-  `[photo.jpg · 8064×6048 → 2048×1536]`. On submission that model gets the image block and a
-  model that does not gets the link; a path attached while the model took no images is read and
-  scaled on submission. A clipboard image has no path, so with such a model the draft is kept
-  with the reason. A catalog that does not answer within 5 seconds leaves images sent as images.
+  among its `modalities` — and the token adds what the sent form changed, as the image-marker
+  rule gives it. On submission that model gets the image block and a model that does not gets the
+  link; a path attached while the model took no images is read and scaled on submission. A
+  clipboard image has no path, so with such a model the draft is kept with the reason. A catalog
+  that does not answer within 5 seconds leaves images sent as images.
   Audio and video files are sent as links: user input has no audio or video content block.
 
 The `@` index must not slow the interface, whatever directory the CLI runs in. A project

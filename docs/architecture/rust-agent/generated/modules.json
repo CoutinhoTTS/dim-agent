@@ -2260,7 +2260,10 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "format",
-        "matches"
+        "matches",
+        "tokio::select",
+        "tracing::info",
+        "vec"
       ]
     },
     {
@@ -2352,6 +2355,7 @@
       "unexpandedMacros": [
         "format",
         "params",
+        "tracing::error",
         "vec"
       ]
     },
@@ -2486,7 +2490,9 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/ui_host.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "tracing::warn"
+      ]
     },
     {
       "id": "dim_app_server::ui_leaf",
@@ -2495,10 +2501,7 @@
       "file": "crates/dim-app-server/src/ui_leaf.rs",
       "unexpandedMacros": [
         "format",
-        "json",
         "matches",
-        "tracing::warn",
-        "vec",
         "writeln"
       ]
     },
@@ -2827,10 +2830,8 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/leaf.rs",
       "unexpandedMacros": [
-        "env",
         "format",
-        "matches",
-        "serde_json::json"
+        "matches"
       ]
     },
     {
@@ -3272,6 +3273,7 @@
         "format",
         "include_str",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -18771,6 +18773,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
+        "path dim_agent_runtime::names::registered_key",
         "use dim_agent_runtime::Names"
       ]
     },
@@ -20187,6 +20190,21 @@
       ]
     },
     {
+      "from": "dim_app_server::runtime_manager",
+      "to": "dim_app_server::session_typescript",
+      "references": [
+        "path ForeignRuntime",
+        "path RuntimeState",
+        "path RuntimeState::Down",
+        "path RuntimeState::Ready",
+        "path RuntimeState::Starting",
+        "path RuntimeStatus::key",
+        "use crate::session_typescript::ForeignRuntime",
+        "use crate::session_typescript::RuntimeState",
+        "use crate::session_typescript::RuntimeStatus"
+      ]
+    },
+    {
       "from": "dim_app_server::runtime_manager::tests",
       "to": "dim_app_server::runtime_manager",
       "references": [
@@ -20278,6 +20296,7 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_runtime::names",
       "references": [
+        "path dim_agent_runtime::names::registered_key",
         "path name_of",
         "use dim_agent_runtime::names::name_of"
       ]
@@ -20993,6 +21012,13 @@
         "path SqliteStorage",
         "path error",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore"
       ]
     },
     {
@@ -21776,8 +21802,10 @@
       "references": [
         "path LeafSpec",
         "path UiLeaves",
+        "path leaf_failed",
         "use crate::ui_leaf::LeafSpec",
-        "use crate::ui_leaf::UiLeaves"
+        "use crate::ui_leaf::UiLeaves",
+        "use crate::ui_leaf::leaf_failed"
       ]
     },
     {
@@ -22171,7 +22199,9 @@
       "references": [
         "mod leaf",
         "path leaf",
-        "path leaf::Leaf::bind"
+        "path leaf::Leaf::bind",
+        "path leaf::LeafTui::new",
+        "path leaf::Opened"
       ]
     },
     {
@@ -23806,6 +23836,13 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::images",
+      "references": [
+        "path crate::images::marker"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::member_approval",
       "references": [
         "path crate::member_approval::DetailError"
@@ -25424,10 +25461,12 @@
       "to": "dim_cli::images",
       "references": [
         "path crate::images::Attached",
+        "path crate::images::Attached::block",
         "path crate::images::Item::Image",
         "path crate::images::Item::Text",
         "path crate::images::file",
-        "path crate::images::is_image"
+        "path crate::images::is_image",
+        "path crate::images::marker"
       ]
     },
     {
@@ -25816,10 +25855,35 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::attachments",
+      "references": [
+        "path crate::attachments::pasted_entries"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::images",
       "references": [
+        "path crate::images::Attached",
         "path crate::images::from_bytes",
         "path crate::images::from_pixels"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path DraftPart",
+        "path DraftPart::Block",
+        "path DraftPart::Paste",
+        "path DraftPart::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::Projection::default"
       ]
     },
     {
@@ -25834,14 +25898,26 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::ZhCn",
+        "path crate::ui::i18n::active",
+        "path crate::ui::i18n::set"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
         "path KeyCode::Backspace",
         "path KeyCode::Char",
+        "path KeyCode::Delete",
         "path KeyCode::Down",
+        "path KeyCode::End",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
+        "path KeyCode::Home",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
@@ -32973,6 +33049,14 @@
     {
       "module": "dim_app_server::session_typescript",
       "path": "Kind::Python"
+    },
+    {
+      "module": "dim_app_server::session_typescript::tests",
+      "path": "ForeignRuntime::new"
+    },
+    {
+      "module": "dim_app_server::session_typescript::tests",
+      "path": "RuntimeStatus::key"
     },
     {
       "module": "dim_app_server::settings",

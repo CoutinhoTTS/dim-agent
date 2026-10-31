@@ -27,7 +27,10 @@ function jobPreview(job: Job) {
 function runPreview(run: Run) { return { ...run, detail: bounded(run.detail, 512) } }
 
 export default definePlugin({
-  name: 'Scheduler', config: z.toJSONSchema(options),
+  name: 'Scheduler',
+  // A plain JSON Schema: zod's result also carries `~standard`, which
+  // rutis refuses as a Standard Schema.
+  config: JSON.parse(JSON.stringify(z.toJSONSchema(options))),
   inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods', 'partRegistry'],
   provides: { scheduleJobs: { call: 'async' } },
   async apply(ctx, config: z.infer<typeof options>) {

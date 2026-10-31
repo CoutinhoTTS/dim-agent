@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { load } from '@arcships/rutis/testing'
-import { part as plugin } from './index.ts'
+import plugin from './part.ts'
 
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const pending = () => new Promise(() => {})

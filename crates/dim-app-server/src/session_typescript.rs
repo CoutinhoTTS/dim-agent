@@ -8,20 +8,24 @@ use dim_agent_capabilities::{
     methods::SessionMethods, prompt_guide::GuideEntries, tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, PartRegistry, SESSION_GROUP, names::name_of};
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, Key, PluginFactory, TypeKey};
 use rutis::{Ctx, Error};
 use rutis_bridge::{
-    runtime::{LocalRuntime, Stdio},
+    PeerId, Session,
+    pipe::Processes,
+    runtime::{Launcher, Stdio},
     session::host_key,
 };
-use rutis_loader::resolve::{Build, Resolved};
-use rutis_loader::runtime::RuntimeResolver;
+use rutis_loader::resolve::Resolved;
+use rutis_loader::runtime::SessionResolver;
 use rutis_loader::{LoaderError, Resolver, ServiceCatalog};
 use serde_json::{Map, Value};
 use std::{
     collections::{HashMap, HashSet},
+    io::BufRead,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 /// The Session and branch services marked `#[rutis::service]`: provided in
@@ -116,7 +120,7 @@ impl SessionTypeScriptConfig {
     }
 }
 
-/// Python 3.10 or later with the `rutis` package, running the modules of
+/// Python 3.12 or later with the `rutis` package, running the modules of
 /// `project`.
 #[derive(Clone, Debug)]
 pub struct PythonConfig {
@@ -127,18 +131,32 @@ pub struct PythonConfig {
     pub packages: Option<PathBuf>,
 }
 
-/// A runtime of other languages and the resolver of its rows.
+/// How a local runtime's process starts: its command, given its channel,
+/// `--id <row>` and `anchor` as its last arguments. Its connection row
+/// injects it, so the row starts once it is provided and starts again when
+/// it is provided again.
+pub struct LaunchCommand {
+    launcher: Launcher,
+    anchor: PathBuf,
+}
+
+/// A local runtime: its connection row and the launch command that row
+/// injects.
+#[derive(Clone)]
 pub(crate) struct ForeignRuntime {
-    /// Its name, which its rows gate on.
-    pub name: &'static str,
-    pub runtime: Arc<LocalRuntime>,
-    pub rows: Arc<RuntimeResolver>,
+    /// The connection row, which its plugin rows run on (`session-node`,
+    /// `py`).
+    pub row: &'static str,
+    /// The Rust-only process key of its launch command.
+    pub command: Key<LaunchCommand>,
+    pub launch: Arc<LaunchCommand>,
 }
 
 pub(crate) struct Parts {
     pub node: ForeignRuntime,
     pub python: Option<ForeignRuntime>,
-    pub resolver: Arc<SessionResolver>,
+    snapshots: HashMap<String, Map<String, Value>>,
+    file_roots: Arc<[PathBuf]>,
     /// The rows, without the host's fields.
     pub rows: Vec<Value>,
 }
@@ -211,7 +229,7 @@ impl Parts {
                     }
                 };
                 if !matches!(
-                    builder.catalog().key_in(service, &Build::default()),
+                    dim_agent_runtime::names::registered_key(builder.catalog(), service),
                     Err(LoaderError::UnknownService(_))
                 ) {
                     return Err(ServerError::Configuration(format!(
@@ -251,7 +269,7 @@ impl Parts {
                     )));
                 }
                 if let Err(LoaderError::UnknownService(_)) =
-                    builder.catalog().key_in(service, &Build::default())
+                    dim_agent_runtime::names::registered_key(builder.catalog(), service)
                 {
                     builder.catalog_mut().register_shared(service);
                 }
@@ -263,28 +281,46 @@ impl Parts {
             }
             rows.push(row);
         }
-        let node = LocalRuntime::node(&config.js_runtime, &config.anchor)
-            .interpreter(config.node.clone())
-            .named("session-node");
-        let node = ForeignRuntime::new("session-node", node, RuntimeResolver::node, builder);
+        // The commands rutis-host's launchers use for these packages.
+        let node = ForeignRuntime::new(
+            NODE_ROW,
+            "nodeRuntime",
+            Launcher::new(&config.node)
+                .arg("--import")
+                .arg("tsx")
+                .arg(config.js_runtime.join("src/runner.mjs"))
+                .cwd(&config.js_runtime),
+            config.anchor.clone(),
+        );
         let python = config.python.as_ref().map(|python| {
-            let mut runtime =
-                LocalRuntime::python(&python.project).interpreter(python.interpreter.clone());
-            if let Some(packages) = &python.packages {
-                runtime = runtime.python_path(packages);
-            }
-            ForeignRuntime::new("py", runtime, RuntimeResolver::modules, builder)
-        });
-        let resolver = Arc::new(SessionResolver {
-            node: node.rows.clone(),
-            python: python.as_ref().map(|python| python.rows.clone()),
-            snapshots,
-            file_roots: file_roots.to_vec().into(),
+            let inherited = std::env::var_os("PYTHONPATH").filter(|path| !path.is_empty());
+            let entries: Vec<PathBuf> = python
+                .packages
+                .iter()
+                .cloned()
+                .chain([python.project.clone()])
+                .chain(inherited.iter().flat_map(std::env::split_paths))
+                .collect();
+            let path = std::env::join_paths(&entries)
+                .unwrap_or_else(|_| python.project.clone().into_os_string());
+            ForeignRuntime::new(
+                PYTHON_ROW,
+                "pythonRuntime",
+                Launcher::new(&python.interpreter)
+                    .arg("-m")
+                    .arg("rutis")
+                    .env("PYTHONPATH", path)
+                    .env("PYTHONUNBUFFERED", "1")
+                    .env("PYTHONDONTWRITEBYTECODE", "1")
+                    .cwd(&python.project),
+                python.project.clone(),
+            )
         });
         Ok(Self {
             node,
             python,
-            resolver,
+            snapshots,
+            file_roots: file_roots.to_vec().into(),
             rows,
         })
     }
@@ -292,56 +328,222 @@ impl Parts {
     pub fn runtimes(&self) -> impl Iterator<Item = &ForeignRuntime> {
         std::iter::once(&self.node).chain(&self.python)
     }
+    /// The resolver of the rows of both runtimes, for a loader with
+    /// `catalog`, last in its chain, and Dim's wrapper around it.
+    pub fn resolver(&self, catalog: &ServiceCatalog) -> (SessionResolver, Arc<SnapshotResolver>) {
+        let sessions = SessionResolver::npm(catalog, NODE_ROW);
+        let snapshots = Arc::new(SnapshotResolver {
+            sessions: sessions.clone(),
+            snapshots: self.snapshots.clone(),
+            file_roots: self.file_roots.clone(),
+        });
+        (sessions, snapshots)
+    }
 }
 
+/// The Node runtime's connection row; rows not named `<row>:<plugin>` run
+/// on its session.
+const NODE_ROW: &str = "session-node";
+/// The Python runtime's connection row; rows `py:<module>` run on its
+/// session.
+const PYTHON_ROW: &str = "py";
+
+/// How long a runtime's process may take to greet once started.
+const GREETING: Duration = Duration::from_secs(30);
+
 impl ForeignRuntime {
-    fn new(
-        name: &'static str,
-        runtime: LocalRuntime,
-        rows: impl FnOnce(rutis_bridge::runtime::RuntimeHandle) -> RuntimeResolver,
-        builder: &AgentBuilder,
-    ) -> Self {
+    fn new(row: &'static str, command: &'static str, launcher: Launcher, anchor: PathBuf) -> Self {
         // Its standard error reaches the process log, line by line (ADR 005).
-        let runtime = Arc::new(
-            runtime
-                .stdin(Stdio::Null)
-                .stdout(Stdio::Null)
-                .stderr(Stdio::Lines),
-        );
-        let rows = Arc::new(rows(runtime.handle()).with_catalog(builder.catalog()));
+        let launcher = launcher
+            .inherit_fd()
+            .stdin(Stdio::Null)
+            .stdout(Stdio::Null)
+            .stderr(log_lines(row));
         Self {
-            name,
-            runtime,
-            rows,
+            row,
+            command: Key::dynamic(command),
+            launch: Arc::new(LaunchCommand { launcher, anchor }),
+        }
+    }
+    /// Its connection row's plugin.
+    pub fn connection(&self) -> RuntimeConnection {
+        RuntimeConnection {
+            row: self.row,
+            command: self.command.clone(),
         }
     }
 }
 
-pub(crate) struct SessionResolver {
-    node: Arc<RuntimeResolver>,
-    python: Option<Arc<RuntimeResolver>>,
+/// A process output that `tracing` receives line by line.
+fn log_lines(runtime: &'static str) -> Stdio {
+    Stdio::Pipe(Arc::new(move || {
+        let (reader, writer) = std::io::pipe()?;
+        std::thread::Builder::new()
+            .name(format!("{runtime} stderr"))
+            .spawn(move || {
+                let mut reader = std::io::BufReader::new(reader);
+                let mut line = Vec::new();
+                while matches!(reader.read_until(b'\n', &mut line), Ok(read) if read > 0) {
+                    let text = String::from_utf8_lossy(&line);
+                    tracing::info!(runtime, "{}", text.trim_end());
+                    line.clear();
+                }
+            })?;
+        Ok(writer.into())
+    }))
+}
+
+/// A local runtime's state, as its connection row keeps it, at
+/// [`RuntimeStatus::key`] of the row while the row runs.
+#[derive(Debug)]
+pub struct RuntimeStatus(Mutex<RuntimeState>);
+
+/// What a [`RuntimeStatus`] says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeState {
+    /// Its process is starting, or greeting.
+    Starting,
+    /// Its session is there: its rows run.
+    Ready,
+    /// It did not start, or its process ended, and why: its rows wait.
+    Down(String),
+}
+
+impl RuntimeStatus {
+    /// Where the connection row `row` keeps its runtime's status.
+    pub fn key(row: &str) -> Key<RuntimeStatus> {
+        Key::dynamic(row.to_owned())
+    }
+    pub fn state(&self) -> RuntimeState {
+        self.0.lock().unwrap().clone()
+    }
+    fn set(&self, state: RuntimeState) {
+        *self.0.lock().unwrap() = state;
+    }
+}
+
+/// A local runtime as a connection row: starts the runtime's process with
+/// its launch command, mounts the session on the process's channel, and
+/// keeps the runtime's [`RuntimeStatus`]. The row stays Active when the
+/// runtime does not start or its process ends.
+pub(crate) struct RuntimeConnection {
+    row: &'static str,
+    command: Key<LaunchCommand>,
+}
+
+impl DynPlugin for RuntimeConnection {
+    fn name(&self) -> &str {
+        self.row
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.command.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, std::result::Result<Effect, Error>> {
+        Box::pin(async move {
+            let status = Arc::new(RuntimeStatus(Mutex::new(RuntimeState::Starting)));
+            ctx.provide_at(RuntimeStatus::key(self.row), status.clone())?;
+            let command = ctx.require_at(&self.command)?;
+            let processes = Processes::default();
+            let watching: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::default();
+            {
+                let (processes, watching) = (processes.clone(), watching.clone());
+                ctx.effect(move || async move {
+                    if let Some(watcher) = watching.lock().unwrap().take() {
+                        watcher.abort();
+                    }
+                    processes.kill();
+                    processes.ended().await;
+                    Ok(())
+                })?;
+            }
+            let down = |why: String| {
+                status.set(RuntimeState::Down(why));
+                Ok(Effect::Done)
+            };
+            let id = PeerId::new(self.row).expect("a runtime row is a peer id");
+            let started = tokio::select! {
+                started = command.launcher.start(&id, &command.anchor, &processes) => started,
+                () = ctx.cancelled() => return Ok(Effect::Done),
+            };
+            let channel = match started {
+                Ok(channel) => channel,
+                Err(error) => return down(error.to_string()),
+            };
+            let greeted = tokio::select! {
+                greeted = rutis_bridge::pipe::greeted(channel, GREETING) => greeted,
+                () = ctx.cancelled() => return Ok(Effect::Done),
+            };
+            let channel = match greeted {
+                Ok(channel) => channel,
+                Err(why) => return down(why),
+            };
+            let session = ctx.plugin(Session::new(channel));
+            let mut states = session.watch();
+            loop {
+                let snapshot = states.borrow_and_update().clone();
+                match snapshot.state {
+                    FiberState::Active => break,
+                    FiberState::Failed | FiberState::Disposed => {
+                        return down(snapshot.error.map_or_else(
+                            || "the runtime ended as it started".into(),
+                            |error| error.to_string(),
+                        ));
+                    }
+                    _ => {}
+                }
+                tokio::select! {
+                    changed = states.changed() => if changed.is_err() {
+                        return down("the runtime ended as it started".into());
+                    },
+                    () = ctx.cancelled() => return Ok(Effect::Done),
+                }
+            }
+            status.set(RuntimeState::Ready);
+            let unloading = ctx.cancellation_token();
+            let watcher = tokio::spawn(async move {
+                let _ = states
+                    .wait_for(|snapshot| {
+                        matches!(snapshot.state, FiberState::Failed | FiberState::Disposed)
+                    })
+                    .await;
+                if unloading.is_cancelled() {
+                    return;
+                }
+                processes.ended().await;
+                status.set(RuntimeState::Down(
+                    processes
+                        .status()
+                        .unwrap_or_else(|| "the runtime's session ended".into()),
+                ));
+            });
+            *watching.lock().unwrap() = Some(watcher);
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Dim's wrapper around the rows' resolver: it checks each row's
+/// `provides` snapshot and hands `workflowFiles` rows their packages.
+pub(crate) struct SnapshotResolver {
+    sessions: SessionResolver,
     snapshots: HashMap<String, Map<String, Value>>,
     file_roots: Arc<[PathBuf]>,
 }
-impl Resolver for SessionResolver {
+impl Resolver for SnapshotResolver {
     fn resolve<'a>(
         &'a self,
         name: &'a str,
     ) -> BoxFuture<'a, std::result::Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
             let snapshot = self.snapshots.get(name);
-            let runtime = match &self.python {
-                Some(python) if name.starts_with("py:") => python,
-                _ => &self.node,
-            };
-            let original = runtime.resolve(name).await?;
+            let original = self.sessions.resolve(name).await?;
             match (snapshot, original.meta.get("provides")) {
                 (None, _) => {}
                 (Some(snapshot), Some(Value::Object(actual))) if actual == snapshot => {}
+                // Resolved while its runtime is not running.
                 (Some(_), None)
-                    if original.meta["source"] == "runtime"
-                        && original.meta["schema"]
-                            == "unavailable: the Cordis runtime is not running" => {}
+                    if original.schema.is_none()
+                        && original.meta.get("schema").is_some_and(Value::is_string) => {}
                 _ => {
                     return Err(LoaderError::Resolve {
                         name: name.into(),
@@ -349,14 +551,27 @@ impl Resolver for SessionResolver {
                     });
                 }
             }
-            let mut resolved = Resolved::new(Arc::new(BoundFactory {
-                inner: original.factory.clone(),
-                file_roots: self.file_roots.clone(),
-            }))
-            .with_schema(original.schema.clone())
-            .with_meta(original.meta.clone());
+            let bound = |inner| -> Arc<dyn PluginFactory<Value>> {
+                Arc::new(BoundFactory {
+                    inner,
+                    file_roots: self.file_roots.clone(),
+                })
+            };
+            let mut resolved = Resolved::new(bound(original.factory.clone()))
+                .with_schema(original.schema.clone())
+                .with_meta(original.meta.clone());
             if original.foreign_scope {
                 resolved = resolved.with_foreign_scope();
+            }
+            if let Some(scoped) = original.scoped.clone() {
+                let file_roots = self.file_roots.clone();
+                resolved = resolved.with_scoped(Arc::new(move |build| {
+                    let factory: Arc<dyn PluginFactory<Value>> = Arc::new(BoundFactory {
+                        inner: scoped(build)?,
+                        file_roots: file_roots.clone(),
+                    });
+                    Ok(factory)
+                }));
             }
             if let Some(declares) = &original.declares {
                 resolved = resolved.with_declarations(declares.clone());
@@ -456,6 +671,33 @@ mod tests {
             assert!(builder.catalog().is_shared(&name), "{name}");
             assert!(builder.catalog().key(&name).is_some(), "{name}");
         }
+    }
+
+    /// A runtime whose launch command cannot start is down with the launch
+    /// error, and its connection row stays Active (M4).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launch_command_that_cannot_start_is_down_with_its_error() {
+        use super::{ForeignRuntime, RuntimeState, RuntimeStatus};
+        use rutis::host::CtxHost;
+        let runtime = ForeignRuntime::new(
+            "session-node",
+            "nodeRuntime",
+            rutis_bridge::runtime::Launcher::new("/nonexistent/node"),
+            "/nonexistent/package.json".into(),
+        );
+        let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+        root.provide_at(runtime.command.clone(), runtime.launch.clone())
+            .unwrap();
+        let row = root.plugin(runtime.connection());
+        (&row).await.unwrap();
+        let status = root.get_at(&RuntimeStatus::key("session-node")).unwrap();
+        assert!(
+            matches!(status.state(), RuntimeState::Down(why) if why.contains("/nonexistent/node")),
+            "{:?}",
+            status.state()
+        );
+        assert_eq!(row.state().state, rutis::host::FiberState::Active);
+        root.shutdown().await.unwrap();
     }
 
     /// R6 replaced the host-side contribution names. A row that still
