@@ -80,11 +80,13 @@ error at 2 KiB for a failure or blocking reason, and a context block at 16 KiB.
 The README of the local profile carries the process facts; the timeout,
 `onFailure`, `async` and de-duplication rules are the design's.
 
-`Stop` writes a `<dim-hooks kind="follow-up">` input that queues a new turn,
-bounded at three consecutive follow-ups; a turn driven by an operator input
-resets the count. The follow-up is recognized by the id of the input Hooks
-wrote, recorded under the view lock when it was appended, so another source's
-queued input is never counted as one.
+`Stop` writes a `<dim-hooks kind="follow-up">` input only when at least one
+handler blocks, carrying the block reasons and then the contexts in catalog
+order; a context alone contributes nothing. The input queues a new turn,
+bounded at three consecutive follow-ups, and a turn driven by an operator
+input resets the count. The follow-up is recognized by the id of the input
+Hooks wrote, recorded under the view lock when it was appended, so another
+source's queued input is never counted as one.
 
 `SessionStart` is derived on `main` from the folded view: it runs only when no
 `turn/start` and no Session-start block was seen; it runs at most once per
@@ -133,6 +135,8 @@ that excerpt, and a handler whose document does not parse is reported by
 `a_timeout_is_a_failure_and_a_blocking_failure_still_answers`,
 `identical_commands_at_one_point_run_once`,
 `stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns`,
+`a_context_only_stop_writes_no_follow_up_and_starts_no_turn`,
+`a_stop_follow_up_carries_the_block_reason_then_the_context`,
 `only_the_follow_ups_turn_reports_stop_hook_active`,
 `permission_request_answers_through_approval`,
 `a_failed_permission_request_with_block_denies_the_approval`,

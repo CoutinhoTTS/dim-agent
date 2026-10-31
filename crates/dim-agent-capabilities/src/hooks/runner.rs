@@ -399,6 +399,48 @@ fn contribution_of(event: HookEvent, run: &HookRun) -> Option<String> {
     }
 }
 
+/// One `Stop` run's parts. Only a block writes a follow-up (§3.4); its
+/// context rides along with a block from any handler (A.4).
+#[derive(Default)]
+struct StopOutput {
+    /// The reason the handler blocks with: exit 2's stderr, or
+    /// `decision: "block"` with its `reason`.
+    reason: Option<String>,
+    /// `hookSpecificOutput.additionalContext`.
+    context: Option<String>,
+}
+
+/// The `Stop` parts of one run (A.4). A failure is a diagnostic only (A.5).
+fn stop_output(run: &HookRun) -> StopOutput {
+    match &run.result {
+        HookResult::Failed { .. } => StopOutput::default(),
+        HookResult::Blocked { reason } => StopOutput {
+            reason: capped(reason),
+            context: None,
+        },
+        HookResult::Success { stdout } => {
+            let trimmed = stdout.trim();
+            if trimmed.is_empty() {
+                return StopOutput::default();
+            }
+            let Ok(Value::Object(object)) = serde_json::from_str::<Value>(trimmed) else {
+                return StopOutput::default();
+            };
+            report_ignored_fields(&object);
+            let reason = (object.get("decision").and_then(Value::as_str) == Some("block"))
+                .then(|| object.get("reason").and_then(Value::as_str))
+                .flatten()
+                .and_then(capped);
+            let context = object
+                .get("hookSpecificOutput")
+                .and_then(|output| output.get("additionalContext"))
+                .and_then(Value::as_str)
+                .and_then(capped);
+            StopOutput { reason, context }
+        }
+    }
+}
+
 /// Output fields this build knows and ignores, at the top level or under
 /// `hookSpecificOutput` (A.4).
 const IGNORED_OUTPUT: [&str; 10] = [
@@ -902,14 +944,20 @@ impl Branch {
         let mut payload = self.runtime.payload(HookEvent::Stop, &self.branch_id);
         payload.insert("stop_hook_active".into(), Value::Bool(from_follow_up));
         let runs = self.runtime.run(&matching, &payload, &self.cancel).await;
-        let context: Vec<String> = runs
+        let outputs: Vec<StopOutput> = runs.iter().map(stop_output).collect();
+        let mut parts: Vec<String> = outputs
             .iter()
-            .filter_map(|run| contribution_of(HookEvent::Stop, run))
+            .filter_map(|out| out.reason.clone())
             .collect();
-        if context.is_empty() {
+        if parts.is_empty() {
+            // A Stop context alone does not drive a turn (§3.4, §5).
+            if outputs.iter().any(|out| out.context.is_some()) {
+                tracing::info!("Stop context ignored: no handler blocked");
+            }
             return;
         }
-        let text = element("dim-hooks", &[("kind", "follow-up")], &context.join("\n"));
+        parts.extend(outputs.iter().filter_map(|out| out.context.clone()));
+        let text = element("dim-hooks", &[("kind", "follow-up")], &parts.join("\n"));
         self.write(
             trigger,
             InputMode::Queue,

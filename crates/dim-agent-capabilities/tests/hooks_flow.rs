@@ -697,6 +697,85 @@ async fn stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns() {
     env.close().await;
 }
 
+/// §3.4: a Stop follow-up is written by a block, not by context alone. Each
+/// Stop point runs the handler once, and the drain runs the points in order,
+/// so a second `run` line proves the first point has written everything it
+/// would write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_only_stop_writes_no_follow_up_and_starts_no_turn() {
+    let env = Env::new().await;
+    let runs = env.path("stop-runs");
+    env.sources.set(document(serde_json::json!({
+        "Stop": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'run\\n' >> {}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"stop context\"}}}}'",
+                runs.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    turn(&session, "first").await;
+    turn(&session, "barrier").await;
+    for _ in 0..500 {
+        let count = std::fs::read_to_string(&runs)
+            .map(|text| text.lines().count())
+            .unwrap_or(0);
+        if count >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        2,
+        "the second Stop point did not run"
+    );
+    assert!(
+        hook_blocks(&session, "follow-up").await.is_empty(),
+        "a context-only Stop wrote a follow-up"
+    );
+    let starts = events(&session)
+        .await
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert_eq!(starts, 2, "a context-only Stop started a turn");
+    env.close().await;
+}
+
+/// A4: the follow-up carries the block reasons first, then the contexts, in
+/// catalog order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_follow_up_carries_the_block_reason_then_the_context() {
+    let env = Env::new().await;
+    env.sources.set(document(serde_json::json!({
+        "Stop": [{
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "printf '{\"decision\":\"block\",\"reason\":\"stop reason\"}'",
+                },
+                {
+                    "type": "command",
+                    "command": "printf '{\"hookSpecificOutput\":{\"additionalContext\":\"stop context\"}}'",
+                },
+            ],
+        }],
+    })));
+    let session = env.session().await;
+    turn(&session, "first").await;
+    let blocks = wait_blocks(&session, "follow-up", 1).await;
+    let text = &blocks[0];
+    let reason = text.find("stop reason").expect("the block reason");
+    let context = text.find("stop context").expect("the context");
+    assert!(reason < context, "the reason comes first: {text:?}");
+    env.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_async_handler_does_not_delay_the_turn_or_the_next_point() {
     let env = Env::new().await;

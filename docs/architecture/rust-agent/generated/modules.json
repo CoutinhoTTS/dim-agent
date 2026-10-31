@@ -515,6 +515,7 @@
         "json",
         "matches",
         "tokio::select",
+        "tracing::info",
         "tracing::warn",
         "vec"
       ]
