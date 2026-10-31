@@ -549,11 +549,17 @@ impl ContextPreparation {
             .rendered_context(&self.timeline, through)
             .await
             .map_err(ContextOpError::Read)?;
-        let request = configured_request(&PolicyContext(context.clone()), &history)
+        let request = configured_request(&PolicyContext::from_context(context.clone()), &history)
             .ok_or(ContextOpError::NotConfigured)?;
         let facts = PolicyFacts::from_context(&context, through);
         let view = policy
-            .view(request, PolicyContext(context), history, facts, Vec::new())
+            .view(
+                request,
+                PolicyContext::from_context(context),
+                history,
+                facts,
+                Vec::new(),
+            )
             .map_err(ContextOpError::Model)?;
         let model = policy
             .resolver
@@ -666,7 +672,7 @@ impl ContextPreparation {
                     .prepare(
                         request,
                         &source,
-                        PolicyContext(context),
+                        PolicyContext::from_context(context),
                         history,
                         facts,
                         cancel,

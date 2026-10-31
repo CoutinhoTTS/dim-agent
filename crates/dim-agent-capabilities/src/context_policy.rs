@@ -5,7 +5,9 @@ use crate::{
     },
     host::*,
 };
-use dim_agent_runtime::{ContextHistory, PolicyFacts, PolicyOrder, PolicyWindow, Timeline};
+use dim_agent_runtime::{
+    ContextHistory, PolicyFacts, PolicyOrder, PolicyOrderEvent, PolicyWindow, Timeline,
+};
 use dim_agent_types::*;
 use std::{
     collections::HashMap,
@@ -63,8 +65,116 @@ pub(crate) struct CompactionStep {
 /// A request's context at a fixed boundary, projected under the compaction
 /// in effect for it.
 /// The context a policy preparation consumes. The full history is retained
-/// only for compaction snapshots; streamed preparations can omit it.
-pub(crate) struct PolicyContext(pub ContextHistory);
+/// only for compaction snapshots; streamed preparations omit it.
+pub(crate) struct PolicyContext {
+    configuration: Option<ContextConfiguredData>,
+    compaction: Option<ContextCompactionData>,
+    order: Vec<PolicyOrderEvent>,
+    full: Option<ContextHistory>,
+}
+
+impl PolicyContext {
+    pub fn from_context(context: ContextHistory) -> Self {
+        let configuration = context_configuration(&context);
+        let compaction = context_compaction(&context).cloned();
+        let order = context
+            .events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| PolicyOrderEvent {
+                id: event.id.clone(),
+                branch_id: context
+                    .positions
+                    .get(index)
+                    .map_or_else(String::new, |position| position.branch_id.clone()),
+                sequence: event.sequence,
+                turn_start: matches!(&event.kind, EventKind::TurnStart(_)),
+                compaction_start: match &event.kind {
+                    EventKind::ContextCompactionStart(data) => Some(data.through),
+                    _ => None,
+                },
+            })
+            .collect();
+        Self {
+            configuration,
+            compaction,
+            order,
+            full: Some(context),
+        }
+    }
+
+    pub fn configuration(&self) -> Option<&ContextConfiguredData> {
+        self.configuration.as_ref()
+    }
+
+    pub fn compaction(&self) -> Option<&ContextCompactionData> {
+        self.compaction.as_ref()
+    }
+
+    pub fn messages_len(&self, history: &[HistoryEntry]) -> usize {
+        let mut len = history.len();
+        if let Some(ContextCompactionData {
+            outcome:
+                ContextCompactionResult::Completed {
+                    replacement,
+                    context_baseline,
+                    ..
+                },
+            ..
+        }) = self.compaction()
+        {
+            len += replacement.len() + context_baseline.len();
+        }
+        len
+    }
+
+    pub fn messages(&self, history: &[HistoryEntry]) -> Vec<Arc<Message>> {
+        let mut messages = Vec::with_capacity(self.messages_len(history));
+        if let Some(ContextCompactionData {
+            outcome:
+                ContextCompactionResult::Completed {
+                    replacement,
+                    context_baseline,
+                    ..
+                },
+            ..
+        }) = self.compaction()
+        {
+            messages.extend(replacement.iter().cloned().map(Arc::new));
+            messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));
+        }
+        messages.extend(history.iter().map(|entry| entry.message.clone()));
+        messages
+    }
+
+    pub fn retained_entry(&self, history: &[HistoryEntry], cut: &str) -> Result<usize, String> {
+        let cut = self
+            .order
+            .iter()
+            .position(|event| event.id == cut)
+            .ok_or_else(|| format!("Compaction cut {cut} is outside the policy order"))?;
+        Ok(history
+            .iter()
+            .position(|entry| {
+                self.order
+                    .iter()
+                    .position(|event| event.id == entry.source)
+                    .is_some_and(|index| index >= cut)
+            })
+            .unwrap_or(history.len()))
+    }
+
+    pub fn full(&self) -> Option<&ContextHistory> {
+        self.full.as_ref()
+    }
+
+    pub fn sequence(&self, id: &str) -> Option<u64> {
+        self.order
+            .iter()
+            .find(|event| event.id == id)
+            .map(|event| event.sequence)
+    }
+}
 
 pub(crate) struct View {
     /// The request as built from the Timeline, with the history prefix.
@@ -223,7 +333,7 @@ pub(crate) fn configured_request(
     context: &PolicyContext,
     history: &[HistoryEntry],
 ) -> Option<Arc<ModelRequest>> {
-    let data = context_configuration(&context.0)?;
+    let data = context.configuration()?;
     Some(Arc::new(
         ModelSettings {
             provider_id: data.settings.provider_id.clone(),
@@ -234,7 +344,7 @@ pub(crate) fn configured_request(
             config: data.settings.config.clone(),
             metadata: data.settings.metadata.clone(),
         }
-        .request(context_messages(&context.0, history)),
+        .request(context.messages(history)),
     ))
 }
 
@@ -270,10 +380,11 @@ impl ContextPolicy {
         facts: PolicyFacts,
         reusable: Vec<Arc<AgentEvent>>,
     ) -> Result<View, HostError> {
-        let prefix_len = crate::history::context_messages_len(&context.0, &history);
+        let prefix_len = context.messages_len(&history);
         let reused = reusable.iter().rev().find_map(|event| match &event.kind {
             EventKind::ContextCompaction(data) => checkpoint(data).and_then(|checkpoint| {
-                retained_entry(&context.0, &history, &checkpoint.retain_from)
+                context
+                    .retained_entry(&history, &checkpoint.retain_from)
                     .ok()
                     .map(|kept| (checkpoint, kept))
             }),
@@ -293,7 +404,7 @@ impl ContextPolicy {
             }
             None => (
                 history,
-                context_compaction(&context.0).and_then(checkpoint),
+                context.compaction().and_then(checkpoint),
                 request.clone(),
             ),
         };
@@ -793,7 +904,9 @@ impl ContextPolicy {
                 request: None,
             });
         };
-        let request = retained_entry(&view.context.0, &view.history, retain_from)
+        let request = view
+            .context
+            .retained_entry(&view.history, retain_from)
             .map_err(HostError::failed)
             .and_then(|kept| {
                 view.compacted(model.as_ref(), kept, replacement, context_baseline)
@@ -802,7 +915,13 @@ impl ContextPolicy {
             });
         if request.is_ok() {
             let saved = async {
-                let snapshot = self.history.snapshot(&view.context.0, retain_from, &fact)?;
+                let snapshot = self.history.snapshot(
+                    view.context
+                        .full()
+                        .ok_or("streamed context has no snapshot history")?,
+                    retain_from,
+                    &fact,
+                )?;
                 self.timeline
                     .save_snapshot(snapshot)
                     .await
@@ -1088,13 +1207,7 @@ impl CarriedPins {
         });
         let ids = ids.filter(|ids| ids.len() == pinned.len());
         let pins = group_pins(pinned, ids);
-        let from = view
-            .context
-            .0
-            .events
-            .iter()
-            .find(|event| event.id == retain_from)
-            .map_or(0, |event| event.sequence);
+        let from = view.context.sequence(retain_from).unwrap_or(0);
         Self { pins, from }
     }
 }
@@ -1334,9 +1447,8 @@ fn pinned_inputs(
         .collect();
     let checkpointed = view
         .context
-        .0
-        .checkpoint
-        .as_ref()
+        .full()
+        .and_then(|context| context.checkpoint.as_ref())
         .map(|checkpoint| checkpoint.state.inputs.as_slice())
         .unwrap_or_default();
     let mut pins = carried
@@ -1630,11 +1742,9 @@ impl<'a> Retention<'a> {
                 let start = self
                     .view
                     .context
-                    .0
-                    .events
+                    .order
                     .iter()
-                    .rev()
-                    .find(|event| matches!(event.kind, EventKind::TurnStart(_)))?;
+                    .rfind(|event| event.turn_start)?;
                 cuts.iter().position(|cut| cut.retain_from == start.id)
             })
             .flatten();

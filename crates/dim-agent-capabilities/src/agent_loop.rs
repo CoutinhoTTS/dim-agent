@@ -357,7 +357,7 @@ impl AgentLoop {
             .rendered_context(&self.timeline, through)
             .await?;
         let Some(request) = configured_request(
-            &crate::context_policy::PolicyContext(context.clone()),
+            &crate::context_policy::PolicyContext::from_context(context.clone()),
             &history,
         ) else {
             return failed("Context is not configured; adopt a model first".into());
@@ -366,7 +366,7 @@ impl AgentLoop {
         let view = policy
             .view(
                 request,
-                crate::context_policy::PolicyContext(context),
+                crate::context_policy::PolicyContext::from_context(context),
                 history,
                 facts,
                 Vec::new(),
