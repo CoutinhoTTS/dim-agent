@@ -206,6 +206,7 @@ impl HistoryRenderer {
         ) {
             return Ok(StreamedContext::fallback());
         }
+        let order = timeline.policy_order(through).await?.events;
         let mut state = None;
         let mut history = Vec::new();
         let mut compaction = None;
@@ -219,17 +220,40 @@ impl HistoryRenderer {
             }
             let projected = project_batch(&events, state.as_ref())
                 .map_err(|error| AgentError::fault("History", error))?;
-            if projected.compacted && projected.compaction.is_none() {
+            if projected.compacted
+                && let Some(event) = &projected.compaction
+                && let EventKind::ContextCompaction(data) = &event.kind
+                && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
+                && !order.iter().any(|event| event.id == retain_from.as_str())
+            {
                 return Ok(StreamedContext::fallback());
             }
             history.extend(projected.history);
+            if projected.compacted
+                && let Some(event) = &projected.compaction
+                && let EventKind::ContextCompaction(data) = &event.kind
+                && let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome
+                && let Some(cut) = order
+                    .iter()
+                    .position(|event| event.id == retain_from.as_str())
+            {
+                let kept = history
+                    .iter()
+                    .position(|entry| {
+                        order
+                            .iter()
+                            .position(|event| event.id == entry.source)
+                            .is_some_and(|index| index >= cut)
+                    })
+                    .unwrap_or(history.len());
+                history.drain(..kept);
+            }
             streamed_state = projected.checkpoint.or(streamed_state);
             compaction = projected.compaction.or(compaction);
             state = Some(projected.state);
             start = end + 1;
         }
         let state = state.unwrap_or_default();
-        let order = timeline.policy_order(through).await?.events;
         let checkpoint = streamed_state.and_then(|streamed| {
             let event = order
                 .iter()
@@ -447,7 +471,7 @@ pub fn project_batch(
                 history: projection.history,
                 state: projection.state,
                 compacted: true,
-                compaction: None,
+                compaction: compaction.cloned(),
                 checkpoint: None,
             });
         };
