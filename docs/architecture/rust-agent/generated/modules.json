@@ -2352,6 +2352,7 @@
       "unexpandedMacros": [
         "format",
         "params",
+        "tracing::error",
         "vec"
       ]
     },
@@ -20994,6 +20995,13 @@
         "path SqliteStorage",
         "path error",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog::tests",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore"
       ]
     },
     {
