@@ -20545,6 +20545,8 @@
         "path ResolveModelConnection",
         "path ResolveModelSelection",
         "path ResolvedModelConnection",
+        "path SelectableModels",
+        "path SelectableModelsHost",
         "path dim_agent_capabilities::host::adopted_preferences"
       ]
     },
