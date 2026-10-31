@@ -22431,7 +22431,8 @@
       "references": [
         "mod version",
         "path version::RELEASE",
-        "path version::VERSION"
+        "path version::VERSION",
+        "path version::current"
       ]
     },
     {

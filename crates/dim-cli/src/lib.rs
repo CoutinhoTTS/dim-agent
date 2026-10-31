@@ -514,6 +514,7 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
             writer: Box::new(tokio::io::stdout()),
         },
         agent_id,
+        version::current(),
     );
     let directory = options
         .directory
