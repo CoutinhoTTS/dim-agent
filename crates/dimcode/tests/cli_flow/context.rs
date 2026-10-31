@@ -166,3 +166,316 @@ fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
         );
     }
 }
+
+/// A `model/usage` fact: the request's counters as the provider reported
+/// them, with the cache read count only when the request reported one.
+fn model_usage(wire: &mut Wire, branch: &str, sequence: u64, prompt: f64, cache_read: Option<f64>) {
+    let mut usage =
+        json!({"promptTokens":prompt,"completionTokens":1.0,"totalTokens":prompt + 1.0});
+    if let Some(cache_read) = cache_read {
+        usage["cacheReadTokens"] = json!(cache_read);
+    }
+    wire.notice(
+        "session.event",
+        json!({"sessionId":"session","branchId":branch,"event":{
+            "id":format!("event-{sequence}"),"sequence":sequence,"create_at":1,
+            "type":"model","name":"usage",
+            "data":{"turn_id":"turn","request_id":"request","usage":usage}}}),
+    );
+}
+
+/// `/usage` reports the last request's cache read share beside the context
+/// reading, follows a newer request's usage, and drops the segment when the
+/// newest usage reports no cache field.
+#[test]
+fn tui_usage_shows_the_last_requests_cache_hit_rate() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => {
+                        assert_eq!(
+                            request["params"],
+                            json!({"sessionId":"session","branchId":"main"})
+                        );
+                        wire.reply(&request, usage(1849.0));
+                    }
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            for (sequence, cache_read, delta, input) in [
+                (9, Some(9200.0), "first request", 64000.0),
+                (11, Some(0.0), "second request", 32000.0),
+                (13, None, "third request", 16000.0),
+            ] {
+                model_usage(wire, "main", sequence, 10000.0, cache_read);
+                wire.event(
+                    sequence + 1,
+                    "text",
+                    json!({"turn_id":"turn","request_id":"request","delta":delta}),
+                );
+                let request = wire.read("session.context.usage");
+                wire.reply(&request, usage(input));
+            }
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                assert!(
+                    !line.contains("session.context.usage"),
+                    "extra read: {line}"
+                );
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("1.8K / 256K");
+        shown.send(()).unwrap();
+        terminal.until("first request");
+        terminal.write(b"/usage\r");
+        terminal.until("last request cached 92%");
+        terminal.until("second request");
+        terminal.write(b"/usage\r");
+        terminal.until("last request cached 0%");
+        terminal.until("third request");
+        terminal.write(b"/usage\r");
+        terminal.until("tokens (6%)");
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        let last = terminal
+            .transcript
+            .rfind("Context:")
+            .expect("a /usage line");
+        assert!(
+            !terminal.transcript[last..].contains("last request cached"),
+            "{}",
+            terminal.transcript
+        );
+    }
+}
+
+/// Every rounding row reaches the report: `100%` for a full hit, one decimal
+/// below it, `<1%` for a positive share under one percent, and no segment
+/// when the counters cannot produce one.
+#[test]
+fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.reply(&request, usage(1849.0)),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        for (sequence, cache_read, delta, input) in [
+            (9, Some(10000.0), "full hit", 64000.0),
+            (11, Some(9999.0), "almost full", 32000.0),
+            (13, Some(1.0), "sliver", 16000.0),
+            (15, Some(10001.0), "impossible", 8000.0),
+        ] {
+            model_usage(wire, "main", sequence, 10000.0, cache_read);
+            wire.event(
+                sequence + 1,
+                "text",
+                json!({"turn_id":"turn","request_id":"request","delta":delta}),
+            );
+            let request = wire.read("session.context.usage");
+            wire.reply(&request, usage(input));
+        }
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("1.8K / 256K");
+    shown.send(()).unwrap();
+    terminal.until("full hit");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 100%");
+    terminal.until("almost full");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 99.9%");
+    terminal.until("sliver");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached <1%");
+    terminal.until("impossible");
+    terminal.write(b"/usage\r");
+    terminal.until("tokens (3%)");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    let last = terminal
+        .transcript
+        .rfind("Context:")
+        .expect("a /usage line");
+    assert!(
+        !terminal.transcript[last..].contains("last request cached"),
+        "{}",
+        terminal.transcript
+    );
+}
+
+/// A resumed Session shows the share of the last request it recorded before
+/// any new request: the attach history folds like the live events do.
+#[test]
+fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["branchId"], "main");
+        wire.reply(
+            &history,
+            json!({"events":[{
+                "id":"event-5","sequence":5,"create_at":1,
+                "type":"model","name":"usage",
+                "data":{"turn_id":"turn","request_id":"request","usage":{
+                    "promptTokens":10000.0,"completionTokens":1.0,
+                    "totalTokens":10001.0,"cacheReadTokens":9200.0}}}],
+            "through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.reply(&request, usage(64000.0)),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        let request = wire.read("session.context.usage");
+        wire.reply(&request, usage(64000.0));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("64K / 256K");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 92%");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A `model/usage` on another branch never touches the figure `main` shows.
+#[test]
+fn tui_usage_cache_hit_rate_ignores_events_off_main() {
+    let home = Home::new();
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.reply(&request, usage(64000.0)),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        model_usage(wire, "main", 9, 10000.0, Some(9200.0));
+        wire.event(
+            10,
+            "text",
+            json!({"turn_id":"turn","request_id":"request","delta":"main request"}),
+        );
+        let request = wire.read("session.context.usage");
+        wire.reply(&request, usage(32000.0));
+        // A full hit on a task branch is folded after its own history page,
+        // before the next main-branch event renders.
+        model_usage(wire, "child", 9, 10000.0, Some(10000.0));
+        let child = wire.read("session.history");
+        assert_eq!(child["params"]["branchId"], "child");
+        assert_eq!(child["params"]["after"], 0);
+        wire.reply(
+            &child,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.event(
+            12,
+            "text",
+            json!({"turn_id":"turn","request_id":"request","delta":"child request"}),
+        );
+        let request = wire.read("session.context.usage");
+        wire.reply(&request, usage(16000.0));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("64K / 256K");
+    shown.send(()).unwrap();
+    terminal.until("main request");
+    terminal.write(b"/usage\r");
+    terminal.until("last request cached 92%");
+    terminal.until("child request");
+    terminal.write(b"/usage\r");
+    terminal.until("tokens (6%)");
+    assert!(
+        !terminal.transcript.contains("last request cached 100%"),
+        "{}",
+        terminal.transcript
+    );
+    let last = terminal
+        .transcript
+        .rfind("Context:")
+        .expect("a /usage line");
+    assert!(
+        terminal.transcript[last..].contains("last request cached 92%"),
+        "{}",
+        terminal.transcript
+    );
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}

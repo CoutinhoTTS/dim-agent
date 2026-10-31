@@ -261,6 +261,9 @@ struct Worker {
     /// compaction result arrived on main, or the session or its model
     /// changed.
     context_stale: bool,
+    /// The last `model/usage` on main, folded from the events so `/usage`
+    /// can report its cache read share.
+    last_usage: Option<LastUsage>,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
     /// The catalog version each provider was last asked to refill at in this
@@ -367,6 +370,7 @@ async fn run(
         login: None,
         login_callbacks: unbounded_channel(),
         context_stale: false,
+        last_usage: None,
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
@@ -552,6 +556,49 @@ impl ContextUsage {
 
 fn tokens(value: f64) -> u64 {
     value.max(0.0).round() as u64
+}
+
+/// The last `model/usage` fact on `main`: the counters `/usage` reports the
+/// cache read share of.
+#[derive(Clone, Copy)]
+struct LastUsage {
+    prompt_tokens: u64,
+    cache_read_tokens: Option<u64>,
+}
+
+impl LastUsage {
+    /// The share `/usage` prints, or `None` when the counters cannot
+    /// produce one.
+    fn percent(&self) -> Option<String> {
+        cache_hit_rate(self.prompt_tokens, self.cache_read_tokens)
+    }
+}
+
+/// The cache read share of one request, floored at every step so the figure
+/// never flatters: `100%` only when every prompt token was a cache read, one
+/// decimal rounded down between 99% and 100%, an integer rounded down below
+/// that, and `<1%` for a positive share too small for an integer. `None` when
+/// the request reported no cache read count, its cache reads exceed its
+/// prompt, or its prompt is zero, so a reported zero stays `0%`.
+fn cache_hit_rate(prompt_tokens: u64, cache_read_tokens: Option<u64>) -> Option<String> {
+    let cache_read_tokens = cache_read_tokens?;
+    if prompt_tokens == 0 || cache_read_tokens > prompt_tokens {
+        return None;
+    }
+    if cache_read_tokens == prompt_tokens {
+        return Some("100%".to_owned());
+    }
+    if cache_read_tokens == 0 {
+        return Some("0%".to_owned());
+    }
+    let tenths = u128::from(cache_read_tokens) * 1000 / u128::from(prompt_tokens);
+    Some(if tenths >= 990 {
+        format!("{}.{}%", tenths / 10, tenths % 10)
+    } else if tenths >= 10 {
+        format!("{}%", tenths / 10)
+    } else {
+        "<1%".to_owned()
+    })
 }
 
 #[derive(Deserialize)]
@@ -1108,10 +1155,21 @@ impl Worker {
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
-            Command::Usage => match self.context_usage().await {
-                Ok(usage) => self.report(usage.describe(), false),
-                Err(error) => self.report(error.to_string(), true),
-            },
+            Command::Usage => {
+                let reading = self.context_usage().await;
+                let cached = self.last_usage.and_then(|usage| usage.percent());
+                match reading {
+                    Ok(usage) => {
+                        let mut line = usage.describe();
+                        if let Some(cached) = cached {
+                            line.push_str(" · last request cached ");
+                            line.push_str(&cached);
+                        }
+                        self.report(line, false)
+                    }
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::Compact => self.compact().await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
@@ -3307,6 +3365,14 @@ impl Worker {
         if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
             self.context_stale = true;
         }
+        if branch_id == "main"
+            && let EventContent::ModelUsage(data) = &event.content
+        {
+            self.last_usage = Some(LastUsage {
+                prompt_tokens: tokens(data.usage.prompt_tokens),
+                cache_read_tokens: data.usage.cache_read_tokens.map(tokens),
+            });
+        }
         self.projection.apply(branch_id, &event);
         if let EventContent::ExecEnded(data) = &event.content
             && self.output.as_ref().is_some_and(|output| {
@@ -3738,6 +3804,38 @@ struct SessionSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_hit_rate_floors_at_every_step() {
+        for (prompt, cache, expected) in [
+            (10_000, 10_000, "100%"),
+            (10_000, 9_999, "99.9%"),
+            (10_000, 9_900, "99.0%"),
+            (10_000, 9_200, "92%"),
+            (10_000, 100, "1%"),
+            (10_000, 99, "<1%"),
+            (10_000, 1, "<1%"),
+            (10_000, 0, "0%"),
+        ] {
+            assert_eq!(
+                cache_hit_rate(prompt, Some(cache)).as_deref(),
+                Some(expected),
+                "{cache} of {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_hit_rate_is_absent_when_its_counters_cannot_produce_one() {
+        assert_eq!(cache_hit_rate(10_000, None), None, "no cache read count");
+        assert_eq!(
+            cache_hit_rate(10_000, Some(10_001)),
+            None,
+            "cache reads above the prompt"
+        );
+        assert_eq!(cache_hit_rate(0, Some(0)), None, "no prompt tokens");
+        assert_eq!(cache_hit_rate(0, None), None, "neither counter");
+    }
 
     #[test]
     fn a_line_notice_reaches_its_own_transcript() {

@@ -3121,7 +3121,8 @@
       "parent": "dim_cli::session_host",
       "file": "crates/dim-cli/src/session_host.rs",
       "unexpandedMacros": [
-        "assert"
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -24767,6 +24768,7 @@
         "path Event",
         "path EventContent::Configuration",
         "path EventContent::ExecEnded",
+        "path EventContent::ModelUsage",
         "path EventContent::PermissionChanged",
         "path Progress",
         "use crate::wire::Configuration",
