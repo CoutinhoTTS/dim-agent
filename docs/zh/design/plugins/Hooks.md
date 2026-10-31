@@ -287,7 +287,8 @@ Hook 命令因配置而运行，不是 agent 的决定，因此无需批准，�
 - Permission 与 Approval：向分支的 Permission 登记（`permission.registerAdvice`）并在准入决定中调用的建议方，由 Approval 传入调用的 `source`（A.6.1）。
 - InputQueue（Session 表 `submitChecks`，以及负责 `session.input.withdraw {steer}` 的 `InputMethods`）、Rpc（`session.submit`、`session.branch_create`）与原生 CLI：向 `submitChecks` 登记并在写入操作者输入之前调用的检查、`input_blocked` 错误，以及它在保证未提交任何东西的 `session.submit` 错误中的位置（A.6.2）。
 - HostPlatform：启动进程时把给定字节写入其 stdin，然后关闭（A.6.3）。
-AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 `refusal`，消息作为文本（决定 9）。不属于需求的：Settings 来源 `hooks`（仅用户作用域）、`hooks-projects` 与 `hooks-plugins` 是 `BusinessDocument` 来源（现有机制，v13 中新增 `user/<source>` 行），且 `hooks-plugins` 只由所有者操作写入，任何 `hooks.*` 方法都不写它；`.dimcode/hooks.json` 是目录中的项目文件，由其所有者在 Settings 授权的根下经 FileStorage 读取，与 Workflow 的定义文件相同（[总览](../overview.md)，配置）；`hooks.*` 方法使用现有的 `ManagementMethods`；HostPlatform 的 shell 形式 `build_process_spec` 已覆盖 `command`（不支持 exec 形式的 `args`，附录 G）。
+
+AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒绝报告为拒绝消息加停止原因 `refusal`（[AcpGateway §4.2](AcpGateway.md#42-prompt-与取消)），因此 Hooks 不对它提出需求（决定 9）。不属于需求的：Settings 来源 `hooks`（仅用户作用域）、`hooks-projects` 与 `hooks-plugins` 是 `BusinessDocument` 来源（现有机制，v13 中新增 `user/<source>` 行），且 `hooks-plugins` 只由所有者操作写入，任何 `hooks.*` 方法都不写它；`.dimcode/hooks.json` 是目录中的项目文件，由其所有者在 Settings 授权的根下经 FileStorage 读取，与 Workflow 的定义文件相同（[总览](../overview.md)，配置）；`hooks.*` 方法使用现有的 `ManagementMethods`；HostPlatform 的 shell 形式 `build_process_spec` 已覆盖 `command`（不支持 exec 形式的 `args`，附录 G）。
 
 ## 10. 决定
 
