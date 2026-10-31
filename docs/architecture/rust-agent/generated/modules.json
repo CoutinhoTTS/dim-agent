@@ -8984,10 +8984,20 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use crate::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
         "path canonical_prefix",
-        "use crate::workspace_tools::files::canonical_prefix"
+        "path resolve_path",
+        "use crate::workspace_tools::files::canonical_prefix",
+        "use crate::workspace_tools::files::resolve_path"
       ]
     },
     {

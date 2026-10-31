@@ -8,7 +8,8 @@
 use crate::{
     file_access::FileAccessFacts,
     host::{HostError, HostFuture},
-    workspace_tools::files::canonical_prefix,
+    host_platform::HostPlatform,
+    workspace_tools::files::{canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
     AgentError, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, StateCell, Timeline,
@@ -87,6 +88,9 @@ pub struct Permission {
     facts: Option<Arc<FileAccessFacts>>,
     session_id: String,
     cwd: PathBuf,
+    /// The host home for `~` and the tool resolver; absent compositions keep
+    /// the fallback rule for relative targets.
+    home: Option<PathBuf>,
     inner: Mutex<Inner>,
 }
 impl Permission {
@@ -100,18 +104,26 @@ impl Permission {
         cancel: &CancellationToken,
     ) -> Result<Decision, HostError> {
         let write = matches!(Risk::of(risk), Risk::Write);
+        let path = call
+            .input
+            .get("path")
+            .and_then(|path| path.as_str())
+            .filter(|path| !path.is_empty());
         let write_target = if write
             && self.state.get().policy.preset != PermissionPreset::FullAccess
-            && let Some(path) = call.input.get("path").and_then(|path| path.as_str())
-            && std::path::Path::new(path).is_absolute()
+            && let Some(path) =
+                path.filter(|path| self.home.is_some() || std::path::Path::new(path).is_absolute())
         {
-            let cwd = self.cwd.clone();
-            let path = PathBuf::from(path);
+            let (cwd, home, path) = (self.cwd.clone(), self.home.clone(), path.to_owned());
             let target = tokio::task::spawn_blocking(move || {
                 let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
                     format!("Failed to resolve workspace {}: {error}", cwd.display())
                 })?;
-                canonical_prefix(path).map(|target| (workspace, target))
+                let target = match home {
+                    Some(home) => resolve_path(&cwd, &home, &path),
+                    None => canonical_prefix(PathBuf::from(path)),
+                };
+                target.map(|target| (workspace, target))
             });
             Some(tokio::select! {
                 result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
@@ -414,6 +426,7 @@ pub struct PermissionPlugin {
     rules: Key<CommandRulesHost>,
     facts: Key<FileAccessFacts>,
     identity: Key<SessionIdentity>,
+    platform: Key<HostPlatform>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
 }
@@ -426,6 +439,7 @@ impl PermissionPlugin {
             rules: names.key()?,
             facts: names.key()?,
             identity: names.key()?,
+            platform: names.key()?,
             timeline: names.key()?,
             dispatcher: names.key()?,
         })
@@ -450,8 +464,12 @@ impl DynPlugin for PermissionPlugin {
             let rules = ctx.require_at(&self.rules)?;
             let identity = ctx.require_at(&self.identity)?;
             // A composition without the facts part decides a write by the
-            // workspace alone.
+            // workspace alone; without HostPlatform it cannot resolve `~` or
+            // relative targets.
             let facts = ctx.get_at(&self.facts);
+            let home = ctx
+                .get_at(&self.platform)
+                .map(|platform| platform.home.clone());
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let service = Arc::new(Permission {
@@ -464,6 +482,7 @@ impl DynPlugin for PermissionPlugin {
                 facts,
                 session_id: identity.session_id.clone(),
                 cwd: PathBuf::from(&config.cwd),
+                home,
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();

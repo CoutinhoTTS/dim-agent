@@ -448,6 +448,26 @@ async fn file_write_facts_decide_each_path_by_preset() {
             session.close().await.unwrap();
         }
 
+        // A relative target is resolved against the Session cwd with the
+        // tools' resolver before the facts.
+        let session = agent
+            .create_session(config_in(&work, preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        let permission = session.service::<Permission>("main").unwrap();
+        assert_eq!(
+            write_verdict(&permission, Path::new("inside.txt")).await,
+            "allow"
+        );
+        assert_eq!(
+            write_verdict(&permission, Path::new("../outside.txt")).await,
+            "ask"
+        );
+        let escape = PathBuf::from("../".repeat(work.components().count() - 1)).join("etc/hosts");
+        assert_eq!(write_verdict(&permission, &escape).await, "deny");
+        assert_eq!(write_verdict(&permission, Path::new("")).await, "ask");
+        session.close().await.unwrap();
+
         // An explicit tool allow does not bypass a path fact.
         let session = agent
             .create_session(config_in(

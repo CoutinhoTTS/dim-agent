@@ -629,6 +629,12 @@
             "external": false
           },
           {
+            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "provider": null,
+            "declared": false,
+            "external": false
+          },
+          {
             "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
             "provider": 21,
             "declared": true,

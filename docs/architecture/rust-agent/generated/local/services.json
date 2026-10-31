@@ -804,6 +804,12 @@
             "external": false
           },
           {
+            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "provider": 5,
+            "declared": false,
+            "external": true
+          },
+          {
             "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
             "provider": 31,
             "declared": true,

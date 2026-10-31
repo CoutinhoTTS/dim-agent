@@ -61,15 +61,19 @@ state; it reads at use time and imports no SessionStore. A query failure denies.
 
 For a write, Permission resolves the call's path to the same canonical target
 the tool owner admitted and calls the service with the branch preset and
-`write`. A system root or Session-owned artifact is denied, not asked, under
-`read-only` and `workspace-write`, including when `allowedTools` names the
-tool. A `read-only` write is otherwise denied by its preset; `full-access`
-admits file-tool writes everywhere without a query. `workspace-write` allows a
-workspace target, allows a target covered by a write grant, and asks otherwise.
-A write grant is inert under `read-only`; a read grant never permits a write. A
-composition without the facts service keeps the workspace-only rule below.
-Reads are unchanged until [ADR 014 D2/D4](../../../adr/014-file-access-facts.md#d2-read-and-write)
-lands for them.
+`write`. It uses WorkspaceTools' `resolve_path` for both absolute and relative
+targets, so cwd, `~`, `..` and symlinks are settled before the query; a
+composition without HostPlatform cannot expand `~` or join a relative target
+and keeps the fallback rule below. A system root or Session-owned artifact is
+denied, not asked, under `read-only` and `workspace-write`, including when
+`allowedTools` names the tool. A `read-only` write is otherwise denied by its
+preset; `full-access` admits file-tool writes everywhere without a query.
+`workspace-write` allows a workspace target, allows a target covered by a write
+grant, and asks otherwise. A write grant is inert under `read-only`; a read
+grant never permits a write. A composition without the facts service keeps the
+workspace-only rule below. Reads are unchanged until
+[ADR 014 D2/D4](../../../adr/014-file-access-facts.md#d2-read-and-write) lands
+for them.
 
 ### Workspace write targets
 
@@ -78,9 +82,9 @@ Decision for [#294](https://github.com/arcships/dim/issues/294): under
 facts say its resolved `path` is inside the Session workspace. Every outside
 write asks for approval for that call, including a model write to a host-owned
 output directory. `allowedTools` does not bypass this question;
-`disallowedTools` still denies. A write tool without an absolute target also
-asks because its workspace scope cannot be established. This is the fallback
-rule when the facts part is absent.
+`disallowedTools` still denies. A write tool without a path, or with a relative
+target in a composition without HostPlatform, asks because its workspace scope
+cannot be established. This is the fallback rule when the facts part is absent.
 
 The tool's owner resolves its target before admission. WorkspaceTools expands
 home-relative paths using its own HostPlatform facts and applies its shared
@@ -88,14 +92,15 @@ path boundary: platform path handling, lexical components and canonicalization
 of the longest existing prefix, including a new file's parent. ToolExecutor
 passes that resolved call to both Approval and execution, so retargeting an
 original symlink while approval is pending does not redirect the approved write.
-The model's original tool-call fact stays unchanged. Permission compares the
-same canonical target; the facts compare the workspace, system roots, owned
-artifacts and grants against it. Compare path components, not string prefixes.
-Resolution failures refuse the call; an unreadable prefix, symlink loop or
-dangling symlink is not a missing directory to skip. I/O runs outside the async
-executor. Read the dispatched policy after this I/O so a policy change while it
-waits takes effect. Approval rechecks the path and policy before an approved
-call starts, using its existing call-specific request and response.
+The model's original tool-call fact stays unchanged. Permission applies the same
+resolver to a call it receives unresolved, and the facts compare the workspace,
+system roots, owned artifacts and grants against that canonical target. Compare
+path components, not string prefixes. Resolution failures refuse the call; an
+unreadable prefix, symlink loop or dangling symlink is not a missing directory
+to skip. I/O runs outside the async executor. Read the dispatched policy after
+this I/O so a policy change while it waits takes effect. Approval rechecks the
+path and policy before an approved call starts, using its existing
+call-specific request and response.
 
 ### Session grants
 
