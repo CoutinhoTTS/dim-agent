@@ -4729,7 +4729,7 @@ fn workspace_label(branch: &str) -> String {
 fn git_head(cwd: &str) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
         .current_dir(cwd)
-        .args(["rev-parse", "--path-format=absolute", "--git-path", "HEAD"])
+        .args(["rev-parse", "--git-path", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
@@ -4737,7 +4737,7 @@ fn git_head(cwd: &str) -> Option<PathBuf> {
         return None;
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!path.is_empty()).then(|| PathBuf::from(path))
+    (!path.is_empty()).then(|| std::path::Path::new(cwd).join(path))
 }
 
 fn git_branch(head: &std::path::Path) -> Option<String> {
@@ -5013,13 +5013,19 @@ mod tests {
         for (expected, linked_expected) in [
             ("feature/updated", "feature/linked-updated"),
             ("HEAD", "HEAD"),
+            ("feature/updated", "feature/linked-updated"),
         ] {
             if expected == "HEAD" {
                 git(&repo, &["switch", "-q", "--detach"]);
                 git(&linked, &["switch", "-q", "--detach"]);
+            } else {
+                git(&repo, &["switch", "-q", expected]);
+                git(&linked, &["switch", "-q", linked_expected]);
             }
-            std::thread::sleep(GIT_BRANCH_POLL);
             for (index, app) in apps.iter_mut().enumerate() {
+                app.git_checked = Instant::now();
+                assert!(!app.tick(), "a Git switch must wait for the next check");
+                app.git_checked -= GIT_BRANCH_POLL;
                 assert!(app.tick(), "a Git switch must request a repaint");
                 let expected = if index < 2 { expected } else { linked_expected };
                 let frame = app.frame((160, 30));
@@ -5038,9 +5044,32 @@ mod tests {
                 );
             }
         }
-        std::thread::sleep(GIT_BRANCH_POLL);
-        for app in &mut apps {
+        for (index, app) in apps.iter_mut().enumerate() {
+            app.git_checked -= GIT_BRANCH_POLL;
             assert!(!app.tick(), "an unchanged HEAD must not request a repaint");
+            let expected = if index < 2 {
+                "feature/updated"
+            } else {
+                "feature/linked-updated"
+            };
+            let head = app.git_head.clone().unwrap();
+            let saved = std::fs::read(&head).unwrap();
+            std::fs::remove_file(&head).unwrap();
+            for missing in [true, false] {
+                if !missing {
+                    std::fs::write(&head, "").unwrap();
+                }
+                app.git_checked -= GIT_BRANCH_POLL;
+                assert!(!app.tick(), "a failed HEAD read must not request a repaint");
+                assert!(
+                    app.frame((160, 30))
+                        .live
+                        .iter()
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "a missing or empty HEAD must preserve the last branch label"
+                );
+            }
+            std::fs::write(&head, saved).unwrap();
         }
     }
 

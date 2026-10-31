@@ -734,6 +734,8 @@ The composer box: no prompt mark or placeholder, the model at the right of its t
 
 The Git branch label follows branch switches in both modes, including switches made by tools or another terminal. At startup the client resolves the workspace's own Git `HEAD` path (including linked worktrees); the existing UI timer reads that file at most once every 10 seconds, without spawning more Git processes, and requests a repaint only when the name changes. Detached HEAD displays `HEAD`; a transient read failure keeps the last known name until the next check.
 
+If the workspace is not a Git repository at startup, the label stays `Not available`; initializing a repository later requires restarting the TUI to discover it. The client does not repeatedly spawn Git to look for a new repository.
+
 ```text
 git switch feature/fix  ->  workspace HEAD changes  ->  next check (within about 10 s)
                                                       |
