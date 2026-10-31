@@ -624,6 +624,18 @@
         "matches",
         "serde_json::json",
         "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::input_queue::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::input_queue",
+      "file": "crates/dim-agent-capabilities/src/input_queue.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "vec"
       ]
     },
@@ -6399,7 +6411,8 @@
       "to": "dim_agent_capabilities::input_queue",
       "references": [
         "mod input_queue",
-        "path input_queue::InputQueue"
+        "path input_queue::InputQueue",
+        "path input_queue::SubmitChecks"
       ]
     },
     {
@@ -8842,13 +8855,31 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_capabilities::input_queue::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_capabilities::methods",
       "references": [
+        "path RpcError::app",
+        "path RpcError::interrupted",
         "path SessionMethods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
         "use crate::methods::MethodDecl",
+        "use crate::methods::RpcError",
         "use crate::methods::SessionMethods",
         "use crate::methods::params",
         "use crate::methods::reply"
@@ -8910,11 +8941,26 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_runtime::registrations",
+      "references": [
+        "path Registrations",
+        "use dim_agent_runtime::Registrations"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::state",
       "references": [
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Text"
       ]
     },
     {
@@ -8940,6 +8986,36 @@
         "path InputWithdrawData",
         "path UserInput",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError::failed",
+        "path HostFuture",
+        "use crate::host::HostError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue::tests",
+      "to": "dim_agent_capabilities::input_queue",
+      "references": [
+        "path CheckSubmission",
+        "path SubmitCheckReply",
+        "path SubmitCheckReply::Block",
+        "path SubmitCheckReply::Proceed",
+        "path SubmitCheckRequest",
+        "path SubmitChecks",
+        "path SubmitChecks::default",
+        "path SubmitEntry::Submit"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMode::Queue"
       ]
     },
     {

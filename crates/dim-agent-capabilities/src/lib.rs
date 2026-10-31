@@ -80,6 +80,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<permission::CommandRulesHost>(catalog, session);
     register::<hooks::HookSourcesHost>(catalog, session);
     register::<hooks::HooksRuntime>(catalog, session);
+    register::<input_queue::SubmitChecks>(catalog, session);
     register::<methods::SessionMethods>(catalog, session);
     let branch = Some(BRANCH_GROUP);
     register::<input_queue::InputQueue>(catalog, branch);
@@ -111,6 +112,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
 }
 impl PublicService for approval::Approval {}
 impl PublicService for input_queue::InputQueue {}
+impl PublicService for input_queue::SubmitChecks {}
 impl PublicService for permission::Permission {}
 impl PublicService for workspace_tools::background::BackgroundExec {}
 impl PublicService for shell_session::ShellSession {}

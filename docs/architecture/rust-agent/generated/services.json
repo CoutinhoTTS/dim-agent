@@ -1876,6 +1876,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+        "provider": 25,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::methods::SessionMethods@session",
         "provider": 29,
         "generation": 1,

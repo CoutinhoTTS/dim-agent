@@ -3312,6 +3312,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::input_queue::SubmitChecks@session",
+        "provider": 39,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::methods::SessionMethods@session",
         "provider": 47,
         "generation": 1,
