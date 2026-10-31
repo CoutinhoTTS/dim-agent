@@ -1342,7 +1342,10 @@ fn pinned_inputs(
     let Some((turn_id, carried)) = turn else {
         return Pinned::default();
     };
-    let events = window.map_or(&view.context.events, |window| &window.events);
+    let Some(window) = window else {
+        return Pinned::default();
+    };
+    let events = &window.events;
     let Some(cut) = events.iter().position(|event| event.id == retain_from) else {
         return Pinned::default();
     };
@@ -1359,21 +1362,7 @@ fn pinned_inputs(
         (Some(carried), Some(start)) => carried.max(start + 1),
         (Some(carried), None) => carried,
         (None, Some(start)) => start + 1,
-        (None, None) => {
-            // A SQL window can start at the turn's first consumed input and
-            // omit the turn start; locate it in the view so the pins after it
-            // are still included.
-            let Some(start) = view.context.events.iter().find(|event| {
-                matches!(&event.kind, EventKind::TurnStart(data) if data.turn_id == turn_id)
-            }) else {
-                return Pinned::default();
-            };
-            let start = events
-                .iter()
-                .position(|event| event.sequence > start.sequence)
-                .unwrap_or(cut);
-            carried_from.map_or(start, |carried| carried.max(start))
-        }
+        (None, None) => return Pinned::default(),
     };
     let messages: HashMap<&str, &InputMessageData> = events[..cut]
         .iter()

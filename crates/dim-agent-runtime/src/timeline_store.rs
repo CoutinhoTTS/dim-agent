@@ -37,6 +37,7 @@ impl PolicyFacts {
 pub struct PolicyWindow {
     pub through: u64,
     pub cut: String,
+    pub cut_sequence: u64,
     pub events: Vec<Arc<AgentEvent>>,
     pub tool_results: Vec<Arc<AgentEvent>>,
 }
@@ -259,7 +260,7 @@ pub trait TimelineStore: Send + Sync + 'static {
                     },
                     _ => None,
                 });
-            let cut_sequence = previous_cut.and_then(|cut| {
+            let previous_sequence = previous_cut.and_then(|cut| {
                 records
                     .iter()
                     .find(|record| record.event.id == cut)
@@ -267,11 +268,15 @@ pub trait TimelineStore: Send + Sync + 'static {
             });
             let mut events = Vec::new();
             let mut tool_results = Vec::new();
+            let mut cut_sequence = 0u64;
             for record in records {
                 if matches!(&record.event.kind, EventKind::ToolResult(_))
-                    && cut_sequence.is_none_or(|cut| record.event.sequence >= cut)
+                    && previous_sequence.is_none_or(|cut| record.event.sequence >= cut)
                 {
                     tool_results.push(record.event.clone());
+                }
+                if record.event.id == cut {
+                    cut_sequence = record.event.sequence;
                 }
                 if record.event.id == cut || window_event(&record.event) {
                     events.push(record.event);
@@ -280,6 +285,7 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
+                cut_sequence,
                 events,
                 tool_results,
             })

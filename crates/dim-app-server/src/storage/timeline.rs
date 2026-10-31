@@ -2377,9 +2377,14 @@ impl TimelineStore for SqliteTimelineStore {
                     events.push(event);
                 }
             }
+            let cut_sequence = events
+                .iter()
+                .find(|event| event.id == cut)
+                .map_or(0, |event| event.sequence);
             Ok(PolicyWindow {
                 through,
                 cut: cut.to_owned(),
+                cut_sequence,
                 events,
                 tool_results,
             })
