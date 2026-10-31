@@ -3127,7 +3127,7 @@ async fn the_daemon_names_an_ignored_host_isolation_file() {
         r#"{"version":2,"sandbox":"host"}"#,
     )
     .unwrap();
-    let socket = std::env::temp_dir().join(format!("dim-legacy-socket-{}/s", uuid::Uuid::new_v4()));
+    let socket = PathBuf::from("/tmp").join(format!("dim-legacy-{}/s", uuid::Uuid::new_v4()));
     let model_config = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../dim-agent-aimux/examples/offline.json");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
