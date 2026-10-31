@@ -428,6 +428,102 @@ async fn session_start_writes_one_keyed_block_per_hook_and_the_model_sees_it() {
     env.close().await;
 }
 
+/// §3.4: `SessionStart`'s output is dropped when the branch moved on while
+/// its command ran. The command announces that it started and waits on a
+/// gate; the first turn runs to its `turn/end` before the test releases the
+/// gate, and the command writes `finished` after it. The next turn is the
+/// barrier: the point's write, if any, happens right after that marker and
+/// so before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_context_is_dropped_once_the_first_turn_has_run() {
+    let env = Env::new().await;
+    let entered = env.path("session-start-entered");
+    let gate = env.path("session-start-gate");
+    let finished = env.path("session-start-finished");
+    env.sources.set(document(serde_json::json!({
+        "SessionStart": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf 'late context'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    for _ in 0..500 {
+        if entered.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(entered.exists(), "the SessionStart hook did not start");
+    turn(&session, "hello").await;
+    std::fs::write(&gate, "").unwrap();
+    for _ in 0..500 {
+        if finished.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(finished.exists(), "the SessionStart command did not end");
+    turn(&session, "again").await;
+    let late = hook_blocks(&session, "session-start").await;
+    assert!(
+        late.is_empty(),
+        "SessionStart context was appended after the first turn: {late:?}"
+    );
+    env.close().await;
+}
+
+/// §3.4: an interrupt while the `SessionStart` command runs drops its output
+/// too. The interrupt is committed on an idle `main`, which is a
+/// `stop/interrupt` fact like any other; the turn after the marker is the
+/// barrier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_context_is_dropped_by_an_interrupt() {
+    let env = Env::new().await;
+    let entered = env.path("session-start-interrupt-entered");
+    let gate = env.path("session-start-interrupt-gate");
+    let finished = env.path("session-start-interrupt-finished");
+    env.sources.set(document(serde_json::json!({
+        "SessionStart": [command(serde_json::json!({
+            "type": "command",
+            "command": format!(
+                "printf 'entered' > {}; while [ ! -f {} ]; do sleep 0.05; done; printf 'finished' > {}; printf 'late context'",
+                entered.display(),
+                gate.display(),
+                finished.display(),
+            ),
+        }))],
+    })));
+    let session = env.session().await;
+    for _ in 0..500 {
+        if entered.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(entered.exists(), "the SessionStart hook did not start");
+    session.interrupt("main", "stop".into()).unwrap();
+    std::fs::write(&gate, "").unwrap();
+    for _ in 0..500 {
+        if finished.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(finished.exists(), "the SessionStart command did not end");
+    turn(&session, "after").await;
+    let late = hook_blocks(&session, "session-start").await;
+    assert!(
+        late.is_empty(),
+        "SessionStart context was appended after an interrupt: {late:?}"
+    );
+    env.close().await;
+}
+
 async fn blocks_of_key(session: &Session, key: &str) -> usize {
     blocks(session)
         .await

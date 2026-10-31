@@ -124,6 +124,8 @@ that excerpt, and a handler whose document does not parse is reported by
 
 [hooks_flow.rs](../../../../crates/dim-agent-capabilities/tests/hooks_flow.rs):
 `session_start_writes_one_keyed_block_per_hook_and_the_model_sees_it`,
+`session_start_context_is_dropped_once_the_first_turn_has_run`,
+`session_start_context_is_dropped_by_an_interrupt`,
 `a_second_session_start_does_not_run_the_hooks_again`,
 `the_session_start_block_is_still_in_context_after_compaction`,
 `post_tool_use_follows_the_protocol_for_success_block_and_failure`,

@@ -534,9 +534,20 @@ enum Job {
     Stop { trigger: u64, from_follow_up: bool },
 }
 
+/// What a written output must still hold after its commands ran (§3.4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Validity {
+    /// Any point but `SessionStart`: no interrupt or newer operator input.
+    Branch,
+    /// `SessionStart`: the Session has not started either.
+    Unstarted,
+}
+
 /// What a branch consumed, folded from its events.
 #[derive(Default)]
 struct View {
+    /// The sequence of the last consumed event.
+    last: u64,
     /// The last consumed `stop/interrupt`.
     interrupted: u64,
     /// The last consumed input carrying the operator's own content.
@@ -558,6 +569,7 @@ struct View {
 
 impl View {
     fn fold(&mut self, event: &AgentEvent) -> Option<Job> {
+        self.last = event.sequence;
         match &event.kind {
             EventKind::StopInterrupt(_) => {
                 self.interrupted = event.sequence;
@@ -777,9 +789,15 @@ impl Branch {
         if self.branch_id != MAIN_BRANCH {
             return;
         }
-        if self.view.lock().unwrap().started {
-            return;
-        }
+        // The branch as it stood when the point was decided; anything the
+        // branch consumes later invalidates the output (§3.4).
+        let trigger = {
+            let view = self.view.lock().unwrap();
+            if view.started {
+                return;
+            }
+            view.last
+        };
         let Some(snapshot) = self.runtime.snapshot().await else {
             return;
         };
@@ -806,14 +824,12 @@ impl Branch {
         if blocks.is_empty() {
             return;
         }
-        let _ = append_own(
-            &self.timeline,
-            InputMessageData {
-                blocks,
-                mode: Some(InputMode::Append),
-                ..InputMessageData::default()
-            },
-            Vec::new(),
+        self.write(
+            trigger,
+            InputMode::Append,
+            blocks,
+            false,
+            Validity::Unstarted,
         );
     }
 
@@ -868,7 +884,7 @@ impl Branch {
         if blocks.is_empty() {
             return;
         }
-        self.write(trigger, InputMode::Append, blocks, false);
+        self.write(trigger, InputMode::Append, blocks, false, Validity::Branch);
     }
 
     async fn stop(self: &Arc<Self>, trigger: u64, from_follow_up: bool) {
@@ -894,7 +910,13 @@ impl Branch {
             return;
         }
         let text = element("dim-hooks", &[("kind", "follow-up")], &context.join("\n"));
-        self.write(trigger, InputMode::Queue, vec![raw(text, None)], true);
+        self.write(
+            trigger,
+            InputMode::Queue,
+            vec![raw(text, None)],
+            true,
+            Validity::Branch,
+        );
     }
 
     async fn approval(self: &Arc<Self>, data: ApprovalRequestData, cancel: CancellationToken) {
@@ -938,17 +960,21 @@ impl Branch {
         }
     }
 
-    /// Writes an input unless an interrupt or a newer operator input was
-    /// consumed after the triggering fact (§3.4).
+    /// Writes an input unless the branch moved on after the triggering fact:
+    /// an interrupt or a newer operator input was consumed, or, for
+    /// `SessionStart`, the Session started (§3.4).
     fn write(
         &self,
         trigger: u64,
         mode: InputMode,
         blocks: Vec<InputBlock>,
         follow_up: bool,
+        validity: Validity,
     ) -> Option<Arc<AgentEvent>> {
         let mut view = self.view.lock().unwrap();
-        if view.interrupted > trigger || view.spoken > trigger {
+        let moved_on = view.interrupted > trigger || view.spoken > trigger;
+        let started = validity == Validity::Unstarted && view.started;
+        if moved_on || started {
             tracing::warn!("hook output dropped: the branch moved on");
             return None;
         }
