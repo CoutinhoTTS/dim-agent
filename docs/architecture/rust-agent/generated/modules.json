@@ -33395,6 +33395,22 @@
       "path": "Theme::system"
     },
     {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "Locale::En"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "Locale::ZhCn"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "i18n::LOCALES"
+    },
+    {
+      "module": "dim_cli::ui::transcript::block::tests",
+      "path": "i18n::set"
+    },
+    {
       "module": "dim_cli::ui::transcript::blocks",
       "path": "char::is_whitespace"
     },
