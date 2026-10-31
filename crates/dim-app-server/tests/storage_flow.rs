@@ -3074,7 +3074,10 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     db.close().await.unwrap();
 
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(marker(&connection), [26]);
+    assert_eq!(
+        marker(&connection),
+        [i64::from(dim_app_server::storage::STORE_FORMAT)]
+    );
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -3090,7 +3093,11 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), None, "the store is already version 26");
+    assert_eq!(
+        db.upgraded_from(),
+        None,
+        "the store is already the current format"
+    );
     let store = SqliteTimelineStore::new(db.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
