@@ -328,10 +328,13 @@ impl State {
                         .register(&plugin, &dir, &manifest, kinds, &mut outcome)
                         .await;
                     log_refused(&plugin, &outcome);
+                    in_use.insert(plugin);
                 }
-                Err(error) => tracing::warn!(%name, %error, "plugin manifest unreadable"),
+                Err(error) => {
+                    tracing::warn!(%name, %error, "plugin manifest unreadable");
+                    owners.withdraw(&plugin, kinds).await;
+                }
             }
-            in_use.insert(plugin);
         }
         for plugin in owners.held(kinds).await {
             if !in_use.contains(&plugin) {
@@ -1407,6 +1410,8 @@ impl Manager {
         let manifest = match dir.as_deref().map(Manifest::read) {
             Some(Ok(manifest)) => manifest,
             Some(Err(error)) => {
+                let plugin = own_id(name, used).expect("not a built-in");
+                self.owners.withdraw(plugin, &CONTENT).await;
                 return Outcome {
                     status: Some(json!({"status": "failed", "error": error.to_string()})),
                     ..Default::default()

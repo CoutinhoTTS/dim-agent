@@ -191,7 +191,7 @@ Content follows the same switch: when name N stops using P, PluginManager withdr
 2. The App Server reconciles `[assembly, plugins]`. A built-in that is off never starts.
 3. PluginManager's row applies, registers `plugin` with `managementMethods` and `PluginTools` with `partRegistry`, then, after activation, deletes leftover staging directories and Git clones no installed entry refers to.
 
-A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Once the process rows are up, before clients are admitted, the App Server calls PluginManager's content startup, which brings every present owner to the record (§3.7).
+A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. A used plugin whose manifest cannot be read runs nothing: it gets no row, and its content of every kind is withdrawn from every present owner. Once the process rows are up, before clients are admitted, the App Server calls PluginManager's content startup, which brings every present owner to the record (§3.7).
 
 ### 3.2 Install
 
