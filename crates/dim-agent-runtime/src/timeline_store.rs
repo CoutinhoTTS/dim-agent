@@ -1,5 +1,5 @@
 use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
-use dim_agent_types::{AgentEvent, EventKind, RecoverySnapshot};
+use dim_agent_types::{AgentEvent, ContextCompactionResult, EventKind, RecoverySnapshot};
 use std::{ops::RangeInclusive, sync::Arc};
 
 /// Storage address of one Timeline inside an Agent's shared store.
@@ -247,10 +247,30 @@ pub trait TimelineStore: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<PolicyWindow>> {
         Box::pin(async move {
             let records = self.read(key, 1..=through).await?;
+            let previous_cut = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::ContextCompaction(data) => match &data.outcome {
+                        ContextCompactionResult::Completed { retain_from, .. } => {
+                            Some(retain_from.as_str())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+            let cut_sequence = previous_cut.and_then(|cut| {
+                records
+                    .iter()
+                    .find(|record| record.event.id == cut)
+                    .map(|record| record.event.sequence)
+            });
             let mut events = Vec::new();
             let mut tool_results = Vec::new();
             for record in records {
-                if matches!(&record.event.kind, EventKind::ToolResult(_)) {
+                if matches!(&record.event.kind, EventKind::ToolResult(_))
+                    && cut_sequence.is_none_or(|cut| record.event.sequence >= cut)
+                {
                     tool_results.push(record.event.clone());
                 }
                 if record.event.id == cut || window_event(&record.event) {

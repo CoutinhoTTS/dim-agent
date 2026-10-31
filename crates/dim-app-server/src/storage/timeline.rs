@@ -1933,16 +1933,48 @@ fn window_rows(
         )
         .optional()
         .map_err(error)?;
+    let previous_cut: Option<String> = connection
+        .prepare(
+            "SELECT json_extract(body, '$.record.event.data.retain_from') \
+             FROM timeline_events \
+             WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+             AND kind='context/compaction' \
+             AND json_extract(body, '$.record.event.data.retain_from') IS NOT NULL \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .map_err(error)?
+        .query_row(
+            params![key.session_id, key.branch_id, through as i64],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let tool_start = match previous_cut {
+        Some(cut) => connection
+            .prepare(
+                "SELECT sequence FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 AND sequence<=?4",
+            )
+            .map_err(error)?
+            .query_row(
+                params![key.session_id, key.branch_id, cut, through as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .unwrap_or(1),
+        None => 1,
+    };
     rows.extend(
         connection
             .prepare(
                 "SELECT sequence, last_sequence FROM timeline_events \
-                 WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 \
+                 WHERE session_id=?1 AND branch_id=?2 AND sequence>=?4 AND sequence<=?3 \
                  AND kind='step/tool-result' ORDER BY sequence",
             )
             .map_err(error)?
             .query_map(
-                params![key.session_id, key.branch_id, through as i64],
+                params![key.session_id, key.branch_id, through as i64, tool_start],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(error)?
