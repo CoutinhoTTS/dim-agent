@@ -59,18 +59,16 @@ Extend the existing request without adding fields:
 session.model.update {
   sessionId, branchId, providerId?, modelId?,
   modelPreferences?: {
-    reasoningEffort?: string | {action:"set", value:string} | {action:"clear"},
-    serviceTier?:     string | {action:"set", value:string} | {action:"clear"}
+    reasoningEffort?: string | {action:"clear"},
+    serviceTier?:     string | {action:"clear"}
   }
 } -> {model: {providerId, modelId}, outcome: "adopted" | "unchanged"}
 ```
 
-A plain string is the existing set shorthand. The action object is the same
-per-field patch [Provider management](appserver/provider-management.md#33-probe-preference-adoption-and-usage)
-uses for a saved preference, so one spelling sets or clears a field and the
-readback keeps spelling set values as plain strings. Null, an empty string and
-an unknown action are invalid. [Clearing one preference](#clearing-one-preference)
-gives the clear semantics.
+A plain string sets the field. `{action:"clear"}` clears it and needs no
+`value`; any other action, including `{action:"set"}`, any extra field, null and
+an empty string are invalid. An omitted field keeps its adopted value.
+[Clearing one preference](#clearing-one-preference) gives the clear semantics.
 
 Without a target, at least one preference field is required; an empty update is invalid.
 Both target fields are present or both absent; partial targets and explicit null
@@ -102,17 +100,17 @@ the view is read. The field is absent when the configuration carries neither
 value, and when the recorded protocol is missing or unreadable; no protocol is
 guessed. Nothing new is stored and the storage format is unchanged. The
 `session.create` reply names these preferences from its creation configuration;
-the `session.attach` reply names the ones the Session's latest adopted
-configuration carries, falling back to the creation configuration while the
-Session has not adopted one; a reloading Session omits the field instead of
-reporting the creation value. A Session therefore shows its effort before
-publishing its first `context/configured` fact, and a reopened Session shows the
-current value after any update. The event data spells the field
-`model_preferences` and the two replies spell it `modelPreferences`; each keeps
-its layer's naming and the inner fields match. The CLI draws the effort from that
-field and keeps no preference state of its own. The view does not expose the rest
-of the internal model settings or capability snapshots. Catalog choices are
-display data; Provider validates each update.
+the `session.attach` reply names the model and the preferences from the
+Session's latest adopted configuration, falling back to the creation
+configuration while the Session has not adopted one. A Session therefore shows
+its effort before publishing its first `context/configured` fact, and a reopened
+Session shows the current model and values after any update. The event data
+spells the field `model_preferences` and the two replies spell it
+`modelPreferences`; each keeps its layer's naming and the inner fields match.
+The CLI draws the effort from that field and keeps no preference state of its
+own. The view does not expose the rest of the internal model settings or
+capability snapshots. Catalog choices are display data; Provider validates each
+update.
 `none` needs that declaration or an advertised native `none`. Unsupported values
 fail without adoption; no value is guessed from a model name.
 
@@ -154,7 +152,7 @@ without changing the other field. Without a target, the fields are independent:
 | Request value | Meaning | Adopted configuration | Readback |
 | --- | --- | --- | --- |
 | field omitted | keep the adopted value | that field unchanged | the value it already carried |
-| `"high"`, or `{"action":"set","value":"high"}` | apply the value | the model sends `high` | `"high"` |
+| `"high"` | apply the value | the model sends `high` | `"high"` |
 | `{"action":"clear"}` | remove the Session's value for the field | the model's declared configuration for that field, or no value when it declares none | the declared value, or absent |
 
 Clear is not a value: `reasoningEffort:"none"` selects the model's reasoning-off
@@ -162,15 +160,19 @@ declaration and `serviceTier:"default"` selects an advertised tier; neither
 clears anything. The sibling preference and every other adopted model setting
 stay. A cleared field carries the value an explicit adoption of the same model
 with no preference for that field would carry, so reselecting the model is no
-longer needed to clear one field.
+longer needed to clear one field. The value comes from the model's declared
+configuration, not from a per-model preference saved through
+[Provider management](appserver/provider-management.md#33-probe-preference-adoption-and-usage);
+a Session clear neither reads nor changes those saved values.
 
 Clearing is meaningful only without a target. With `providerId` and `modelId`,
 both fields start from the target's declared configuration as for any explicit
-adoption, so a clear there is accepted and changes nothing, and an omitted
-sibling is reset by that adoption. A client that clears one field and keeps the
-other sends no target. `session.create` keeps the set-only spelling: a new
-Session has no value to clear. A clear follows the same `main`-only, admission,
-supersession and cancellation behavior as a set.
+adoption, so a clear there is accepted and adds nothing to that adoption; the
+adoption can still change the model. An omitted sibling is reset by that
+adoption. A client that clears one field and keeps the other sends no target.
+`session.create` keeps the set-only spelling: a new Session has no value to
+clear. A clear follows the same `main`-only, admission, supersession and
+cancellation behavior as a set.
 
 `session.model.update` still requires at least one preference field and returns
 its existing `{model, outcome}` reply. A clear that leaves the adopted
@@ -182,8 +184,10 @@ names the same values. The update reply is not a readback.
 
 The request patch is a distinct type from `ModelPreferences`: one is what a
 client asks to change, the other the effective values a configuration sends.
-`ModelPreferences` keeps its readback spelling and the readback stays derived
-from the stored configuration.
+One request patch type serves `session.model.update`; Provider management's
+saved-per-model patch keeps its own type and target. `ModelPreferences` keeps
+its readback spelling and the readback stays derived from the stored
+configuration.
 
 ### What a client sees
 
@@ -192,7 +196,7 @@ from the stored configuration.
 | Sends | one field `{"action":"clear"}`, the sibling omitted |
 | Reply | `{model, outcome:"adopted"}`, or `"unchanged"` when that field already carried the declared value |
 | Live | one `context/configured` event whose `data.model_preferences` omits the cleared field, or names the declared value |
-| Reopen | the same `model_preferences` from `session.history`; the `session.attach` reply names the same values |
+| Reopen | the same model and `model_preferences` from `session.history`; the `session.attach` reply names the same values |
 | Failure | the error a failed set gives; no fact, the adopted configuration unchanged |
 
 Absence in the readback has one meaning: the configuration sends no value for
@@ -325,7 +329,7 @@ become model input; headless prompt/stdin content keeps its literal meaning.
 | Area | Necessary change |
 | --- | --- |
 | Provider / current model-update entry | Apply preferences to an adopted base when no target is supplied; apply the per-field set/clear patch, clearing one field from the model's declared configuration while keeping the sibling; preserve explicit-target behavior. |
-| App Server `session.attach` | Derive `modelPreferences` from the latest adopted configuration, falling back to the creation configuration. |
+| App Server `session.attach` | Derive the reply's `model` and `modelPreferences` from the latest adopted configuration, falling back to the creation configuration. |
 | Agents Session entry | Resolve a profile and submit prompt/model through one contributed method. |
 | Prompt | Accept frozen sources through its current command/adoption path; expose adopted ModelConfiguration in its existing published snapshot. |
 | PromptSources | Reuse System-entry construction and refresh dynamic sources only. |
@@ -355,8 +359,9 @@ The clear flow runs through the existing transport product-protocol test: adopt
 a model with both preferences, clear one and observe the sibling and the other
 settings unchanged, clear the other and observe the field absent, repeat the
 same clear and observe `unchanged` with no new `context/configured`, then
-re-attach and read the same values from the reply and from history. Each
-malformed action is rejected without adoption.
+re-attach and read the same model and values from the reply and from history.
+Switch to another model and re-attach to observe the reply's `model` follow the
+adopted one. Each malformed action is rejected without adoption.
 
 Ablation: existing profiles replace a mode store; facts replace a preferences cache;
 existing model-update fields replace a separate parameter method; frozen values
