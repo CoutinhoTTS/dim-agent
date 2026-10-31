@@ -553,6 +553,15 @@ fn refused(kind: Kind, error: impl std::fmt::Display) -> Value {
     json!({"kind": kind, "error": error.to_string()})
 }
 
+/// A plugin's JSON content document at `path` (§3.7): the one read and parse
+/// for every kind whose owner takes one. The error names the path.
+fn read_content(path: &Path) -> Result<Value, String> {
+    std::fs::read(path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
     let issues: Vec<String> = issues
         .into_iter()
@@ -640,20 +649,14 @@ impl Owners {
                 (None, Some(_)) => outcome.skipped.push(Kind::Mcp),
                 (None, None) => {}
                 (Some(mcp), Some(path)) => {
-                    let document = std::fs::read(path)
-                        .map_err(|error| error.to_string())
-                        .and_then(|bytes| {
-                            serde_json::from_slice::<Value>(&bytes)
-                                .map_err(|error| error.to_string())
-                        });
-                    let result = match document {
+                    let result = match read_content(path) {
                         Ok(document) => mcp
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
                             .map_err(|error| error.to_string()),
                         Err(error) => {
                             let _ = mcp.withdraw_plugin(plugin.into(), &cancel).await;
-                            Err(format!("{}: {error}", path.display()))
+                            Err(error)
                         }
                     };
                     if let Err(error) = result {
