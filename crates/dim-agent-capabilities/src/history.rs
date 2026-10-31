@@ -196,7 +196,7 @@ impl HistoryRenderer {
         let mut start = 1;
         while start <= through {
             let end = (start + batch - 1).min(through);
-            let events = timeline.local(start..=end).await?;
+            let events = timeline.stored_local(start..=end).await?;
             if events.is_empty() {
                 return Ok(StreamedContext::fallback());
             }
