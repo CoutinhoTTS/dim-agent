@@ -351,6 +351,14 @@ fn failed(reason: impl Into<String>, stderr: &[u8]) -> HookResult {
     }
 }
 
+/// A hook point's own text, escaped for the runtime block it goes into. The
+/// cap is applied to the hook's text before this (A.4 bounds the context and
+/// the reason, not their escaped form), so escaping never eats into what a
+/// hook may contribute.
+fn escaped(parts: &[String]) -> String {
+    crate::context_block::text(&parts.join("\n"))
+}
+
 /// Bounds one hook's context at 16 KiB and drops an empty one (A.4).
 fn capped(text: &str) -> Option<String> {
     let text = text.trim();
@@ -880,7 +888,11 @@ impl Branch {
             .filter_map(|(index, run)| {
                 let context = contribution_of(HookEvent::SessionStart, run)?;
                 Some(raw(
-                    element("dim-hooks", &[("kind", "session-start")], &context),
+                    element(
+                        "dim-hooks",
+                        &[("kind", "session-start")],
+                        &escaped(&[context]),
+                    ),
                     Some(format!("{SESSION_START_KEY}{}", index + 1)),
                 ))
             })
@@ -934,7 +946,7 @@ impl Branch {
                         ("call_id", &call.call_id),
                         ("tool", &call.name),
                     ],
-                    &context.join("\n"),
+                    &escaped(&context),
                 ),
                 None,
             ));
@@ -973,11 +985,13 @@ impl Branch {
             return;
         }
         parts.extend(outputs.iter().filter_map(|out| out.context.clone()));
-        let text = element("dim-hooks", &[("kind", "follow-up")], &parts.join("\n"));
+        // The follow-up is read back by its opening marker (`follow_up_input`),
+        // which the escape leaves alone: it covers the body only.
+        let follow_up = element("dim-hooks", &[("kind", "follow-up")], &escaped(&parts));
         self.write(
             trigger,
             InputMode::Queue,
-            vec![raw(text, None)],
+            vec![raw(follow_up, None)],
             Validity::Branch,
         );
     }
