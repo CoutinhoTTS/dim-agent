@@ -4,6 +4,7 @@
 
 use dim_agent_capabilities::{
     defaults,
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     history::HistoryRenderer,
     host::*,
     host_platform::{
@@ -96,7 +97,8 @@ pub fn platform(home: &Path) -> HostPlatform {
         source: ShellSource::Login,
         output_encoding: OutputEncoding::Utf8,
     }))
-    .unwrap();
+    .unwrap()
+    .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()));
     platform.home = home.to_owned();
     platform.os = Os::Linux;
     platform.arch = "x64".into();

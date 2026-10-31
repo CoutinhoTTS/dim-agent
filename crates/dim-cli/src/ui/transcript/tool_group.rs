@@ -332,9 +332,6 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             Tone::Danger,
         ));
     }
-    if let Some(text) = boundary(&items) {
-        header.push(span(text, Tone::Muted));
-    }
     let mut collapsed = vec![header_line(0, mark, header)];
     let now = now_ms();
     for item in &items {
@@ -523,27 +520,6 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
         spans.extend(phrase(key, &members));
     }
     spans
-}
-
-/// The tiers the group's calls asked for, in widening order, when any did. A
-/// collapsed group draws no command rows, so its header carries the boundary
-/// instead.
-fn boundary(items: &[Item<'_>]) -> Option<String> {
-    let tiers: Vec<&str> = ["workspace", "network", "host"]
-        .into_iter()
-        .filter(|tier| {
-            items
-                .iter()
-                .any(|item| item.call().string("sandbox") == Some(*tier))
-        })
-        .collect();
-    if tiers.is_empty() {
-        return None;
-    }
-    Some(tf(
-        " (boundary: {sandbox})",
-        &[("sandbox", &tiers.join(", "))],
-    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,13 +720,7 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
                     .filter(|part| !part.is_empty())
                     .collect::<Vec<_>>()
                     .join(" ");
-                let mut spans = vec![span(text, Tone::Muted)];
-                if let Some(sandbox) = call.string("sandbox") {
-                    spans.push(span(
-                        tf(" (boundary: {sandbox})", &[("sandbox", sandbox)]),
-                        Tone::Muted,
-                    ));
-                }
+                let spans = vec![span(text, Tone::Muted)];
                 lines.push(Line {
                     indent: if nested { 3 } else { 1 },
                     mark: Some(match call.state {
@@ -980,12 +950,6 @@ fn append_card(lines: &mut Vec<Line>, call: &Call<'_>, now: u64, detail: Detail)
 
 fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
     let mut spans = highlight_command(command);
-    if let Some(sandbox) = call.string("sandbox") {
-        spans.push(span(
-            tf(" (boundary: {sandbox})", &[("sandbox", sandbox)]),
-            Tone::Muted,
-        ));
-    }
     if call.background() {
         spans.push(span(t(" (detached)"), Tone::Muted));
     }

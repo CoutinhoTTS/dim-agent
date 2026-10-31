@@ -77,8 +77,11 @@ mod management;
 #[path = "transport_flow/permission_rules.rs"]
 mod permission_rules;
 
-#[path = "transport_flow/isolation_policy.rs"]
-mod isolation_policy;
+#[path = "transport_flow/exec_shell_settings.rs"]
+mod exec_shell_settings;
+
+#[path = "transport_flow/execution_settings.rs"]
+mod execution_settings;
 
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;

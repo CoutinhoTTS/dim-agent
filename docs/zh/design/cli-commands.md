@@ -36,59 +36,66 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
-## 命令隔离设置
+## 用量报告
 
-现有 `/settings` 面板在 Permissions 下、`Tool approvals` 旁增加独立的 `Command isolation` 行。
-这是唯一的用户配置入口，不新增原生 `dimcode isolation` 命令或 `/isolation` 斜杠命令。
-即使模型命令无法运行，该入口仍通过本地守护进程连接使用 HostPlatform 的
-[可信本地策略管理](../../design/host-platform-isolation.md#trusted-local-policy-management)。
-`/approvals` 输出指向 `/settings > Command isolation`；隔离不是另一种 Permission 预设。
+两种 TUI 模式下，`/usage` 都输出主分支的上下文用量。当前模型使用 Dim OAuth 时，
+还通过现有[账号用量合同](../../../crates/dim-oauth/docs/runtime-contract.md)查询并输出账号的
+套餐、积分、滚动窗口和功能额度。其他模型提供方只显示上下文用量；仅登录 Dim 账号不会启用
+账号用量报告。`/login` 中的账号视图保持可用。
+
+上下文和账号查询失败时分别报告：上下文用量不可用不会隐藏账号用量，账号查询失败也不会丢弃
+上下文报告。账号未返回的可选字段不显示。下图为虚构示例，不代表账号一定具有 5h 窗口。
 
 ```text
-Settings > Command isolation
-  Permission preset   full-access (admission only)
-  Execution node      local
-  Isolation tier      workspace >  [workspace | network | host]
-  Wider requests      ask       >  [ask | deny]
-  Advanced                     >  Read paths / Write paths / Environment names
-  Policy source       defaults
-  Policy path         <execution-home>/host-isolation.json
+/usage
+  Context: 1,849 / 256,000 tokens (...) ...
 
-  Save
-  Reset to defaults
-  Applies to new commands and new persistent shells.
+  DimAgent OAuth
+  Pro · active · expires 2026-11-30
+
+  Credits     25,000 / 300,000  8%
+  [###-------------------------------------]
+
+  5h window   9,500 / 10,000  95%
+  [######################################--]
+
+  Web search  211 / 1,500  14%
+  [######----------------------------------]
 ```
 
-打开面板时分别读取策略快照和当前 `main` 分支的 Permission 预设。快照的 revision 随草稿保留，
-不作为用户输入字段。隔离层级和扩大范围请求的选择器打开时预选草稿值，字段省略时预选其有效值，
-并且只修改草稿。编辑版本 1 策略的
-tier/escalation 时，显式将其有效设置转换为版本 2，并保留可选列表。Save 提交完整草稿和
-读取时的 revision；Reset to defaults 先要求确认，再携带该 revision 由所有者重置。
-两种操作都不会自动重试过期 revision。发生冲突时保留草稿，显示错误并提供 Reload；
-Reload 明确丢弃草稿。保存或重置成功后，以返回的快照替换草稿，并提示设置从下一个进程起生效。
-Esc/Back 返回 Settings；有未保存修改时先询问是否丢弃。
+## 执行设置
 
-Advanced 为 `readOnlyPaths`、`writablePaths` 和环境变量**名称**提供三个列表编辑器。
-每个编辑器都有与显式列表不同的 `Use defaults` 选项、Add 输入、条目编辑/删除和清空列表操作；
-显式空列表不授予任何访问。面板说明显式列表会替换默认值。绝不读取或显示环境变量值。
-保存一个字段时保留无关的显式设置和省略的列表。校验失败时保留草稿并指出错误字段，
-不改变已保存策略；不需要直接编辑生效策略 JSON、外部临时文件、导出入口或强制覆盖选项。
+现有 `/settings` 面板在 `Tool approvals` 旁有一个 `Execution` 行。它是进程边界的唯一用户配置入口：
+没有原生 `dimcode isolation` 命令、没有 `/isolation` 斜杠命令，也没有策略文件。两个开关就是用户作用域的
+`execution` 设置源，通过 [`settings.read`/`settings.update`](appserver/settings-service.md) 读写；
+每个开关授予什么由[进程隔离设计](../../design/host-platform-isolation.md)规定。`/approvals` 输出说明沙箱在
+`/settings > Execution`；沙箱不是另一种 Permission 预设。
 
-复用现有设置和列表面板的导航：方向键选择，Enter 打开选择器/编辑器或执行操作，Esc 返回上一级。
-只有活动面板接收输入；确认或输入浮层结束后返回所属面板。长路径换行或滚动，不遮住操作控件。
-小终端复用现有面板的视口和滚动行为，不另设全屏布局。加载时禁用修改；读取失败提供 Retry/Back，
-不伪造默认快照；写入失败保留编辑。管理方法不可用时显示守护进程不支持的错误，
-不回退到模型执行命令。
+```text
+Settings > Execution
+  Applies to new processes and persistent shells.
+  Sandbox             off  >                    切换 off | on
+  Network             off  >                    Sandbox 关闭时被忽略，显示为
+                                                "off (ignored while Sandbox is off)"
+  Save                                          携带读取时的 revision 写入两个开关
+  Reset to defaults                             确认后把两个开关写为关闭
+  Reload              Discard edits and read the current settings
+```
 
-修改策略是本地用户的显式配置操作，不是模型命令审批。`ask` 委托 Permission/Approval 决定，
-并不总是弹出询问。`host` 表示普通守护进程用户的访问权限；`network` 只改变网络访问，
-不改变文件系统授权或认证。
+打开面板时读取 `{source: "execution", scope: "user"}`，返回的 revision 随草稿保留，不作为用户输入字段。
+方向键选择，Enter 或 Space 切换选中行，Esc 关闭面板，有未保存修改时先询问是否丢弃。
+Save 携带读取时的 revision 提交两个开关；Reset to defaults 先要求确认，再携带该 revision 把两个开关写为关闭。
+两种操作都不会自动重试过期 revision：冲突时保留草稿并显示错误，Reload 明确丢弃草稿后重新读取。
+Sandbox 关闭时面板仍显示已保存的 Network 值并标注其被忽略，因此打开 Sandbox 后会生效的值可见。
+加载时禁用修改；守护进程没有这些设置方法时显示不支持的错误，不回退到宿主执行。
 
-验证独立于 `./dev` 覆盖全新原生启动：默认交互审批显示 `network`/`host`，允许后执行载荷，
-拒绝则阻止载荷；版本 2 省略 escalation 时使用 `ask`，显式 deny 和版本 1 仍保持限制。
-流程覆盖还包括 `full-access`、允许的工具和命令规则、本地专用管理、策略文件缺失、保存时保留列表、
-重置、非法字段/根路径及 revision 冲突。Homebrew 可执行文件的对照用例区分网络访问和可执行文件访问，
-不使用真实凭据。
+该行报告的是已保存的开关，不是正在运行的命令的边界：运行中的进程（包括常驻 shell）保持启动时的边界。
+没有沙箱后端的平台在下次启动进程时以 `isolation_unavailable` 报错；把该状态显示在行上属于
+[#691](https://github.com/arcships/dim/issues/691)。
+
+验证覆盖这一行显示什么、守护进程据此做什么：读取；Sandbox 关闭时切换仍显示已存储的 Network 值；
+revision 冲突；保存后 `exec` 在新边界下运行——沙箱开启时工作区外的写入失败，关闭后同一写入成功。
+重置、外部修改后重载、不支持的守护进程分支，以及切换前已启动的常驻 shell，目前还没有流程测试。
 
 ## 命令
 

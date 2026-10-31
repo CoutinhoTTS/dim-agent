@@ -4,6 +4,7 @@
 //! Shell resolution copies ADR 020 and TS `packages/agent/src/exec-shell.ts`.
 //! Process facts are captured at apply; exec shell preferences are read at use
 //! time. Shell problems are returned as data, never raised during assembly.
+use crate::execution_settings::{ExecutionSettingsHost, ExecutionSettingsSource};
 use crate::file_storage::{FileStorage, FileStorageError};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
@@ -25,28 +26,22 @@ use tokio_util::sync::CancellationToken;
 mod exec_shell_settings;
 #[cfg(unix)]
 mod isolation;
-mod isolation_policy;
-pub use dim_agent_types::{
-    IsolationEscalation, IsolationPolicy, IsolationPolicyEffective, IsolationPolicySnapshot,
-    IsolationPolicySource, Sandbox,
-};
 pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellChoice};
-pub use isolation_policy::IsolationPolicyError;
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
-/// The declaration line on default isolation for the tools that start isolated
-/// processes; `None` where no backend exists. It is static because declarations
-/// are read once, while each process start reads the current policy. Only the
-/// macOS default gives each process tree a writable TMPDIR.
+/// The declaration line for the tools that start processes; `None` where the
+/// platform has no sandbox backend. It is static because declarations are read
+/// once, while each process start reads the current switches. Only the macOS
+/// default gives each process tree a writable TMPDIR.
 pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(target_os = "macos") {
     Some(
-        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access. exec accepts a \"sandbox\" argument to request a wider boundary; the node's host-isolation.json decides whether that request is allowed, and approving a command does not widen anything by itself.",
+        "Isolation: the user decides in /settings > Execution whether commands run sandboxed. When the sandbox is on, commands can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access unless the user also turned Network on. You cannot change the boundary; retrying or an approval does not lift it.",
     )
 } else if cfg!(unix) {
     Some(
-        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace, read only there and in system directories, and have no network access. exec accepts a \"sandbox\" argument to request a wider boundary; the node's host-isolation.json decides whether that request is allowed, and approving a command does not widen anything by itself.",
+        "Isolation: the user decides in /settings > Execution whether commands run sandboxed. When the sandbox is on, commands can write only inside the session workspace, read only there and in system directories, and have no network access unless the user also turned Network on. You cannot change the boundary; retrying or an approval does not lift it.",
     )
 } else {
     None
@@ -160,8 +155,7 @@ pub struct HostPlatform {
     pub env: Vec<(OsString, OsString)>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
-    #[cfg(unix)]
-    isolation_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
+    pub(crate) execution: Option<Arc<dyn ExecutionSettingsSource>>,
 }
 
 struct ResolvedShell {
@@ -202,12 +196,9 @@ pub struct ProcessSpecError {
 }
 
 /// What a consumer keeps for a process that
-/// [`HostPlatform::prepare_isolated_process`] sandboxed: where the user
-/// changes its policy.
+/// [`HostPlatform::prepare_isolated_process`] sandboxed.
 #[cfg_attr(windows, allow(dead_code))]
-pub(crate) struct Isolation {
-    policy: String,
-}
+pub(crate) struct Isolation;
 
 #[cfg_attr(windows, allow(dead_code))]
 impl Isolation {
@@ -236,8 +227,7 @@ impl Isolation {
         DENIALS.iter().any(|denial| lower.contains(denial)).then(
             || {
                 format!(
-                    "This command ran under host isolation, which may have caused the failure. By default, isolation blocks network access and file access outside {reach}. Approving or retrying without a wider sandbox request does not lift it. Request the required sandbox boundary, or ask the user to configure /settings > Command isolation (policy: {}).",
-                    self.policy
+                    "This command ran under the sandbox the user turned on, which may have caused the failure. It blocks network access and file access outside {reach}. Retrying or an approval does not lift it. Ask the user to change Sandbox or Network in /settings > Execution."
                 )
             },
         )
@@ -282,9 +272,15 @@ impl HostPlatform {
                 status: shell,
             })),
             shell_file: None,
-            #[cfg(unix)]
-            isolation_file: None,
+            execution: None,
         })
+    }
+    /// Uses `host` for the execution switches at each process preparation. The
+    /// HostPlatform plugin wires it; a platform without switches fails
+    /// preparation instead of running unsandboxed (ADR 011 D1).
+    pub fn with_execution_settings(mut self, host: ExecutionSettingsHost) -> Self {
+        self.execution = Some(host.0);
+        self
     }
     /// Reads the configured exec shell for this invocation without reloading
     /// the plugin. Explicitly constructed platforms keep their supplied shell.
@@ -321,16 +317,43 @@ impl HostPlatform {
         native::spawn(command)
     }
 
+    /// The execution switches as they stand before this process starts. A host
+    /// without the port fails here rather than running unsandboxed.
+    pub(crate) async fn execution_settings(
+        &self,
+    ) -> Result<crate::execution_settings::ExecutionSettings, ProcessSpecError> {
+        let source = self.execution.as_ref().ok_or_else(|| ProcessSpecError {
+            code: "isolation_config_invalid",
+            reason:
+                "The host has no execution settings port, so the sandbox switches cannot be read"
+                    .into(),
+        })?;
+        source
+            .read(CancellationToken::new())
+            .await
+            .map_err(|error| ProcessSpecError {
+                code: "isolation_config_invalid",
+                reason: error.to_string(),
+            })
+    }
+
     #[cfg(windows)]
     pub(crate) async fn prepare_isolated_process(
         &self,
         spec: ProcessSpec,
         _workspace: &Path,
         _output_dir: Option<&Path>,
-        _requested: Option<Sandbox>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
-        Ok((spec, None, None))
+        if !self.execution_settings().await?.sandbox {
+            return Ok((spec, None, None));
+        }
+        Err(ProcessSpecError {
+            code: "isolation_unavailable",
+            reason:
+                "The sandbox has no backend on Windows; turn Sandbox off in /settings > Execution"
+                    .into(),
+        })
     }
 }
 
@@ -675,13 +698,14 @@ impl Drop for ProcessTree {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HostPlatformConfig {
+    /// The execution switches, provided by the App Server's `ExecutionSettings`
+    /// part. Every assembly that starts processes declares it (ADR 011 D1).
+    pub execution: Key<ExecutionSettingsHost>,
     /// `exec-shell.json`: FileStorage root index and relative path. `None`
     /// means the profile has no home; the shell is resolved automatically.
     pub exec_shell_file: Option<(usize, PathBuf)>,
-    /// Node-local `host-isolation.json`; missing files use the default policy.
-    pub isolation_file: Option<(usize, PathBuf)>,
 }
 
 /// Process plugin providing `P:HostPlatform`.
@@ -689,25 +713,35 @@ pub struct HostPlatformPlugin {
     config: HostPlatformConfig,
     /// File storage only when a local configuration source is configured.
     storage: Option<Key<FileStorage>>,
+    execution: Key<ExecutionSettingsHost>,
 }
 impl HostPlatformPlugin {
     pub fn new(names: &Names<'_>, config: HostPlatformConfig) -> rutis::Result<Self> {
         let storage = uses_storage(&config)
             .then(|| names.key::<FileStorage>())
             .transpose()?;
-        Ok(Self { config, storage })
+        let execution = config.execution.clone();
+        Ok(Self {
+            config,
+            storage,
+            execution,
+        })
     }
 }
 /// File storage only when a local configuration source is configured.
 fn uses_storage(config: &HostPlatformConfig) -> bool {
-    config.exec_shell_file.is_some() || (cfg!(unix) && config.isolation_file.is_some())
+    config.exec_shell_file.is_some()
 }
 impl DynPlugin for HostPlatformPlugin {
     fn name(&self) -> &str {
         "HostPlatform"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        self.storage.iter().map(|storage| storage.erase()).collect()
+        self.storage
+            .iter()
+            .map(|storage| storage.erase())
+            .chain(std::iter::once(self.execution.erase()))
+            .collect()
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
@@ -730,15 +764,8 @@ impl DynPlugin for HostPlatformPlugin {
             let mut platform = HostPlatform::current(shell)
                 .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             platform.shell_file = shell_file;
-            #[cfg(unix)]
-            {
-                platform.isolation_file = self
-                    .config
-                    .isolation_file
-                    .clone()
-                    .zip(storage)
-                    .map(|((root, relative), storage)| (storage, root, relative));
-            }
+            let execution = ctx.require_at(&self.execution)?;
+            platform.execution = Some(execution.0.clone());
             platform.shell.lock().await.config = config;
             ctx.provide_as::<HostPlatform>(Arc::new(platform))?;
             Ok(Effect::Done)

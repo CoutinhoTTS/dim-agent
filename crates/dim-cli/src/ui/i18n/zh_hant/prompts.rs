@@ -155,8 +155,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Edit" => "編輯",
         "Write" => "寫入",
         "Create" => "建立",
-        "boundary: {sandbox}" => "邊界：{sandbox}",
-        " (boundary: {sandbox})" => "（邊界：{sandbox}）",
         " (detached)" => "（背景）",
         "Checked on background task" => "查看了背景工作",
         "Waiting…" => "等待中…",

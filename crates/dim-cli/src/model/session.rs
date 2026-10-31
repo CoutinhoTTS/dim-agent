@@ -11,6 +11,9 @@ use crate::model::shell::ShellResult;
 use crate::model::view::{MemberConversationState, TaskOutputState, TaskTarget, ViewSnapshot};
 use crate::wire::Configuration;
 
+/// The Dim account provider, signed in with `/login`.
+pub const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
+
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DraftPart {
@@ -23,6 +26,13 @@ pub enum DraftPart {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionSnapshot {
+    pub revision: String,
+    pub sandbox: bool,
+    pub network: bool,
+}
+
 pub enum Command {
     Submit(String),
     /// A draft with pastes to store or content blocks to send.
@@ -137,7 +147,8 @@ pub enum Command {
     ReadIsolation,
     SaveIsolation {
         expected_revision: String,
-        policy: dim_agent_types::isolation::IsolationPolicy,
+        sandbox: bool,
+        network: bool,
     },
     ResetIsolation(String),
     ClearModelPreferences {
@@ -588,7 +599,7 @@ pub enum Update {
     ModelsRefilled,
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
-    Isolation(Result<dim_agent_types::isolation::IsolationPolicySnapshot, String>),
+    Isolation(Result<ExecutionSnapshot, String>),
     /// A transient status-line message.
     Toast(String),
     /// The default tool-approval mode (wire name).
@@ -610,6 +621,8 @@ pub enum Update {
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.
     Usage(Result<Usage, String>),
+    /// The Dim account usage requested by `/usage`.
+    UsageReport(Result<Usage, String>),
     /// The main branch's context use; none while the session's usage is
     /// unknown.
     Context(Option<ContextReading>),
