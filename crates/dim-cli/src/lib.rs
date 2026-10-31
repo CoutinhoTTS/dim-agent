@@ -29,6 +29,7 @@ mod session_host;
 mod ui;
 mod update;
 mod usage;
+mod version;
 mod web_install;
 mod wire;
 
@@ -450,7 +451,7 @@ fn prepare() -> Result<Option<Options>> {
         return Ok(None);
     }
     if matches!(options.action, Action::Version) {
-        println!("dimcode {}", env!("CARGO_PKG_VERSION"));
+        println!("dimcode {}", version::current());
         return Ok(None);
     }
     if matches!(options.action, Action::McpLogin(_)) && !std::io::stdin().is_terminal() {
@@ -513,6 +514,7 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
             writer: Box::new(tokio::io::stdout()),
         },
         agent_id,
+        version::current(),
     );
     let directory = options
         .directory
@@ -591,7 +593,19 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         return open_tui_leaf(root, &options).await;
     }
     if matches!(options.action, Action::WebInstall) {
-        return web_install::install(&options.home).await;
+        if !version::RELEASE {
+            return Err("A build from source has no published Web workspace; set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature".into());
+        }
+        let executable = std::env::current_exe().unwrap_or_default();
+        let assets = client::web_assets(&executable, &options.home);
+        return web_install::install(
+            &options.home,
+            version::VERSION,
+            &update::registry(),
+            assets,
+            &mut std::io::stdout(),
+        )
+        .await;
     }
     if let Action::Web {
         port,
