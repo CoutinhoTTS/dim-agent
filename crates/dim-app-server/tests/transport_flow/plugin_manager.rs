@@ -1314,10 +1314,13 @@ async fn plugin_content_reaches_sessions_through_its_owners() {
         .rpc("mcp.inspect", json!({"source":"plugin","id":"kit:docs"}))
         .await;
     assert_ok(&inspection);
+    let installed = inspection["result"]["configuration"]["cwd"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a plugin entry runs in its installed directory: {inspection}"));
     assert!(
-        inspection["result"]["configuration"]["cwd"]
-            .as_str()
-            .is_some_and(|cwd| cwd.starts_with(home.to_str().unwrap())),
+        std::fs::canonicalize(installed)
+            .unwrap()
+            .starts_with(std::fs::canonicalize(&home).unwrap()),
         "a plugin entry runs inside its installed directory: {inspection}"
     );
     assert_eq!(
