@@ -1324,9 +1324,10 @@ mod tests {
             "the detail replaces the list: {text}"
         );
         assert!(text.contains("↑↓ scroll · Esc back"), "{text}");
-        // Esc returns to the list, with the selection kept.
+        // Esc returns to the list, with the selection kept. The wrapped hint
+        // takes two rows of the list here, so the panel is drawn two taller.
         assert!(matches!(panel.handle_key(key(KeyCode::Esc)), Effect::None));
-        let text = shown(&panel, 60, 12).join("\n");
+        let text = shown(&panel, 60, 14).join("\n");
         assert!(
             text.contains("nightly") && text.contains("release"),
             "{text}"

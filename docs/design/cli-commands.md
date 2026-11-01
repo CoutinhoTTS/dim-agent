@@ -401,6 +401,11 @@ failed read. The first two areas use toggle, reload and edit. The Scheduler area
 add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
 adapter and the methods its kinds call, and names here the kinds it adds.
 
+A hint the bottom border cannot hold is drawn as rows above a plain bottom border, wrapped at
+the ` · ` separators so a part never splits, and a part wider than a row is cut with `…`. The
+rows take their space from the list like the footer's, so every key stays visible at any width,
+the remove confirmation included.
+
 - add opens the external editor on a new-entry document that the adapter supplies — the owner's
   create shape, filled with example values — and writes it with the area's create method. An
   unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N

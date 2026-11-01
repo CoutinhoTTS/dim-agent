@@ -1108,6 +1108,84 @@ fn tui_scheduled_panel_reports_a_conflict_on_remove() {
     daemon.join().unwrap();
 }
 
+/// At 80 columns the Scheduler's keys wrap above the bottom border, so every
+/// key stays visible, and the remove confirmation for a long name is drawn
+/// whole, in both terminal modes.
+#[test]
+fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("schedule.list");
+            wire.reply(
+                &request,
+                json!({"jobs": [
+                    job("job-1", "a job whose name is rather long", 3, true, Value::Null),
+                ]}),
+            );
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        sized(&mut command, 80, 24);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/scheduled\r");
+        terminal.until("every 60 minutes");
+        // Every key is drawn, wrapped above the border at this width. A key
+        // and its action are painted as separate spans, so each is asserted
+        // on its own; a frame redraws the same hint, so each search starts
+        // anywhere in the transcript.
+        for key in [
+            "Enter", "Ctrl+E", "Ctrl+R", "Ctrl+N", "Ctrl+X", "Ctrl+T", "Tab", "Esc",
+        ] {
+            terminal.until_anywhere(key);
+        }
+        for action in [
+            " toggle", " edit", " reload", " add", " remove", " run", " inspect", " close",
+        ] {
+            terminal.until_anywhere(action);
+        }
+        terminal.raw(b"\x18");
+        terminal.until("a job whose name is rather long? Enter confirm");
+        // Esc cancels the confirmation, a second closes the panel.
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
 /// A create the owner refuses keeps the user's text, and the next Ctrl+N
 /// writes that same text again with no revision, in both terminal modes.
 #[test]

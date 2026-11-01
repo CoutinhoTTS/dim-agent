@@ -29677,10 +29677,12 @@
         "path bordered",
         "path follow_window",
         "path key_hints",
+        "path visible_width",
         "path wrap_words",
         "use crate::ui::render::panel::bordered",
         "use crate::ui::render::panel::follow_window",
         "use crate::ui::render::panel::key_hints",
+        "use crate::ui::render::panel::visible_width",
         "use crate::ui::render::panel::wrap_words"
       ]
     },
