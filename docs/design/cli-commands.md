@@ -353,6 +353,56 @@ an editor, and either one keeps the user's text in its own file under `<home>/ed
 revision is stale. The user source offers edit and no toggle, because it is always in effect; a
 plugin's source offers neither, and its detail names the plugin.
 
+### The Scheduler area
+
+Scheduler (#815): the `/scheduled` panel, `/schedule` its alias in both modes, and `dimcode
+scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`
+over `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`,
+`schedule.run_now` and `schedule.history` ([Scheduler §A.3](plugins/Scheduler.md#a3-management-methods)).
+Every job is an entry: its name is the label, and its schedule, next window and last outcome are
+its detail. A job whose schedule the owner cannot use is marked invalid and its detail carries the
+owner's message; a job the scheduler holds while it is disabled says it has no next window. The
+owner reports no grouping, so the jobs share one heading, `jobs`.
+
+A job's document is the record the owner wrote; the client changes only the fields `schedule.save`
+takes — `name`, `schedule`, `prompt`, `cwd`, `model`, `mode`, `policy`, `max_run_minutes`,
+`enabled`, `session_id` and `agent_id` — and carries the id on the Save action and the job's
+revision as the revision the draft was read at. A stale revision is `schedule_conflict`, the
+typed conflict: nothing is written, the jobs are read again, and the next edit opens the current
+record. `created_by`, `policy_cap` and `enabled_at` are the owner's to derive and are never sent.
+A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt
+and the Session's workspace — and writes with `schedule.save` without a revision. `inspect` is
+`history`: the job's recent runs, newest first, with the state the owner recorded.
+
+```text
+╭─ Scheduler ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+│                                                                                                                      │
+│   jobs                                                                                                               │
+│ › nightly-build   enabled                                                                                            │
+│   release         disabled  invalid                                                                                  │
+│                                                                                                                      │
+│   every 60 minutes                                                                                                   │
+│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
+│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
+```
+
+Ctrl+T runs the selected job now and reports what the owner answered — `launching`, or the reason
+the run was skipped — and Tab shows the job's history in place of the list:
+
+```text
+╭─ Recent runs of nightly-build ─────────────────────────────╮
+│ 2026-11-01T09:00:12.000Z  completed                        │
+│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
+│ 2026-10-31T09:00:03.000Z  completed                        │
+╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
+```
+
+`dimcode scheduled add PATH` (`-` for stdin) is the create without an editor, `dimcode scheduled
+history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
+the panel's confirmation.
+
 ## Commands
 
 | Entry | Behavior |
@@ -377,6 +427,15 @@ plugin's source offers neither, and its detail names the plugin.
 | `dimcode hooks edit` | Open the user's hook document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `hooks.save` with the revision `hooks.catalog` reported; an interactive edit needs a terminal. |
 | `dimcode hooks set PATH` | Write the user's hook document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `/hooks` | Open the Hooks panel of the Session's workspace ([management surfaces](#management-surfaces)): a source per entry, the project's toggle and the user document's edit. |
+| `dimcode scheduled list` | List the jobs the Scheduler holds over `schedule.list` ([Scheduler](plugins/Scheduler.md#a3-management-methods)): each job's id, name, schedule, state, next window and last outcome, then the jobs whose schedule the owner cannot use. |
+| `dimcode scheduled enable\|disable ID` | Enable or pause one job over `schedule.set_enabled`, then report the jobs again. |
+| `dimcode scheduled edit ID` | Open one job's document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `schedule.save` with the revision the listing reported; an interactive edit needs a terminal. |
+| `dimcode scheduled set ID PATH` | Write one job's document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
+| `dimcode scheduled add PATH` | Create a job from `PATH`, or from stdin for `-`, over `schedule.save` without a revision: the owner derives the id, `created_by` and `policy_cap`. |
+| `dimcode scheduled remove ID` | Delete one job over `schedule.delete` without a prompt: the id on the command line is the intent. |
+| `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
+| `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
+| `/scheduled`, `/schedule` | Open the Scheduler panel of the Session's workspace ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and history kinds. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |

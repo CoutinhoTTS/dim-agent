@@ -42,6 +42,29 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "사용자 문서가 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 문서를 엽니다."
         }
+        "Scheduler" => "스케줄러",
+        "Added {name}." => "{name}을(를) 추가했습니다.",
+        "Run {name}: {outcome}." => "{name}을(를) 실행했습니다: {outcome}.",
+        "Recent runs of {name}" => "{name}의 최근 실행",
+        "No run yet." => "아직 실행 기록이 없습니다.",
+        "No next run." => "다음 실행이 없습니다.",
+        "Next run {instant}." => "다음 실행 {instant}.",
+        "Last run {outcome} at {instant}." => "마지막 실행 {outcome}, {instant}.",
+        "every {minutes} minutes" => "{minutes}분마다",
+        "at {instant}" => "{instant}에",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression} ({zone})",
+        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
+            "작업이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 작업을 엽니다."
+        }
+        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
+            "작업이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 추가는 작성한 내용을 다시 엽니다."
+        }
+        "The job changed since it was read; nothing was removed." => {
+            "작업이 읽은 뒤에 변경되었습니다. 아무것도 삭제하지 않았습니다."
+        }
+        "The Scheduler has no area document." => "스케줄러에는 영역 문서가 없습니다.",
+        "No scheduled job has that id." => "해당 id의 예약 작업이 없습니다.",
         _ => return None,
     })
 }

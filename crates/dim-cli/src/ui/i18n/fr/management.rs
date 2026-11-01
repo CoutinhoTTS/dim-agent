@@ -44,6 +44,29 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "Le document utilisateur a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira le document actuel."
         }
+        "Scheduler" => "Planificateur",
+        "Added {name}." => "{name} ajouté.",
+        "Run {name}: {outcome}." => "{name} exécuté : {outcome}.",
+        "Recent runs of {name}" => "Exécutions récentes de {name}",
+        "No run yet." => "Aucune exécution pour l'instant.",
+        "No next run." => "Aucune exécution à venir.",
+        "Next run {instant}." => "Prochaine exécution {instant}.",
+        "Last run {outcome} at {instant}." => "Dernière exécution {outcome} à {instant}.",
+        "every {minutes} minutes" => "toutes les {minutes} minutes",
+        "at {instant}" => "à {instant}",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression} en {zone}",
+        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
+            "La tâche a changé depuis sa lecture ; rien n'a été écrit. Votre prochaine modification ouvrira la tâche actuelle."
+        }
+        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Les tâches ont changé depuis leur lecture ; rien n'a été écrit. Votre prochain ajout rouvrira votre texte."
+        }
+        "The job changed since it was read; nothing was removed." => {
+            "La tâche a changé depuis sa lecture ; rien n'a été supprimé."
+        }
+        "The Scheduler has no area document." => "Le planificateur n'a pas de document de domaine.",
+        "No scheduled job has that id." => "Aucune tâche planifiée n'a cet id.",
         _ => return None,
     })
 }

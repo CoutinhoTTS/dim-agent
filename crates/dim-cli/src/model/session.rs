@@ -268,6 +268,7 @@ pub enum Command {
 pub enum Area {
     Skills,
     Hooks,
+    Scheduled,
 }
 
 impl Area {
@@ -276,6 +277,7 @@ impl Area {
         match self {
             Self::Skills => "skills",
             Self::Hooks => "hooks",
+            Self::Scheduled => "scheduled",
         }
     }
 }

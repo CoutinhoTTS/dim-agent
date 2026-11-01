@@ -14,6 +14,7 @@
 
 pub mod editor;
 pub mod hooks;
+pub mod scheduler;
 pub mod skills;
 
 use std::path::Path;
@@ -58,10 +59,25 @@ const HOOKS: Methods = Methods {
     ],
 };
 
+const SCHEDULED: Methods = Methods {
+    catalog: "schedule.list",
+    kinds: &[
+        (ActionKind::Toggle, "schedule.set_enabled"),
+        (ActionKind::Edit, "schedule.save"),
+        // A reload re-reads the jobs, so it needs no rescan method.
+        (ActionKind::Reload, "schedule.list"),
+        (ActionKind::Add, "schedule.save"),
+        (ActionKind::Remove, "schedule.delete"),
+        (ActionKind::Run, "schedule.run_now"),
+        (ActionKind::Inspect, "schedule.history"),
+    ],
+};
+
 fn methods_of(area: Area) -> &'static Methods {
     match area {
         Area::Skills => &SKILLS,
         Area::Hooks => &HOOKS,
+        Area::Scheduled => &SCHEDULED,
     }
 }
 
@@ -148,7 +164,11 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
 }
 
 fn unsupported(area: Area) -> String {
-    format!("This daemon cannot manage {}.", area.name())
+    match area {
+        // The Scheduler is one owner by name, not a plural noun.
+        Area::Scheduled => "This daemon cannot manage the Scheduler.".to_owned(),
+        Area::Skills | Area::Hooks => format!("This daemon cannot manage {}.", area.name()),
+    }
 }
 
 /// Applies `request` to its area and reports what it came to.
@@ -179,6 +199,20 @@ pub async fn apply(
                 Err(ManagementRefusal::Conflict {
                     message,
                     view: Box::new(hooks::view(&catalog, &actions)),
+                })
+            }
+        },
+        Area::Scheduled => match scheduler::apply(client, &request.action).await {
+            Ok(scheduler::Answer::Jobs { catalog, note }) => Ok(ManagementReport::View {
+                view: Box::new(scheduler::view(&catalog, &actions, cwd)),
+                note,
+            }),
+            Ok(scheduler::Answer::Detail(detail)) => Ok(ManagementReport::Detail(detail)),
+            Err(scheduler::Failure::Refused(message)) => Err(ManagementRefusal::Refused(message)),
+            Err(scheduler::Failure::Conflict { message, catalog }) => {
+                Err(ManagementRefusal::Conflict {
+                    message,
+                    view: Box::new(scheduler::view(&catalog, &actions, cwd)),
                 })
             }
         },

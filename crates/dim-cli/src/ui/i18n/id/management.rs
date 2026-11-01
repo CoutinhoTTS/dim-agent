@@ -42,6 +42,29 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka dokumen saat ini."
         }
+        "Scheduler" => "Penjadwal",
+        "Added {name}." => "{name} ditambahkan.",
+        "Run {name}: {outcome}." => "{name} dijalankan: {outcome}.",
+        "Recent runs of {name}" => "Eksekusi terbaru {name}",
+        "No run yet." => "Belum ada eksekusi.",
+        "No next run." => "Tidak ada eksekusi berikutnya.",
+        "Next run {instant}." => "Eksekusi berikutnya {instant}.",
+        "Last run {outcome} at {instant}." => "Eksekusi terakhir {outcome} pada {instant}.",
+        "every {minutes} minutes" => "setiap {minutes} menit",
+        "at {instant}" => "pada {instant}",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression} di {zone}",
+        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka tugas saat ini."
+        }
+        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Tugas berubah sejak dibaca; tidak ada yang ditulis. Tambah berikutnya membuka kembali teks Anda."
+        }
+        "The job changed since it was read; nothing was removed." => {
+            "Tugas berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "The Scheduler has no area document." => "Penjadwal tidak memiliki dokumen area.",
+        "No scheduled job has that id." => "Tidak ada tugas terjadwal dengan id itu.",
         _ => return None,
     })
 }

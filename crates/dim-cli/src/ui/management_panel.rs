@@ -44,6 +44,7 @@ use crate::ui::theme::ansi::fg;
 pub const STRINGS: &[&str] = &[
     "Skills",
     "Hooks",
+    "Scheduler",
     "Esc close",
     "Enter toggle",
     "Ctrl+E edit",
@@ -79,6 +80,22 @@ pub const STRINGS: &[&str] = &[
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
     "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
+    "Added {name}.",
+    "Run {name}: {outcome}.",
+    "Recent runs of {name}",
+    "No run yet.",
+    "No next run.",
+    "Next run {instant}.",
+    "Last run {outcome} at {instant}.",
+    "every {minutes} minutes",
+    "at {instant}",
+    "cron {expression}",
+    "cron {expression} in {zone}",
+    "The job changed since it was read; nothing was written. Your next edit opens the current job.",
+    "The jobs changed since they were read; nothing was written. Your next add opens your text again.",
+    "The job changed since it was read; nothing was removed.",
+    "The Scheduler has no area document.",
+    "No scheduled job has that id.",
 ];
 
 pub struct ManagementPanel {
@@ -575,6 +592,7 @@ fn title(area: Area) -> &'static str {
     match area {
         Area::Skills => "Skills",
         Area::Hooks => "Hooks",
+        Area::Scheduled => "Scheduler",
     }
 }
 

@@ -24,6 +24,8 @@ mod migration;
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/scheduled.rs"]
+mod scheduled;
 #[path = "cli_flow/skills.rs"]
 mod skills;
 #[path = "cli_flow/tasks.rs"]

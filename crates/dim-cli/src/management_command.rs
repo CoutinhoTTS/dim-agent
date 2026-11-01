@@ -15,9 +15,11 @@ use serde_json::Value;
 use crate::Result;
 use crate::args::Options;
 use crate::client::Client;
-use crate::management::{self, editor, hooks, skills};
+use crate::management::{self, editor, hooks, scheduler, skills};
 use crate::mcp_command::print_report;
-use crate::model::session::{ActionKind, Area, ManagementAction, ManagementRequest};
+use crate::model::session::{
+    ActionKind, Area, ManagementAction, ManagementReport, ManagementRequest,
+};
 use crate::sanitize::safe;
 
 /// Runs `request` and prints its area's report.
@@ -29,11 +31,18 @@ pub async fn run(
     match request.area {
         Area::Skills => run_skills(client, options, request).await,
         Area::Hooks => run_hooks(client, options, request).await,
+        Area::Scheduled => run_scheduled(client, request).await,
     }
 }
 
-/// `<area> edit`: the area's document in the external editor.
-pub async fn edit(client: &mut Client, options: &Options, area: Area) -> Result<i32> {
+/// `<area> edit [ID]`: the area's document in the external editor, or one
+/// entry's for an area whose documents are per entry.
+pub async fn edit(
+    client: &mut Client,
+    options: &Options,
+    area: Area,
+    id: Option<String>,
+) -> Result<i32> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(format!(
             "{} edit needs a terminal; {} set PATH writes a file, or - its input",
@@ -44,7 +53,7 @@ pub async fn edit(client: &mut Client, options: &Options, area: Area) -> Result<
     }
     // Refuse a write the daemon cannot serve before the user edits.
     management::supports_kind(client, area, ActionKind::Edit).map_err(failed)?;
-    let (revision, document) = read(client, options, area).await?;
+    let (revision, document) = read(client, options, area, id.as_deref()).await?;
     let text = serde_json::to_string_pretty(&document)
         .map(|text| format!("{text}\n"))
         .map_err(|error| error.to_string())?;
@@ -71,44 +80,114 @@ pub async fn edit(client: &mut Client, options: &Options, area: Area) -> Result<
     let text = draft
         .text()
         .map_err(|error| format!("{error} Your text is kept in {kept}."))?;
-    let outcome = write(client, options, area, &text, &revision, &document, &kept).await;
+    let outcome = write(
+        client,
+        options,
+        &Draft {
+            area,
+            id,
+            text,
+            revision,
+            stored: document,
+            kept,
+        },
+    )
+    .await;
     if outcome.is_ok() {
         draft.remove();
     }
     outcome
 }
 
-/// `<area> set PATH`: the same write without an editor, from a file or from
-/// stdin.
-pub async fn set(client: &mut Client, options: &Options, area: Area, path: &Path) -> Result<i32> {
+/// `<area> set [ID] PATH`: the same write without an editor, from a file or
+/// from stdin.
+pub async fn set(
+    client: &mut Client,
+    options: &Options,
+    area: Area,
+    id: Option<String>,
+    path: &Path,
+) -> Result<i32> {
     // Refuse a write the daemon cannot serve before the input can hold the
     // call: the same check `edit` makes before it opens the editor.
     management::supports_kind(client, area, ActionKind::Edit).map_err(failed)?;
     // The input first and the revision second, so the revision is read
     // immediately before the write however long the input takes.
-    let text = if path == Path::new("-") {
-        let mut text = String::new();
-        std::io::stdin().read_to_string(&mut text)?;
-        text
-    } else {
-        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?
-    };
-    let (revision, document) = read(client, options, area).await?;
+    let text = read_text(path)?;
+    let (revision, stored) = read(client, options, area, id.as_deref()).await?;
     if path == Path::new("-") {
         let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
         let kept = draft.path().display().to_string();
-        let outcome = write(client, options, area, &text, &revision, &document, &kept).await;
+        let outcome = write(
+            client,
+            options,
+            &Draft {
+                area,
+                id,
+                text,
+                revision,
+                stored,
+                kept,
+            },
+        )
+        .await;
+        if outcome.is_ok() {
+            draft.remove();
+        }
+        return outcome;
+    }
+    write(
+        client,
+        options,
+        &Draft {
+            area,
+            id,
+            text,
+            revision,
+            stored,
+            kept: path.display().to_string(),
+        },
+    )
+    .await
+}
+
+/// `<area> add PATH`: the non-interactive twin of the add kind, from a file
+/// or from stdin.
+pub async fn add(client: &mut Client, options: &Options, area: Area, path: &Path) -> Result<i32> {
+    // Refuse a create the daemon cannot serve before the input can hold the
+    // call, as `set` does.
+    management::supports_kind(client, area, ActionKind::Add).map_err(failed)?;
+    let text = read_text(path)?;
+    if path == Path::new("-") {
+        let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
+        let kept = draft.path().display().to_string();
+        let outcome = create(client, options, area, &text, &kept).await;
         if outcome.is_ok() {
             draft.remove();
         }
         return outcome;
     }
     let kept = path.display().to_string();
-    write(client, options, area, &text, &revision, &document, &kept).await
+    create(client, options, area, &text, &kept).await
+}
+
+/// The document a command reads, from a file or from stdin for `-`.
+fn read_text(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()).into())
 }
 
 /// The document and the revision to write it at, read immediately before.
-async fn read(client: &mut Client, options: &Options, area: Area) -> Result<(String, Value)> {
+async fn read(
+    client: &mut Client,
+    options: &Options,
+    area: Area,
+    id: Option<&str>,
+) -> Result<(String, Value)> {
     management::supported(
         client,
         &ManagementRequest {
@@ -127,43 +206,96 @@ async fn read(client: &mut Client, options: &Options, area: Area) -> Result<(Str
                 .ok_or_else(|| failed("The daemon reports no hook document to edit.".to_owned()))?;
             Ok((catalog.user_revision, document))
         }
+        Area::Scheduled => {
+            let Some(id) = id else {
+                return Err("scheduled edit and set take a job id.".to_owned().into());
+            };
+            let catalog = scheduler::catalog(client).await.map_err(failed)?;
+            let job = catalog
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .ok_or_else(|| failed(format!("No scheduled job has that id: {id}")))?;
+            Ok((job.revision.to_string(), job.document()))
+        }
     }
 }
 
-/// Writes `text` as the area's document with `revision`: nothing when it
-/// says what is stored, and a refusal names `kept`, where the user's text
-/// stays.
-async fn write(
-    client: &mut Client,
-    options: &Options,
+/// One document a command writes: where it goes, what it says, and where
+/// the user's text stays when the owner refuses it.
+struct Draft {
     area: Area,
-    text: &str,
-    revision: &str,
-    stored: &Value,
-    kept: &str,
-) -> Result<i32> {
-    let document: Value = serde_json::from_str(text)
-        .map_err(|error| format!("{error} Your text is kept in {kept}."))?;
-    if &document == stored {
+    id: Option<String>,
+    text: String,
+    /// The revision the document was read at.
+    revision: String,
+    /// The document as the owner reported it, which `text` must differ from.
+    stored: Value,
+    /// The file that keeps the user's text when nothing is written.
+    kept: String,
+}
+
+/// Writes a draft: nothing when it says what is stored, and a refusal names
+/// `kept`, where the user's text stays.
+async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<i32> {
+    let document: Value = serde_json::from_str(&draft.text)
+        .map_err(|error| format!("{error} Your text is kept in {}.", draft.kept))?;
+    if document == draft.stored {
         print_report(vec!["No change.".to_owned()], Vec::new());
         return Ok(0);
     }
     let request = ManagementRequest {
-        area,
+        area: draft.area,
         action: ManagementAction::Save {
-            id: None,
-            expected_revision: revision.to_owned(),
+            id: draft.id.clone(),
+            expected_revision: draft.revision.clone(),
             document,
         },
     };
     if let Err(error) = management::apply(client, &request, &options.cwd).await {
-        return Err(format!("{error} Your text is kept in {kept}.").into());
+        return Err(format!("{error} Your text is kept in {}.", draft.kept).into());
     }
-    print_report(
-        vec![format!("Saved the {} document.", area.name())],
-        Vec::new(),
-    );
+    print_report(vec![saved(draft.area)], Vec::new());
     Ok(0)
+}
+
+/// What a create writes, with the message the owner's answer gives.
+async fn create(
+    client: &mut Client,
+    options: &Options,
+    area: Area,
+    text: &str,
+    kept: &str,
+) -> Result<i32> {
+    let document: Value = serde_json::from_str(text)
+        .map_err(|error| format!("{error} Your text is kept in {kept}."))?;
+    let request = ManagementRequest {
+        area,
+        action: ManagementAction::Add { document },
+    };
+    match management::apply(client, &request, &options.cwd).await {
+        Ok(ManagementReport::View { note, .. }) => {
+            // The note names the entry the owner saved: made safe, as every
+            // line the Scheduler prints is.
+            let note = note.iter().map(|note| safe(note)).collect();
+            print_report(note, Vec::new());
+            Ok(0)
+        }
+        Ok(ManagementReport::Detail(detail)) => {
+            let lines = detail.lines.iter().map(|line| safe(line)).collect();
+            print_report(lines, Vec::new());
+            Ok(0)
+        }
+        Err(error) => Err(format!("{error} Your text is kept in {kept}.").into()),
+    }
+}
+
+/// The notice a successful write leaves.
+fn saved(area: Area) -> String {
+    match area {
+        Area::Scheduled => "Saved the job.".to_owned(),
+        Area::Skills | Area::Hooks => format!("Saved the {} document.", area.name()),
+    }
 }
 
 fn failed(message: String) -> crate::Error {
@@ -230,6 +362,83 @@ async fn run_hooks(
         _ => print_report(hook_rows(&catalog), hook_notes(&catalog)),
     }
     Ok(0)
+}
+
+/// `scheduled ...`: the jobs the Scheduler holds, printed as its owner
+/// reports them.
+async fn run_scheduled(client: &mut Client, request: &ManagementRequest) -> Result<i32> {
+    management::supported(client, request).map_err(failed)?;
+    match scheduler::apply(client, &request.action).await {
+        Ok(scheduler::Answer::Detail(detail)) => {
+            // The owner names jobs and states reasons: what it wrote is
+            // made safe before it reaches the terminal.
+            let lines = detail.lines.iter().map(|line| safe(line)).collect();
+            print_report(lines, Vec::new())
+        }
+        Ok(scheduler::Answer::Jobs { catalog, note }) => match (&request.action, note) {
+            (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
+            (ManagementAction::Toggle { id, enabled }, None) => {
+                let name = catalog
+                    .jobs
+                    .iter()
+                    .find(|job| &job.id == id)
+                    .map(|job| job.name.clone())
+                    .unwrap_or_else(|| id.clone());
+                print_report(
+                    vec![format!(
+                        "{} {}.",
+                        if *enabled { "Enabled" } else { "Disabled" },
+                        safe(&name)
+                    )],
+                    Vec::new(),
+                );
+            }
+            (ManagementAction::Remove { id }, None) => {
+                print_report(vec![format!("Removed {}.", safe(id))], Vec::new());
+            }
+            _ => print_report(job_rows(&catalog), job_notes(&catalog)),
+        },
+        Err(error) => return Err(failed(error.to_string())),
+    }
+    Ok(0)
+}
+
+/// One job: its id, name, schedule, state, next window and last outcome.
+fn job_rows(catalog: &scheduler::Catalog) -> Vec<String> {
+    catalog
+        .jobs
+        .iter()
+        .map(|job| {
+            let next = job.next_window.as_deref().unwrap_or("—");
+            let last = job.last_run.as_ref().map_or_else(
+                || "—".to_owned(),
+                |run| format!("{} at {}", run.outcome(), run.instant()),
+            );
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                safe(&job.id),
+                safe(&job.name),
+                safe(&scheduler::schedule_text(&job.schedule)),
+                if job.enabled { "enabled" } else { "disabled" },
+                safe(next),
+                safe(&last),
+            )
+        })
+        .collect()
+}
+
+fn job_notes(catalog: &scheduler::Catalog) -> Vec<String> {
+    let mut notes = if catalog.jobs.is_empty() {
+        vec!["No job is scheduled.".to_owned()]
+    } else {
+        vec!["Columns: id, name, schedule, state, next run, last run.".to_owned()]
+    };
+    for job in &catalog.jobs {
+        if let Some(error) = &job.schedule_error {
+            notes.push(format!("{}: {}", safe(&job.name), safe(error)));
+        }
+    }
+    notes
 }
 
 /// One Skill: its name, source, state, file and description.

@@ -252,6 +252,38 @@ Skills（#814）：`/skills` 面板与 `dimcode skills list|enable|disable|reloa
 
 Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set PATH`。面板把每个来源列为一个带状态的条目；toggle 经 `hooks.set_enabled` 启用或停用项目来源（项目来源初始为停用，只有用户可以启用它）；edit 用编辑器打开用户文档，并以 `hooks.save` 写入，即 Settings 来源 `hooks` 的 CAS 写入。`dimcode hooks set PATH`（`-` 表示 stdin）是不经编辑器的同一次写入；revision 过期时两者都把用户文本留在 `<home>/edit/` 下它自己的文件里。用户来源提供 edit、不提供 toggle，因为它始终生效；插件来源两者都不提供，详情说明所属插件。
 
+### Scheduler 领域
+
+Scheduler（#815）：`/scheduled` 面板，`/schedule` 在两种模式下都是它的别名，以及 `dimcode scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`，经 `schedule.list`、`schedule.save`、`schedule.delete`、`schedule.set_enabled`、`schedule.run_now` 与 `schedule.history`（[Scheduler §A.3](plugins/Scheduler.md#a3-管理方法)）。每个任务是条目：名称是标签，调度、下次窗口与上次结果分别是详情。所有者无法使用其调度的任务标记为无效，详情带上所有者的消息；已停用的任务说明没有下次窗口。所有者不报告分组，所以任务共用 `jobs` 一个分组。
+
+任务的文档就是所有者写入的那条记录；客户端只改动 `schedule.save` 接受的字段——`name`、`schedule`、`prompt`、`cwd`、`model`、`mode`、`policy`、`max_run_minutes`、`enabled`、`session_id` 与 `agent_id`——并把 id 放在 Save 动作上、把任务的 revision 作为草稿读取时的 revision。revision 过期就是 `schedule_conflict`，即类型化的冲突：什么都不写，重新读取任务，下次编辑打开当前记录。`created_by`、`policy_cap` 与 `enabled_at` 由所有者推导，客户端从不发送。新条目从所有者的创建形态开始——一个名称、一个 `every` 示例调度、一个提示词与会话的工作区——以不带 revision 的 `schedule.save` 写入。`inspect` 就是 `history`：任务最近的运行，最新的在前，带所有者记录的状态。
+
+```text
+╭─ Scheduler ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                                    │
+│                                                                                                                      │
+│   jobs                                                                                                               │
+│ › nightly-build   enabled                                                                                            │
+│   release         disabled  invalid                                                                                  │
+│                                                                                                                      │
+│   every 60 minutes                                                                                                   │
+│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
+│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
+```
+
+Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`，或运行被跳过的原因；Tab 用任务的历史替代列表显示：
+
+```text
+╭─ Recent runs of nightly-build ─────────────────────────────╮
+│ 2026-11-01T09:00:12.000Z  completed                        │
+│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
+│ 2026-10-31T09:00:03.000Z  completed                        │
+╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
+```
+
+`dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
+
 ## 命令
 
 | 入口 | 行为 |
@@ -272,6 +304,15 @@ Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set
 | `dimcode hooks edit` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户 Hook 文档，并以 `hooks.catalog` 报告的 revision 经 `hooks.save` 写回；交互式编辑需要终端。 |
 | `dimcode hooks set PATH` | 从 `PATH`（`-` 表示 stdin）读取用户 Hook 文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
 | `/hooks` | 打开会话所在工作区的 Hooks 面板（[管理界面](#管理界面)）：每个来源一个条目，项目来源提供 toggle，用户文档提供 edit。 |
+| `dimcode scheduled list` | 经 `schedule.list` 列出 Scheduler 持有的任务（[Scheduler](plugins/Scheduler.md#a3-管理方法)）：每个任务的 id、名称、计划、状态、下一次窗口与上次结果，然后是计划无法被 owner 使用的任务。 |
+| `dimcode scheduled enable\|disable ID` | 经 `schedule.set_enabled` 启用或暂停单个任务，然后再次报告任务。 |
+| `dimcode scheduled edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开单个任务的文档，并以列表报告的 revision 经 `schedule.save` 写回；交互式编辑需要终端。 |
+| `dimcode scheduled set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取单个任务的文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
+| `dimcode scheduled add PATH` | 从 `PATH`（`-` 表示 stdin）读取文档，不经 revision 经 `schedule.save` 创建任务：id、`created_by` 与 `policy_cap` 由 owner 推导。 |
+| `dimcode scheduled remove ID` | 不经确认，经 `schedule.delete` 删除单个任务：命令行上的 id 就是意图。 |
+| `dimcode scheduled run ID` | 经 `schedule.run_now` 立即运行单个任务，并报告 owner 返回的内容，或它跳过这次运行的原因。 |
+| `dimcode scheduled history ID` | 经 `schedule.history` 打印单个任务最近的运行，最新的在前，并带上每次运行的状态与时间。 |
+| `/scheduled`、`/schedule` | 打开会话所在工作区的 Scheduler 面板（[管理界面](#管理界面)）：每个任务一个条目，带计划、下一次窗口与上次结果，以及 toggle、edit、add、remove、run 与 history 种类。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
 | `dimcode logout PROVIDER` | 让被描述的账号退出。 |

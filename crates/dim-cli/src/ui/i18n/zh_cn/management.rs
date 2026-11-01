@@ -38,6 +38,29 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "用户文档在读取后已被修改；本次没有写入。下次编辑会打开当前文档。"
         }
+        "Scheduler" => "调度器",
+        "Added {name}." => "已新建 {name}。",
+        "Run {name}: {outcome}." => "已运行 {name}：{outcome}。",
+        "Recent runs of {name}" => "{name} 的最近运行",
+        "No run yet." => "尚未运行。",
+        "No next run." => "没有下次运行。",
+        "Next run {instant}." => "下次运行 {instant}。",
+        "Last run {outcome} at {instant}." => "上次运行 {outcome}，于 {instant}。",
+        "every {minutes} minutes" => "每 {minutes} 分钟",
+        "at {instant}" => "于 {instant}",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression}（{zone}）",
+        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
+            "任务在读取后已被修改；本次没有写入。下次编辑会打开当前任务。"
+        }
+        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
+            "任务在读取后已被修改；本次没有写入。下次新建会重新打开你的文本。"
+        }
+        "The job changed since it was read; nothing was removed." => {
+            "任务在读取后已被修改；本次没有删除。"
+        }
+        "The Scheduler has no area document." => "调度器没有领域文档。",
+        "No scheduled job has that id." => "没有该 id 的定时任务。",
         _ => return None,
     })
 }

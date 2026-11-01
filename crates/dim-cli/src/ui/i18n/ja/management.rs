@@ -44,6 +44,29 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"
         }
+        "Scheduler" => "スケジューラー",
+        "Added {name}." => "{name} を作成しました。",
+        "Run {name}: {outcome}." => "{name} を実行しました：{outcome}。",
+        "Recent runs of {name}" => "{name} の最近の実行",
+        "No run yet." => "まだ実行はありません。",
+        "No next run." => "次回の実行はありません。",
+        "Next run {instant}." => "次回の実行 {instant}。",
+        "Last run {outcome} at {instant}." => "前回の実行 {outcome}（{instant}）。",
+        "every {minutes} minutes" => "{minutes} 分ごと",
+        "at {instant}" => "{instant} に",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression}（{zone}）",
+        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
+            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のジョブを開きます。"
+        }
+        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
+            "ジョブは読み取り後に変更されています。今回は何も書き込んでいません。次回の作成では入力した内容を開きます。"
+        }
+        "The job changed since it was read; nothing was removed." => {
+            "ジョブは読み取り後に変更されています。今回は何も削除していません。"
+        }
+        "The Scheduler has no area document." => "スケジューラーには領域ドキュメントがありません。",
+        "No scheduled job has that id." => "その id のスケジュールジョブはありません。",
         _ => return None,
     })
 }

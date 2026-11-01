@@ -44,6 +44,29 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "El documento del usuario cambió desde que se leyó; no se escribió nada. Tu próxima edición abre el documento actual."
         }
+        "Scheduler" => "Programador",
+        "Added {name}." => "{name} añadido.",
+        "Run {name}: {outcome}." => "{name} ejecutado: {outcome}.",
+        "Recent runs of {name}" => "Ejecuciones recientes de {name}",
+        "No run yet." => "Todavía no hay ejecuciones.",
+        "No next run." => "No hay próxima ejecución.",
+        "Next run {instant}." => "Próxima ejecución {instant}.",
+        "Last run {outcome} at {instant}." => "Última ejecución {outcome} a las {instant}.",
+        "every {minutes} minutes" => "cada {minutes} minutos",
+        "at {instant}" => "a las {instant}",
+        "cron {expression}" => "cron {expression}",
+        "cron {expression} in {zone}" => "cron {expression} en {zone}",
+        "The job changed since it was read; nothing was written. Your next edit opens the current job." => {
+            "La tarea cambió desde que se leyó; no se escribió nada. Tu próxima edición abre la tarea actual."
+        }
+        "The jobs changed since they were read; nothing was written. Your next add opens your text again." => {
+            "Las tareas cambiaron desde que se leyeron; no se escribió nada. Tu próxima acción de añadir vuelve a abrir tu texto."
+        }
+        "The job changed since it was read; nothing was removed." => {
+            "La tarea cambió desde que se leyó; no se eliminó nada."
+        }
+        "The Scheduler has no area document." => "El Programador no tiene documento de área.",
+        "No scheduled job has that id." => "Ninguna tarea programada tiene ese id.",
         _ => return None,
     })
 }

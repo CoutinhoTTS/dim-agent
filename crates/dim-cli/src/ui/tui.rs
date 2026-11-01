@@ -3332,6 +3332,10 @@ impl App {
                 self.open_management(Area::Hooks);
                 Outcome::Continue
             }
+            "scheduled" => {
+                self.open_management(Area::Scheduled);
+                Outcome::Continue
+            }
             "connect" => {
                 self.open_prompt(Prompt::Providers(Box::new(ProvidersPanel::new())));
                 self.host.send(Command::ListProviders);
