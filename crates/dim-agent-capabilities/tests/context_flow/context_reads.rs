@@ -954,11 +954,21 @@ async fn a_custom_render_renders_its_own_entries_and_keeps_the_streamed_checkpoi
         .await
         .unwrap();
     let through = timeline.sequence();
+    let order = timeline.policy_order(through).await.unwrap();
+    let position = order
+        .events
+        .iter()
+        .find(|event| event.id == *retain_from)
+        .map(|event| TimelinePosition {
+            branch_id: event.branch_id.clone(),
+            sequence: event.sequence,
+        })
+        .unwrap();
     let checkpoint = HistoryRenderer {
         render: HistoryRender::Custom(external_history),
         ..HistoryRenderer::default()
     }
-    .stream_checkpoint(&timeline, through, retain_from, 256)
+    .stream_checkpoint(&timeline, position, through, retain_from, 256)
     .await
     .expect("the built-in builder still streams");
     assert_eq!(checkpoint.state.retain_from, *retain_from);

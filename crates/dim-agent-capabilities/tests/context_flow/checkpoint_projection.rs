@@ -1502,3 +1502,122 @@ async fn a_cut_that_moves_backwards_falls_back_to_the_full_render() {
     let (_, full) = renderer.rendered_context(&timeline, through).await.unwrap();
     assert_eq!(full.len(), 2, "the full render keeps what the cut retains");
 }
+
+/// A memory store whose reads stop before the branch head: a truncated branch,
+/// where the page after the last readable event is empty.
+struct TruncatedStore {
+    memory: MemoryTimelineStore,
+    visible: u64,
+    reads: AtomicUsize,
+}
+
+impl TimelineStore for TruncatedStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
+        self.memory.head(key)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        Box::pin(async move {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let mut segments = self.memory.read_segments(session_id, segments).await?;
+            for events in &mut segments {
+                events.retain(|record| record.event.sequence <= self.visible);
+            }
+            Ok(segments)
+        })
+    }
+}
+
+/// The streamed checkpoint read stops at the first empty page instead of
+/// walking one sequence at a time to `through`.
+#[tokio::test]
+async fn a_streamed_checkpoint_stops_at_an_empty_page() {
+    let store = Arc::new(TruncatedStore {
+        memory: MemoryTimelineStore::default(),
+        visible: 1,
+        reads: AtomicUsize::new(0),
+    });
+    let key = TimelineKey {
+        session_id: "truncated".into(),
+        branch_id: "main".into(),
+    };
+    store
+        .memory
+        .create_session(&key.session_id, &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(Ctx::root().unwrap(), key, vec![], store.clone());
+    let hello = input(&timeline, "hello");
+    let cut = timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: hello.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    step(&timeline, "one", "r1", &["a", "b"]);
+    let through = timeline.sequence();
+    assert!(cut.sequence > store.visible);
+    store.reads.store(0, Ordering::SeqCst);
+    let renderer = HistoryRenderer::default();
+    let error = renderer
+        .stream_checkpoint(
+            &timeline,
+            TimelinePosition {
+                branch_id: "main".into(),
+                sequence: cut.sequence,
+            },
+            through,
+            &cut.id,
+            1,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("compaction cut was not read"),
+        "{error}"
+    );
+    assert_eq!(
+        store.reads.load(Ordering::SeqCst),
+        store.visible as usize + 1,
+        "the read stops at the first empty page"
+    );
+}

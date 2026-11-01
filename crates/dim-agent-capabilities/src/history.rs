@@ -192,10 +192,12 @@ impl HistoryRenderer {
     }
 
     /// Builds the checkpoint for `retain_from` while streaming batches, so a
-    /// compaction snapshot does not need the full `ContextHistory`.
+    /// compaction snapshot does not need the full `ContextHistory`. `resume`
+    /// is the cut's position from the policy order the caller already holds.
     pub async fn stream_checkpoint(
         &self,
         timeline: &Timeline,
+        resume: dim_agent_types::TimelinePosition,
         through: u64,
         retain_from: &str,
         batch: u64,
@@ -205,24 +207,17 @@ impl HistoryRenderer {
                 "streamed checkpoint needs a local branch".into(),
             ));
         }
-        let order = timeline.policy_order(through).await?;
-        let position = order
-            .events
-            .iter()
-            .find(|event| event.id == retain_from)
-            .ok_or_else(|| {
-                AgentError::InvalidInput("compaction cut is outside the branch".into())
-            })?;
-        let resume = dim_agent_types::TimelinePosition {
-            branch_id: position.branch_id.clone(),
-            sequence: position.sequence,
-        };
         let mut state: Option<ProjectionCheckpointState> = None;
         let mut start = 1;
         while start <= through {
             let events = timeline
                 .stored_page(start.saturating_sub(1), batch as usize, through)
                 .await?;
+            if events.is_empty() {
+                return Err(AgentError::InvalidInput(
+                    "compaction cut was not read".into(),
+                ));
+            }
             let end = events.last().map_or(start, |event| event.sequence);
             if let Some(index) = events.iter().position(|event| event.id == retain_from) {
                 let mut state = replay(&events[..index], state.as_ref())

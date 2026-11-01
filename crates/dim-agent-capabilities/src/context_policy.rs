@@ -727,7 +727,9 @@ impl ContextPolicy {
                     None,
                 ),
             };
-            return self.commit(step, view, model, start, outcome).await;
+            return self
+                .commit(step, view, model, start, outcome, &policy_order)
+                .await;
         }
         let first = self
             .pass(
@@ -844,7 +846,8 @@ impl ContextPolicy {
             },
             StepOutcome::Cancelled { reason } => ContextCompactionResult::Cancelled { reason },
         };
-        self.commit(step, view, model, start, outcome).await
+        self.commit(step, view, model, start, outcome, &policy_order)
+            .await
     }
 
     /// Whether the entries a compaction at `cut` removes — less the pinned
@@ -890,6 +893,7 @@ impl ContextPolicy {
         model: Arc<dyn ContextModel>,
         start: Arc<AgentEvent>,
         outcome: ContextCompactionResult,
+        policy_order: &PolicyOrder,
     ) -> Result<Compacted, HostError> {
         let fact = self
             .timeline
@@ -934,9 +938,24 @@ impl ContextPolicy {
                 let snapshot = match view.context.full() {
                     Some(context) => Some(self.history.snapshot(context, retain_from, &fact)?),
                     None if self.history.checkpoint.is_builtin() => {
+                        let resume = policy_order
+                            .events
+                            .iter()
+                            .find(|event| event.id == *retain_from)
+                            .map(|event| TimelinePosition {
+                                branch_id: event.branch_id.clone(),
+                                sequence: event.sequence,
+                            })
+                            .ok_or_else(|| "compaction cut is outside the branch".to_owned())?;
                         let checkpoint = self
                             .history
-                            .stream_checkpoint(&self.timeline, view.facts.through, retain_from, 256)
+                            .stream_checkpoint(
+                                &self.timeline,
+                                resume,
+                                view.facts.through,
+                                retain_from,
+                                256,
+                            )
                             .await
                             .map_err(|error| error.to_string())?;
                         Some(self.history.snapshot_from_checkpoint(&checkpoint, &fact)?)
