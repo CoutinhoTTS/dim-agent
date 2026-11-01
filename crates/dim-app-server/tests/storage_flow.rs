@@ -2785,8 +2785,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29));
-             INSERT INTO agent_store_format VALUES (29);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
+             INSERT INTO agent_store_format VALUES (30);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -2796,10 +2796,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29"), "{note}");
-    assert!(note.contains("Daemon format: v28"), "{note}");
+    assert!(note.contains("Store format: v30"), "{note}");
+    assert!(note.contains("Daemon format: v29"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v29"), "{note}");
+    assert!(note.contains("Run a build supporting v30"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -2810,17 +2810,82 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=27",
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=28",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v27 (schema is v28)"), "{note}");
+    assert!(note.contains("Store format: v28 (schema is v29)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_older_known_schema_with_a_newer_marker_is_a_mismatch() {
+    let database = Database::new();
+    let connection = v13_store(&database.0);
+    connection
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=30",
+        )
+        .unwrap();
+    drop(connection);
+    let original = std::fs::read(&database.0).unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    assert_eq!(std::fs::read(&database.0).unwrap(), original);
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: v30 (schema is v13)"), "{note}");
+    assert!(
+        note.contains("Use the build that wrote this store"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
+    let database = Database::new();
+    drop(SqliteStorage::open(database.0.clone()).unwrap());
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch("DELETE FROM agent_store_format")
+        .unwrap();
+    let original = std::fs::read(&database.0).unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    assert_eq!(std::fs::read(&database.0).unwrap(), original);
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v29 (format marker is missing or ambiguous)"),
+        "{note}"
+    );
+    assert!(!note.contains("Run a build supporting"), "{note}");
+}
+
+#[test]
+fn an_unrecognized_store_with_a_readable_marker_names_it() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY);
+             INSERT INTO agent_store_format VALUES (20);
+             CREATE TABLE unrelated (value INTEGER);",
+        )
+        .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v20 (unrecognized schema)"),
+        "{note}"
+    );
+    assert!(
+        note.contains("The store is not a format this daemon recognizes"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -2864,6 +2929,48 @@ fn an_old_store_note_says_it_is_no_longer_read() {
 }
 
 #[test]
+fn a_removed_v14_store_note_says_it_is_no_longer_read() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY);
+             INSERT INTO agent_store_format VALUES (14);
+             CREATE TABLE unrelated (value INTEGER);",
+        )
+        .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Store format: v14 (no longer read by this daemon)"),
+        "{note}"
+    );
+    assert!(note.contains("Use a build that reads v14"), "{note}");
+}
+
+#[test]
+fn a_failed_open_replaces_the_previous_startup_note() {
+    let database = Database::new();
+    Connection::open(&database.0)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
+             INSERT INTO agent_store_format VALUES (30);",
+        )
+        .unwrap();
+    std::fs::write(
+        startup_note(&database.0),
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v31\n",
+    )
+    .unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let note = read_startup_note(&database.0);
+    assert!(note.contains("Store format: v30"), "{note}");
+    assert!(!note.contains("/previous"), "{note}");
+    assert!(!note.contains("v31"), "{note}");
+}
+
+#[test]
 fn a_successful_open_removes_a_stale_startup_note() {
     let database = Database::new();
     drop(SqliteStorage::open(database.0.clone()).unwrap());
@@ -2879,7 +2986,7 @@ fn a_successful_upgrade_removes_a_stale_startup_note() {
     std::fs::write(startup_note(&database.0), "stale").unwrap();
     drop(SqliteStorage::open(database.0.clone()).unwrap());
     assert!(!startup_note(&database.0).exists());
-    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![28]);
+    assert_eq!(marker(&Connection::open(&database.0).unwrap()), vec![29]);
 }
 
 fn marker(connection: &Connection) -> Vec<i64> {
