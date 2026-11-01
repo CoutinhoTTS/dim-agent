@@ -8370,6 +8370,7 @@
         "mod runner",
         "path runner::HooksBranchPlugin::new",
         "path runner::HooksSessionPlugin::new",
+        "use runner::HooksBranchPlugin",
         "use runner::HooksRuntime",
         "use runner::HooksSessionPlugin"
       ]
@@ -8525,6 +8526,27 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path AdmissionDecision::Allow",
+        "path AdmissionDecision::Ask",
+        "path AdviseTool",
+        "path Permission",
+        "path ToolAdviceReply",
+        "path ToolAdviceReply::Allow",
+        "path ToolAdviceReply::Ask",
+        "path ToolAdviceReply::Deny",
+        "path ToolAdviceReply::None",
+        "path ToolAdviceRequest",
+        "use crate::permission::AdmissionDecision",
+        "use crate::permission::AdviseTool",
+        "use crate::permission::Permission",
+        "use crate::permission::ToolAdviceReply",
+        "use crate::permission::ToolAdviceRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
@@ -8646,7 +8668,9 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolDefinition",
-        "use dim_agent_types::ToolDefinition"
+        "path ToolMetadata",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolMetadata"
       ]
     },
     {
@@ -8659,6 +8683,8 @@
         "path HookEvent::UserPromptSubmit",
         "path HookHandler",
         "path HooksDocument",
+        "path OnFailure",
+        "path OnFailure::Block",
         "path OnFailure::Continue",
         "path handlers",
         "use crate::hooks::HooksDocument"
@@ -8712,6 +8738,16 @@
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform::current"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path ToolAdviceReply::Allow",
+        "path ToolAdviceReply::Ask",
+        "path ToolAdviceReply::Deny",
+        "path ToolAdviceReply::None"
       ]
     },
     {

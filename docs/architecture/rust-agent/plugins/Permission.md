@@ -243,7 +243,7 @@ and exits 3.
 | 作用域 | 分支 |
 | 注入 | `B:Dispatcher`、`B:Timeline`、`S:CommandRulesHost`、`S:SessionConfig`、`S:SessionIdentity` |
 | 提供 | `B:Permission`、`B:StateCell<PermissionState>` |
-| 被注入于 | `Approval` |
+| 被注入于 | `Approval`、`HooksBranch` |
 <!-- /generated -->
 
 ## Approval
