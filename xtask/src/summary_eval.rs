@@ -1281,9 +1281,9 @@ async fn complete(
 pub(crate) struct Completion {
     /// The reply's text blocks.
     pub text: String,
-    /// The stop reason the stream reported; `None` when it ended without one,
-    /// which is an error.
-    pub stop: Option<ModelStopReason>,
+    /// The stop reason the stream reported; a stream that ends without one is
+    /// an error.
+    pub stop: ModelStopReason,
     /// The completion tokens the stream reported, when it reported usage.
     pub completion_tokens: Option<f64>,
     /// The bytes of reasoning deltas the stream carried.
@@ -1310,25 +1310,26 @@ pub(crate) async fn complete_detailed(
 }
 
 async fn collected(mut stream: ModelStream) -> std::result::Result<Completion, HostError> {
-    let mut reply = Completion {
-        text: String::new(),
-        stop: None,
-        completion_tokens: None,
-        thinking_bytes: 0,
-    };
+    let mut text = String::new();
+    let mut stop = None;
+    let mut completion_tokens = None;
+    let mut thinking_bytes = 0;
     while let Some(chunk) = stream.next().await {
         match chunk? {
-            ModelChunk::Text(delta) => reply.text.push_str(&delta),
-            ModelChunk::Thinking(delta) => reply.thinking_bytes += delta.len(),
-            ModelChunk::MessageStop { reason, .. } => reply.stop = Some(reason),
-            ModelChunk::Usage(usage) => reply.completion_tokens = Some(usage.completion_tokens),
+            ModelChunk::Text(delta) => text.push_str(&delta),
+            ModelChunk::Thinking(delta) => thinking_bytes += delta.len(),
+            ModelChunk::MessageStop { reason, .. } => stop = Some(reason),
+            ModelChunk::Usage(usage) => completion_tokens = Some(usage.completion_tokens),
             _ => {}
         }
     }
-    if reply.stop.is_none() {
-        return Err(HostError::failed("the judge stream ended without a stop"));
-    }
-    Ok(reply)
+    let stop = stop.ok_or_else(|| HostError::failed("the judge stream ended without a stop"))?;
+    Ok(Completion {
+        text,
+        stop,
+        completion_tokens,
+        thinking_bytes,
+    })
 }
 
 /// The verdicts of a judge reply: the first JSON array that parses as a

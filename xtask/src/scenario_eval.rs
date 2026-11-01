@@ -1500,8 +1500,7 @@ enum JudgeOutcome {
 #[serde(rename_all = "camelCase")]
 struct JudgeCall {
     /// The stop reason the stream reported: `end_turn`, `tool_use`,
-    /// `stop_sequence` or `max_tokens`; `none` when the call failed or the
-    /// stream ended without one.
+    /// `stop_sequence` or `max_tokens`; `none` when the call failed.
     stop: String,
     duration_ms: f64,
     /// The reply text's length in bytes.
@@ -1515,18 +1514,13 @@ impl JudgeCall {
     /// The call a reply answers, timed from the call's start.
     fn answered(reply: &Completion, duration: Duration) -> Self {
         Self {
-            stop: reply.stop.map_or_else(
-                || "none".to_owned(),
-                |reason| {
-                    match reason {
-                        ModelStopReason::EndTurn => "end_turn",
-                        ModelStopReason::ToolUse => "tool_use",
-                        ModelStopReason::StopSequence => "stop_sequence",
-                        ModelStopReason::MaxTokens => "max_tokens",
-                    }
-                    .to_owned()
-                },
-            ),
+            stop: match reply.stop {
+                ModelStopReason::EndTurn => "end_turn",
+                ModelStopReason::ToolUse => "tool_use",
+                ModelStopReason::StopSequence => "stop_sequence",
+                ModelStopReason::MaxTokens => "max_tokens",
+            }
+            .to_owned(),
             duration_ms: duration.as_secs_f64() * 1000.,
             text_bytes: reply.text.len(),
             completion_tokens: reply.completion_tokens,
@@ -2496,7 +2490,7 @@ async fn judge_export(
         // A call cut off at its cap is a failed call, not an unreadable
         // answer: a re-ask exists for an answer that does not read, not for a
         // call that was cut off.
-        if reply.stop == Some(ModelStopReason::MaxTokens) {
+        if reply.stop == ModelStopReason::MaxTokens {
             let cap = match reply.completion_tokens {
                 Some(tokens) => {
                     format!("the judge stopped at its output cap ({tokens:.0} completion tokens)")
