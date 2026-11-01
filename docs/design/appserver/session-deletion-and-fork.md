@@ -70,10 +70,11 @@ are Rust methods over the native store, not services: only Agents calls them.
 
 ### 3.1 Method
 
-`session.delete {sessionId: string} -> {deleted: bool}`
+`session.delete {sessionId: string, requireInactive?: bool} -> {deleted: bool}`
 
 | Item | Rule |
 | --- | --- |
+| `requireInactive` | Optional, default `false`. With `true`, a Session in use is refused `session_active` and nothing is removed (§3.2 step 1). Without it the delete closes and removes the Session as before, which `dimcode session delete ID` and direct clients rely on |
 | Kind | Rpc built-in, next to `session.create` and `session.close`. It is not a `sessionMethods` entry, because a Session cannot unload itself through one of its own parts. It is not a management method either: it acts on one Session, and Rpc's Session checks apply |
 | Protocol | v3. v1 and v2 get `unknown_method` ("Method requires protocol v3"). `hello.features` lists it under the conditions that list `session.create`. The protocol version stays 3: clients discover new built-ins through `hello.features`, as they discover `session.summaries` |
 | Callers | Every connection that may call `session.close`, under the same profile rules: in a protected profile, local transports only. Paired devices (P3) are decided in RemoteGateway's compatibility table together with the other Session built-ins |
@@ -104,6 +105,20 @@ are Rust methods over the native store, not services: only Agents calls them.
    while it restores and a creation holds until the Session it builds is published (§7), so no request,
    subscription or fork can load S while the delete runs, and a delete of a Session still building waits for it. A
    request that already holds a use of S keeps it, and the close in step 2 ends its work.
+
+   With `requireInactive`, the delete checks before removing anything, under the gate it holds for S and in the same
+   pass for every Session it would remove with S (its led members, recursively), that nothing uses them. A Session is
+   in use when a `SessionUse` is held, which every accepted request and every subscription holds, so an attached
+   client counts; when a `SessionHold` exists, which accepted detached work takes; or when it is loaded and one of its
+   lines is not idle, by the same reading the idle unloader takes (`Session::in_use`, every line). An unloaded Session
+   has no line and no hold, so only its uses can make it in use. A refusal is `session_active` (§3.5) and removes
+   nothing; the message says what uses the Session. Only the owner can answer this: it alone sees the uses, holds and
+   lines of the moment, and a client's read of the summaries can only date from before the delete. Because the gate
+   stays held until S is forgotten, no new use of S is admitted after the check. A led member is read without its own
+   gate, so a client that attaches to a member between this check and that member's delete is not covered. A caller
+   that starts a turn without a `SessionUse` either holds the Session while it does (a background task's wake takes a
+   `SessionHold`, a Scheduler run through the `sessions` service takes a lease) or appends after the close, which the
+   branch refuses.
 2. **Close.** If S is loaded, Agents closes it as `session.close` does: a business close, not an unload. Its
    capabilities settle their accepted work, write their terminal facts and release processes, FileStorage leases and
    member requests. A close that reports cleanup errors is logged and the delete continues: the facts it could not
@@ -187,6 +202,7 @@ Every step tolerates an absent target, so a delete can be retried after any fail
 | `unknown_method` (-32601) | Protocol v1 or v2 | Unchanged |
 | `invalid_params` (-32602) | `sessionId` missing or not a string | Unchanged |
 | `session_protocol_version` | S belongs to another protocol version | Unchanged |
+| `session_active` (-32000) | `requireInactive` and S, or a Session the delete would remove with it, is in use (§3.2 step 1) | Unchanged: nothing is removed and nothing is closed. The message says why: a turn is running, a background task holds it, or how many requests and subscriptions use it |
 | `product_integration_pending` | The profile does not serve Session execution | Unchanged |
 | `-32603` "Session operation failed" | Step 3 failed (`Locked`, `DirectoryNotEmpty`, `Unsynced`, I/O, node unavailable) or step 4 failed (SQLite) | If step 2 closed S, S is closed but not deleted, as after `session.close`: its rows remain, it is neither listed nor loaded again in this process, and the relations its close ended stay ended. After a restart it loads, possibly with part of its command output gone. A Session that was not loaded is unchanged. Retry |
 | No reply | The connection or Rpc ended before the reply | Either state. Retry |
@@ -246,8 +262,11 @@ Rejected alternatives:
 
 The [feature list](../../feature-list.md) asks for cleanup "by age or retained count, with a preview". The CLI
 composes it: `session.summaries` returns `createdAt`, `updatedAt` and a preview for every Session of the connection's
-protocol version; the CLI selects, shows the selection, and calls `session.delete` for each id. A failed id is
-reported and can be retried; the others are deleted.
+protocol version; the CLI selects, shows the selection, and calls `session.delete` for each id with
+`requireInactive: true`, so the owner refuses a Session that is in use at the delete. A failed id is reported and can
+be retried; the others are deleted, and a Session the owner refuses is reported as kept rather than failed. The
+preview's own read of `running` and `attachedClients` is a preview: the owner decides at the delete, on every line and
+with uses and holds included.
 
 Rejected: a server method such as `session.cleanup {olderThan, keep, dryRun}`. It repeats the selection and preview
 the client already has, a retention policy would need a business owner and configuration that nothing defines, and a

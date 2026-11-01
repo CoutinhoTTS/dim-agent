@@ -304,6 +304,155 @@ async fn delete_reports_whether_it_removed_a_stored_session() {
     server.join().await.unwrap();
 }
 
+/// §3.1: `requireInactive` refuses a Session an accepted subscription
+/// holds, says why, and removes nothing. Without the field the same Session
+/// is deleted as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn require_inactive_refuses_an_attached_session() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let sid = session(&mut client).await;
+    assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+
+    let mut other = Client::new_version(&server, false, 3).await;
+    let refused = other
+        .rpc(
+            "session.delete",
+            json!({"sessionId":sid,"requireInactive":true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "session_active");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("1 request or subscription is using it"),
+        "{refused}"
+    );
+    assert!(
+        agent.get_session(&sid).is_some(),
+        "the Session stays loaded"
+    );
+    assert!(!store.rows(&sid).is_empty(), "its rows are still there");
+
+    assert_eq!(
+        other.rpc("session.delete", json!({"sessionId":sid})).await["result"],
+        json!({"deleted": true}),
+        "without the field an attached Session is deleted as before"
+    );
+    assert!(store.rows(&sid).is_empty(), "{:?}", store.rows(&sid));
+    assert!(agent.get_session(&sid).is_none());
+    drop((client, other, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// §3.1: `requireInactive` reads every line, not `main` alone. A turn on a
+/// child line refuses the delete while `main` is idle, and the same delete
+/// without the field goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn require_inactive_sees_a_turn_on_another_line() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd": std::env::temp_dir(), "tools": ["wait", "branch"],
+                "permissionPolicy": {"allowedTools": ["wait", "branch"]}}),
+        )
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let child = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":sid,"parentBranchId":"main","at":0,
+                "prompt":"tool:wait {\"millis\":60000}"}),
+        )
+        .await;
+    assert_ok(&child);
+    let branch = child["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = agent.get_session(&sid).unwrap();
+    eventually("child turn", || session.state(&branch).unwrap().running).await;
+    assert!(!session.state("main").unwrap().running, "main is idle");
+
+    let refused = client
+        .rpc(
+            "session.delete",
+            json!({"sessionId":sid,"requireInactive":true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "session_active");
+    assert!(
+        agent.get_session(&sid).is_some(),
+        "the Session stays loaded"
+    );
+    assert!(!store.rows(&sid).is_empty(), "its rows are still there");
+
+    assert_ok(&client.rpc("session.delete", json!({"sessionId":sid})).await);
+    assert!(store.rows(&sid).is_empty(), "{:?}", store.rows(&sid));
+    drop((client, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// §3.1: an idle loaded Session and a stored Session this daemon did not
+/// load are both deleted with `deleted: true`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn require_inactive_deletes_an_idle_loaded_and_an_unloaded_session() {
+    let store = Store::new();
+    let (server, _agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut ids = vec![];
+    for text in ["loaded", "stored"] {
+        let id = session(&mut client).await;
+        turn(&mut client, &id, text).await;
+        ids.push(id);
+    }
+    let [loaded, stored] = ids.try_into().unwrap();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(agent.get_session(&loaded).is_none() && agent.get_session(&stored).is_none());
+    // An attach loads the Session; its detach releases the use and leaves it
+    // loaded, so this one is the idle loaded case.
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":loaded}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId":loaded}))
+            .await,
+    );
+    assert!(agent.get_session(&loaded).is_some(), "the attach loaded it");
+    for id in [&loaded, &stored] {
+        assert_eq!(
+            client
+                .rpc(
+                    "session.delete",
+                    json!({"sessionId":id,"requireInactive":true})
+                )
+                .await["result"],
+            json!({"deleted": true}),
+            "{id}"
+        );
+        assert!(store.rows(id).is_empty(), "{id}: {:?}", store.rows(id));
+    }
+    drop((client, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Acceptance 2 and 9: Sessions that are not loaded, fail validation or
 /// have no readable owner are deleted by id, and a Session whose output
 /// is already gone loads and is deleted.

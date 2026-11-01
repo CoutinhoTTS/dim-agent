@@ -110,7 +110,7 @@ pub enum Call {
     Stop(Stop),
     Idle(Idle),
     Close(SessionId),
-    Delete(SessionId),
+    Delete(Delete),
     Fork(Fork),
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
@@ -567,6 +567,15 @@ pub struct CatalogCancel {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionId {
     pub session_id: String,
+}
+/// `session.delete`: with `requireInactive`, a Session in use refuses the
+/// delete with `session_active` instead of being closed and removed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Delete {
+    pub session_id: String,
+    #[serde(default)]
+    pub require_inactive: bool,
 }
 /// `session.fork`: `at` is the last `main` sequence the fork inherits.
 #[derive(Debug, Deserialize)]

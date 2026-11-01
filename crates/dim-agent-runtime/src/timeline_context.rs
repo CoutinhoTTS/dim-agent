@@ -563,19 +563,29 @@ impl TimelineContext {
             tokio::time::sleep(LOOP_RETURN_POLL).await;
         }
     }
+    /// Whether the line is idle: it is not closing or failed, it accepts
+    /// appends, dispatch has reached the tail and Loop is between turns. A
+    /// read that takes no commit lock and changes nothing;
+    /// [`Self::lock_idle`] takes the same reading under that lock.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.timeline
+            .open_tail()
+            .is_some_and(|tail| self.idle_at(tail))
+    }
+    fn idle_at(&self, tail: u64) -> bool {
+        !self.is_closing()
+            && self.dispatcher.failure().is_none()
+            && self.dispatcher.sequence() == tail
+            && self
+                .loop_state()
+                .is_ok_and(|state| state.state().phase == LoopPhase::Idle)
+    }
     /// Holds the commit lock and returns it when Loop is idle, nothing is
     /// pending and dispatch has reached the tail; `None` otherwise, without
     /// freezing or rejecting appends. Detached work is judged by Session holds.
     pub(crate) fn lock_idle(&self) -> Option<TailLock<'_>> {
-        if self.is_closing() || self.dispatcher.failure().is_some() {
-            return None;
-        }
         let tail = self.timeline.lock_tail()?;
-        let idle = self.dispatcher.sequence() == tail.sequence()
-            && self
-                .loop_state()
-                .is_ok_and(|state| state.state().phase == LoopPhase::Idle);
-        idle.then_some(tail)
+        self.idle_at(tail.sequence()).then_some(tail)
     }
     /// Releases the instance after an idle check: no stop is recorded.
     pub fn unload(self: &Arc<Self>) -> BoxFuture<'static, Result<()>> {

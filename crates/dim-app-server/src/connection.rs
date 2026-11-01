@@ -1,6 +1,6 @@
 use crate::{
     ServerConfig,
-    agents::{AgentIndex, SessionUse},
+    agents::{AgentIndex, DeleteOutcome, SessionUse},
     control::ServerControl,
     outbound::{Frame, Sender},
     protocol::*,
@@ -944,6 +944,20 @@ impl Connection {
                 };
                 rpc.index.remove_version(&params.session_id);
                 result.map(|_| Reply::empty())
+            }
+            Call::Delete(params) if params.require_inactive => {
+                match rpc.index.delete_if_inactive(&params.session_id).await {
+                    Ok(DeleteOutcome::Removed(deleted)) => {
+                        Ok(Reply::Deleted(DeleteResult { deleted }))
+                    }
+                    Ok(DeleteOutcome::InUse(reason)) => {
+                        Err(RpcError::app(-32000, "session_active", reason))
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
+                        Err(RpcError::from(error))
+                    }
+                }
             }
             Call::Delete(params) => rpc
                 .index

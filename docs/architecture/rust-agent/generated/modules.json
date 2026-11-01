@@ -15633,8 +15633,11 @@
       "to": "dim_agent_runtime::agent",
       "references": [
         "path Agent",
+        "path InUse::Held",
+        "path InUse::Line",
         "path Session",
         "use dim_agent_runtime::Agent",
+        "use dim_agent_runtime::InUse",
         "use dim_agent_runtime::Session"
       ]
     },
@@ -17547,11 +17550,14 @@
       "to": "dim_app_server::agents",
       "references": [
         "path AgentIndex",
+        "path DeleteOutcome::InUse",
+        "path DeleteOutcome::Removed",
         "path SessionUse",
         "path crate::agents::AgentOpError::Settle",
         "path crate::agents::AgentOpError::Unload",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
+        "use crate::agents::DeleteOutcome",
         "use crate::agents::SessionUse"
       ]
     },
