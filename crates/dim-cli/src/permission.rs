@@ -332,17 +332,20 @@ pub fn rule(
     })
 }
 
+/// Whether two rules are the same rule. Commands compare word by word, as
+/// Permission matches them, so stored spacing is not an identity.
+pub fn same_rule(one: &CommandRule, other: &CommandRule) -> bool {
+    one.decision == other.decision
+        && one.matching == other.matching
+        && one
+            .command
+            .split_whitespace()
+            .eq(other.command.split_whitespace())
+}
+
 /// The list with `rule` appended, or `None` when an equal rule exists.
-/// Rules compare word by word, as Permission matches them.
 fn with_rule(rules: &[CommandRule], rule: &CommandRule) -> Option<Vec<CommandRule>> {
-    let present = rules.iter().any(|existing| {
-        existing.decision == rule.decision
-            && existing.matching == rule.matching
-            && existing
-                .command
-                .split_whitespace()
-                .eq(rule.command.split_whitespace())
-    });
+    let present = rules.iter().any(|existing| same_rule(existing, rule));
     (!present).then(|| {
         let mut rules = rules.to_vec();
         rules.push(rule.clone());

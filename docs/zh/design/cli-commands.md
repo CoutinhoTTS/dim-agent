@@ -412,6 +412,26 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
 
+### 命令规则领域
+
+命令规则（#819）：经 `dimcode permissions list|add PATH|remove RULE` 管理用户的命令规则（[权限控制](#权限控制)、[命令规则](appserver/permission-command-rules.md)）。所有者用 `permission.rules` 报告规则列表及其 Settings revision，并用 `permission.set_rules` 按该 revision 替换整个列表；revision 过期即为 `permission_rules_conflict`。
+
+每条规则是一个条目。所有者没有为规则提供 id，所以 id 与标签就是规则的值，`DECISION MATCH COMMAND`——`allow exact cargo test -p dim-cli`、`deny prefix git push`。规则只有允许或拒绝的决定，没有开关状态，所以条目不上报启用状态（`enabled: None`），面板既不画 `enabled` 也不画 `disabled`；条目也没有 states，因为所有者无法使用的已存规则会让整次读取失败。领域提供三种动作：reload 重新读取 `permission.rules`（所有者每次调用都读取 Settings 来源，所以没有 rescan 方法），add 追加一条规则，remove 删除条目所指的规则。不提供 toggle、edit、run 与 inspect：规则没有开关，唯一一次写入替换整个列表，而一条规则的全部内容就是它的标签与两条详情。
+
+Add 用外部编辑器打开一条规则，即所有者写入单元去掉 revision：
+
+```json
+{"command": "cargo test", "match": "prefix", "decision": "deny"}
+```
+
+`deny` 配 `prefix` 是失败关闭的示例：用户只改命令，规则仍然拒绝。适配器把文档解码为命令规则，并用行内提示符的 `permission::rule` 校验（按词归一、命令非空、不含 shell 分隔符）；写入调用 `permission::add_rule`，也就是行内提示符自己的操作：读取 `permission.rules`，除非已有相等的规则否则追加，并按读到的 revision 写入。add 是唯一会重试冲突的动作，最多三次，因为追加不依赖其他规则，也不会覆盖任何内容。相等的规则不写入，并说明它已存在。`dimcode permissions add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
+
+Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Esc cancel`，然后按适配器读到的 revision 写入去掉该规则的列表。动作本身不携带 revision：规则的 id 就是它的值，所以 remove 作用在用户看到的那条规则上，面板打开期间其他规则的变化不算冲突。两种失败都什么都不写，并显示当前的规则列表：规则已不在列表中（`That command rule is no longer listed; nothing was removed.`），或另一客户端在读取与写入之间写入、所有者的答复是 `permission_rules_conflict`（`Command rules changed since they were read; nothing was removed.`）。`dimcode permissions remove 'deny prefix git push'` 把整条规则作为一个加引号的参数，不做确认直接删除，因为命令行上写出的规则就是意图。
+
+领域只有用户作用域：Permission 只有一个用户 Settings 来源，没有项目规则，`.dimcode/permission.json` 不起作用。没有任何缓存：面板在打开时、Ctrl+R 时以及每次自己的写入之后读取列表，所以由"总是允许"、行内提示符或 Web 写入的规则会出现在下一次这样的读取里，而不会在面板空闲时出现。
+
+`dimcode permissions list` 每行打印一条规则，用制表符分隔决定、匹配方式与命令，然后打印列说明以及 deny 的含义。`dimcode permissions remove` 把整条规则作为一个加引号的参数，因此全局选项不会产生歧义。
+
 ## 命令
 
 | 入口 | 行为 |
@@ -442,6 +462,9 @@ Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`�
 | `dimcode scheduled run ID` | 经 `schedule.run_now` 立即运行单个任务，并报告 owner 返回的内容，或它跳过这次运行的原因。 |
 | `dimcode scheduled history ID` | 经 `schedule.history` 打印单个任务最近的运行，最新的在前，并带上每次运行的状态与时间。 |
 | `/scheduled`、`/schedule` | 打开会话所在工作区的 Scheduler 面板（[管理界面](#管理界面)）：每个任务一个条目，带计划、下一次窗口与上次结果，以及 toggle、edit、add、remove、run 与 history 种类。 |
+| `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
+| `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |
+| `dimcode permissions remove RULE` | 删除 `RULE` 指定的规则，`RULE` 是作为单个加引号参数的整条 `'DECISION MATCH COMMAND'`；经刚读到的 revision 调用 `permission.rules` 与 `permission.set_rules`；规则已不存在或写入被并发修改时什么都不写，退出码 1。 |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | 启动被描述账号的浏览器或设备签到（[提供方账号](#提供方账号)）；不给 PROVIDER 时列出被描述的账号。 |
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
 | `dimcode logout PROVIDER` | 让被描述的账号退出。 |

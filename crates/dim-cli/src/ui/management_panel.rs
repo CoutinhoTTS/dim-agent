@@ -99,6 +99,19 @@ pub const STRINGS: &[&str] = &[
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
     "This workspace's hook settings changed since they were read; nothing was written.",
+    "Command rules",
+    "user",
+    "Matches only this command.",
+    "Matches commands whose first words are these.",
+    "Allows a simple command that would otherwise ask.",
+    "Denies the command under every preset.",
+    "Applies in every Session, in every workspace.",
+    "Rule added: {rule}.",
+    "Rule already present: {rule}.",
+    "Rule removed: {rule}.",
+    "That command rule is no longer listed; nothing was removed.",
+    "Command rules changed since they were read; nothing was removed.",
+    "A command rule is DECISION MATCH COMMAND, such as deny prefix git push.",
 ];
 
 pub struct ManagementPanel {
@@ -627,6 +640,7 @@ fn title(area: Area) -> &'static str {
         Area::Skills => "Skills",
         Area::Hooks => "Hooks",
         Area::Scheduled => "Scheduler",
+        Area::Permissions => "Command rules",
     }
 }
 

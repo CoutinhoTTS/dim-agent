@@ -72,6 +72,31 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "As definições de hooks deste espaço de trabalho mudaram desde que foram lidas; nada foi escrito."
         }
+        "Command rules" => "Regras de comando",
+        "user" => "utilizador",
+        "Matches only this command." => "Corresponde apenas a este comando.",
+        "Matches commands whose first words are these." => {
+            "Corresponde a comandos cujas primeiras palavras são estas."
+        }
+        "Allows a simple command that would otherwise ask." => {
+            "Permite um comando simples que de outra forma perguntaria."
+        }
+        "Denies the command under every preset." => "Recusa o comando em qualquer predefinição.",
+        "Applies in every Session, in every workspace." => {
+            "Aplica-se em todas as sessões e em todos os espaços de trabalho."
+        }
+        "Rule added: {rule}." => "Regra adicionada: {rule}.",
+        "Rule already present: {rule}." => "A regra já existe: {rule}.",
+        "Rule removed: {rule}." => "Regra removida: {rule}.",
+        "That command rule is no longer listed; nothing was removed." => {
+            "Essa regra de comando já não está listada; nada foi removido."
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "As regras de comando mudaram desde que foram lidas; nada foi removido."
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "Uma regra de comando escreve-se DECISION MATCH COMMAND, por exemplo deny prefix git push."
+        }
         _ => return None,
     })
 }

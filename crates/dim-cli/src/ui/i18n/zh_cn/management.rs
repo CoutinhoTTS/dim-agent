@@ -66,6 +66,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "此工作区的钩子设置已在读取后发生变化；本次没有写入。"
         }
+        "Command rules" => "命令规则",
+        "user" => "用户",
+        "Matches only this command." => "仅匹配此命令。",
+        "Matches commands whose first words are these." => "匹配以此开头的命令。",
+        "Allows a simple command that would otherwise ask." => "允许本会询问的简单命令。",
+        "Denies the command under every preset." => "在任何预设下都拒绝该命令。",
+        "Applies in every Session, in every workspace." => "在所有会话、所有工作区中生效。",
+        "Rule added: {rule}." => "已添加规则：{rule}。",
+        "Rule already present: {rule}." => "规则已存在：{rule}。",
+        "Rule removed: {rule}." => "已删除规则：{rule}。",
+        "That command rule is no longer listed; nothing was removed." => {
+            "该命令规则已不在列表中；未删除任何内容。"
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "命令规则在读取后已被修改；未删除任何内容。"
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "命令规则写作 DECISION MATCH COMMAND，例如 deny prefix git push。"
+        }
         _ => return None,
     })
 }

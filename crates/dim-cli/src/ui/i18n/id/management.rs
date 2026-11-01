@@ -70,6 +70,31 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "Pengaturan hook ruang kerja ini berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "Command rules" => "Aturan perintah",
+        "user" => "pengguna",
+        "Matches only this command." => "Hanya cocok dengan perintah ini.",
+        "Matches commands whose first words are these." => {
+            "Cocok dengan perintah yang kata awalnya ini."
+        }
+        "Allows a simple command that would otherwise ask." => {
+            "Mengizinkan perintah sederhana yang biasanya ditanyakan."
+        }
+        "Denies the command under every preset." => "Menolak perintah itu pada setiap preset.",
+        "Applies in every Session, in every workspace." => {
+            "Berlaku di setiap Sesi, di setiap workspace."
+        }
+        "Rule added: {rule}." => "Aturan ditambahkan: {rule}.",
+        "Rule already present: {rule}." => "Aturan sudah ada: {rule}.",
+        "Rule removed: {rule}." => "Aturan dihapus: {rule}.",
+        "That command rule is no longer listed; nothing was removed." => {
+            "Aturan perintah itu tidak lagi terdaftar; tidak ada yang dihapus."
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "Aturan perintah berubah sejak dibaca; tidak ada yang dihapus."
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "Aturan perintah ditulis DECISION MATCH COMMAND, misalnya deny prefix git push."
+        }
         _ => return None,
     })
 }

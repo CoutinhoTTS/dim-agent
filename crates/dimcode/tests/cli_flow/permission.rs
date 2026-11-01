@@ -1090,3 +1090,336 @@ fn member_approval_in_line_mode_allows_rejection_during_loading_and_rechecks_an_
         daemon.join().unwrap();
     }
 }
+
+/// A `permission.rules` reply.
+fn rules_reply(revision: &str, command_rules: Value) -> Value {
+    json!({"revision": revision, "commandRules": command_rules})
+}
+
+/// One `CommandRule` as the owner reports it.
+fn command_rule(decision: &str, matching: &str, command: &str) -> Value {
+    json!({"command": command, "match": matching, "decision": decision})
+}
+
+#[test]
+fn permissions_list_prints_each_rule_and_the_notes_that_read_them() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply(
+                "r1",
+                json!([
+                    command_rule("allow", "exact", "cargo test -p dim-cli"),
+                    command_rule("deny", "prefix", "git push"),
+                ]),
+            ),
+        );
+    });
+    let output = home
+        .command()
+        .args(["permissions", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "allow\texact\tcargo test -p dim-cli\ndeny\tprefix\tgit push\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Columns: decision, match, command."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("deny wins over allow"), "{stderr}");
+
+    // An owner with no rule says so instead of printing nothing.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let request = wire.read("permission.rules");
+        wire.reply(&request, rules_reply("r1", json!([])));
+    });
+    let output = home
+        .command()
+        .args(["permissions", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("No command rule is configured."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn permissions_add_appends_the_document_and_names_the_rule() {
+    let home = Home::new();
+    let path = home.0.join("rule.json");
+    fs::write(
+        &path,
+        r#"{"command":"git  push","match":"prefix","decision":"deny"}"#,
+    )
+    .unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let read = wire.read("permission.rules");
+        wire.reply(
+            &read,
+            rules_reply(
+                "r1",
+                json!([command_rule("allow", "exact", "cargo test -p dim-cli")]),
+            ),
+        );
+        let write = wire.read("permission.set_rules");
+        assert_eq!(write["params"]["expectedRevision"], "r1");
+        assert_eq!(
+            write["params"]["commandRules"],
+            json!([
+                command_rule("allow", "exact", "cargo test -p dim-cli"),
+                command_rule("deny", "prefix", "git push"),
+            ])
+        );
+        wire.reply(&write, json!({"revision": "r2"}));
+    });
+    let output = home
+        .command()
+        .args(["permissions", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Rule added: deny prefix `git push`.\n"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn permissions_add_reports_a_rule_that_is_already_present() {
+    let home = Home::new();
+    let path = home.0.join("rule.json");
+    fs::write(
+        &path,
+        r#"{"command":"git  push","match":"prefix","decision":"deny"}"#,
+    )
+    .unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        // The stored rule compares equal word by word, so nothing is
+        // written; the list is read again so the answer carries it.
+        for _ in 0..2 {
+            let read = wire.read("permission.rules");
+            wire.reply(
+                &read,
+                rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
+            );
+        }
+    });
+    let output = home
+        .command()
+        .args(["permissions", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Rule already present: deny prefix `git push`.\n"
+    );
+}
+
+#[test]
+fn permissions_remove_takes_the_whole_rule_as_one_argument() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let read = wire.read("permission.rules");
+        wire.reply(
+            &read,
+            rules_reply(
+                "r1",
+                json!([
+                    command_rule("allow", "exact", "cargo test -p dim-cli"),
+                    command_rule("deny", "prefix", "git push"),
+                ]),
+            ),
+        );
+        let write = wire.read("permission.set_rules");
+        assert_eq!(write["params"]["expectedRevision"], "r1");
+        assert_eq!(
+            write["params"]["commandRules"],
+            json!([command_rule("allow", "exact", "cargo test -p dim-cli")])
+        );
+        wire.reply(&write, json!({"revision": "r2"}));
+    });
+    let output = home
+        .command()
+        .args(["permissions", "remove", "deny prefix git push"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Rule removed: deny prefix `git push`.\n"
+    );
+}
+
+#[test]
+fn permissions_remove_refuses_a_rule_that_is_no_longer_listed() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        // Another client removed the rule after this user saw it; a remove
+        // acts on the rule it names, and writes nothing when it is gone.
+        let read = wire.read("permission.rules");
+        wire.reply(
+            &read,
+            rules_reply(
+                "r2",
+                json!([command_rule("allow", "exact", "cargo test -p dim-cli")]),
+            ),
+        );
+    });
+    let output = home
+        .command()
+        .args(["permissions", "remove", "deny prefix git push"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("That command rule is no longer listed; nothing was removed."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn permissions_remove_keeps_a_rule_another_client_added() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        // The list the user saw changed, but the rule the remove names is
+        // still there: a change to another rule is not a conflict.
+        let read = wire.read("permission.rules");
+        wire.reply(
+            &read,
+            rules_reply(
+                "r2",
+                json!([
+                    command_rule("deny", "prefix", "git push"),
+                    command_rule("deny", "exact", "rm -rf /"),
+                ]),
+            ),
+        );
+        let write = wire.read("permission.set_rules");
+        assert_eq!(write["params"]["expectedRevision"], "r2");
+        assert_eq!(
+            write["params"]["commandRules"],
+            json!([command_rule("deny", "exact", "rm -rf /")])
+        );
+        wire.reply(&write, json!({"revision": "r3"}));
+    });
+    let output = home
+        .command()
+        .args(["permissions", "remove", "deny prefix git push"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Rule removed: deny prefix `git push`.\n"
+    );
+}
+
+#[test]
+fn permissions_remove_reports_a_write_another_client_raced() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let read = wire.read("permission.rules");
+        wire.reply(
+            &read,
+            rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
+        );
+        let write = wire.read("permission.set_rules");
+        fail(wire, &write, "permission_rules_conflict");
+        // The list as it is now, which the answer carries.
+        let read = wire.read("permission.rules");
+        wire.reply(&read, rules_reply("r2", json!([])));
+    });
+    let output = home
+        .command()
+        .args(["permissions", "remove", "deny prefix git push"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Command rules changed since they were read; nothing was removed."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn permissions_needs_the_rule_methods() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+    });
+    let output = home
+        .command()
+        .args(["permissions", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("This daemon does not provide command rules."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

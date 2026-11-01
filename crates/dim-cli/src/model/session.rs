@@ -290,6 +290,7 @@ pub enum Area {
     Skills,
     Hooks,
     Scheduled,
+    Permissions,
 }
 
 impl Area {
@@ -299,6 +300,7 @@ impl Area {
             Self::Skills => "skills",
             Self::Hooks => "hooks",
             Self::Scheduled => "scheduled",
+            Self::Permissions => "permissions",
         }
     }
 }

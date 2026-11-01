@@ -570,6 +570,59 @@ the run was skipped — and Tab shows the job's history in place of the list:
 history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
 the panel's confirmation.
 
+### The command rules area
+
+Command rules (#819): `dimcode permissions list|add PATH|remove RULE` over the user's command
+rules ([permission controls](#permission-controls),
+[command rules](appserver/permission-command-rules.md)). The owner reports the list and its
+Settings revision with `permission.rules`, and replaces the whole list at that revision with
+`permission.set_rules`; a stale revision is `permission_rules_conflict`.
+
+Every rule is an entry. The owner has no id for one, so the id and the label are the rule's value,
+`DECISION MATCH COMMAND` — `allow exact cargo test -p dim-cli`, `deny prefix git push`. A rule has
+a decision, not an on/off state, so the entry reports no enablement (`enabled: None`) and the
+panel draws neither `enabled` nor `disabled`; it reports no states either, because a stored rule
+the owner cannot use fails the whole read. The area offers three kinds: reload re-reads
+`permission.rules` (the owner reads the Settings source on every call, so there is no rescan
+method), add appends one rule, and remove removes the rule the entry names. Toggle, edit, run and
+inspect are not offered: a rule is not on or off, the one write replaces the whole list, and a
+rule's whole content is its label and its two detail lines.
+
+Add opens the external editor on one rule, the owner's write unit without the revision:
+
+```json
+{"command": "cargo test", "match": "prefix", "decision": "deny"}
+```
+
+`deny` with `prefix` is the fail-closed example: a user who edits only the command still denies.
+The adapter decodes the document as a command rule and checks it with the line prompt's
+`permission::rule` (word normalization, a non-empty command, no shell separators); the write is
+`permission::add_rule`, the line prompt's own operation: read `permission.rules`, append unless an
+equal rule exists, and write at the read revision. An add is the one kind that retries a conflict,
+up to three attempts, because an append does not depend on the other rules and overwrites
+nothing. An equal rule writes nothing and says it is already present. `dimcode permissions add
+PATH` (`-` for stdin) is the same write without an editor.
+
+Remove asks in the hint first, `Remove deny prefix git push? Enter confirm · Esc cancel`, and
+writes the list without that rule at the revision the adapter read. The action carries no
+revision: a rule's id is its value, so a remove acts on exactly the rule the user saw, and a
+change to some other rule while the panel was open is not a conflict. Two failures write nothing
+and show the list as it now is: the rule is no longer listed (`That command rule is no longer
+listed; nothing was removed.`), or another client wrote between the read and the write and the
+owner answered `permission_rules_conflict` (`Command rules changed since they were read; nothing
+was removed.`). `dimcode permissions remove 'deny prefix git push'` takes the whole rule as one
+quoted argument and deletes without a prompt, because the rule typed on the command line is the
+intent.
+
+The area is user scope only: Permission has one user Settings source, with no project rules, and a
+`.dimcode/permission.json` has no effect. Nothing is cached: the panel reads the list when it
+opens, on Ctrl+R and after each of its writes, so a rule written by Allow always, by the line
+prompt or by Web appears on the next of those reads, not while the panel sits idle.
+
+`dimcode permissions list` prints one rule per line, with the decision, the match and the command
+separated by tabs, then the columns and what deny means. `dimcode permissions remove` takes the
+whole rule as one quoted argument, so global options stay unambiguous.
+
 ## Commands
 
 | Entry | Behavior |
@@ -604,6 +657,9 @@ the panel's confirmation.
 | `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
 | `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
 | `/scheduled`, `/schedule` | Open the Scheduler panel of the Session's workspace ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and history kinds. |
+| `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
+| `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
+| `dimcode permissions remove RULE` | Remove the rule named by `RULE`, which is the whole rule as one quoted `'DECISION MATCH COMMAND'` argument, over `permission.rules` and `permission.set_rules` at the revision just read; a rule that is gone, or a raced write, writes nothing and exits 1. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |

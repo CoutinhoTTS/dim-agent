@@ -70,6 +70,31 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "This workspace's hook settings changed since they were read; nothing was written." => {
             "이 작업 공간의 훅 설정이 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다."
         }
+        "Command rules" => "명령 규칙",
+        "user" => "사용자",
+        "Matches only this command." => "이 명령만 일치합니다.",
+        "Matches commands whose first words are these." => {
+            "앞부분이 이 단어들인 명령과 일치합니다."
+        }
+        "Allows a simple command that would otherwise ask." => {
+            "원래 확인을 요청하는 단순 명령을 허용합니다."
+        }
+        "Denies the command under every preset." => "모든 프리셋에서 이 명령을 거부합니다.",
+        "Applies in every Session, in every workspace." => {
+            "모든 세션, 모든 워크스페이스에서 적용됩니다."
+        }
+        "Rule added: {rule}." => "규칙을 추가했습니다: {rule}.",
+        "Rule already present: {rule}." => "규칙이 이미 있습니다: {rule}.",
+        "Rule removed: {rule}." => "규칙을 삭제했습니다: {rule}.",
+        "That command rule is no longer listed; nothing was removed." => {
+            "해당 명령 규칙이 더 이상 목록에 없습니다. 아무것도 삭제되지 않았습니다."
+        }
+        "Command rules changed since they were read; nothing was removed." => {
+            "명령 규칙이 읽은 뒤 변경되었습니다. 아무것도 삭제되지 않았습니다."
+        }
+        "A command rule is DECISION MATCH COMMAND, such as deny prefix git push." => {
+            "명령 규칙은 DECISION MATCH COMMAND 형식입니다. 예: deny prefix git push."
+        }
         _ => return None,
     })
 }
