@@ -511,15 +511,27 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
 - `load(plugin, { config, services })` keeps its shape. A value now crosses between the test and the
   plugin by the rules between processes, and an event the test observes arrives after the emitter
   returns. Tests that read a result right after an `emit` wait for it.
-- The goal, session-title, scheduler and workflow plugin tests do not run in CI yet. 0.19.3 fixes the
-  three test-tool problems the upgrade parked them for
-  ([rutis#986](https://github.com/arcships/rutis/issues/986),
+- A test drives a function a plugin handed it through the runtime, not by calling it itself: the
+  test's own call of such a function is a synchronous session call, and a plugin cannot await a
+  service of the test inside one (`SyncWaitCycle`). `runtime/fixtures/plugin-test.ts` is the row
+  that calls it from the runtime and asynchronously; the goal and session-title tests load it next
+  to the plugin.
+- Those two tests wait for the plugin to stop instead of for one turn of their own event loop: they
+  count the calls the plugin makes of the test's services, which crosses between processes.
+- The goal and session-title plugin tests run in CI again. 0.19.3 fixes the three test-tool problems
+  the upgrade parked the four tests for ([rutis#986](https://github.com/arcships/rutis/issues/986),
   [#987](https://github.com/arcships/rutis/issues/987),
-  [#988](https://github.com/arcships/rutis/issues/988)), but the tests do not pass on it either:
-  session-title's test does not settle, goal fails 23 of its 50 tests, and scheduler and workflow
-  fail to load a fixture (`partRegistry.registerDefinition` sends a plugin definition to a far end
-  that does not accept one). `tsc` still checks the plugins, and the Node-backed flows of §6 still
-  load them for real. Repairing the tests against the current test tool is not part of this upgrade.
+  [#988](https://github.com/arcships/rutis/issues/988)); the two suites were then moved to the
+  crossing rules above. Session-title's generation-budget test is skipped: the 30 s budget is a
+  timer of the runtime the plugin runs in, and a test cannot advance it.
+- The scheduler and workflow plugin tests stay off in CI: 0.19.3's TypeScript test tool cannot
+  receive a plugin definition, and both register a part before anything else —
+  `partRegistry.registerDefinition` fails with "cannot send a plugin definition: the far end does
+  not accept plugin definitions (it did not declare the capability plugins)". The capability is
+  Rust's, and the test process declares none, so no double of the test's can receive what the plugin
+  registers, although rutis's own design has a test double receive a definition and load it
+  ([plugin values R10](https://github.com/arcships/rutis/blob/main/docs/design-plugin-values-2026-10-25.en.md)).
+  `tsc` still checks the two plugins, and the Node-backed flows of §6 still load them for real.
 - zod's `z.toJSONSchema` result also carries `~standard`, which 0.19's `definePlugin` refuses as a
   Standard Schema, so the goal, scheduler and workflow plugins pass it as plain JSON.
 
@@ -563,7 +575,8 @@ The checks `.github/workflows/ci.yml` runs, at the workspace root, in its order:
    `DIM_TEST_APP_SERVER` and `DIM_TEST_NPM_WRAPPER`
 6. The public Node bindings:
    - `runtime/plugin-sdk.test.mjs`;
-   - the four plugin tests and their `tsc` checks, now with `RUTIS_HOST` (M10);
+   - the goal and session-title plugin tests, the scheduler and workflow `tsc` checks, now with
+     `RUTIS_HOST` (M10);
    - the Python environment from `runtime/python-requirements.txt`.
 7. The Node- and Python-backed Rust flows, with `DIM_TEST_NODE`, `DIM_TEST_JS_RUNTIME`,
    `DIM_TEST_RUTIS_SDK` and `DIM_TEST_PYTHON`:
@@ -668,7 +681,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | Unknown npm names wait instead of failing | `RuntimeManager`'s status shows the wait; M9 adjusts the test that relied on the failure |
 | The launch commands Dim keeps drift from the runtime packages | They are pinned with those packages (`runtime/package.json`, `runtime/python-requirements.txt`), and the Node- and Python-backed flows start both runtimes |
 | A Session plugin's cleanup fails while a close cancels its construction | 0.19.3 returns the cleanup error from the dispose or subtree shutdown that cancelled the construction, and the runtime keeps it in `Agent::close`'s result; the cancellation itself is not reported as a close failure. `lifecycle_review` checks both |
-| The TypeScript plugin tests are off in CI | `tsc` and the Node-backed flows still cover the plugins; the tests do not pass on 0.19.3 yet (M10) |
+| The scheduler and workflow plugin tests are off in CI | `tsc` and the Node-backed flows still cover the plugins; their doubles cannot receive the plugin definition they register until rutis's test tool takes one (M10) |
 
 Rollback: revert the upgrade change and the pins. No persisted format moves; Timeline, storage and
 wire fixtures are untouched.

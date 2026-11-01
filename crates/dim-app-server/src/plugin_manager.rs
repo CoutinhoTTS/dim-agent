@@ -746,30 +746,32 @@ impl Owners {
             }
         }
         if kinds.contains(&Kind::Hooks) {
+            // Only a failed read keeps PluginManager's refusal of the kind.
+            // Every other outcome clears it: the document read and handed
+            // over, the kind not carried by the manifest, and the kind
+            // skipped because its owner is absent, which read nothing
+            // (§3.7).
+            self.clear_refusal(plugin, Kind::Hooks);
             match (self.ctx.get_at(&self.hooks), &manifest.hooks) {
                 (None, Some(_)) => outcome.skipped.push(Kind::Hooks),
                 (None, None) => {}
-                (Some(hooks), Some(path)) => {
-                    let document = std::fs::read(path)
-                        .map_err(|error| error.to_string())
-                        .and_then(|bytes| {
-                            serde_json::from_slice::<Value>(&bytes)
-                                .map_err(|error| error.to_string())
-                        });
-                    let result = match document {
-                        Ok(document) => hooks
+                (Some(hooks), Some(path)) => match read_content(path) {
+                    Ok(document) => {
+                        if let Err(error) = hooks
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => {
-                            let _ = hooks.withdraw_plugin(plugin.into(), &cancel).await;
-                            Err(format!("{}: {error}", path.display()))
+                        {
+                            outcome
+                                .refused
+                                .push(refused(Kind::Hooks, error.to_string()));
                         }
-                    };
-                    if let Err(error) = result {
+                    }
+                    Err(error) => {
+                        let _ = hooks.withdraw_plugin(plugin.into(), &cancel).await;
+                        self.keep_refusal(plugin, Kind::Hooks, &error);
                         outcome.refused.push(refused(Kind::Hooks, error));
                     }
-                }
+                },
                 (Some(hooks), None) => {
                     if let Err(error) = hooks.withdraw_plugin(plugin.into(), &cancel).await {
                         tracing::warn!(%plugin, %error, "Hooks withdrawal refused");
@@ -852,12 +854,18 @@ impl Owners {
             }
         }
         if manifest.hooks.is_some()
-            && let Some(error) = self
-                .ctx
-                .get_at(&self.hooks)
-                .and_then(|hooks| hooks.plugin_refusal(plugin))
+            && let Some(hooks) = self.ctx.get_at(&self.hooks)
         {
-            found.push(refused(Kind::Hooks, error));
+            let error = self
+                .refusals
+                .lock()
+                .unwrap()
+                .get(&(plugin.to_owned(), Kind::Hooks))
+                .cloned()
+                .or_else(|| hooks.plugin_refusal(plugin));
+            if let Some(error) = error {
+                found.push(refused(Kind::Hooks, error));
+            }
         }
         found
     }

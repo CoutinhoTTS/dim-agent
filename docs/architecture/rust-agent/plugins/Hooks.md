@@ -89,7 +89,8 @@ Its token is registered before the task starts, and the live
 token cancelled, before it starts or after the source read, starts no command.
 Before writing, the branch rechecks the consumed view: output whose triggering
 fact an interrupt or a newer *consumed* operator input has overtaken is
-dropped. An input counts as the operator's when it carries `user` content and
+dropped, and `SessionStart` output is also dropped once a turn has started on
+the branch, because its block must come before the first turn. An input counts as the operator's when it carries `user` content and
 its first block is not a `<dim-…>` source marker (session access A.1–A.2), and
 only its `input/consumed` counts, so a queued input or another source's input
 drops nothing.
