@@ -204,7 +204,8 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
     for id in [sid.clone(), uuid::Uuid::new_v4().to_string()] {
         assert_eq!(
             other.rpc("session.delete", json!({"sessionId":id})).await["result"],
-            json!({})
+            json!({"deleted": false}),
+            "{id}: nothing of it is left to remove"
         );
     }
     assert_eq!(
@@ -246,6 +247,59 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
     );
     assert!(!store.rows(&kept).is_empty() && !store.rows(v2_session).is_empty());
     drop((client, other, v2, session, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The reply says whether this call removed the Session: `deleted: true`
+/// for a stored one, `false` on a repeat, and a Session an editor closed
+/// through `session.close` keeps its rows, which a delete then removes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_reports_whether_it_removed_a_stored_session() {
+    let store = Store::new();
+    let (server, _agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut other = Client::new_version(&server, false, 3).await;
+
+    let stored = session(&mut client).await;
+    assert!(!store.rows(&stored).is_empty());
+    assert_eq!(
+        other
+            .rpc("session.delete", json!({"sessionId":stored}))
+            .await["result"],
+        json!({"deleted": true})
+    );
+    assert!(store.rows(&stored).is_empty(), "{:?}", store.rows(&stored));
+    assert_eq!(
+        other
+            .rpc("session.delete", json!({"sessionId":stored}))
+            .await["result"],
+        json!({"deleted": false}),
+        "a repeat removes nothing"
+    );
+
+    let closed = session(&mut client).await;
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId":closed}))
+            .await,
+    );
+    let summaries = other.rpc("session.summaries", json!({})).await;
+    assert!(
+        !listed(&summaries, &closed),
+        "the closed Session is not listed: {summaries}"
+    );
+    assert!(!store.rows(&closed).is_empty(), "its rows are stored");
+    assert_eq!(
+        other
+            .rpc("session.delete", json!({"sessionId":closed}))
+            .await["result"],
+        json!({"deleted": true}),
+        "a delete removes a Session this daemon closed"
+    );
+    assert!(store.rows(&closed).is_empty(), "{:?}", store.rows(&closed));
+
+    drop((client, other));
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -300,7 +354,7 @@ async fn unloaded_and_damaged_sessions_are_deleted_by_id() {
     for id in [&dormant, &damaged, &ownerless, &outputless] {
         assert_eq!(
             client.rpc("session.delete", json!({"sessionId":id})).await["result"],
-            json!({}),
+            json!({"deleted": true}),
             "{id}"
         );
         assert!(store.rows(id).is_empty(), "{id}: {:?}", store.rows(id));
@@ -335,7 +389,8 @@ async fn a_delete_leaves_another_databases_command_output() {
 
     assert_eq!(
         to_a.rpc("session.delete", json!({"sessionId":sid})).await["result"],
-        json!({})
+        json!({"deleted": false}),
+        "a's database holds no row of b's Session"
     );
     assert!(exists(&store.output(&sid)), "b's output stays");
     assert!(agent.get_session(&sid).is_some());
@@ -450,7 +505,7 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
         client
             .rpc("session.delete", json!({"sessionId":lead}))
             .await["result"],
-        json!({})
+        json!({"deleted": true})
     );
     assert!(store.rows(&lead).is_empty(), "{:?}", store.rows(&lead));
     assert!(!exists(&store.output(&lead)));
@@ -541,7 +596,10 @@ async fn a_delete_waits_for_a_building_session() {
             building.as_str(),
             "{created}"
         );
-        assert_eq!(deleter.response(delete).await["result"], json!({}));
+        assert_eq!(
+            deleter.response(delete).await["result"],
+            json!({"deleted": true})
+        );
         assert!(agent.get_session(&building).is_none(), "{method}");
         assert!(
             store.rows(&building).is_empty(),

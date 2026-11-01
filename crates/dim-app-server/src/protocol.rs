@@ -998,6 +998,14 @@ pub struct ForkResult {
     pub session_id: String,
     pub sequence: u64,
 }
+/// The `session.delete` reply (S5c §3.1): `deleted` is true when this call
+/// removed the Session's stored rows, or, in a daemon without a native
+/// store, a loaded Session.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteResult {
+    pub deleted: bool,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionOrigin {
@@ -1103,6 +1111,8 @@ pub enum Reply {
     Ping(PingResult),
     Create(CreateResult),
     Fork(ForkResult),
+    /// The `session.delete` reply: whether this call removed the Session.
+    Deleted(DeleteResult),
     List(Vec<SessionInfo>),
     /// The attached Session's directory record, with `model` and
     /// `modelPreferences` from its latest adopted configuration, falling back

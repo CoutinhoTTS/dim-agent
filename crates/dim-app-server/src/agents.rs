@@ -1194,7 +1194,10 @@ impl AgentIndex {
     /// keeps no slot. A delete that fails before the rows go leaves a
     /// Session it closed as `session.close` does, closed in this process with
     /// its rows kept (D5); one it did not close loads again on its next use.
-    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
+    ///
+    /// The reply reports whether this call removed the Session: its stored
+    /// rows, or, in a daemon without a native store, a loaded Session.
+    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<bool> {
         // The id names `command-output/<id>`, so only a single path component
         // can be a Session's (D3); refused before any admission state exists.
         if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
@@ -1227,6 +1230,7 @@ impl AgentIndex {
             Some(store) => store.delete_session(id).await?,
             None => false,
         };
+        let deleted = stored || (self.session_store.is_none() && loaded.is_some());
         let owner = {
             let mut inner = self.directory.inner.lock().expect("agent index");
             let owner = inner.versions.remove(id);
@@ -1246,18 +1250,18 @@ impl AgentIndex {
                 .loader
                 .get()
                 .expect("AgentsPlugin apply sets the loader");
-            let deleted = Arc::new(UnloadedSessionDeleted {
+            let announcement = Arc::new(UnloadedSessionDeleted {
                 agent_id,
                 session_id: id.to_owned(),
             });
-            if let Err(error) = root.parallel(deleted).await {
+            if let Err(error) = root.parallel(announcement).await {
                 tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
             }
         }
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
-        Ok(())
+        Ok(deleted)
     }
     /// Whether an Agent has any member Session, loaded or stored. An owned
     /// Agent with none is an incomplete delegation, which no request may

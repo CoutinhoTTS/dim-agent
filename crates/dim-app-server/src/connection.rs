@@ -946,7 +946,7 @@ impl Connection {
                 .index
                 .delete(&params.session_id)
                 .await
-                .map(|()| Reply::empty())
+                .map(|deleted| Reply::Deleted(DeleteResult { deleted }))
                 .map_err(|error| {
                     tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
                     RpcError::from(error)

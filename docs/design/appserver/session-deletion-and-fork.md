@@ -70,7 +70,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 
 ### 3.1 Method
 
-`session.delete {sessionId: string} -> {}`
+`session.delete {sessionId: string} -> {deleted: bool}`
 
 | Item | Rule |
 | --- | --- |
@@ -79,7 +79,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Callers | Every connection that may call `session.close`, under the same profile rules: in a protected profile, local transports only. Paired devices (P3) are decided in RemoteGateway's compatibility table together with the other Session built-ins |
 | Session version | A Session's recorded protocol version must equal the connection's (`session_protocol_version`), as for every Session built-in. A Session with no readable owner row has no recorded version, so the check passes |
 | Damaged Sessions | Deleted by id. A delete reads none of the Session's records, so a Session that fails validation or has no available owner can be deleted; Rpc's unavailable-Session check does not apply to `session.delete` |
-| Reply | `{}` once the Session's rows are gone. An unknown or already deleted id also replies `{}` |
+| Reply | `{deleted: true}` once this call removed the Session: its stored rows, or, in a daemon without a native store, a loaded Session. An unknown or already deleted id also succeeds, with `{deleted: false}`: nothing of the id was removed, and the client's retry finds no rows. The field is added to the reply, so a client of an older App Server reads `{}` as the same success it was |
 
 ### 3.2 Sequence
 
@@ -97,7 +97,7 @@ are Rust methods over the native store, not services: only Agents calls them.
   |             |                              |    Timeline rows, owner, record -> commit      |
   |             |                              |  5 schedule the S5a sweep                      |
   |             | 6 forget S; drop its slot                          |                          |
-  |<---- {} ----|                              |                     |                          |
+  |<-{deleted}-|                              |                     |                          |
 ```
 
 1. **Admission.** Agents checks the id (D3) and takes S's admission gate, the `SessionSlot` gate that `acquire` holds
@@ -183,7 +183,7 @@ Every step tolerates an absent target, so a delete can be retried after any fail
 
 | Result | When | State after |
 | --- | --- | --- |
-| `{}` | The rows were removed, or there were none | Session gone; its unowned files go in the sweep |
+| `{deleted: true}` or `{deleted: false}` | The rows were removed, or there were none | Session gone; its unowned files go in the sweep |
 | `unknown_method` (-32601) | Protocol v1 or v2 | Unchanged |
 | `invalid_params` (-32602) | `sessionId` missing or not a string | Unchanged |
 | `session_protocol_version` | S belongs to another protocol version | Unchanged |
@@ -211,7 +211,7 @@ gone.
 | Before or during the close | All rows | The directory | Nothing lost; S loads on its next use; retry |
 | During the removal | All rows | Part of the directory | Retry: removal continues and absent entries count as removed |
 | After the removal, before the commit | All rows | No directory, durably | Retry. Meanwhile S loads, without its command output files |
-| After the commit, before the reply | No rows | No directory; S's files unowned | The client's retry finds no rows, so it removes no directory, replies `{}` and schedules the sweep again; otherwise S5a's next trigger (another delete, or the first put of a later generation) removes the files |
+| After the commit, before the reply | No rows | No directory; S's files unowned | The client's retry finds no rows, so it removes no directory, replies `{deleted: false}` and schedules the sweep again; otherwise S5a's next trigger (another delete, or the first put of a later generation) removes the files |
 | During the sweep | S5a's states | — | [Session files §6](session-files.md#6-deletion-crash-recovery-and-serialization) |
 
 **Why the directory goes before the commit.** The Session's own `command-output/<S>/` directory has no row of its
@@ -227,7 +227,7 @@ gap; HostPlatform syncs the parent of a removed `.dim/exec` directory the same w
 
 **Only an id with rows here.** For the same reason a delete removes the directory only while its own database has
 rows of the id. Two daemons on `a.sqlite` and `b.sqlite` in one directory share `command-output/`; a
-`session.delete {S_b}` sent to the first, for example by a CLI given the wrong `--database`, replies `{}` and must not
+`session.delete {S_b}` sent to the first, for example by a CLI given the wrong `--database`, replies `{deleted: false}` and must not
 remove the output of S_b, which is alive in the second. The check costs no convergence: the directory goes before the
 rows, so a database with no rows of S has no directory of S left to remove, and Agents' admission gate keeps two
 deletes of one id from interleaving. A retry after a commit therefore removes nothing, as it needs nothing removed.
@@ -497,7 +497,7 @@ delete against loading.
 | The source's delete commits, then the fork transaction | It finds no source: `session_closed`, nothing created |
 | The delete's close during the fork's cut check | The check fails `session_closed` |
 | Put against delete or fork | Session files §6 |
-| Two deletes | The second waits for the gate, then finds no rows: `{}` |
+| Two deletes | The second waits for the gate, then finds no rows: `{deleted: false}` |
 | Delete of a Session still building: a `session.create`, a member's creation or a fork whose rows are committed and listed | The creation holds the new id's gate from before its rows commit until the Session is published and its protocol version recorded (D6). The delete waits, then closes the published Session and removes its rows. A creation that fails rolls its rows back, and the delete finds nothing |
 | Delete against attach, submit or a Session method | They wait for the gate, then fail `session_closed`; requests that already hold a use end with the close |
 | Delete against the Session's own appends | The close settles them; the row transaction follows every queued append on the Timeline writer |
@@ -633,10 +633,10 @@ stop would deadlock that reload, and delaying release would let a later member i
 ## 15. Acceptance (flow tests)
 
 1. Delete a loaded Session with a running turn while a client is attached: the client gets `session.closed`, the reply
-   is `{}`, `session.list` omits the Session and `session.attach` fails `session_closed`. No row with its id remains
+   is `{deleted: true}`, `session.list` omits the Session and `session.attach` fails `session_closed`. No row with its id remains
    in any table, `command-output/<id>/` is gone, and its Session files are removed by the sweep. A second delete
-   replies `{}`.
-2. Delete an unloaded Session, and one whose rows fail validation: both reply `{}` and leave no row.
+   replies `{deleted: false}`.
+2. Delete an unloaded Session, and one whose rows fail validation: both reply `{deleted: true}` and leave no row.
 3. Fork at a rest point of `main`, with one child branch created before the cut and one after: F's `main` holds the
    source's events through `at` with the same ids, then `session/forked`, `branch/resume` and one `branch/create-failed` for the first
    child; F has the first child's directory without events and nothing of the second; F has only the content rows
@@ -661,7 +661,7 @@ stop would deadlock that reload, and delaying release would let a later member i
     -32603 and keeps the leader's rows; the leader is neither listed nor loaded again in this process, and its member
     stays a Session. After a restart the leader loads, and a retry deletes it (D5).
 11. A delete of a Session still building, a `session.create` and a `session.fork` held in a capability's apply after
-    their rows commit and are listed, waits for the build, then replies `{}`; no row and no loaded Session of the id
+    their rows commit and are listed, waits for the build, then replies `{deleted: true}`; no row and no loaded Session of the id
     remain (D6). An id that is not one path component is refused and removes nothing (D3).
 
 Tests: 1 and 2 are `delete_closes_a_running_session_and_removes_what_it_stored` and
