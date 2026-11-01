@@ -570,6 +570,15 @@ pub trait ResolveModelSelection: Send + Sync + 'static {
 }
 pub struct ModelSelectionHost(pub Arc<dyn ResolveModelSelection>);
 
+/// Enumerates the models the owner would serve: the same selectability rules as
+/// execution, one read, no live request. The caller passes its cancellation
+/// token; cancelling it cancels the read.
+pub trait SelectableModels: Send + Sync + 'static {
+    fn selectable(&self, cancel: CancellationToken)
+    -> HostFuture<'_, Vec<ModelCapabilitySnapshot>>;
+}
+pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
+
 /// One non-streaming request outside any Session: no tools, no Timeline.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
