@@ -123,7 +123,11 @@ The revision is Settings' opaque revision for the entry's source document
 `mcp.catalog` reports as `userRevision` or `projectRevision`, and the same one every write takes
 as `expectedVersion`. All entries of one source share it, so a write to another entry of that
 source makes the token stale and the next write answers `mcp_settings_conflict`. A client then
-re-reads the entry it is editing and shows the conflict; it does not retry the same write.
+re-reads the entry it is editing and shows the conflict; it does not retry the same write. A
+remove whose `expectedVersion` is stale when it arrives writes nothing. A source change that
+lands while the remove runs, after that check, can still leave the entry withdrawn: it is then
+off, which fails closed, and the reply is the conflict. A remove needs a readable source; a
+disable still withdraws the record without one.
 
 A plugin entry has no Settings source and no revision. The read returns no `revision` for it,
 which is the client's signal that the entry is read-only: `mcp.save`, `mcp.update`, `mcp.remove`
