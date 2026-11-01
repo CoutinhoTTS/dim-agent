@@ -877,6 +877,133 @@ fn tui_workflow_panel_starts_a_run_with_parameters() {
     }
 }
 
+/// Two parameterized user definitions of the run-draft test: each declares
+/// one parameter of its own, so the template says which one opened.
+fn two_parameterized() -> Value {
+    json!([
+        {
+            "name": "review-and-fix", "source": "user", "enabled": true,
+            "description": "Analyze", "parameters": [
+                {"name": "target", "description": "Path to review", "required": true}
+            ],
+            "valid": true, "issues": [], "issue_count": 0
+        },
+        {
+            "name": "digest", "source": "user", "enabled": true,
+            "description": "Digest", "parameters": [
+                {"name": "path", "description": "Path to digest", "required": true}
+            ],
+            "valid": true, "issues": [], "issue_count": 0
+        }
+    ])
+}
+
+/// A run the owner refused keeps its parameters for its own definition:
+/// Ctrl+T on another definition opens that definition's template and starts
+/// it, and the refused one still reopens its own kept text.
+#[test]
+fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let log = home.0.join("opened.log");
+        // The editor records the text it was opened on, then fills the
+        // parameters of whichever template this is.
+        let script = editor(
+            &home,
+            "printf '%s\\n===\\n' \"$(cat \"$1\")\" >> \"$RUN_LOG\"\n\
+             case \"$(cat \"$1\")\" in\n\
+               *'\"target\": \"\"'*) printf '%s' '{\"target\":\"kept\"}' > \"$1\" ;;\n\
+               *'\"path\": \"\"'*) printf '%s' '{\"path\":\"docs\"}' > \"$1\" ;;\n\
+             esac",
+        );
+        let (shown, wait_shown) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            opened_with(
+                wire,
+                &[
+                    "workflow.list",
+                    "workflow.save",
+                    "workflow.start",
+                    "workflow.status",
+                    "settings.read",
+                    "settings.update",
+                ],
+            );
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("workflow.list");
+            wire.reply(&request, two_parameterized());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            // Ctrl+T on review-and-fix: its parameters go out, and the owner
+            // refuses the run, so the text stays.
+            let request = wire.read("workflow.list");
+            wire.reply(&request, two_parameterized());
+            let request = wire.read("workflow.start");
+            assert_eq!(request["params"]["name"], "review-and-fix");
+            assert_eq!(request["params"]["params"], json!({"target": "kept"}));
+            wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32000,"message":"the owner refused the run",
+                "data":{"appError":"start_refused"}}}));
+            // Ctrl+T on digest opens digest's own template and starts digest
+            // with its own parameters, not the kept draft.
+            let request = wire.read("workflow.list");
+            wire.reply(&request, two_parameterized());
+            let request = wire.read("workflow.start");
+            assert_eq!(request["params"]["name"], "digest");
+            assert_eq!(request["params"]["params"], json!({"path": "docs"}));
+            wire.reply(&request, json!({"run_id": "wf-2"}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, two_parameterized());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            // Back on review-and-fix, Ctrl+T reopens the text it kept.
+            let request = wire.read("workflow.list");
+            wire.reply(&request, two_parameterized());
+            let request = wire.read("workflow.start");
+            assert_eq!(request["params"]["name"], "review-and-fix");
+            assert_eq!(request["params"]["params"], json!({"target": "kept"}));
+            wire.reply(&request, json!({"run_id": "wf-3"}));
+            let request = wire.read("workflow.list");
+            wire.reply(&request, two_parameterized());
+            let request = wire.read("settings.read");
+            wire.reply(&request, settings());
+            drains(wire);
+        });
+        let mut command = edit_command(&home, &script, fullscreen);
+        command.env("RUN_LOG", &log);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/workflow\r");
+        terminal.until("review-and-fix");
+        terminal.raw(b"\x14");
+        terminal.until("the owner refused the run");
+        terminal.raw(b"\x1b[B");
+        terminal.until("Digest");
+        terminal.raw(b"\x14");
+        terminal.until("Started digest: wf-2.");
+        terminal.raw(b"\x1b[A");
+        terminal.until("Analyze");
+        terminal.raw(b"\x14");
+        terminal.until("Started review-and-fix: wf-3.");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        let opened = fs::read_to_string(&log).unwrap();
+        let entries: Vec<&str> = opened
+            .split("\n===\n")
+            .filter(|entry| !entry.trim().is_empty())
+            .collect();
+        assert_eq!(entries.len(), 3, "{opened}");
+        assert!(entries[0].contains("\"target\": \"\""), "{opened}");
+        assert!(entries[1].contains("\"path\": \"\""), "{opened}");
+        assert_eq!(entries[2].trim(), "{\"target\":\"kept\"}", "{opened}");
+    }
+}
+
 /// A run started from the panel reports to the line the panel shows: the
 /// user focused `line-1` before they opened `/workflow`, so the start is
 /// addressed to it, not to `main`.
