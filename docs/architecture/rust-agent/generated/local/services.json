@@ -749,6 +749,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "status": "Ready"
@@ -768,6 +773,12 @@
           },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
+            "scope": null,
+            "provider": 32,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
             "scope": null,
             "provider": 32,
             "generation": 1
@@ -793,13 +804,13 @@
             "external": true
           },
           {
-            "service": "dim_agent_capabilities::session_grants::SessionGrantsHost@session",
-            "provider": null,
-            "declared": false,
-            "external": false
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "provider": 32,
+            "declared": true,
+            "external": true
           },
           {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "service": "dim_agent_runtime::config::SessionIdentity@session",
             "provider": 32,
             "declared": true,
             "external": true
@@ -2061,7 +2072,7 @@
         "removing": false
       },
       {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#loader",
+        "service": "dyn rutis_bridge::session::services::HostDispatch#rutis/loader",
         "provider": 2,
         "generation": 1,
         "removing": false

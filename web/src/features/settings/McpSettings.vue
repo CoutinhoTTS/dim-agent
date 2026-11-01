@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readMcp, readMcpAuthStart, readMcpConfiguration, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpInspection, type McpOAuthInput, type McpServerInput, type McpTool, type McpView } from "../../rpc/general-settings"
+import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpInspection, readMcpTest, type McpConfigurationPatch, type McpEntry, type McpInspection, type McpOAuthInput, type McpServerInput, type McpTool, type McpView } from "../../rpc/general-settings"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
-import { bindSettingsDirty, messageFrom } from "./context"
+import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
 
 type SecretField = { name: string; action: "keep" | "set" | "remove"; value: string; stored?: boolean }
 type Draft = {
@@ -99,14 +99,15 @@ async function edit(server: McpEntry): Promise<void> {
   busy.value = true
   error.value = ""
   try {
-    const expected = revision(server.source)
-    const config = await connection.client.call("mcp.configuration", target(server), readMcpConfiguration)
+    const entry = await connection.client.call("mcp.configuration", target(server), readMcpEditableEntry)
+    if (entry.revision === undefined) throw new Error(s('This entry has no source revision and cannot be edited.', '此条目没有源修订号，无法编辑。'))
+    const config = entry.configuration
     draft.value = {
       id: server.id, source: server.source, type: config.type,
       command: config.type === "stdio" ? config.command : "", args: [], argsAction: "keep", storedArgsCount: config.type === "stdio" ? config.argsCount : 0, cwd: config.type === "stdio" ? config.cwd ?? "" : "",
       url: "", ...(config.type !== "stdio" ? { endpoint: config.endpoint } : {}),
       secrets: (config.type === "stdio" ? config.envNames : config.headerNames).map((name) => ({ name, action: "keep", value: "", stored: true })),
-      enabled: server.enabled, oauth: config.type !== "stdio" && config.oauthConfigured,
+      enabled: entry.enabled, oauth: config.type !== "stdio" && config.oauthConfigured,
       authConfigured: config.type !== "stdio" && config.authConfigured,
       clientId: config.type !== "stdio" ? config.oauth?.clientId ?? "" : "",
       callbackPort: config.type !== "stdio" ? String(config.oauth?.callbackPort ?? "") : "",
@@ -115,7 +116,7 @@ async function edit(server: McpEntry): Promise<void> {
       metadataUrl: "", metadataAction: "keep", token: "", bearerAction: "keep", oauthAction: "keep",
     }
     editing.value = true
-    editorRevision.value = expected
+    editorRevision.value = entry.revision
     baseline.value = JSON.stringify(draft.value)
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
@@ -243,6 +244,7 @@ async function finishAuth(cancel = false): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
+reloadSettingsOnReconnect(connection, load, computed(() => draft.value !== undefined || !!clientSecret.value || !!callback.value || !!authorization.value))
 onMounted(load)
 onBeforeUnmount(() => {
   mounted = false

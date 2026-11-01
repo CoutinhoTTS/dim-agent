@@ -1627,6 +1627,36 @@ fn noninteractive_approval_denies_and_drains_outstanding_responses_before_detach
 }
 
 #[test]
+fn noninteractive_outside_read_is_denied_by_the_ordinary_approval_answer() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"read-approval","source":{"kind":"model"},"call":{"name":"read","input":{"path":"/etc/hosts"}},"reason":"Reading outside the session workspace requires approval: /etc/hosts"}));
+        let approval = wire.read("approval.respond"); assert_eq!(approval["params"]["decision"],"deny");
+        let stop = wire.read("session.stop");
+        wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"denied"}));
+        wire.reply(&stop,json!({"sequence":30}));
+        wire.reply(&idle,json!({"sequence":30}));
+        wire.reply(&approval,json!({}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--prompt", "read /etc/hosts"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("Interactive approval required"), "{stderr}");
+}
+
+#[test]
 fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -5321,6 +5351,10 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     terminal.paste(url::Url::from_file_path(&reference).unwrap().as_str());
     terminal.until("[File: outside reference.txt]");
     terminal.write(b"\n");
+    // The referenced file is outside the Session workspace, so the read asks
+    // (ADR 014 D2); the user answers the ordinary approval.
+    terminal.until("Allow once? [y/N]");
+    terminal.write(b"y\n");
     terminal.until("files read completed");
     terminal.editor();
     terminal.write(b"/exit\n");

@@ -738,6 +738,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             )?))
         })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(execution_settings::ExecutionBackendPlugin::new(
+                names,
+            )?))
+        })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(skills_management::SkillsCatalogPlugin::new(
                 names,
             )?))
@@ -795,7 +800,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         Some(state) => {
             let build = rutis_loader::resolve::Build::default();
             let names = dim_agent_runtime::Names::copy(builder.catalog(), &build);
-            let owners = plugin_manager::Owners::new(root.clone(), &names)
+            let owners = plugin_manager::Owners::new(root.clone(), &names, state.refusals.clone())
                 .map_err(|error| ServerError::Configuration(error.to_string()))?;
             Some((state.clone(), owners))
         }
