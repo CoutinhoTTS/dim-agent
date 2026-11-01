@@ -1174,18 +1174,24 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     );
     mine.models = vec![
         model("text", 1000),
-        model("disabled", 1000),
+        model("served", 1000),
         unavailable,
         image,
         nonchat,
         narrow,
     ];
     let created = provider.create(mine, &cancel).await.unwrap();
-    let disabled = provider
+    let updated = provider
         .set_enabled_models(
             MINE.into(),
             created.version.unwrap(),
-            vec!["disabled".into()],
+            vec![
+                "served".into(),
+                "unavailable".into(),
+                "image".into(),
+                "nonchat".into(),
+                "narrow".into(),
+            ],
             &cancel,
         )
         .await
@@ -1217,7 +1223,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
         .iter()
         .map(|model| model.target.model_id.as_str())
         .collect();
-    assert_eq!(ids, ["disabled"], "{ids:?}");
+    assert_eq!(ids, ["served"], "{ids:?}");
     assert!(
         !first
             .iter()
@@ -1229,11 +1235,23 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(catalog.disabled_model_ids, ["text"]);
+    for (id, reason) in [
+        ("unavailable", "provider_unavailable"),
+        ("image", "provider_unavailable"),
+        ("nonchat", "provider_unavailable"),
+        ("narrow", "limits_undeclared"),
+    ] {
+        let model = catalog.models.iter().find(|model| model.id == id).unwrap();
+        assert_eq!(model.unavailable_reason.as_deref(), Some(reason), "{id}");
+    }
     let declared = catalog
         .models
         .iter()
-        .find(|model| model.id == "disabled")
+        .find(|model| model.id == "served")
         .unwrap();
+    assert!(declared.unavailable_reason.is_none());
+    assert!(declared.missing_limits.is_empty());
     assert_eq!(
         mine[0].capabilities.modalities,
         declared.capabilities.modalities
@@ -1278,7 +1296,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
         "the read made a provider request"
     );
     provider
-        .set_enabled_models(MINE.into(), disabled.version, vec!["text".into()], &cancel)
+        .set_enabled_models(MINE.into(), updated.version, vec!["text".into()], &cancel)
         .await
         .unwrap();
     let second = selectable.0.selectable(cancel.clone()).await.unwrap();
@@ -1288,7 +1306,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
         .map(|model| model.target.model_id.as_str())
         .collect();
     assert_eq!(second_ids, ["text"]);
-    assert_eq!(ids, ["disabled"], "the earlier reply must not change");
+    assert_eq!(ids, ["served"], "the earlier reply must not change");
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
