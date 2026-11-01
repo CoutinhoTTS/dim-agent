@@ -4,7 +4,7 @@ import type { InputWrite, PermissionPolicy, SessionRef, Sessions } from '../../.
 import { Catalog, select } from './catalog.ts'
 import { parameters, payloadBytes, policy, render, stages, WorkflowError, type Source, type StageDefinition } from './definition.ts'
 import { StageHistory } from './history.ts'
-import { bounded, log, projectedBytes, RunStore, stageTerminal, storedResultText, terminal, type Run, type Stage } from './store.ts'
+import { bounded, log, projectedBytes, RunStore, stageTerminal, storedReason, storedResultText, terminal, type Run, type Stage } from './store.ts'
 
 export interface Caller { sessionId: string; branchId: string; callId: string; cwd: string }
 export interface StartRequest {
@@ -325,6 +325,7 @@ export class Workflow {
           if (stage.result_text !== undefined) {
             stage.result_text = storedResultText(run, stage, stage.result_text)
           }
+          if (stage.reason !== undefined) stage.reason = storedReason(stage.reason)
         })
         return
       }

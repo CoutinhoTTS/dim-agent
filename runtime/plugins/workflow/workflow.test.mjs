@@ -587,7 +587,7 @@ test('new definitions and accepted parameters enforce byte limits before run per
   assert.equal(f.state.files.get('project:/workspace/bounded.yaml'), original)
   f.state.files.delete('project:/workspace/bounded.yaml')
   f.state.document.definitions.bounded = large
-  assert.equal((await f.method('list', { cwd: '/workspace' })).value[0].valid, false)
+  assert.equal((await f.method('list', { cwd: '/workspace' })).value.definitions[0].valid, false)
   assert.equal((await f.method('start', { name: 'bounded', cwd: '/workspace' })).code, 'invalid_definition')
   await f.method('save', { source: 'user', document: doc })
   const edge = '界'.repeat(10922) + 'ab'
@@ -626,11 +626,11 @@ test('oversized definition entries do not hide valid sources or expand YAML alia
   const listed = await f.method('list', { cwd: '/workspace' })
   assert.equal(listed.kind, 'value')
   for (const name of ['aliases', 'oversized']) {
-    const entry = listed.value.find(entry => entry.name === name)
+    const entry = listed.value.definitions.find(entry => entry.name === name)
     assert.equal(entry.valid, false)
     assert.match(entry.issues.join('; '), name === 'aliases' ? /exceeds 1 MiB/ : /exceeds 8 MiB/)
   }
-  assert.equal(listed.value.find(entry => entry.name === 'usable').valid, true)
+  assert.equal(listed.value.definitions.find(entry => entry.name === 'usable').valid, true)
   assert.equal((await f.settled((await f.execute({ action: 'start', name: 'usable' })).structuredContent.run_id)).state, 'completed')
   f.state.document.projectEnabled['/workspace'] = { oversized: true }
   assert.equal((await f.method('start', { name: 'oversized', cwd: '/workspace' })).code, 'invalid_definition')
@@ -660,14 +660,52 @@ test('stored stage results and the run store stay within one bridge payload', as
   f.state.response = () => 'x'.repeat(80 * 1024)
   const id = (await f.method('start', { name: 'bounded-results', cwd: '/workspace' })).value.run_id
   const run = await f.settled(id)
-  const total = run.stages.reduce((sum, stage) => sum + Buffer.byteLength(stage.result_text ?? ''), 0)
-  assert.equal(total, 512 * 1024)
+  const stored = text => Buffer.byteLength(JSON.stringify(text))
+  const total = run.stages.reduce((sum, stage) => sum + stored(stage.result_text ?? ''), 0)
+  assert.ok(total <= 512 * 1024)
   assert.equal(run.stages.length, 9)
-  for (const stage of run.stages.slice(0, 8)) assert.equal(Buffer.byteLength(stage.result_text), 64 * 1024)
+  assert.equal(run.stages.filter(stage => Buffer.byteLength(stage.result_text ?? '') === 64 * 1024).length, 7)
   assert.equal(run.stages[8].result_text, '')
-  assert.ok(Buffer.byteLength(f.state.stored) <= 8 * 1024 * 1024)
+  assert.ok(stored(f.state.stored) <= 8 * 1024 * 1024)
   const all = await f.method('status')
   assert.ok(Buffer.byteLength(JSON.stringify(all.value)) <= 8 * 1024 * 1024)
+})
+
+test('escaped results and agent copies stay in the run-store payload', async t => {
+  const f = await fixture(t)
+  const agent = 'a'.repeat(32 * 1024)
+  await f.method('save', { source: 'user', document: definition('encoded-results',
+    Array.from({ length: 8 }, (_, index) => ({ stage: { id: `s${index}`, prompt: `s${index}`, agent } }))) })
+  const stored = text => Buffer.byteLength(JSON.stringify(text))
+  for (const text of ['"'.repeat(80 * 1024), '\\'.repeat(80 * 1024), '\u0001'.repeat(80 * 1024)]) {
+    f.state.response = () => text
+    const id = (await f.method('start', { name: 'encoded-results', cwd: '/workspace' })).value.run_id
+    const run = await f.settled(id)
+    const total = run.stages.reduce((sum, stage) => sum + stored(stage.result_text ?? ''), 0)
+    assert.ok(total <= 512 * 1024, `${total} encoded result bytes`)
+    assert.ok(run.stages.every(stage => stage.agent_id === agent))
+    assert.ok(stored(f.state.stored) <= 8 * 1024 * 1024)
+  }
+})
+
+test('the tool list sends one bounded listing and marks omitted definitions', async t => {
+  const f = await fixture(t)
+  const description = 'x'.repeat(4 * 1024)
+  for (let index = 0; index < 2200; index++) {
+    const name = `d${index}`
+    f.state.document.definitions[name] = { ...definition(name, [{ stage: { id: 'one', prompt: 'x' } }]), description }
+  }
+  const listed = await f.execute({ action: 'list' })
+  assert.equal(listed.isError, undefined)
+  assert.equal(listed.structuredContent, undefined)
+  assert.ok(Buffer.byteLength(JSON.stringify(listed.content)) <= 8 * 1024 * 1024)
+  const value = JSON.parse(listed.content)
+  assert.equal(value.truncated, true)
+  assert.ok(value.definitions.length > 0 && value.definitions.length < 2200)
+  assert.ok(value.definitions.every(entry => Buffer.byteLength(entry.description) <= 4 * 1024))
+  const management = await f.method('list', { cwd: '/workspace' })
+  assert.equal(management.value.truncated, true)
+  assert.ok(Buffer.byteLength(JSON.stringify(management.value)) <= 8 * 1024 * 1024)
 })
 
 test('run admission keeps the run store within one bridge payload', async t => {
@@ -886,7 +924,8 @@ test('semantic errors, file identities and package collisions remain visible wit
   ]) })
   const listed = await f.execute({ action: 'list' })
   assert.match(listed.content, /multiple installed packages/)
-  assert.deepEqual(listed.structuredContent.definitions.map(entry => entry.package_id), ['a', 'b'])
+  assert.equal(listed.structuredContent, undefined)
+  assert.deepEqual(JSON.parse(listed.content).definitions.map(entry => entry.package_id), ['a', 'b'])
   assert.equal((await f.execute({ action: 'start', name: 'shared' })).isError, true)
   const invalid = [
     ...['{{stage.one.result}}', '{{ params.x }}', '{{params.x', 'x'.repeat(32769)]
@@ -902,7 +941,7 @@ test('semantic errors, file identities and package collisions remain visible wit
     assert.equal(f.state.revision, revision)
     f.state.document.definitions.bad = document
     const listed = await f.execute({ action: 'list' })
-    assert.equal(listed.structuredContent.definitions.find(entry => entry.name === 'bad').valid, false)
+    assert.equal(JSON.parse(listed.content).definitions.find(entry => entry.name === 'bad').valid, false)
     assert.match((await f.execute({ action: 'start', name: 'bad' })).content, /invalid_definition.*Use list/s)
   }
   assert.equal(f.state.launches.length, 0)

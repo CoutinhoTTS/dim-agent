@@ -4,13 +4,16 @@ import type { PermissionPolicy } from '../../../npm/plugin.js'
 
 /** One definition's compact JSON; several share a user document and the run store. */
 export const definitionBytes = 1024 * 1024
-/** One Workflow payload crossing the bridge: the user document or `runs.json` text.
- * Half of the 16 MiB frame stays for the service envelope and JSON escaping. */
+/** One Workflow payload crossing the bridge, in its serialized bytes: the user
+ * document, the store text as a JSON string, or a list/status reply. Half of the
+ * 16 MiB frame stays for the service envelope. */
 export const payloadBytes = 8 * 1024 * 1024
-/** A run's stored stage result texts in total. */
+/** A run's stored stage result texts in total, in the committed JSON's bytes. */
 export const resultBytes = 512 * 1024
-/** One stored run log message. */
+/** One stored run log message, in the committed JSON's bytes. */
 export const logMessageBytes = 512
+/** One stored stage reason, in the committed JSON's bytes. */
+export const stageReasonBytes = 512
 export const logEntries = 500
 
 export class WorkflowError extends Error {

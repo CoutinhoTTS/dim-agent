@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { FileScope, PermissionPolicy } from '../../../npm/plugin.js'
-import { definitionSchema, issues, logEntries, logMessageBytes, resultBytes, stages, WorkflowError } from './definition.ts'
+import { definitionSchema, issues, logEntries, logMessageBytes, resultBytes, stageReasonBytes, stages, WorkflowError } from './definition.ts'
 
 const id = z.string().min(1)
 const timestamp = z.iso.datetime({ precision: 3 })
@@ -65,7 +65,7 @@ export function stageTerminal(stage: Stage): boolean {
 }
 
 export function log(run: Run, message: string) {
-  run.log.push({ at: new Date().toISOString(), message: bounded(message, logMessageBytes) })
+  run.log.push({ at: new Date().toISOString(), message: boundedEncoded(message, logMessageBytes) })
   if (run.log.length > logEntries) run.log.splice(0, run.log.length - logEntries)
 }
 
@@ -77,30 +77,64 @@ export function bounded(text: string, limit: number): string {
   return bytes.subarray(0, end).toString('utf8')
 }
 
+/** A string's bytes in the committed JSON text: quotes and backslashes double,
+ * and control characters expand to escapes. */
+export function encodedBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text))
+}
+
+/** The longest UTF-8 prefix whose serialized form stays within `limit` bytes. */
+export function boundedEncoded(text: string, limit: number): string {
+  if (encodedBytes(text) <= limit) return text
+  let low = 0
+  let high = Buffer.byteLength(text)
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (encodedBytes(bounded(text, middle)) <= limit) low = middle
+    else high = middle - 1
+  }
+  return bounded(text, low)
+}
+
 function resultTextBytes(run: Run): number {
-  return run.stages.reduce((total, stage) => total + Buffer.byteLength(stage.result_text ?? ''), 0)
+  return run.stages.reduce((total, stage) => total + encodedBytes(stage.result_text ?? ''), 0)
 }
 
 /** The text a stage stores: within its own cap and the run's remaining result payload. */
 export function storedResultText(run: Run, stage: Stage, text: string): string {
   const used = run.stages.reduce((total, entry) =>
-    total + (entry === stage ? 0 : Buffer.byteLength(entry.result_text ?? '')), 0)
-  return bounded(text, Math.max(0, resultBytes - used))
+    total + (entry === stage ? 0 : encodedBytes(entry.result_text ?? '')), 0)
+  return boundedEncoded(text, Math.max(0, resultBytes - used))
 }
 
-/** Record fields an admitted run gains later: stage identities and the report. */
-const admittedFieldsBytes = 64 * 1024
+/** A stage's reason: an error code or a bounded turn error message. */
+export function storedReason(reason: string): string {
+  return boundedEncoded(reason, stageReasonBytes)
+}
 
-/** The run store's text plus every active run's remaining result/log allowance
- * and later fields: what a start must fit and the most the text can grow to. */
+/** Fields an admitted run gains later: stage ids/reasons/policy/report, plus each
+ * configured stage's `agent`, which `admit` copies into `agent_id`. */
+function admittedFields(run: Run): number {
+  let total = 192 * 1024
+  for (const step of run.definition.steps) {
+    for (const stage of stages(step)) if (stage.agent !== undefined) total += encodedBytes(stage.agent)
+  }
+  return total
+}
+
+/** The run store's text as a bridge payload (the JSON string the file service
+ * carries), plus every active run's remaining result/log allowance and later
+ * fields at their worst serialized form: what a start must fit and the most the
+ * payload can grow to. Each future field's serialized form is at most twice its
+ * committed-JSON size, so the allowance doubles. */
 export function projectedBytes(runs: Run[]): number {
-  let total = Buffer.byteLength(JSON.stringify({ version: 2, runs }))
+  let total = Buffer.byteLength(JSON.stringify(JSON.stringify({ version: 2, runs })))
   for (const run of runs) {
     if (terminal(run)) continue
-    total += admittedFieldsBytes
-    total += Math.max(0, resultBytes - resultTextBytes(run))
-    total += Math.max(0, logEntries * logMessageBytes
-      - run.log.reduce((sum, entry) => sum + Buffer.byteLength(entry.message), 0))
+    total += 2 * admittedFields(run)
+    total += 2 * Math.max(0, resultBytes - resultTextBytes(run))
+    total += 2 * Math.max(0, logEntries * logMessageBytes
+      - run.log.reduce((sum, entry) => sum + encodedBytes(entry.message), 0))
   }
   return total
 }
