@@ -488,10 +488,12 @@ Namespace `workflow`, registered with `managementMethods`: its declarations list
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
 | `workflow.list` | `cwd` | Definitions with source, enabled state and issues | no |
-| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name}` after A.1's semantic checks; `user`: Workflow's typed write of the entry into the `workflow` document (CAS on its revision); `project`: the project file, written through FileStorage (file authority); saving does not enable a project definition | yes |
+| `workflow.save` | `source: user\|project`; `user`: `expectedRevision?`, `document`; `project`: `cwd`, `document` | `{name}` after A.1's semantic checks; `user`: Workflow's typed write of the entry into the `workflow` document, CASed on `expectedRevision` when the caller sends one and on the revision it read otherwise; `project`: the project file, written through FileStorage (file authority), with no revision; saving does not enable a project definition | yes |
 | `workflow.start` | `name`, `source?`, `cwd`, `resource_node?` (P3), `params`, `report_to?` | `{run_id}`; first launch records its returned policy (A17); management uses the existing host bound/read-only default | yes |
 | `workflow.status` | `run_id?` | One run or recent runs | no |
 | `workflow.stop` | `run_id` | Final run state | yes |
+
+The CAS unit of a `user` save is the user `workflow` document, the only revision the owner holds: a save also answers `conflict` when another definition or a project definition's enablement changed since the caller read the document. Nothing is written; the caller reads again and writes the revision it then has. A `project` save takes no revision, because it replaces the file; a request that carries one is `invalid_params`.
 
 Use the delivered binding and existing method admission: list/status are `report`; save/start/stop are `drain`, so accepted mutations settle before unload. Rpc returns `service_reloading` for Pending/reloading owners, `service_unavailable` for Failed/Unresolved owners and `unknown_method` for disabled/absent owners. The TypeScript management projection is delivered; Workflow implements the methods in its process row.
 

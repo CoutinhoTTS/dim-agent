@@ -1,6 +1,7 @@
 import { stringify } from 'yaml'
 import type { Settings, WorkflowFiles, WorkflowFilesErrorThrown, WorkflowRoot } from '../../../npm/plugin.js'
 import { decodeDefinition, decodeFile, issues, withinDefinitionLimit, WorkflowError, type Definition, type Source, type WorkflowSettings } from './definition.ts'
+import type { SaveRequest } from './requests.ts'
 
 export interface DefinitionEntry {
   name: string
@@ -83,21 +84,23 @@ export class Catalog {
     return entries
   }
 
-  async save(source: 'user' | 'project', cwd: string | undefined, input: unknown) {
-    const definition = decodeDefinition(input)
+  async save(request: SaveRequest) {
+    const definition = decodeDefinition(request.document)
     const invalid = issues(definition, definition.name)
     if (invalid.length) throw new WorkflowError('invalid_definition', invalid.slice(0, 10).join('; '))
-    if (source === 'user') {
+    if (request.source === 'user') {
       const snapshot = await this.settings.read({ source: 'workflow', scope: 'user' })
       if (!snapshot.ok) throw new WorkflowError('definition_source_failed', snapshot.error.message)
       const document = snapshot.value.document as unknown as WorkflowSettings
       const saved = await this.settings.update({ source: 'workflow', scope: 'user',
-        expectedRevision: snapshot.value.revision,
+        // The caller's revision is the document this write replaces; a
+        // create has none, so the read above is the caller.
+        expectedRevision: request.expectedRevision ?? snapshot.value.revision,
         document: { ...document, definitions: { ...document.definitions, [definition.name]: definition } },
       })
       if (!saved.ok) throw new WorkflowError(saved.error.code, saved.error.message)
     } else {
-      if (!cwd) throw new WorkflowError('invalid_params', 'Project save requires cwd')
+      const { cwd } = request
       const text = stringify(definition)
       if (Buffer.byteLength(text) > 8 * 1024 * 1024) {
         throw new WorkflowError('invalid_definition', 'Definition file exceeds 8 MiB')

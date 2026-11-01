@@ -102,8 +102,7 @@ export default definePlugin({
               return { kind: 'value' as const, value: visible((await catalog.load(cwd)).entries) }
             }
             if (name === 'save') {
-              const { source, cwd, document } = management.save.parse(call.params)
-              return { kind: 'value' as const, value: await catalog.save(source, cwd, document) }
+              return { kind: 'value' as const, value: await catalog.save(management.save.parse(call.params)) }
             }
             if (name === 'start') {
               const request = management.start.parse(call.params)
