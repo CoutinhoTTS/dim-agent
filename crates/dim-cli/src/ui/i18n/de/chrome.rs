@@ -253,7 +253,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "Nichts läuft",
         "No queued message" => "Keine Nachricht eingereiht",
         "Only in fullscreen (/tui)" => "Nur im Vollbild (/tui)",
-        "/{name} is not yet available" => "/{name} noch nicht verfügbar",
         "new session" => "neue Session",
         "resumed {id} · {count} messages" => "{id} fortgesetzt · {count} Nachrichten",
         " · earlier history: /timeline" => " · früherer Verlauf: /timeline",

@@ -251,7 +251,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "Tak ada yang berjalan",
         "No queued message" => "Antrean kosong",
         "Only in fullscreen (/tui)" => "Hanya di layar penuh (/tui)",
-        "/{name} is not yet available" => "/{name} belum tersedia",
         "new session" => "sesi baru",
         "resumed {id} · {count} messages" => "lanjut {id} · {count} pesan",
         " · earlier history: /timeline" => " · riwayat lama: /timeline",

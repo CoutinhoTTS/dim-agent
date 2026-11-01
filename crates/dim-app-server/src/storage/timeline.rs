@@ -1,7 +1,8 @@
 use super::{
     SqliteStorage,
     codec::{
-        self, CONTENT_BUDGET, ContentRow, ListReferences, Previous, Reader, Values, WireEvent,
+        self, CONTENT_BUDGET, ContentRow, ListReferences, Previous, Reader, RequestBodies, Values,
+        WireEvent,
     },
     files::{self, SessionFiles},
     metadata::{self, Titles},
@@ -299,8 +300,131 @@ impl SqliteTimelineStore {
         store
     }
     /// A reader for one read call or validation pass.
-    fn reader(&self) -> Reader {
-        Reader::new(self.content_budget)
+    fn reader(&self, request_bodies: RequestBodies) -> Reader {
+        match request_bodies {
+            RequestBodies::Rebuild => Reader::new(self.content_budget),
+            RequestBodies::Unused => Reader::without_request_bodies(self.content_budget),
+        }
+    }
+    /// One page of complete batches, with `request_bodies` deciding whether the
+    /// records it returns carry their rebuilt requests (§7.5 of the request
+    /// storage design).
+    async fn page(
+        &self,
+        key: &TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+        request_bodies: RequestBodies,
+    ) -> Result<Vec<StoredEvent>> {
+        if after > through {
+            return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+        }
+        let session = key.session_id.clone();
+        self.segments(
+            &session,
+            vec![(key.branch_id.clone(), through..=through)],
+            request_bodies,
+        )
+        .await?;
+        if after > 0 && after != through {
+            self.segments(
+                &session,
+                vec![(key.branch_id.clone(), after..=after)],
+                request_bodies,
+            )
+            .await?;
+        }
+        let mut end = through.min(after.saturating_add(limit as u64));
+        if end <= after {
+            return Ok(vec![]);
+        }
+        let mut next = after + 1;
+        let mut events = vec![];
+        let mut reader = self.reader(request_bodies);
+        while next <= end {
+            let last = end.min(next.saturating_add(255));
+            let page = read_range(&self.db, &mut reader, key, next..=last, false).await?;
+            if page.len() as u64 != last - next + 1 {
+                return Err(error("Timeline read contains a sequence gap"));
+            }
+            if last == end {
+                end = page.last().unwrap().batch_end;
+                if end < last || end > through {
+                    return Err(error("invalid Timeline batch boundary"));
+                }
+            }
+            events.extend(page);
+            next = last + 1;
+        }
+        self.finish(reader);
+        Ok(events)
+    }
+    /// The records of `segments`, decoded with one reader of `request_bodies`.
+    async fn segments(
+        &self,
+        session_id: &str,
+        segments: Vec<(String, RangeInclusive<u64>)>,
+        request_bodies: RequestBodies,
+    ) -> Result<Vec<Vec<StoredEvent>>> {
+        let session = session_id.to_owned();
+        let mut result = Vec::with_capacity(segments.len());
+        let mut reader = self.reader(request_bodies);
+        for (branch_id, range) in segments {
+            let key = TimelineKey {
+                session_id: session.clone(),
+                branch_id,
+            };
+            let through = self.head(&key).await?;
+            if *range.end() > through {
+                return Err(AgentError::InvalidInput("future Timeline sequence".into()));
+            }
+            let mut records = vec![];
+            let mut next = *range.start();
+            while next <= *range.end() {
+                let end = next.saturating_add(255).min(*range.end());
+                let page = read_range(&self.db, &mut reader, &key, next..=end, false).await?;
+                let expected = if end >= next.max(1) {
+                    end - next.max(1) + 1
+                } else {
+                    0
+                };
+                if page.len() as u64 != expected {
+                    return Err(error("Timeline read contains a sequence gap"));
+                }
+                records.extend(page);
+                next = end + 1;
+            }
+            if records
+                .last()
+                .is_some_and(|record| record.batch_end > *range.end())
+            {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {} is inside an atomic batch",
+                    range.end()
+                )));
+            }
+            result.push(records);
+        }
+        self.finish(reader);
+        Ok(result)
+    }
+    /// The records of `key` in `range`, decoded with one reader of
+    /// `request_bodies`.
+    async fn read_records(
+        &self,
+        key: &TimelineKey,
+        range: RangeInclusive<u64>,
+        request_bodies: RequestBodies,
+    ) -> Result<Vec<StoredEvent>> {
+        let mut segments = self
+            .segments(
+                &key.session_id,
+                vec![(key.branch_id.clone(), range)],
+                request_bodies,
+            )
+            .await?;
+        Ok(segments.pop().expect("one range returns one segment"))
     }
     /// Ends `reader`'s read call; feature `testing` counts its node loads.
     fn finish(&self, reader: Reader) {
@@ -354,6 +478,7 @@ impl SqliteTimelineStore {
                     !branches.is_empty()
                 });
         }
+        self.db.checkpoint();
     }
     fn commit_prepared(&self, prepared: BTreeMap<String, (Vec<Pending>, Prepared)>) {
         let mut guard = self
@@ -491,7 +616,7 @@ impl SqliteTimelineStore {
     /// storage design), and each request draft's against its record's
     /// request.
     fn prepare(&self, session: &str, batches: &[Pending]) -> Result<Prepared> {
-        let mut reader = self.reader();
+        let mut reader = self.reader(RequestBodies::Rebuild);
         let mut round = Round::default();
         let mut prepared = Prepared {
             lists: Vec::with_capacity(batches.len()),
@@ -759,6 +884,8 @@ impl SqliteTimelineStore {
             fault();
         }
         tx.commit().map_err(error)?;
+        drop(guard);
+        self.db.checkpoint();
         if released > 0 {
             self.sweep_files.notify_one();
         }
@@ -1045,13 +1172,37 @@ impl SessionStore {
         limit: usize,
         through: u64,
     ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+        self.main_page(id, after, limit, through, RequestBodies::Rebuild)
+            .await
+    }
+    /// A page for readers that discard `context/prepare` and `model/call`
+    /// records or use only their other fields: their requests are not
+    /// rebuilt.
+    pub async fn read_page_without_request_bodies(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+        self.main_page(id, after, limit, through, RequestBodies::Unused)
+            .await
+    }
+    async fn main_page(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+        through: u64,
+        request_bodies: RequestBodies,
+    ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
         let key = TimelineKey {
             session_id: id.into(),
             branch_id: "main".into(),
         };
         Ok(self
             .timeline
-            .read_page(&key, after, limit, through)
+            .page(&key, after, limit, through, request_bodies)
             .await?
             .into_iter()
             .map(|record| record.event)
@@ -1179,7 +1330,9 @@ impl SessionStore {
             branch_id: branch.into(),
         };
         if through > 0 {
-            self.timeline.read(&key, through..=through).await?;
+            self.timeline
+                .read_records(&key, through..=through, RequestBodies::Unused)
+                .await?;
         }
         let top = before.saturating_sub(1).min(through);
         if top == 0 || top < window_start || limit == 0 {
@@ -1202,7 +1355,10 @@ impl SessionStore {
             .max(1)
             .max(window_start);
         loop {
-            let page = self.timeline.read(&key, low..=end).await?;
+            let page = self
+                .timeline
+                .read_records(&key, low..=end, RequestBodies::Unused)
+                .await?;
             let Some(first) = page.first() else {
                 return Ok(vec![]);
             };
@@ -1225,7 +1381,7 @@ impl SessionStore {
         key: &TimelineKey,
         range: RangeInclusive<u64>,
     ) -> Result<Vec<StoredEvent>> {
-        let mut reader = self.timeline.reader();
+        let mut reader = self.timeline.reader(RequestBodies::Unused);
         let records = read_range(&self.timeline.db, &mut reader, key, range, false).await;
         self.timeline.finish(reader);
         records
@@ -1388,7 +1544,7 @@ impl SessionStore {
         select: impl Fn(&Connection) -> Result<Vec<Fetched>> + Send + Sync + 'static,
     ) -> Result<Vec<Fetched>> {
         let session = session.to_owned();
-        let mut reader = self.timeline.reader();
+        let mut reader = self.timeline.reader(RequestBodies::Rebuild);
         let rows = holds(
             &self.timeline.db,
             &mut reader,
@@ -2615,7 +2771,7 @@ impl TimelineStore for SqliteTimelineStore {
     }
     fn branches<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
         Box::pin(async move {
-            let mut reader = self.reader();
+            let mut reader = self.reader(RequestBodies::Rebuild);
             let branches = validate_session(&self.db, &mut reader, session_id).await?;
             self.finish(reader);
             Ok(branches)
@@ -2666,37 +2822,20 @@ impl TimelineStore for SqliteTimelineStore {
         through: u64,
     ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
         Box::pin(async move {
-            if after > through {
-                return Err(AgentError::InvalidInput("future Timeline cursor".into()));
-            }
-            self.read(key, through..=through).await?;
-            if after > 0 && after != through {
-                self.read(key, after..=after).await?;
-            }
-            let mut end = through.min(after.saturating_add(limit as u64));
-            if end <= after {
-                return Ok(vec![]);
-            }
-            let mut next = after + 1;
-            let mut events = vec![];
-            let mut reader = self.reader();
-            while next <= end {
-                let last = end.min(next.saturating_add(255));
-                let page = read_range(&self.db, &mut reader, key, next..=last, false).await?;
-                if page.len() as u64 != last - next + 1 {
-                    return Err(error("Timeline read contains a sequence gap"));
-                }
-                if last == end {
-                    end = page.last().unwrap().batch_end;
-                    if end < last || end > through {
-                        return Err(error("invalid Timeline batch boundary"));
-                    }
-                }
-                events.extend(page);
-                next = last + 1;
-            }
-            self.finish(reader);
-            Ok(events)
+            self.page(key, after, limit, through, RequestBodies::Rebuild)
+                .await
+        })
+    }
+    fn read_page_without_request_bodies<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        after: u64,
+        limit: usize,
+        through: u64,
+    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        Box::pin(async move {
+            self.page(key, after, limit, through, RequestBodies::Unused)
+                .await
         })
     }
 
@@ -2860,47 +2999,8 @@ impl TimelineStore for SqliteTimelineStore {
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
         Box::pin(async move {
-            let session = session_id.to_owned();
-            let mut result = Vec::with_capacity(segments.len());
-            let mut reader = self.reader();
-            for (branch_id, range) in segments {
-                let key = TimelineKey {
-                    session_id: session.clone(),
-                    branch_id,
-                };
-                let through = self.head(&key).await?;
-                if *range.end() > through {
-                    return Err(AgentError::InvalidInput("future Timeline sequence".into()));
-                }
-                let mut records = vec![];
-                let mut next = *range.start();
-                while next <= *range.end() {
-                    let end = next.saturating_add(255).min(*range.end());
-                    let page = read_range(&self.db, &mut reader, &key, next..=end, false).await?;
-                    let expected = if end >= next.max(1) {
-                        end - next.max(1) + 1
-                    } else {
-                        0
-                    };
-                    if page.len() as u64 != expected {
-                        return Err(error("Timeline read contains a sequence gap"));
-                    }
-                    records.extend(page);
-                    next = end + 1;
-                }
-                if records
-                    .last()
-                    .is_some_and(|record| record.batch_end > *range.end())
-                {
-                    return Err(AgentError::InvalidInput(format!(
-                        "sequence {} is inside an atomic batch",
-                        range.end()
-                    )));
-                }
-                result.push(records);
-            }
-            self.finish(reader);
-            Ok(result)
+            self.segments(session_id, segments, RequestBodies::Rebuild)
+                .await
         })
     }
     fn trace<'a>(
@@ -2909,7 +3009,7 @@ impl TimelineStore for SqliteTimelineStore {
         sequence: u64,
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         Box::pin(async move {
-            let mut reader = self.reader();
+            let mut reader = self.reader(RequestBodies::Rebuild);
             let record = read_range(&self.db, &mut reader, key, sequence..=sequence, false)
                 .await?
                 .pop();
@@ -2924,7 +3024,7 @@ impl TimelineStore for SqliteTimelineStore {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let key = key.clone();
-            let mut reader = self.reader();
+            let mut reader = self.reader(RequestBodies::Rebuild);
             let sequence = snapshot.sequence;
             holds(&self.db, &mut reader, None, move |connection, reader, rows: &mut Option<Rows>| {
                 let rows = match rows {

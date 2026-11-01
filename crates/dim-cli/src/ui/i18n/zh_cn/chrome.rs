@@ -210,7 +210,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "当前没有运行",
         "No queued message" => "没有队列消息",
         "Only in fullscreen (/tui)" => "仅在全屏界面可用（/tui）",
-        "/{name} is not yet available" => "/{name} 尚不可用",
         "new session" => "新会话",
         "resumed {id} · {count} messages" => "已恢复 {id} · {count} 条消息",
         " · earlier history: /timeline" => " · 更早历史：/timeline",

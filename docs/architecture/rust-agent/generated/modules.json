@@ -2604,7 +2604,8 @@
         "eprintln",
         "format",
         "rusqlite::params",
-        "tokio::pin"
+        "tokio::pin",
+        "tracing::error"
       ]
     },
     {
@@ -2828,6 +2829,15 @@
       ]
     },
     {
+      "id": "dim_cli::client::same_file_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert"
+      ]
+    },
+    {
       "id": "dim_cli::client::web_assets_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::client",
@@ -3025,6 +3035,15 @@
         "println",
         "tokio::pin",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::maintenance",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/maintenance.rs",
+      "unexpandedMacros": [
+        "format"
       ]
     },
     {
@@ -4711,6 +4730,7 @@
         "matches",
         "print",
         "println",
+        "unreachable",
         "vec"
       ]
     },
@@ -16589,6 +16609,13 @@
       ]
     },
     {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path crate::storage::vacuum_store"
+      ]
+    },
+    {
       "from": "dim_app_server::codex_oauth",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -22459,7 +22486,9 @@
         "mod sqlite",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
-        "use sqlite::SqliteStoragePlugin"
+        "use sqlite::SqliteStoragePlugin",
+        "use sqlite::Vacuumed",
+        "use sqlite::vacuum_store"
       ]
     },
     {
@@ -23163,6 +23192,10 @@
         "path Previous",
         "path Reader",
         "path Reader::new",
+        "path Reader::without_request_bodies",
+        "path RequestBodies",
+        "path RequestBodies::Rebuild",
+        "path RequestBodies::Unused",
         "path Values::Written",
         "path WireEvent",
         "path codec::NodeLoads",
@@ -23177,6 +23210,7 @@
         "use super::codec::ListReferences",
         "use super::codec::Previous",
         "use super::codec::Reader",
+        "use super::codec::RequestBodies",
         "use super::codec::Values",
         "use super::codec::WireEvent"
       ]
@@ -23780,6 +23814,7 @@
         "path Action::Acp",
         "path Action::Chat",
         "path Action::DaemonStop",
+        "path Action::DaemonVacuum",
         "path Action::DefaultTerminalMode",
         "path Action::Exec",
         "path Action::Export",
@@ -23921,6 +23956,14 @@
         "path login::account_directory",
         "path login::login",
         "path login::logout"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::maintenance",
+      "references": [
+        "mod maintenance",
+        "path maintenance::vacuum"
       ]
     },
     {
@@ -24238,7 +24281,15 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::client::same_file_tests",
+      "references": [
+        "mod same_file_tests"
       ]
     },
     {
@@ -24274,6 +24325,13 @@
         "use dim_client::RpcError",
         "use dim_client::Server",
         "use dim_client::app_error"
+      ]
+    },
+    {
+      "from": "dim_cli::client::same_file_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::same_file"
       ]
     },
     {
@@ -24656,7 +24714,8 @@
       "to": "dim_cli::args",
       "references": [
         "path Options",
-        "use crate::args::Options"
+        "use crate::args::Options",
+        "use crate::args::SERVER_REQUIREMENT"
       ]
     },
     {
@@ -24897,6 +24956,30 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::maintenance",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::server",
+        "use crate::client"
       ]
     },
     {
@@ -33027,6 +33110,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::active",
+        "path i18n::set",
+        "path t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
@@ -33164,6 +33257,8 @@
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path QUEUE_HINT",
+        "path QUEUE_HINT_MORE",
         "path ThemeContext",
         "path WebOpened",
         "path banner",

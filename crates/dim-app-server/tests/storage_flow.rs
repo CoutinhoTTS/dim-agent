@@ -8,7 +8,9 @@ use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
     *,
 };
-use dim_app_server::storage::{NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore};
+use dim_app_server::storage::{
+    NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
+};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
@@ -852,6 +854,119 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
     assert_eq!(store.head(&key("session", "main")).await.unwrap(), 11);
     store.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// A held read snapshot keeps the WAL from checkpointing; once it ends, the
+/// writer's checkpoint copies the frames and the size limit truncates the
+/// file, so the WAL stays bounded instead of at its high-water mark (#600).
+#[tokio::test]
+async fn the_wal_file_is_bounded_when_a_read_snapshot_ends() {
+    const WAL_LIMIT: u64 = 64 * 1024 * 1024;
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut wal = database.0.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal_bytes = || std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+    let reader = Connection::open(&database.0).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM timeline_events", [], |row| row.get(0))
+        .unwrap();
+    let payload = "x".repeat(8_000_000);
+    let mut sequence = 0;
+    while wal_bytes() <= WAL_LIMIT && sequence < 20 {
+        sequence += 1;
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text(payload.clone(), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        wal_bytes() > WAL_LIMIT,
+        "a held read snapshot keeps the WAL growing: {} bytes",
+        wal_bytes()
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    for _ in 0..2 {
+        sequence += 1;
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text(payload.clone(), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        wal_bytes() <= WAL_LIMIT,
+        "the WAL is truncated to its limit after the snapshot ends: {} bytes",
+        wal_bytes()
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Deleting a Session leaves free pages; `dimcode daemon vacuum` rewrites the
+/// offline store to reclaim them and refuses a store another process owns.
+#[tokio::test]
+async fn vacuum_reclaims_a_deleted_session_and_refuses_a_running_store() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    for sequence in 1..=50u64 {
+        append(
+            &store,
+            key("session", "main"),
+            vec![record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text("x".repeat(40_000), None)),
+            )],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        vacuum_store(database.0.clone()).is_err(),
+        "a running store owns the database"
+    );
+    store.rollback_session("session").await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let before = std::fs::metadata(&database.0).unwrap().len();
+    let vacuumed = vacuum_store(database.0.clone()).unwrap();
+    assert!(
+        vacuumed.after < before,
+        "vacuum reclaims free pages: {} >= {}",
+        vacuumed.after,
+        before
+    );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let events: i64 = connection
+        .query_row("SELECT count(*) FROM timeline_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 0, "vacuum keeps the deleted rows deleted");
+    drop(connection);
 }
 
 /// A text block's identity is the first delta's event id, so the output-row
@@ -1846,6 +1961,104 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
     assert_eq!(after, before);
     assert!(store.take_node_loads().max_per_hold <= 256);
     drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A paging read uses none of the requests its records hold, so it rebuilds
+/// none: `context/prepare` and `model/call` carry an empty request, no
+/// content row is loaded, and a page still returns when one of those nodes
+/// is damaged. A read that uses the requests fails on the same row (#598).
+#[tokio::test]
+async fn paging_reads_do_not_rebuild_request_bodies() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("paging", &SessionConfig::default())
+        .await
+        .unwrap();
+    let main = key("paging", "main");
+    let messages: Vec<Message> = (1..=6)
+        .map(|index| Message::text(Role::User, format!("message-{index}")))
+        .collect();
+    append(
+        &store,
+        main.clone(),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("go", Some(InputMode::Queue))),
+            ),
+            model_call(2, messages.clone()),
+            text(3, "done"),
+        ],
+    )
+    .await
+    .unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session("paging".into()).await.unwrap();
+    session.idle("main").await.unwrap();
+    store.take_node_loads();
+
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(page.len(), 3);
+    assert_eq!(
+        store.take_node_loads(),
+        NodeLoads::default(),
+        "a paging read loaded request content"
+    );
+    assert!(
+        matches!(&page[1].kind, EventKind::ModelCall(data) if data.request.messages.is_empty()),
+        "a paging read left a stored request as its record holds it"
+    );
+
+    let rebuilt = store.read_page(&main, 0, 8, 3).await.unwrap();
+    assert_eq!(rebuilt[1].event, model_call(2, messages).event);
+    assert_eq!(store.take_node_loads().loads, 6);
+
+    let connection = Connection::open(&database.0).unwrap();
+    let damaged = connection
+        .execute(
+            "UPDATE timeline_content SET body = replace(body, 'message-1', 'message-X') \
+             WHERE session_id = 'paging' AND kind = 'node'",
+            [],
+        )
+        .unwrap();
+    assert!(damaged > 0, "the request's nodes are stored");
+    assert!(
+        matches!(
+            store.read_page(&main, 0, 8, 3).await,
+            Err(AgentError::Storage(message)) if message.contains("request content hash mismatch")
+        ),
+        "a read that uses the requests checks their content"
+    );
+    let page = session.local_page("main", 0, 8, 3).await.unwrap();
+    assert_eq!(
+        page.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(store.take_node_loads(), NodeLoads::default());
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let page = sessions
+        .read_page_before("paging", "main", 4, 8, 3, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|record| record.event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the reverse history page does not rebuild the damaged request"
+    );
+    drop(sessions);
+    drop(connection);
+    agent.close().await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }

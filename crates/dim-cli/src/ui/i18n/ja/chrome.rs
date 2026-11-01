@@ -233,7 +233,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "実行中の処理なし",
         "No queued message" => "キューは空",
         "Only in fullscreen (/tui)" => "全画面のみ（/tui）",
-        "/{name} is not yet available" => "/{name} はまだ利用不可",
         "new session" => "新規セッション",
         "resumed {id} · {count} messages" => "{id} を再開 · {count} 件",
         " · earlier history: /timeline" => " · 過去の履歴：/timeline",
