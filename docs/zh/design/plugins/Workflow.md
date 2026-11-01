@@ -492,7 +492,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 使用现有 `scope.withLock` 的读/修改/`file.replace` 持久化每个必要转换，释放事务后才调用 `sessions`。启动、输入和报告都先记录意图，再发起副作用；保存回复后才继续推进。不增互斥锁、日志、存储或公开服务。读/替换失败即停止新的运行副作用并报告存储错误。卸载先停止准入，结算自持调用和记录写入，再关闭文件 scope；A13 不限制已接受写入的结算时间。
 
-保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)：保留所有 running/stopping 运行、每条 pending 报告，以及其他终态中按 `ended_at` 最近的 100 条记录，同时间以 `run_id` 排序。日志最多 500 条（A9）。只有报告为 none/delivered/undeliverable 且所有自持阶段操作均已结算的运行才可移除。start 的帧估算超过载荷时，在准入前让超出该集合的最早且已结算的终态运行过期；pending 报告和未结算所有权不会为了空间而过期。对于从 Workflow 自己成功 launch 回复中记录的 Session，先计算活动和保留运行的引用；没有引用时，先调用现有 sessions.delete，再移除过期运行的最后一条所有权记录。删除失败或不确定时保留记录并报告错误，供下一次保留期清理使用，不增清理队列。fork 和外部提供的 Session 身份不归 Workflow。报告或清理未结算时可暂时超过 100 条。没有持久化 launch 身份的 Session 仍适用附录 F 的已知限制。
+保留策略遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)：保留所有 running/stopping 运行、每条 pending 报告，以及其他终态中按 `ended_at` 最近的 100 条记录，同时间以 `run_id` 排序。日志最多 500 条（A9）。只有报告为 none/delivered/undeliverable 且所有自持阶段操作均已结算的运行才可移除。start 的帧估算超过载荷时，在准入前也可让最近 100 条内最早且已结算的终态运行过期：最近 100 条是存储在容量内时的保留目标，不是 start 为空间可过期记录的下限。pending 报告和未结算所有权不会为了空间而过期。对于从 Workflow 自己成功 launch 回复中记录的 Session，先计算活动和保留运行的引用；没有引用时，先调用现有 sessions.delete，再移除过期运行的最后一条所有权记录。删除失败或不确定时保留记录并报告错误，供下一次保留期清理使用，不增清理队列。fork 和外部提供的 Session 身份不归 Workflow。报告或清理未结算时可暂时超过 100 条。没有持久化 launch 身份的 Session 仍适用附录 F 的已知限制。
 
 启动恢复后、每次终态转换后及报告结算后执行保留期清理。失败清理仍留下过期记录时，经 owner 的定时器每分钟重试一次，即使没有活动运行。运行存储读取失败即跳过删除与裁剪，保留记录并报告错误。所有权引用来自运行存储；定义来源被删除或无法读取，不会使活动运行或 pending 报告过期。读取失败而跳过的清理也按同一分钟节奏重试。
 

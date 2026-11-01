@@ -752,6 +752,35 @@ test('a start expires the oldest settled history to keep the store within one pa
   assert.equal((await f.settled(admitted.value.run_id)).state, 'completed')
 })
 
+test('a refused start expires no settled history', async t => {
+  const seed = await fixture(t)
+  await seed.method('save', { source: 'user', document: definition('history',
+    Array.from({ length: 4 }, (_, index) => ({ stage: { id: `s${index}`, prompt: 'done' } }))) })
+  const started = await seed.method('start', { name: 'history', cwd: '/workspace' })
+  await seed.settled(started.value.run_id)
+  const first = JSON.parse(seed.state.stored).runs[0]
+  const history = Array.from({ length: 40 }, (_, index) => ({ ...structuredClone(first), run_id: randomUUID(),
+    created_at: new Date(Date.UTC(2026, 0, 1) + index - 1).toISOString(),
+    ended_at: new Date(Date.UTC(2026, 0, 1) + index).toISOString(),
+    stages: first.stages.map((stage, at) => ({ ...stage, session_id: `owned-${index}-${at}`,
+      result_text: 'x'.repeat(64 * 1024) })),
+  }))
+  const f = await fixture(t)
+  f.state.document.max_concurrent_runs = 1
+  await f.method('save', { source: 'user', document: definition('active', [{ stage: { id: 'one', prompt: 'held' } }]) })
+  f.state.behavior = () => 'held'
+  assert.equal((await f.method('start', { name: 'active', cwd: '/workspace' })).kind, 'value')
+  const stored = JSON.parse(f.state.stored)
+  stored.runs.push(...history)
+  f.state.stored = JSON.stringify(stored)
+  const before = f.state.stored
+  const deletes = f.state.deletes.length
+  const refused = await f.method('start', { name: 'active', cwd: '/workspace' })
+  assert.equal(refused.code, 'limit_exceeded')
+  assert.equal(f.state.deletes.length, deletes)
+  assert.equal(f.state.stored, before)
+})
+
 test('tool errors retain the source diagnostic in model-visible content', async t => {
   const f = await fixture(t)
   f.services.settings.read = async () => ({ ok: false, error: { code: 'failed', message: 'Settings source unavailable', retryable: false } })

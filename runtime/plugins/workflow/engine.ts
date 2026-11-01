@@ -111,6 +111,12 @@ export class Workflow {
       created_at: new Date().toISOString(), state: 'running', report: { state: 'none' }, log: [],
       stages: definition.steps.flatMap((step, index) => stages(step).map(stage => ({ id: stage.id, step: index, state: 'waiting' as const }))),
     }
+    const known = await this.store.read()
+    this.available()
+    if (cancelled()) throw new WorkflowError('cancelled')
+    if (known.filter(run => !terminal(run)).length >= configured.document.max_concurrent_runs) {
+      throw new WorkflowError('limit_exceeded')
+    }
     await this.retain(projectedBytes([run]))
     await this.store.update(runs => {
       this.available()
