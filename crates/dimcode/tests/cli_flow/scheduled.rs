@@ -1532,6 +1532,13 @@ fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
                 &request,
                 json!({"jobs": [
                     job("job-1", "a job whose name is rather long", 3, true, Value::Null),
+                    job(
+                        "job-2",
+                        "a job whose name is exactly sixty cells wide to wrap it well",
+                        4,
+                        false,
+                        Value::Null,
+                    ),
                 ]}),
             );
             let mut line = String::new();
@@ -1565,7 +1572,21 @@ fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
         }
         terminal.raw(b"\x18");
         terminal.until("a job whose name is rather long? Enter confirm");
-        // Esc cancels the confirmation, a second closes the panel.
+        // Esc cancels the confirmation.
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        // A sixty-cell name wraps the confirmation across rows; the keys and
+        // their actions are drawn whole, never cut.
+        terminal.raw(b"\x1b[B");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x18");
+        // The confirmation names the selected job, then its keys.
+        terminal.until("sixty cells wide to wrap it well?");
+        terminal.until("Enter");
+        terminal.until(" confirm");
+        terminal.until("Esc");
+        terminal.until(" cancel");
+        // A second Esc closes the panel.
         terminal.raw(b"\x1b");
         thread::sleep(Duration::from_millis(200));
         terminal.raw(b"\x1b");

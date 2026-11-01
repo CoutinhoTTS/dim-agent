@@ -4115,6 +4115,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "vec"
       ]
     },
@@ -29761,7 +29762,8 @@
       "to": "dim_cli::ui::list_panel",
       "references": [
         "path ListPanel",
-        "path ListPanel::new"
+        "path ListPanel::new",
+        "path hint_rows"
       ]
     },
     {
