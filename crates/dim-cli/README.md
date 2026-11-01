@@ -172,16 +172,26 @@ unsupported daemon.
 `session.delete`, and `dimcode session cleanup (--older-than DURATION | --keep N)
 [--yes]` deletes the Sessions a selector matches. The delete reply says whether the
 call removed the Session: `true` prints `Deleted ID`; `false` prints `Nothing was
-deleted: no Session ID is stored in this daemon's database.` on stderr and exits 1,
+removed: no stored Session ID.` on stderr and exits 1,
 and a reply without the field, from an older App Server, prints `Deleted ID`. Cleanup
-reads `session.summaries` with `includeClosed: true`, so a Session this daemon closed
-is listed and marked `closed` (an older App Server refuses the field `invalid_params`;
-the read is repeated without it with one stderr note), orders and filters by
-`updatedAt` (the last activity), and prints its selection before anything is deleted:
-the id, the title and how long ago the Session was active, one tab-separated line
-each. A Session with a running turn or an attached client is kept, listed after the
-selection under `Kept (active):` with its reason, and `--keep N` keeps it without its
-consuming one of the N. On a terminal only `y` or `yes` confirms and `--yes` skips
+selects only the Sessions `/resume` lists by default
+([classification](../../docs/design/appserver/session-classification.md)): origin
+`client` or `unknown`, or a daemon that records none; an `internal` or `acp` Session is
+never selected, does not count toward `--keep N` and does not appear in the preview.
+It reads `session.summaries` with `includeClosed: true`, so a Session this daemon closed
+is listed and marked `closed`; an older App Server refuses the field `invalid_params`,
+and cleanup then stops before any delete with
+`This App Server is too old to clean up Sessions safely; nothing was deleted.` and exits
+1. It orders and filters by `updatedAt` (the last activity), and prints its selection
+before anything is deleted: the id, the title and how long ago the Session was active,
+one tab-separated line each. A Session with a running turn or an attached client is
+kept, listed after the selection under `Kept (active):` with its reason, and `--keep N`
+keeps it without its consuming one of the N. Every delete carries
+`requireInactive: true`, so the daemon checks the Session again at the delete; a
+`session_active` refusal is listed under `Kept (active):` after the deletes with the
+daemon's reason and is not a failure. When nothing was deleted because every matching
+Session is active, the command prints `Nothing to delete: every matching Session is
+active.` and exits 0. On a terminal only `y` or `yes` confirms and `--yes` skips
 the prompt; without a terminal nothing confirms, so a script passes `--yes`. A
 confirmed run deletes every selected id: each failure is printed with its id and the
 method's error, `dimcode session delete ID` is printed to retry it, and the run exits

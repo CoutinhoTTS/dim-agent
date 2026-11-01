@@ -507,6 +507,18 @@ fn state(mut session: Value, closed: bool, running: bool, clients: usize) -> Val
     session
 }
 
+/// `summary` with the creation origin the selection reads.
+fn origin(mut session: Value, origin: &str) -> Value {
+    session["origin"] = json!(origin);
+    session
+}
+
+/// The params of a cleanup delete: it always asks the owner to refuse a
+/// Session in use.
+fn require_inactive(id: &str) -> Value {
+    json!({"sessionId": id, "requireInactive": true})
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -575,8 +587,7 @@ fn session_delete_reports_a_delete_that_removed_nothing() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr
-            .contains("Nothing was deleted: no Session gone is stored in this daemon's database."),
+        stderr.contains("Nothing was removed: no stored Session gone."),
         "{stderr}"
     );
     assert!(output.stdout.is_empty());
@@ -666,7 +677,7 @@ fn session_cleanup_by_keep_deletes_exactly_the_selection() {
         wire.reply(&listed, three_sessions());
         for expected in ["b", "a"] {
             let delete = wire.read("session.delete");
-            assert_eq!(delete["params"], json!({"sessionId": expected}));
+            assert_eq!(delete["params"], require_inactive(expected));
             wire.reply(&delete, json!({}));
         }
         wire.hold();
@@ -703,12 +714,12 @@ fn session_cleanup_names_a_failed_id_and_prints_its_retry() {
         let listed = wire.read("session.summaries");
         wire.reply(&listed, three_sessions());
         let first = wire.read("session.delete");
-        assert_eq!(first["params"], json!({"sessionId":"b"}));
+        assert_eq!(first["params"], require_inactive("b"));
         wire.send(json!({"jsonrpc":"2.0","id":first["id"],"error":{
             "code":-32000,"message":"fixture storage_failed",
             "data":{"appError":"storage_failed"}}}));
         let second = wire.read("session.delete");
-        assert_eq!(second["params"], json!({"sessionId":"a"}));
+        assert_eq!(second["params"], require_inactive("a"));
         wire.reply(&second, json!({}));
         wire.hold();
     });
@@ -770,7 +781,7 @@ fn session_cleanup_asks_on_a_terminal() {
             if answer == "y" {
                 for expected in ["b", "a"] {
                     let delete = wire.read("session.delete");
-                    assert_eq!(delete["params"], json!({"sessionId": expected}));
+                    assert_eq!(delete["params"], require_inactive(expected));
                     wire.reply(&delete, json!({}));
                 }
             }
@@ -880,7 +891,7 @@ fn session_cleanup_lists_and_deletes_a_closed_session() {
             ]),
         );
         let delete = wire.read("session.delete");
-        assert_eq!(delete["params"], json!({"sessionId":"closed"}));
+        assert_eq!(delete["params"], require_inactive("closed"));
         wire.reply(&delete, json!({"deleted": true}));
         wire.hold();
     });
@@ -932,7 +943,7 @@ fn session_cleanup_keeps_active_sessions() {
         let delete = wire.read("session.delete");
         assert_eq!(
             delete["params"],
-            json!({"sessionId":"idle"}),
+            require_inactive("idle"),
             "an active Session is never deleted"
         );
         wire.reply(&delete, json!({"deleted": true}));
@@ -980,7 +991,7 @@ fn session_cleanup_with_keep_zero_selects_every_inactive_session() {
         );
         for expected in ["b", "a"] {
             let delete = wire.read("session.delete");
-            assert_eq!(delete["params"], json!({"sessionId": expected}));
+            assert_eq!(delete["params"], require_inactive(expected));
             wire.reply(&delete, json!({"deleted": true}));
         }
         wire.hold();
@@ -1028,7 +1039,7 @@ fn session_cleanup_reports_every_failed_delete() {
         );
         for expected in ["b", "a"] {
             let delete = wire.read("session.delete");
-            assert_eq!(delete["params"], json!({"sessionId": expected}));
+            assert_eq!(delete["params"], require_inactive(expected));
             wire.send(json!({"jsonrpc":"2.0","id":delete["id"],"error":{
                 "code":-32000,"message":"fixture storage_failed",
                 "data":{"appError":"storage_failed"}}}));
@@ -1061,8 +1072,11 @@ fn session_cleanup_reports_every_failed_delete() {
     );
 }
 
+/// `requireInactive` and `includeClosed` land together, so a server that
+/// refuses the summaries read is too old to check a delete: cleanup stops
+/// before any delete and exits 1.
 #[test]
-fn session_cleanup_falls_back_once_without_include_closed() {
+fn session_cleanup_stops_when_the_app_server_is_too_old() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.summaries", "session.delete"]);
@@ -1071,9 +1085,220 @@ fn session_cleanup_falls_back_once_without_include_closed() {
         wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{
             "code":-32602,"message":"Invalid request parameters",
             "data":{"appError":"invalid_params"}}}));
-        let retried = wire.read("session.summaries");
-        assert_eq!(retried["params"], json!({}), "the field is dropped once");
-        wire.reply(&retried, json!([]));
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "no delete is sent: {line:?}"
+        );
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "1", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "This App Server is too old to clean up Sessions safely; nothing was deleted."
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "no preview and no delete");
+}
+
+/// A `requireInactive` the server does not know is the same too-old case:
+/// the first delete is the one refused, so nothing was deleted.
+#[test]
+fn session_cleanup_stops_when_a_delete_refuses_require_inactive() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(&listed, json!([summary("b", Some("Middle"), 24 * HOUR)]));
+        let delete = wire.read("session.delete");
+        assert_eq!(delete["params"], require_inactive("b"));
+        wire.send(json!({"jsonrpc":"2.0","id":delete["id"],"error":{
+            "code":-32602,"message":"Invalid request parameters",
+            "data":{"appError":"invalid_params"}}}));
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "no further delete is sent: {line:?}"
+        );
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "0", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "This App Server is too old to clean up Sessions safely; nothing was deleted."
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The owner refuses a Session the preview read as idle: cleanup keeps it
+/// with the owner's reason, deletes the rest and still exits 0.
+#[test]
+fn session_cleanup_keeps_a_session_the_owner_refuses() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        assert_eq!(listed["params"], json!({"includeClosed": true}));
+        wire.reply(
+            &listed,
+            json!([
+                summary("b", Some("Middle"), 24 * HOUR + HOUR),
+                summary("a", None, 3 * 24 * HOUR + HOUR),
+            ]),
+        );
+        let busy = wire.read("session.delete");
+        assert_eq!(busy["params"], require_inactive("b"));
+        wire.send(json!({"jsonrpc":"2.0","id":busy["id"],"error":{
+            "code":-32000,"message":"Session is in use: a turn is running",
+            "data":{"appError":"session_active"}}}));
+        let free = wire.read("session.delete");
+        assert_eq!(free["params"], require_inactive("a"));
+        wire.reply(&free, json!({"deleted": true}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "0", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "b\tMiddle\t1d ago",
+            "a\t-\t3d ago",
+            "Deleted a",
+            "Kept (active):",
+            "b\tMiddle\t1d ago\tSession is in use: a turn is running",
+        ],
+        "the refusal is kept with the owner's reason, after the deletes"
+    );
+    assert!(output.stderr.is_empty(), "a refusal is not a failure");
+}
+
+/// Every selected Session refused: the run says so and exits 0.
+#[test]
+fn session_cleanup_says_nothing_to_delete_when_the_owner_refuses_every_session() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(&listed, json!([summary("b", Some("Middle"), 24 * HOUR)]));
+        let delete = wire.read("session.delete");
+        assert_eq!(delete["params"], require_inactive("b"));
+        wire.send(json!({"jsonrpc":"2.0","id":delete["id"],"error":{
+            "code":-32000,"message":"Session is in use: 1 request or subscription is using it",
+            "data":{"appError":"session_active"}}}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--keep", "0", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "b\tMiddle\t1d ago",
+            "Kept (active):",
+            "b\tMiddle\t1d ago\tSession is in use: 1 request or subscription is using it",
+            "Nothing to delete: every matching Session is active.",
+        ]
+    );
+}
+
+/// The preview's own partition keeps every match: it says nothing is
+/// deletable instead of claiming nothing matched.
+#[test]
+fn session_cleanup_says_nothing_to_delete_when_every_match_is_active() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(
+            &listed,
+            json!([state(
+                summary("c", Some("Running"), 3 * 24 * HOUR),
+                false,
+                true,
+                0
+            )]),
+        );
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "cleanup", "--older-than", "2d", "--yes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "Kept (active):",
+            "c\tRunning\t3d ago\trunning",
+            "Nothing to delete: every matching Session is active.",
+        ]
+    );
+}
+
+/// Cleanup selects only what `/resume` lists by default: `internal` and
+/// `acp` Sessions neither consume `--keep N` nor appear in the preview.
+#[test]
+fn session_cleanup_selects_only_sessions_resume_lists() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.summaries", "session.delete"]);
+        let listed = wire.read("session.summaries");
+        wire.reply(
+            &listed,
+            json!([
+                origin(summary("internal", Some("Worker"), HOUR), "internal"),
+                origin(summary("acp", Some("Editor"), 2 * HOUR), "acp"),
+                origin(summary("newest", Some("Newest"), 4 * HOUR), "client"),
+                origin(summary("oldest", Some("Oldest"), 3 * 24 * HOUR), "client"),
+            ]),
+        );
+        let delete = wire.read("session.delete");
+        assert_eq!(
+            delete["params"],
+            require_inactive("oldest"),
+            "--keep 1 keeps the newest client Session, not a newer internal one"
+        );
+        wire.reply(&delete, json!({"deleted": true}));
         wire.hold();
     });
     let output = home
@@ -1087,15 +1312,11 @@ fn session_cleanup_falls_back_once_without_include_closed() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "This App Server does not list Sessions closed since it started; they are not included."
-        ),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "No Sessions matched; nothing was deleted.\n"
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["oldest\tOldest\t3d ago", "Deleted oldest"]
     );
 }

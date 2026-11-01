@@ -26552,6 +26552,7 @@
       "to": "dim_cli",
       "references": [
         "path Result",
+        "path crate::Error",
         "use crate::Result"
       ]
     },
@@ -26580,8 +26581,10 @@
       "to": "dim_client",
       "references": [
         "path Client",
+        "path RpcError",
         "path crate::client::app_error",
-        "use crate::client::Client"
+        "use crate::client::Client",
+        "use crate::client::RpcError"
       ]
     },
     {

@@ -360,9 +360,8 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 哪一种。命令面板的这一行声明了标题参数，所以从面板选中 `/rename` 只是填入 `/rename ` 并等待
 输入；对空的 `/rename` 回车会得到 `needs <title>` 提示且不发送任何内容，`--clear` 是唯一
 无需标题即可清除的形式。两种形式都是客户端处理的命令：文本从不入队、从不提交，模型回合进行
-中也是如此。`/resume` 列表每次打开都读取 `session.summaries`，因此显示新标题；页头显示的是
-首条消息的主题，不受影响。空闲的行式客户端读取同样的两种形式，对空的 `/rename` 打印
-`Use /rename TITLE or /rename --clear`。
+中也是如此。`/resume` 列表每次打开都读取 `session.summaries`，因此显示新标题；页头显示的是首条消息的主题，不受影响。空闲的行式客户端
+读取同样的两种形式，对空的 `/rename` 打印 `Use /rename TITLE or /rename --clear`。
 
 ### 会话删除与清理
 
@@ -370,7 +369,7 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 （[Session 删除](appserver/session-deletion-and-fork.md)）。不弹出确认：命令行上给出的 id 就是意图。
 回复说明本次调用是否移除了它（[`deleted`](appserver/session-deletion-and-fork.md#31-method)）：为
 `true` 时打印 `Deleted ID`，为 `false` 时在 stderr 打印
-`Nothing was deleted: no Session ID is stored in this daemon's database.` 并以 1 退出。守护进程
+`Nothing was removed: no stored Session ID.` 并以 1 退出。守护进程
 在这个 id 下没有行，是一次什么都没移除的成功删除；这不是用法错误，命令行本身写错才是。回复不带该字段
 （来自更旧的 App Server）时按一次删除处理：两种情况下行都已不在，也就是所要求的状态。
 
@@ -378,9 +377,11 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 [§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) 的要求。它用
 `includeClosed: true` 读 `session.summaries`，因此本守护进程关闭的 Session 也会列出，并在预览里
 标为 `closed`：它的行仍在存储中，而别的列目录都不显示它
-（[Session 目录](appserver/session-catalog.md#33-sessionsummaries)）。旧版 App Server 没有这个参数，
-会以 `invalid_params` 拒绝；命令随后去掉它重读摘要，并在 stderr 打印一条说明：该守护进程启动以来
-关闭的 Session 没有包含在内。它用两个选择器之一，
+（[Session 目录](appserver/session-catalog.md#33-sessionsummaries)）。没有这个参数的旧版 App Server
+会以 `invalid_params` 拒绝，而缺了它命令就看不到本守护进程关闭的 Session；因此命令在任何删除之前
+停下，打印 `This App Server is too old to clean up Sessions safely; nothing was deleted.` 并以 1
+退出。它在每次删除时带的 `requireInactive` 与 `includeClosed` 一同落地，所以拒绝其一的服务器两者
+都拒绝；某次删除在尚未删除任何东西之前回答 `invalid_params` 时，也按同一方式停下。它用两个选择器之一，
 两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
 
 | 选择器 | 选择范围 |
@@ -388,11 +389,23 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 | `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
 | `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
 
+清理只选 `/resume` 默认列出的 Session
+（[分类](../../design/appserver/session-classification.md#35-catalog-visibility)）：来源为 `client` 或 `unknown`。
+`internal` 的 Session
+永远不会被选中：成员随其 leader 的删除一起消失，启动的 Session 属于它的插件。`acp` 的 Session
+同样不会被选中；用 `dimcode session delete ID` 删除它。不被选中的 Session 既不占用 `--keep N`
+的名额，也不出现在预览里。
+
 轮次正在运行或仍有客户端附着的 Session 会被保留：预览在选择结果之后以 `Kept (active):` 列出这些
 被跳过的 Session，列与选择结果相同，其后是原因（`running`、`N clients attached`），这样的 Session
 一律不删除，`--yes` 也一样。`--keep N` 仍然保留最近活跃的 N 个 Session；比这 N 个更旧的活跃 Session
 也保留，且不占用 N 中的一个名额。`dimcode session delete ID` 仍可有意删除一个活跃 Session：服务端
-允许，这条规则属于批量命令。
+允许，这条规则属于批量命令。这个划分是预览对 `running`（只覆盖 `main`）与 `attachedClients` 的读取；
+每个删除都带 `requireInactive: true`，所以所有者在删除时再查一次，逐条线，并把使用与 hold 都算进去。
+被所有者以 `session_active` 拒绝的 Session 在删除之后以 `Kept (active):` 列出，列相同，其后是所有者的
+原因；拒绝不是失败，不改变退出状态。选中的 Session 全部被保留时，命令打印
+`Nothing to delete: every matching Session is active.` 并以 0 退出，无论预览把它们全部保留还是
+所有者拒绝了每一次删除。
 
 必须恰好给出一个选择器。命令在读取按键之前先打印选择结果——id、标题（无标题时 `-`）以及该 Session
 最后活跃距今多久，每个一行，本守护进程关闭的 Session 在其后加 `closed`，此处以空格示意——确认之后
@@ -412,7 +425,8 @@ Deleted 5e6f7a8b-…
 在终端上只有 `y` 或 `yes` 确认。没有终端时任何输入都不算确认，脚本要传 `--yes`，它同时跳过提示；
 否则命令拒绝并点名 `--yes`。确认后的运行即使某个 id 失败也会删除其余每个选中的 id：每个失败都连同
 其 id 和方法错误一起报告，并为每个失败的 id 打印可重试的命令（`dimcode session delete ID`），
-整次运行以 1 退出。选择为空时打印没有命中并以 0 退出。
+整次运行以 1 退出。完全没有选中任何 Session 时打印 `No Sessions matched; nothing was deleted.`
+并以 0 退出；选中的 Session 全部活跃时打印上面那句。
 
 P1 shell 前缀只用于交互输入。其执行、记录、进度、取消和生命周期遵循 [ShellInput](plugins/ShellInput.md)。
 CLI 在发送请求前生成 `runId`，从不重试一次运行。前缀之后的命令原样传递；空命令打印用法。

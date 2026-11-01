@@ -452,20 +452,23 @@ idle line client reads the same two forms and prints
 ([session deletion](appserver/session-deletion-and-fork.md)). There is no prompt: the
 id on the command line is the intent. The reply says whether this call removed it
 ([`deleted`](appserver/session-deletion-and-fork.md#31-method)): `Deleted ID` on `true`,
-and on `false` the command prints `Nothing was deleted: no Session ID is stored in this
-daemon's database.` on stderr and exits 1. An id the daemon holds no rows of is a
-successful delete that removed nothing; that is not a usage error, a malformed command
-line is. A reply without the field, from an App Server before it, reads as a delete: the
-rows are gone either way, which is the state asked for.
+and on `false` the command prints `Nothing was removed: no stored Session ID.` on stderr
+and exits 1. An id the daemon holds no rows of is a successful delete that removed
+nothing; that is not a usage error, a malformed command line is. A reply without the
+field, from an App Server before it, reads as a delete: the rows are gone either way,
+which is the state asked for.
 
 `dimcode session cleanup` composes deletion from the same two methods, as
 [§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) requires. It
 reads `session.summaries` with `includeClosed: true`, so a Session this daemon closed is
 listed too and marked `closed` in the preview: its rows are still stored, and no other
 listing shows it ([session catalog](appserver/session-catalog.md#33-sessionsummaries)).
-An App Server before that parameter refuses it `invalid_params`; the command then reads
-the summaries again without it and prints one stderr note that Sessions closed since
-that daemon started are not included. It
+An App Server before that parameter refuses it `invalid_params`, and without it the
+command cannot see a closed Session; it therefore stops before any delete, prints
+`This App Server is too old to clean up Sessions safely; nothing was deleted.` and exits
+1. The field it sends with every delete, `requireInactive`, lands with `includeClosed`,
+so a server that refuses one refuses both, and a delete that answers `invalid_params`
+before anything was deleted stops the same way. It
 selects with one of two selectors and reads both from the `updatedAt` of
 `session.summaries`, the Session's last activity:
 
@@ -474,6 +477,13 @@ selects with one of two selectors and reads both from the `updatedAt` of
 | `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
 | `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
 
+Cleanup selects only the Sessions `/resume` lists by default
+([classification](appserver/session-classification.md#35-catalog-visibility)): origin
+`client` or `unknown`. An `internal` Session is never selected: a member goes with
+its leader's delete and a launched Session belongs to its plugin. An `acp` Session is
+never selected either; `dimcode session delete ID` deletes one. A Session it does not
+select neither counts toward `--keep N` nor appears in the preview.
+
 A Session with a running turn or an attached client is kept: the preview lists the
 skipped Sessions after the selection under `Kept (active):`, in the same columns
 followed by the reason (`running`, `N clients attached`), and no such Session is
@@ -481,7 +491,14 @@ deleted, `--yes` included. `--keep N`
 still keeps the N most recently active Sessions, and an active Session older than those
 is kept as well without its consuming one of the N. `dimcode session delete ID` still
 deletes an active Session on purpose: the server permits it, and this is the bulk
-command's rule.
+command's rule. The partition is the preview's reading of `running` (which covers
+`main`) and `attachedClients`; every delete carries `requireInactive: true`, so the owner
+checks again at the delete, on every line and with uses and holds included. A Session
+the owner refuses with `session_active` is listed under `Kept (active):` after the
+deletes, in the same columns followed by the owner's reason, and a refusal is not a
+failure: it does not change the exit status. When every selected Session was kept, the
+command prints `Nothing to delete: every matching Session is active.`, whether the
+preview kept them all or the owner refused each delete, and exits 0.
 
 Exactly one selector is required. The command prints the selection before it reads a
 key — the id, the title (`-` when untitled) and how long ago the Session was last
@@ -503,8 +520,9 @@ On a terminal, only `y` or `yes` confirms. Without a terminal nothing confirms, 
 script passes `--yes`, which also skips the prompt; otherwise the command refuses and
 names `--yes`. A confirmed run deletes every selected id even when one fails: each
 failure is reported with its id and the method's error, the command that retries it
-(`dimcode session delete ID`) is printed for each failed id, and the run exits 1. An
-empty selection prints that nothing matched and exits 0.
+(`dimcode session delete ID`) is printed for each failed id, and the run exits 1. A
+selection of no Sessions at all prints `No Sessions matched; nothing was deleted.` and
+exits 0; a selection whose Sessions are all active prints the sentence above instead.
 
 ### Migration interaction
 

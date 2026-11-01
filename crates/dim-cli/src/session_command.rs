@@ -2,7 +2,12 @@
 //! permanent deletion, and cleanup composed from `session.summaries` and
 //! `session.delete` ([S5c §5.1](../../../docs/design/appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count)).
 
-use crate::{Result, client::Client, model::session::RenameReply, sanitize::safe};
+use crate::{
+    Result,
+    client::{Client, RpcError},
+    model::session::RenameReply,
+    sanitize::safe,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -13,6 +18,10 @@ use std::{
 const RENAME_UNSUPPORTED: &str = "This daemon does not support renaming Sessions";
 const DELETE_UNSUPPORTED: &str = "This daemon does not support deleting Sessions";
 const CLEANUP_UNSUPPORTED: &str = "This daemon does not support cleaning up Sessions";
+/// `includeClosed` and `requireInactive` land together, so a server that
+/// refuses one refuses both, and cleanup cannot delete safely there.
+const TOO_OLD: &str =
+    "This App Server is too old to clean up Sessions safely; nothing was deleted.";
 
 #[derive(Deserialize)]
 struct Renamed {
@@ -46,6 +55,9 @@ struct Summary {
     /// How many clients are attached to the Session.
     #[serde(default)]
     attached_clients: usize,
+    /// The Session's creation origin; absent on a daemon that records none.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 impl Summary {
@@ -61,6 +73,15 @@ impl Summary {
             clients => reasons.push(format!("{clients} clients attached")),
         }
         (!reasons.is_empty()).then(|| reasons.join(", "))
+    }
+    /// Whether `/resume`'s default list shows this Session, which is every
+    /// origin but `internal` and `acp`
+    /// ([classification](../../../docs/design/appserver/session-classification.md)).
+    /// Cleanup removes no Session `/resume` hides: a member goes with its
+    /// leader's delete, a launched Session with its plugin, and an ACP
+    /// Session is deleted by its id.
+    fn resumable(&self) -> bool {
+        !matches!(self.origin.as_deref(), Some("internal" | "acp"))
     }
 }
 
@@ -125,7 +146,7 @@ pub async fn delete(client: &mut Client, session_id: &str) -> Result<()> {
         .await?;
     if reply.deleted == Some(false) {
         return Err(format!(
-            "Nothing was deleted: no Session {} is stored in this daemon's database.",
+            "Nothing was removed: no stored Session {}.",
             one_line(session_id)
         )
         .into());
@@ -135,7 +156,8 @@ pub async fn delete(client: &mut Client, session_id: &str) -> Result<()> {
 }
 
 /// `dimcode session cleanup`: shows the Sessions one selector names, asks for
-/// confirmation, then deletes every one of them. A Session with a running
+/// confirmation, then deletes every one of them. A Session `/resume` hides
+/// (origin `internal` or `acp`) is never selected. A Session with a running
 /// turn or an attached client is shown as kept and never deleted, and
 /// `--keep N` counts it as kept without its consuming one of the N.
 pub async fn cleanup(
@@ -148,6 +170,7 @@ pub async fn cleanup(
         return Err(CLEANUP_UNSUPPORTED.into());
     }
     let mut sessions = summaries(client).await?;
+    sessions.retain(Summary::resumable);
     sessions.sort_by(|left, right| {
         right
             .updated_at
@@ -197,29 +220,64 @@ pub async fn cleanup(
         }
     }
     if selected.is_empty() {
-        println!("No Sessions matched; nothing was deleted.");
+        println!("Nothing to delete: every matching Session is active.");
         return Ok(0);
     }
     if !yes && !confirmed(selected.len())? {
         println!("Nothing was deleted.");
         return Ok(0);
     }
+    let mut deleted = 0;
     let mut failed = Vec::new();
+    let mut refused = Vec::new();
     for session in &selected {
         match client
-            .rpc("session.delete", json!({"sessionId": session.session_id}))
+            .rpc(
+                "session.delete",
+                json!({"sessionId": session.session_id, "requireInactive": true}),
+            )
             .await
         {
-            Ok(_) => println!("Deleted {}", one_line(&session.session_id)),
+            Ok(_) => {
+                deleted += 1;
+                println!("Deleted {}", one_line(&session.session_id));
+            }
             Err(error) => {
-                eprintln!(
-                    "Cannot delete {}: {}",
-                    one_line(&session.session_id),
-                    crate::sanitize::safe(&error.to_string()).replace('\n', " ")
-                );
-                failed.push(session.session_id.clone());
+                match crate::client::app_error(&error) {
+                    // The preview kept what the summaries showed as inactive;
+                    // the owner is the one that knows at the delete.
+                    Some("session_active") => refused.push((session, reason(&error))),
+                    // `requireInactive` joins `includeClosed`, so a server that
+                    // refuses it here is the too-old one; nothing was deleted.
+                    Some("invalid_params") if deleted == 0 && failed.is_empty() => {
+                        return Err(TOO_OLD.into());
+                    }
+                    _ => {
+                        eprintln!(
+                            "Cannot delete {}: {}",
+                            one_line(&session.session_id),
+                            crate::sanitize::safe(&error.to_string()).replace('\n', " ")
+                        );
+                        failed.push(session.session_id.clone());
+                    }
+                }
             }
         }
+    }
+    if !refused.is_empty() {
+        println!("Kept (active):");
+        for (session, why) in &refused {
+            println!(
+                "{}\t{}\t{}\t{}",
+                one_line(&session.session_id),
+                session_title(session),
+                crate::ui::sessions_panel::relative_time(session.updated_at, now),
+                why
+            );
+        }
+    }
+    if deleted == 0 && failed.is_empty() && !refused.is_empty() {
+        println!("Nothing to delete: every matching Session is active.");
     }
     if failed.is_empty() {
         return Ok(0);
@@ -260,8 +318,8 @@ fn session_title(session: &Summary) -> String {
 }
 
 /// Every stored Session `session.summaries` reports, the ones this daemon
-/// closed included; an App Server before `includeClosed` answers
-/// `invalid_params`, and the read is repeated without the field.
+/// closed included. A server that refuses the field is too old to clean up
+/// safely, so the run stops before it deletes anything.
 async fn summaries(client: &mut Client) -> Result<Vec<Summary>> {
     match client
         .typed("session.summaries", json!({"includeClosed": true}))
@@ -269,12 +327,17 @@ async fn summaries(client: &mut Client) -> Result<Vec<Summary>> {
     {
         Ok(sessions) => Ok(sessions),
         Err(error) if crate::client::app_error(&error) == Some("invalid_params") => {
-            eprintln!(
-                "This App Server does not list Sessions closed since it started; they are not included."
-            );
-            client.typed("session.summaries", json!({})).await
+            Err(TOO_OLD.into())
         }
         Err(error) => Err(error),
+    }
+}
+
+/// The App Server's own sentence for a refused call, as one printable line.
+fn reason(error: &crate::Error) -> String {
+    match error.downcast_ref::<RpcError>() {
+        Some(error) if !error.message.is_empty() => one_line(&error.message),
+        _ => one_line(&error.to_string()),
     }
 }
 
