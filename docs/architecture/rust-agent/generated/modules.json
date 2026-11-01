@@ -26568,6 +26568,7 @@
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
+        "path Update::Withdrawn",
         "path Usage",
         "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
@@ -32267,6 +32268,8 @@
         "path ContextReading",
         "path DIM_OAUTH_ID",
         "path SessionPort",
+        "path SubmitMode::Queue",
+        "path SubmitMode::Steer",
         "path SwitchKind",
         "path SwitchKind::Forked",
         "path SwitchKind::New",
@@ -32309,6 +32312,7 @@
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
+        "path Update::Withdrawn",
         "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
@@ -32316,6 +32320,7 @@
         "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
         "use crate::model::session::SessionPort",
+        "use crate::model::session::SubmitMode",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update"
       ]
@@ -32785,10 +32790,12 @@
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Home",
+        "path KeyCode::Left",
         "path KeyCode::PageDown",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
+        "path KeyEvent::new",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path Modifiers::SHIFT",
@@ -33067,9 +33074,11 @@
       "references": [
         "path Command",
         "path Command::AskAnswers",
+        "path Command::InputControl",
         "path Command::ListPlugins",
         "path Command::OpenLine",
         "path Command::Plugin",
+        "path Command::Stop",
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path SessionPort",
@@ -33084,6 +33093,7 @@
         "path Update::Snapshot",
         "path Update::Switched",
         "path Update::UsageReport",
+        "path Update::Withdrawn",
         "path crate::model::session::Account",
         "path crate::model::session::ExecutionSnapshot",
         "path crate::model::session::SwitchKind::Resumed"
@@ -33109,7 +33119,8 @@
         "path SideLine",
         "path ViewRow",
         "path ViewSnapshot",
-        "path ViewSnapshot::default"
+        "path ViewSnapshot::default",
+        "path crate::model::view::QueuedInput"
       ]
     },
     {
@@ -33117,6 +33128,13 @@
       "to": "dim_cli::projection",
       "references": [
         "path crate::projection::Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::composer",
+      "references": [
+        "path crate::ui::composer::read_planned"
       ]
     },
     {
@@ -33203,11 +33221,13 @@
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Home",
+        "path KeyCode::Left",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent::new",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
+        "path Modifiers::SHIFT",
         "path crate::ui::terminal::KeyEvent::new"
       ]
     },
