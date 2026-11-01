@@ -143,7 +143,10 @@ fn scheduled_enable_and_disable_send_the_job() {
         );
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            format!("{} job-1.\n", if enabled { "Enabled" } else { "Disabled" })
+            format!(
+                "{} nightly.\n",
+                if enabled { "Enabled" } else { "Disabled" }
+            )
         );
         fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     }
@@ -660,7 +663,10 @@ fn scheduled_set_writes_a_job_with_the_revision_read_before_it() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved job-1.\n");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Saved nightly.\n"
+    );
 }
 
 /// A job's editable members as `schedule.list` reports them: the base of a
@@ -759,7 +765,10 @@ fn scheduled_set_sends_no_session_id_when_the_mode_becomes_create() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Saved job-1.\n");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Saved nightly.\n"
+    );
 }
 
 /// A stale revision on `set` states the owner's fact and where the text is,
@@ -841,7 +850,7 @@ fn scheduled_edit_writes_what_the_editor_leaves() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved job-1."),
+        terminal.transcript.contains("Saved nightly."),
         "{}",
         terminal.transcript
     );
@@ -1144,7 +1153,7 @@ fn tui_scheduled_panel_composes_in_the_saved_language() {
     terminal.write(b"/scheduled\r");
     terminal.until("release");
     terminal.raw(b"\r");
-    terminal.until("已禁用 job-1。");
+    terminal.until("已禁用 nightly。");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
@@ -1204,7 +1213,7 @@ fn tui_scheduled_panel_follows_the_language_picker() {
     terminal.write(b"/scheduled\r");
     terminal.until("release");
     terminal.raw(b"\r");
-    terminal.until("已禁用 job-1。");
+    terminal.until("已禁用 nightly。");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/language\r");
@@ -1215,7 +1224,7 @@ fn tui_scheduled_panel_follows_the_language_picker() {
     terminal.write(b"/scheduled\r");
     terminal.until("release");
     terminal.raw(b"\r");
-    terminal.until("Disabled job-1.");
+    terminal.until("Disabled nightly.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
@@ -1323,7 +1332,7 @@ fn tui_scheduled_panel_edits_and_creates_jobs() {
         terminal.write(b"/scheduled\r");
         terminal.until("every 60 minutes");
         terminal.raw(b"\x05");
-        terminal.until("Saved.");
+        terminal.until("Saved nightly.");
         terminal.raw(b"\x0e");
         terminal.until("Added example.");
         terminal.raw(b"\t");
@@ -1411,7 +1420,7 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
         terminal.until("The job changed since it was read; nothing was written.");
         terminal.until("Your text is kept in");
         terminal.raw(b"\x05");
-        terminal.until("Saved.");
+        terminal.until("Saved nightly.");
         terminal.raw(b"\x1b");
         thread::sleep(Duration::from_millis(200));
         terminal.write(b"/exit\r");
@@ -1737,11 +1746,11 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
     // The second job's edit is its own document, not the kept text.
     terminal.raw(b"\x1b[B");
     terminal.raw(b"\x05");
-    terminal.until("Saved.");
+    terminal.until("Saved release.");
     // The first job's edit opens the text the owner refused.
     terminal.raw(b"\x1b[A");
     terminal.raw(b"\x05");
-    terminal.until("Saved.");
+    terminal.until("Saved nightly.");
     let log = fs::read_to_string(&seen).unwrap();
     let runs: Vec<&str> = log.split("---\n").collect();
     assert!(

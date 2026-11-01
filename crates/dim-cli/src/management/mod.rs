@@ -22,7 +22,7 @@ use std::path::Path;
 use crate::client::Client;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
-    ManagementRequest, ManagementResult,
+    ManagementRequest, ManagementResult, ManagementView,
 };
 use crate::ui::i18n::{self, t, tf};
 
@@ -180,25 +180,49 @@ fn unsupported(area: Area) -> String {
     )
 }
 
-/// The line an applied action reports, from its request alone. It names the
-/// id, which is what a surface without the area's view has; an adapter with
-/// a better line — a create's name, a run's answer — gives its own.
-pub fn applied_line(request: &ManagementRequest) -> String {
-    match &request.action {
+/// The id of the entry `action` names, when it names one.
+pub fn named_id(action: &ManagementAction) -> Option<&str> {
+    match action {
+        ManagementAction::Toggle { id, .. }
+        | ManagementAction::Remove { id }
+        | ManagementAction::Run { id }
+        | ManagementAction::Save { id: Some(id), .. } => Some(id),
+        _ => None,
+    }
+}
+
+/// The label of the entry `action` names in `view`, when the view has it.
+pub fn entry_name<'a>(view: &'a ManagementView, action: &ManagementAction) -> Option<&'a str> {
+    let id = named_id(action)?;
+    view.groups
+        .iter()
+        .flat_map(|group| &group.entries)
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.label.as_str())
+}
+
+/// The line an applied action reports. `name` is the entry's label from the
+/// freshest read the surface holds; without one the line names the id the
+/// action was sent with. An adapter with a better line — a create's name, a
+/// run's answer — answers with it instead.
+pub fn applied_line(action: &ManagementAction, name: Option<&str>) -> String {
+    match action {
         ManagementAction::Toggle { id, enabled } => tf(
             if *enabled {
                 "Enabled {name}."
             } else {
                 "Disabled {name}."
             },
-            &[("name", id)],
+            &[("name", name.unwrap_or(id))],
         ),
-        ManagementAction::Save { id: Some(id), .. } => tf("Saved {name}.", &[("name", id)]),
+        ManagementAction::Save { id: Some(id), .. } => {
+            tf("Saved {name}.", &[("name", name.unwrap_or(id))])
+        }
         ManagementAction::Save { id: None, .. } => t("Saved.").to_owned(),
-        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", id)]),
+        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", name.unwrap_or(id))]),
         ManagementAction::Reload => t("Reloaded.").to_owned(),
         ManagementAction::Add { .. } => t("Added.").to_owned(),
-        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", id)]),
+        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", name.unwrap_or(id))]),
         // A read applies nothing: the adapters answer with one only after an
         // action of the kinds above.
         ManagementAction::List | ManagementAction::Inspect { .. } => {
@@ -233,7 +257,7 @@ pub async fn apply(
                 note: None,
             },
             skills::Outcome::ReadFailed(error) => ManagementResult::Applied {
-                note: applied_line(request),
+                note: None,
                 read_error: error,
             },
             skills::Outcome::Refused(message) => {
@@ -246,7 +270,7 @@ pub async fn apply(
                 note: None,
             },
             Err(hooks::Failure::ReadFailed(error)) => ManagementResult::Applied {
-                note: applied_line(request),
+                note: None,
                 read_error: error,
             },
             Err(hooks::Failure::Refused(message)) => {
@@ -266,7 +290,7 @@ pub async fn apply(
             },
             Ok(scheduler::Answer::Detail(detail)) => ManagementResult::Detail(detail),
             Err(scheduler::Failure::ReadFailed { note, error }) => ManagementResult::Applied {
-                note: note.unwrap_or_else(|| applied_line(request)),
+                note,
                 read_error: error,
             },
             Err(scheduler::Failure::Refused(message)) => {

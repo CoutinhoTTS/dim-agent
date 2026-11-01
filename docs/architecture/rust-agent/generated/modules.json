@@ -4126,7 +4126,6 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "unreachable",
         "vec"
       ]
     },
@@ -25390,6 +25389,7 @@
         "path ManagementResult::Detail",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
+        "path ManagementView",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::ManagementAction",
@@ -25397,7 +25397,8 @@
         "use crate::model::session::ManagementGroup",
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementRequest",
-        "use crate::model::session::ManagementResult"
+        "use crate::model::session::ManagementResult",
+        "use crate::model::session::ManagementView"
       ]
     },
     {
@@ -25616,6 +25617,8 @@
       "references": [
         "path management::applied_line",
         "path management::apply",
+        "path management::entry_name",
+        "path management::named_id",
         "path management::supported",
         "path management::supports_kind",
         "use crate::management"
@@ -29774,6 +29777,15 @@
     },
     {
       "from": "dim_cli::ui::management_panel",
+      "to": "dim_cli::management",
+      "references": [
+        "path management::applied_line",
+        "path management::entry_name",
+        "use crate::management"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::management_panel",
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
@@ -29792,13 +29804,11 @@
         "path EntryState::ReadOnly",
         "path EntryState::Shadowed",
         "path ManagementAction",
-        "path ManagementAction::Add",
         "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
         "path ManagementAction::Remove",
         "path ManagementAction::Run",
-        "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementDetail",
         "path ManagementEntry",
@@ -33454,6 +33464,7 @@
         "path CompactReply::Unsupported",
         "path ContextReading",
         "path DIM_OAUTH_ID",
+        "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
@@ -34303,6 +34314,7 @@
       "references": [
         "path Area::Hooks",
         "path Area::Scheduled",
+        "path Area::Skills",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
@@ -34313,8 +34325,10 @@
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Add",
+        "path ManagementAction::List",
         "path ManagementAction::Run",
         "path ManagementAction::Save",
+        "path ManagementAction::Toggle",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
         "path ManagementRequest",

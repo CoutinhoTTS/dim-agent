@@ -118,7 +118,7 @@ fn skills_enable_from_a_daemon_without_sources_reports_the_entry() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "Enabled user:commit.\n"
+        "Enabled commit.\n"
     );
 }
 
@@ -290,10 +290,7 @@ fn skills_enable_and_disable_name_the_entry_and_send_the_workspace() {
         );
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            format!(
-                "{} user:commit.\n",
-                if enabled { "Enabled" } else { "Disabled" }
-            )
+            format!("{} commit.\n", if enabled { "Enabled" } else { "Disabled" })
         );
         fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     }

@@ -24,6 +24,7 @@
 
 use std::cell::Cell;
 
+use crate::management;
 use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
@@ -173,6 +174,7 @@ impl ManagementPanel {
         match &reply.result {
             ManagementResult::View { view, note } => {
                 let view = &**view;
+                let name = entry_name(Some(view), self.view.as_ref(), &reply.request.action);
                 // The read that opens a panel says nothing; every later
                 // answer names what it did.
                 self.message = match (&reply.request.action, self.view.is_some()) {
@@ -180,7 +182,7 @@ impl ManagementPanel {
                     (ManagementAction::List, true) => Some(Ok(t("Reloaded.").to_owned())),
                     (action, _) => Some(Ok(match note {
                         Some(note) => note.clone(),
-                        None => outcome(action, view, self.view.as_ref()),
+                        None => management::applied_line(action, name.as_deref()),
                     })),
                 };
                 self.set_view(view.clone());
@@ -193,8 +195,11 @@ impl ManagementPanel {
                 // The action was done, so its own line stands; what failed is
                 // the read, which the footer reports once, wrapped. No view
                 // is kept until the next read.
+                let name = entry_name(self.view.as_ref(), None, &reply.request.action);
                 self.view = None;
-                self.message = Some(Ok(note.clone()));
+                self.message = Some(Ok(note.clone().unwrap_or_else(|| {
+                    management::applied_line(&reply.request.action, name.as_deref())
+                })));
                 self.read_error = Some(read_error.clone());
                 self.list.loading();
             }
@@ -235,6 +240,12 @@ impl ManagementPanel {
             .iter()
             .flat_map(|group| &group.entries)
             .find(|entry| entry.id == id)
+    }
+
+    /// The label of the entry `action` names, from the view the panel shows:
+    /// what a surface names the entry by once the panel is gone.
+    pub fn label_of(&self, action: &ManagementAction) -> Option<String> {
+        entry_name(self.view.as_ref(), None, action)
     }
 
     fn selected(&self) -> Option<&ManagementEntry> {
@@ -714,39 +725,19 @@ fn states(entry: &ManagementEntry) -> Vec<String> {
     states
 }
 
-/// The notice a successful change leaves. `previous` names an entry an
-/// action removed, which the area no longer reports.
-fn outcome(
-    action: &ManagementAction,
-    view: &ManagementView,
+/// The label of the entry `action` names, from the views the panel holds:
+/// the one the reply brought, then the one it showed before the write. An
+/// entry an action removed is gone from the fresh view, so the older one
+/// names it.
+fn entry_name(
+    view: Option<&ManagementView>,
     previous: Option<&ManagementView>,
-) -> String {
-    let name = |id: &str| {
-        std::iter::once(view)
-            .chain(previous)
-            .flat_map(|view| &view.groups)
-            .flat_map(|group| &group.entries)
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.label.clone())
-            .unwrap_or_else(|| id.to_owned())
-    };
-    match action {
-        ManagementAction::Toggle { id, enabled } => tf(
-            if *enabled {
-                "Enabled {name}."
-            } else {
-                "Disabled {name}."
-            },
-            &[("name", &name(id))],
-        ),
-        ManagementAction::Save { .. } => t("Saved.").to_owned(),
-        ManagementAction::Add { .. } => t("Added.").to_owned(),
-        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", &name(id))]),
-        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", &name(id))]),
-        ManagementAction::List | ManagementAction::Reload => t("Reloaded.").to_owned(),
-        // An inspect answers with a detail, never with a view to name.
-        ManagementAction::Inspect { .. } => unreachable!("an inspect answers with a detail"),
-    }
+    action: &ManagementAction,
+) -> Option<String> {
+    view.into_iter()
+        .chain(previous)
+        .find_map(|view| management::entry_name(view, action))
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -1542,17 +1533,40 @@ mod tests {
             Area::Skills,
             ManagementAction::Remove { id: "job-1".into() },
             ManagementResult::Applied {
-                note: "Removed job-1.".into(),
+                note: None,
                 read_error: "the scheduler is unavailable".into(),
             },
         ));
         let text = shown(&panel, 100, 20).join("\n");
-        assert!(text.contains("Removed job-1."), "{text}");
+        assert!(text.contains("Removed nightly."), "{text}");
+        assert!(!text.contains("Removed job-1."), "{text}");
         assert_eq!(
             text.matches("the scheduler is unavailable").count(),
             1,
             "the read error is drawn once: {text}"
         );
+    }
+
+    /// A toggle whose read-back failed names the entry by the label the
+    /// panel holds, not by the id the action was sent with.
+    #[test]
+    fn an_applied_toggle_names_the_entrys_label() {
+        let mut panel = opened_catalogue();
+        panel.handle_key(key(KeyCode::Enter));
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Toggle {
+                id: "job-1".into(),
+                enabled: false,
+            },
+            ManagementResult::Applied {
+                note: None,
+                read_error: "the scheduler is unavailable".into(),
+            },
+        ));
+        let text = shown(&panel, 100, 20).join("\n");
+        assert!(text.contains("Disabled nightly."), "{text}");
+        assert!(!text.contains("Disabled job-1."), "{text}");
     }
 
     /// A run whose read-back fails keeps the owner's answer, and the read
@@ -1565,7 +1579,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
             ManagementResult::Applied {
-                note: "Run nightly: skipped (overlap).".into(),
+                note: Some("Run nightly: skipped (overlap).".into()),
                 read_error: "the scheduler is unavailable".into(),
             },
         ));
