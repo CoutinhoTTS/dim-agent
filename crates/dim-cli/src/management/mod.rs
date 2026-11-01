@@ -26,50 +26,52 @@ use crate::model::session::{
 };
 
 /// One area's management methods: the read that reports the area, and the
-/// method behind each kind it has.
+/// methods behind each kind it has.
 struct Methods {
     catalog: &'static str,
-    kinds: &'static [(ActionKind, &'static str)],
+    /// Each kind and every method it calls. A kind is offered only when all
+    /// of them are advertised.
+    kinds: &'static [(ActionKind, &'static [&'static str])],
 }
 
 impl Methods {
-    fn method(&self, kind: ActionKind) -> Option<&'static str> {
+    fn methods(&self, kind: ActionKind) -> Option<&'static [&'static str]> {
         self.kinds
             .iter()
             .find(|(has, _)| *has == kind)
-            .map(|(_, method)| *method)
+            .map(|(_, methods)| *methods)
     }
 }
 
 const SKILLS: Methods = Methods {
     catalog: "skills.catalog",
     kinds: &[
-        (ActionKind::Toggle, "skills.set_enabled"),
-        (ActionKind::Reload, "skills.refresh"),
+        (ActionKind::Toggle, &["skills.set_enabled"]),
+        (ActionKind::Reload, &["skills.refresh"]),
     ],
 };
 
 const HOOKS: Methods = Methods {
     catalog: "hooks.catalog",
     kinds: &[
-        (ActionKind::Toggle, "hooks.set_enabled"),
-        (ActionKind::Edit, "hooks.save"),
+        (ActionKind::Toggle, &["hooks.set_enabled"]),
+        (ActionKind::Edit, &["hooks.save"]),
         // A reload re-reads the document, so it needs no rescan method.
-        (ActionKind::Reload, "hooks.catalog"),
+        (ActionKind::Reload, &["hooks.catalog"]),
     ],
 };
 
 const SCHEDULED: Methods = Methods {
     catalog: "schedule.list",
     kinds: &[
-        (ActionKind::Toggle, "schedule.set_enabled"),
-        (ActionKind::Edit, "schedule.save"),
+        (ActionKind::Toggle, &["schedule.set_enabled"]),
+        (ActionKind::Edit, &["schedule.save"]),
         // A reload re-reads the jobs, so it needs no rescan method.
-        (ActionKind::Reload, "schedule.list"),
-        (ActionKind::Add, "schedule.save"),
-        (ActionKind::Remove, "schedule.delete"),
-        (ActionKind::Run, "schedule.run_now"),
-        (ActionKind::Inspect, "schedule.history"),
+        (ActionKind::Reload, &["schedule.list"]),
+        (ActionKind::Add, &["schedule.save"]),
+        (ActionKind::Remove, &["schedule.delete"]),
+        (ActionKind::Run, &["schedule.run_now"]),
+        (ActionKind::Inspect, &["schedule.history"]),
     ],
 };
 
@@ -128,7 +130,7 @@ pub fn actions(client: &Client, area: Area) -> Vec<ActionKind> {
     methods
         .kinds
         .iter()
-        .filter(|(_, method)| client.supports(&[method]))
+        .filter(|(_, needed)| client.supports(needed))
         .map(|(kind, _)| *kind)
         .collect()
 }
@@ -157,8 +159,8 @@ pub fn supports_kind(client: &Client, area: Area, kind: ActionKind) -> Result<()
     if !client.supports(&[methods.catalog]) {
         return Err(unsupported(area));
     }
-    match methods.method(kind) {
-        Some(method) if client.supports(&[method]) => Ok(()),
+    match methods.methods(kind) {
+        Some(needed) if client.supports(needed) => Ok(()),
         _ => Err(unsupported(area)),
     }
 }
