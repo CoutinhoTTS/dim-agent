@@ -232,22 +232,32 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
     }
 }
 
+/// The line a source's state adds to what it says about itself, in the one
+/// wording the panel and `dimcode hooks list` show. A source with a path its
+/// owner reported as missing has no hooks file there; an invalid one names
+/// what its owner could not use. An `ok` source has no line.
+pub fn state_line(source: &Source) -> Option<String> {
+    match (source.state.as_str(), source.path.as_deref()) {
+        ("ok", _) => None,
+        ("missing", Some(_)) => Some(t("There is no hooks file there.").to_owned()),
+        (state, _) => Some(match source.message.as_deref() {
+            Some(message) => format!("{state}: {message}"),
+            None => state.to_owned(),
+        }),
+    }
+}
+
 /// What a source says about itself.
 fn detail(source: &Source) -> Vec<String> {
     let mut lines = Vec::new();
     match source.source.as_str() {
         "user" => lines.push(t("The user's own document; always in effect.").to_owned()),
-        PROJECT => match &source.path {
-            Some(path) => lines.push(path.clone()),
-            None => lines.push(t("No .dimcode/hooks.json in this workspace.").to_owned()),
-        },
+        PROJECT => lines.extend(source.path.iter().cloned()),
         _ => {
             let plugin = source.source.trim_start_matches("plugin:");
             lines.push(tf("Owned by plugin {plugin}.", &[("plugin", plugin)]));
         }
     }
-    if let Some(message) = &source.message {
-        lines.push(message.clone());
-    }
+    lines.extend(state_line(source));
     lines
 }

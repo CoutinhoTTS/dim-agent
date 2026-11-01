@@ -25513,6 +25513,7 @@
         "path hooks::Failure::ReadFailed",
         "path hooks::apply",
         "path hooks::catalog",
+        "path hooks::state_line",
         "use crate::management::hooks"
       ]
     },

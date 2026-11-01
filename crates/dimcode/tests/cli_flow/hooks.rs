@@ -972,11 +972,26 @@ fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
     daemon.join().unwrap();
 }
 
+/// The catalog of a workspace with no hook file anywhere: every source
+/// carries the path its owner reports, and the owner reports `missing`.
+fn missing_catalog() -> Value {
+    json!({
+        "userRevision": "missing",
+        "projectsRevision": "missing",
+        "disableAllHooks": false,
+        "sources": [
+            {"source": "user", "enabled": true, "state": "missing"},
+            {"source": "project", "path": "/work/.dimcode/hooks.json", "enabled": false, "state": "missing"},
+        ],
+        "hooks": [],
+    })
+}
+
 /// A source its owner reports as `missing` has no document yet, which is not
-/// an invalid one: the panel names neither the user's nor the project's row
-/// invalid, and the project's detail says the workspace has no hook file.
+/// an invalid one: both surfaces name its path and say there is no hooks file
+/// there, and neither calls it invalid.
 #[test]
-fn tui_hooks_panel_does_not_call_a_missing_source_invalid() {
+fn a_missing_source_shows_its_path_and_says_there_is_no_hooks_file() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
@@ -1000,19 +1015,7 @@ fn tui_hooks_panel_does_not_call_a_missing_source_invalid() {
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("hooks.catalog");
-        wire.reply(
-            &request,
-            json!({
-                "userRevision": "missing",
-                "projectsRevision": "missing",
-                "disableAllHooks": false,
-                "sources": [
-                    {"source": "user", "enabled": true, "state": "missing"},
-                    {"source": "project", "enabled": false, "state": "missing"},
-                ],
-                "hooks": [],
-            }),
-        );
+        wire.reply(&request, missing_catalog());
         drains(wire);
     });
     let mut terminal = Terminal::launch_tui(home.command());
@@ -1023,7 +1026,8 @@ fn tui_hooks_panel_does_not_call_a_missing_source_invalid() {
     // Rows are drawn before the footer, so both rows are on screen once the
     // project's detail is.
     terminal.raw(b"\x1b[B");
-    terminal.until("No .dimcode/hooks.json in this workspace.");
+    terminal.until("/work/.dimcode/hooks.json");
+    terminal.until("There is no hooks file there.");
     assert!(
         !terminal.transcript.contains("invalid"),
         "a missing source is not invalid: {}",
@@ -1035,6 +1039,25 @@ fn tui_hooks_panel_does_not_call_a_missing_source_invalid() {
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+    // The command line says the same line for the same source.
+    fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, missing_catalog());
+    });
+    let output = home.command().args(["hooks", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("project hooks (/work/.dimcode/hooks.json): There is no hooks file there."),
+        "{stderr}"
+    );
 }
 
 /// Ctrl+E hands the user document to `$EDITOR` and writes what it leaves

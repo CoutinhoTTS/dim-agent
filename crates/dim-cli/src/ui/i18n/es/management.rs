@@ -22,9 +22,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The user's own document; always in effect." => {
             "El documento propio del usuario; siempre en efecto."
         }
-        "No .dimcode/hooks.json in this workspace." => {
-            "No hay .dimcode/hooks.json en este espacio de trabajo."
-        }
+        "There is no hooks file there." => "No hay ningún archivo de hooks allí.",
         "Owned by plugin {plugin}." => "Propiedad del plugin {plugin}.",
         "The user document turns every hook off (disableAllHooks)." => {
             "El documento del usuario desactiva todos los hooks (disableAllHooks)."

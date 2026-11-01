@@ -62,7 +62,7 @@ pub const STRINGS: &[&str] = &[
     "Disabled {name}.",
     "Reloaded {area}: {entries} entries, {disabled} disabled.",
     "The user's own document; always in effect.",
-    "No .dimcode/hooks.json in this workspace.",
+    "There is no hooks file there.",
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
     "The user document changed since it was read; nothing was written. Your next edit opens the current document.",

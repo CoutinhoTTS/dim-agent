@@ -348,16 +348,8 @@ fn hook_notes(catalog: &hooks::Catalog) -> Vec<String> {
             Some(path) => format!("{} hooks ({})", safe(&source.source), safe(path)),
             None => format!("{} hooks", safe(&source.source)),
         };
-        if source.state != "ok" {
-            notes.push(format!(
-                "{name}: {}{}",
-                safe(&source.state),
-                source
-                    .message
-                    .as_deref()
-                    .map(|message| format!(": {}", safe(message)))
-                    .unwrap_or_default()
-            ));
+        if let Some(line) = hooks::state_line(source) {
+            notes.push(format!("{name}: {}", safe(&line)));
         } else if !source.enabled {
             notes.push(format!("{name}: disabled"));
         }

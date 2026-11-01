@@ -20,7 +20,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No change." => "没有变化。",
         "Your text is kept in {path}." => "你的内容保留在 {path}。",
         "The user's own document; always in effect." => "用户自己的文档；始终生效。",
-        "No .dimcode/hooks.json in this workspace." => "此工作区没有 .dimcode/hooks.json。",
+        "There is no hooks file there." => "那里没有 hooks 文件。",
         "Owned by plugin {plugin}." => "由插件 {plugin} 提供。",
         "The user document turns every hook off (disableAllHooks)." => {
             "用户文档关闭了所有钩子（disableAllHooks）。"

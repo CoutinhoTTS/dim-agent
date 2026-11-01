@@ -20,9 +20,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No change." => "Tidak ada perubahan.",
         "Your text is kept in {path}." => "Teks Anda tersimpan di {path}.",
         "The user's own document; always in effect." => "Dokumen milik pengguna; selalu berlaku.",
-        "No .dimcode/hooks.json in this workspace." => {
-            "Tidak ada .dimcode/hooks.json di ruang kerja ini."
-        }
+        "There is no hooks file there." => "Tidak ada file hook di sana.",
         "Owned by plugin {plugin}." => "Milik plugin {plugin}.",
         "The user document turns every hook off (disableAllHooks)." => {
             "Dokumen pengguna mematikan semua hook (disableAllHooks)."
