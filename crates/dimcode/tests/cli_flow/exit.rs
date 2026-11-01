@@ -122,3 +122,54 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
         "the terminal was left in raw mode"
     );
 }
+
+/// A store written by a later daemon: the CLI reports the storage note in the
+/// terminal, keeps the store and removes the note after reading it.
+#[test]
+fn an_incompatible_store_reports_the_startup_note() {
+    let home = Home::new();
+    let database = home.0.join("rust/dimcode.sqlite");
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29));
+             INSERT INTO agent_store_format VALUES (29);",
+        )
+        .unwrap();
+    let original = fs::read(&database).unwrap();
+    let output = home
+        .command()
+        .args(["exec", "-p", "hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot open native store"), "{stderr}");
+    assert!(stderr.contains("Store format: v29"), "{stderr}");
+    assert!(stderr.contains("Daemon format: v28"), "{stderr}");
+    assert!(stderr.contains("Existing data was preserved"), "{stderr}");
+    assert!(stderr.contains("Run a build supporting v29"), "{stderr}");
+    assert!(stderr.contains("Details:"), "{stderr}");
+    assert!(!stderr.contains("App Server exited"), "{stderr}");
+    assert_eq!(fs::read(&database).unwrap(), original);
+    assert!(!home.0.join("rust/dimcode.sqlite.startup").exists());
+}
+
+/// A daemon that exits without a storage note keeps the generic cause and log
+/// location.
+#[test]
+fn a_daemon_that_exits_without_a_note_keeps_the_generic_error() {
+    let home = Home::new();
+    let server = home.0.join("failing-server");
+    fs::write(&server, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = home
+        .command()
+        .args(["--server", server.to_str().unwrap(), "exec", "-p", "hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("App Server exited"), "{stderr}");
+    assert!(!stderr.contains("Cannot open native store"), "{stderr}");
+}

@@ -4,6 +4,7 @@ use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use std::{
     fs::File,
+    io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -12,6 +13,8 @@ use std::{
 
 /// The native store format this daemon creates and opens.
 pub const FORMAT: u32 = 29;
+/// The oldest schema the startup transaction upgrades.
+const MIN_FORMAT: u32 = 13;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
@@ -265,6 +268,90 @@ fn storage(error: impl std::fmt::Display) -> AgentError {
     AgentError::Storage(error.to_string())
 }
 
+enum StartupFailure {
+    Newer { marker: i64 },
+    Mismatched { schema: u32, marker: Option<i64> },
+    Unrecognized { marker: Option<i64> },
+    TooOld { marker: i64 },
+}
+impl StartupFailure {
+    /// The note a CLI-started daemon leaves for its client; the first line
+    /// binds it to the process that wrote it.
+    fn note(&self, path: &std::path::Path) -> String {
+        let path = path.display();
+        let body = match self {
+            Self::Newer { marker } => format!(
+                "Cannot open native store {path}.\n  Store format: v{marker}\n  Daemon format: v{FORMAT}\n  This daemon cannot read the store. Existing data was preserved.\n  Run a build supporting v{marker}, or use --home PATH for a separate environment."
+            ),
+            Self::Mismatched { schema, marker } => {
+                let store = match marker {
+                    Some(marker) => format!("v{marker} (schema is v{schema})"),
+                    None => format!("v{schema} (format marker is missing or ambiguous)"),
+                };
+                format!(
+                    "Cannot open native store {path}.\n  Store format: {store}\n  Daemon format: v{FORMAT}\n  The store's format marker and schema disagree. Existing data was preserved.\n  Use the build that wrote this store, or use --home PATH for a separate environment."
+                )
+            }
+            Self::Unrecognized { marker } => {
+                let store = match marker {
+                    Some(marker) => format!("v{marker} (unrecognized schema)"),
+                    None => "unrecognized".to_owned(),
+                };
+                format!(
+                    "Cannot open native store {path}.\n  Store format: {store}\n  Daemon format: v{FORMAT}\n  The store is not a format this daemon recognizes. Existing data was preserved.\n  Use the build that wrote this store, or use --home PATH for a separate environment."
+                )
+            }
+            Self::TooOld { marker } => format!(
+                "Cannot open native store {path}.\n  Store format: v{marker} (no longer read by this daemon)\n  Daemon format: v{FORMAT}\n  This daemon cannot read the store. Existing data was preserved.\n  Use a build that reads v{marker}, or use --home PATH for a separate environment."
+            ),
+        };
+        format!(
+            "dimcode-startup-failure v1 pid={}\n{body}",
+            std::process::id()
+        )
+    }
+}
+
+fn startup_note_path(path: &std::path::Path) -> PathBuf {
+    let mut note = path.as_os_str().to_os_string();
+    note.push(".startup");
+    PathBuf::from(note)
+}
+
+fn single_marker(markers: &[i64]) -> Option<i64> {
+    (markers.len() == 1).then(|| markers[0])
+}
+
+/// Best effort: the rejection and its error text do not depend on the note.
+fn write_startup_failure(path: &std::path::Path, failure: StartupFailure) {
+    let note = failure.note(path);
+    let target = startup_note_path(path);
+    let temp = target.with_file_name(format!(
+        "{}.{}.tmp",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("dimcode.sqlite.startup"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&temp).and_then(|mut file| {
+        file.write_all(note.as_bytes())?;
+        drop(file);
+        let _ = std::fs::remove_file(&target);
+        std::fs::rename(&temp, &target)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
 /// The process connection and maintenance admission. Business modules never
 /// open a second connection to this database.
 pub struct SqliteStorage {
@@ -362,7 +449,15 @@ impl SqliteStorage {
             tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
         } else if let Some(version) = known_format(&actual) {
-            if markers(&tx)? != [i64::from(version)] {
+            let markers = markers(&tx)?;
+            if markers != [i64::from(version)] {
+                write_startup_failure(
+                    &path,
+                    StartupFailure::Mismatched {
+                        schema: version,
+                        marker: single_marker(&markers),
+                    },
+                );
                 return Err(unsupported_version());
             }
             if version != FORMAT {
@@ -392,6 +487,20 @@ impl SqliteStorage {
                 upgraded_from = Some(version);
             }
         } else {
+            let marker = markers(&tx)
+                .ok()
+                .and_then(|markers| single_marker(&markers));
+            let failure = match marker {
+                Some(marker) if marker > i64::from(FORMAT) => StartupFailure::Newer { marker },
+                Some(marker) if marker == 14 || marker < i64::from(MIN_FORMAT) => {
+                    StartupFailure::TooOld { marker }
+                }
+                Some(marker) => StartupFailure::Unrecognized {
+                    marker: Some(marker),
+                },
+                None => StartupFailure::Unrecognized { marker: None },
+            };
+            write_startup_failure(&path, failure);
             return Err(storage(format!(
                 "unsupported SQLite schema at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
                 path.display()
@@ -411,6 +520,7 @@ impl SqliteStorage {
         connection
             .pragma_update(None, "fullfsync", true)
             .map_err(storage)?;
+        let _ = std::fs::remove_file(startup_note_path(&path));
         Ok(Arc::new(Self {
             connection: Mutex::new(Some(connection)),
             admission: Mutex::new(Admission {
