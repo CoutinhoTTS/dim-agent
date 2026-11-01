@@ -29,6 +29,18 @@ pub enum WriteTarget {
     Area { revision: String },
     /// One entry's document, at the revision it was read at.
     Entry { id: String, revision: String },
+    /// The input document of one entry's operation. A run always sends it,
+    /// so it has no revision and is never unchanged.
+    Run { id: String },
+}
+
+impl WriteTarget {
+    /// Whether `self` and `other` are the same kind of draft: a kept draft
+    /// reopens only for its own kind, so a run's parameters never reopen as
+    /// an entry's edit.
+    pub(crate) fn same_kind(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
 }
 
 /// What a key did to a prompt.

@@ -630,8 +630,7 @@ fn run_terminal(
                 Outcome::Edit { area, target, text } => {
                     // A draft a refused edit kept continues in its own file;
                     // anything else starts from the document the panel read.
-                    let creating = matches!(target, WriteTarget::Create);
-                    let (target, draft, reopened) = match app.kept_draft(area, creating) {
+                    let (target, draft, reopened) = match app.kept_draft(area, &target) {
                         Some((target, draft)) => (target, draft, true),
                         None => {
                             let draft = match editor::Draft::open(&app.home, area, &text) {
@@ -1723,8 +1722,13 @@ impl App {
             }
             Update::Management(reply) => {
                 let creating = matches!(reply.request.action, ManagementAction::Add { .. });
-                let write =
-                    creating || matches!(reply.request.action, ManagementAction::Save { .. });
+                // A run is a write only when it carried a draft: a run with
+                // no document, as the Scheduler's, settles none.
+                let write = match &reply.request.action {
+                    ManagementAction::Add { .. } | ManagementAction::Save { .. } => true,
+                    ManagementAction::Run { document, .. } => document.is_some(),
+                    _ => false,
+                };
                 // Only a reload of the draft's own area discards it. Every
                 // other reply — a toggle, a read, another area's reply —
                 // leaves the kept text and the revision it came from for the
@@ -3125,9 +3129,13 @@ impl App {
     /// The draft a refused edit kept for `area`, if its text is still
     /// there: the editor reopens it as it is, so an edit that continues
     /// keeps working in its own file, at the revision that text came from.
-    fn kept_draft(&mut self, area: Area, creating: bool) -> Option<(WriteTarget, editor::Draft)> {
+    fn kept_draft(
+        &mut self,
+        area: Area,
+        target: &WriteTarget,
+    ) -> Option<(WriteTarget, editor::Draft)> {
         let kept = self.management_edit.as_ref()?;
-        if kept.area != area || matches!(kept.target, WriteTarget::Create) != creating {
+        if kept.area != area || !kept.target.same_kind(target) {
             return None;
         }
         let kept = self.management_edit.take()?;
@@ -3266,6 +3274,10 @@ impl App {
                         id: Some(id.clone()),
                         expected_revision: revision.clone(),
                         document,
+                    },
+                    WriteTarget::Run { id } => ManagementAction::Run {
+                        id: id.clone(),
+                        document: Some(document),
                     },
                 };
                 self.management_edit = Some(ManagementDraft {
@@ -8914,5 +8926,110 @@ mod tests {
             let kept = app.management_edit.as_ref().expect("the link stays");
             assert_eq!(kept.draft.path(), path.as_path());
         }
+    }
+
+    /// A run's draft is the operation's input: the editor's text is sent
+    /// with the run, a success removes the file, and a refused run keeps it,
+    /// for its own kind only.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_draft_is_sent_with_the_run_and_reopened_only_by_its_own_kind() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        use std::os::unix::process::ExitStatusExt;
+        fn run_reply(result: ManagementResult) -> Update {
+            Update::Management(ManagementReply {
+                request: ManagementRequest {
+                    area: Area::Skills,
+                    action: ManagementAction::Run {
+                        id: "job-1".into(),
+                        document: Some(serde_json::json!({"target": "src"})),
+                    },
+                },
+                result,
+            })
+        }
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        let draft = || editor::Draft::open(root.path(), Area::Skills, "{\"target\":\"src\"}").unwrap();
+        let written = |app: &mut App, draft: editor::Draft| {
+            let path = draft.path().to_path_buf();
+            app.prompt = Some(Prompt::Management(ManagementPanel::new(Area::Skills)));
+            app.write_draft(
+                Area::Skills,
+                WriteTarget::Run {
+                    id: "job-1".into(),
+                },
+                draft,
+                false,
+                "vi".into(),
+                Ok(std::process::ExitStatus::from_raw(0)),
+            );
+            path
+        };
+        // The text the editor left is the run's document.
+        let path = written(&mut app, draft());
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::Management(ManagementRequest {
+                area: Area::Skills,
+                action: ManagementAction::Run {
+                    id,
+                    document: Some(document),
+                },
+            })) if id == "job-1" && *document == serde_json::json!({"target": "src"})
+        ));
+        app.apply(run_reply(ManagementResult::View {
+            view: Box::new(ManagementView::default()),
+            note: None,
+        }));
+        assert!(!path.exists(), "a written run removes its draft");
+        assert!(app.management_edit.is_none());
+        // A refusal keeps the file and the link; Ctrl+T reopens it, Ctrl+E
+        // never does.
+        let path = written(&mut app, draft());
+        app.apply(run_reply(ManagementResult::Refused(
+            ManagementRefusal::Refused("nope".into()),
+        )));
+        assert!(path.exists(), "a refused run keeps its draft");
+        let text = match &app.prompt {
+            Some(Prompt::Management(panel)) => panel.render(100, 20, &app.palette).join(" "),
+            _ => panic!("the panel stays open"),
+        };
+        assert!(text.contains("nope"), "{text}");
+        assert!(text.contains("Your text is kept in"), "{text}");
+        assert!(
+            app.kept_draft(
+                Area::Skills,
+                &WriteTarget::Entry {
+                    id: "job-1".into(),
+                    revision: "1".into(),
+                },
+            )
+            .is_none(),
+            "an edit never reopens a run's draft"
+        );
+        let (target, kept) = app
+            .kept_draft(
+                Area::Skills,
+                &WriteTarget::Run {
+                    id: "job-1".into(),
+                },
+            )
+            .expect("the run key reopens the draft");
+        assert_eq!(
+            target,
+            WriteTarget::Run {
+                id: "job-1".into()
+            }
+        );
+        assert_eq!(kept.path(), path.as_path());
     }
 }

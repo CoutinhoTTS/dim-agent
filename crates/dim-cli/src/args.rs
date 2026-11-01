@@ -616,7 +616,10 @@ impl Options {
                             let id = value(&mut args)?;
                             let action = match command {
                                 "remove" => ManagementAction::Remove { id },
-                                "run" => ManagementAction::Run { id },
+                                "run" => ManagementAction::Run {
+                                    id,
+                                    document: None,
+                                },
                                 _ => ManagementAction::Inspect { id },
                             };
                             Action::Management(ManagementRequest {

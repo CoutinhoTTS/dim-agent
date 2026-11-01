@@ -325,8 +325,13 @@ pub enum ManagementAction {
     Add { document: serde_json::Value },
     /// Remove one entry.
     Remove { id: String },
-    /// Perform the area's named operation on one entry.
-    Run { id: String },
+    /// Perform the area's named operation on one entry, with the input
+    /// document the editor left when the entry carries one.
+    Run {
+        id: String,
+        /// The parameters the operation takes; `None` sends it at once.
+        document: Option<serde_json::Value>,
+    },
     /// Read one entry's detail, in place of the list.
     Inspect { id: String },
 }
@@ -383,6 +388,9 @@ pub struct ManagementEntry {
     /// The entry's own document, for an area whose documents are per entry
     /// and whose entries offer edit.
     pub document: Option<EntryDocument>,
+    /// The operation's input document when the run kind takes one: the panel
+    /// opens the editor on it before the run. `None` sends the run at once.
+    pub run: Option<serde_json::Value>,
 }
 
 /// One entry's document and the revision a write of it takes.

@@ -25493,6 +25493,7 @@
         "path Groups::default",
         "path super::area_kinds",
         "path super::entry_kinds",
+        "path super::unsupported",
         "use super::Groups"
       ]
     },
@@ -25501,6 +25502,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
+        "path Area::Scheduled",
         "path EntryDocument",
         "path EntryState::Invalid",
         "path ManagementAction",
@@ -25516,6 +25518,7 @@
         "path ManagementEntry",
         "path ManagementView",
         "use crate::model::session::ActionKind",
+        "use crate::model::session::Area",
         "use crate::model::session::EntryDocument",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",
@@ -29870,6 +29873,7 @@
         "path WriteTarget::Area",
         "path WriteTarget::Create",
         "path WriteTarget::Entry",
+        "path WriteTarget::Run",
         "use crate::ui::prompts::Effect",
         "use crate::ui::prompts::WriteTarget"
       ]
@@ -33437,6 +33441,7 @@
         "path ManagementAction::Add",
         "path ManagementAction::List",
         "path ManagementAction::Reload",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRequest",
@@ -33823,6 +33828,7 @@
         "path WriteTarget::Area",
         "path WriteTarget::Create",
         "path WriteTarget::Entry",
+        "path WriteTarget::Run",
         "use crate::ui::prompts::AskUserPrompt",
         "use crate::ui::prompts::Effect",
         "use crate::ui::prompts::ExitConfirm",
@@ -34272,6 +34278,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::management::editor",
       "references": [
+        "path editor::Draft",
         "path editor::Draft::open"
       ]
     },
@@ -34281,6 +34288,7 @@
       "references": [
         "path Area::Hooks",
         "path Area::Scheduled",
+        "path Area::Skills",
         "path Command",
         "path Command::AskAnswers",
         "path Command::InputControl",
@@ -34291,6 +34299,7 @@
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Add",
+        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
@@ -34386,7 +34395,8 @@
       "references": [
         "path AskUserPrompt::new",
         "path WriteTarget::Area",
-        "path WriteTarget::Create"
+        "path WriteTarget::Create",
+        "path WriteTarget::Run"
       ]
     },
     {

@@ -310,6 +310,9 @@ impl ManagementPanel {
                 .document
                 .as_ref()
                 .map(|document| &document.document),
+            // A run document is the operation's input itself: it is always
+            // sent, even when the text did not change.
+            WriteTarget::Run { .. } => None,
         }
     }
 
@@ -381,7 +384,7 @@ impl ManagementPanel {
             return self.remove();
         }
         if key.code == KeyCode::Char('t') && key.mods.contains(Modifiers::CTRL) {
-            return self.send_entry(ActionKind::Run, |id| ManagementAction::Run { id });
+            return self.run();
         }
         if key.code == KeyCode::Tab {
             // Tab moves the list in other panels; here it opens the entry.
@@ -439,6 +442,33 @@ impl ManagementPanel {
         };
         detail.top.set(top);
         Effect::None
+    }
+
+    /// The area's operation on the selected entry. An entry that carries the
+    /// operation's input document opens the editor on it first; otherwise
+    /// the operation is sent at once.
+    fn run(&mut self) -> Effect {
+        let Some(entry) = self.selected() else {
+            return Effect::None;
+        };
+        if !entry.actions.contains(&ActionKind::Run) {
+            return Effect::None;
+        }
+        let id = entry.id.clone();
+        let document = entry.run.clone();
+        match document {
+            Some(document) => self.open_editor(WriteTarget::Run { id }, &document),
+            None => {
+                self.busy = true;
+                Effect::Management(ManagementRequest {
+                    area: self.area,
+                    action: ManagementAction::Run {
+                        id,
+                        document: None,
+                    },
+                })
+            }
+        }
     }
 
     /// Asks for the selected entry's detail, which the adapter answers in
@@ -721,7 +751,7 @@ fn outcome(
         ManagementAction::Save { .. } => t("Saved.").to_owned(),
         ManagementAction::Add { .. } => t("Added.").to_owned(),
         ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", &name(id))]),
-        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", &name(id))]),
+        ManagementAction::Run { id, .. } => tf("Ran {name}.", &[("name", &name(id))]),
         ManagementAction::List | ManagementAction::Reload => t("Reloaded.").to_owned(),
         // An inspect answers with a detail, never with a view to name.
         ManagementAction::Inspect { .. } => unreachable!("an inspect answers with a detail"),
@@ -759,6 +789,7 @@ mod tests {
             states,
             actions,
             document: None,
+            run: None,
         }
     }
 
@@ -991,6 +1022,7 @@ mod tests {
                         states: Vec::new(),
                         actions: vec![ActionKind::Edit],
                         document: None,
+                        run: None,
                     },
                     ManagementEntry {
                         id: "plugin:kit".into(),
@@ -1000,6 +1032,7 @@ mod tests {
                         states: vec![EntryState::ReadOnly, EntryState::Invalid],
                         actions: vec![],
                         document: None,
+                        run: None,
                     },
                 ],
             }],
@@ -1204,6 +1237,7 @@ mod tests {
                             revision: "3".into(),
                             document: serde_json::json!({"name": "nightly"}),
                         }),
+                        run: None,
                     },
                     ManagementEntry {
                         id: "job-2".into(),
@@ -1216,6 +1250,7 @@ mod tests {
                             revision: "7".into(),
                             document: serde_json::json!({"name": "release"}),
                         }),
+                        run: None,
                     },
                 ],
             }],
@@ -1445,13 +1480,22 @@ mod tests {
         let mut panel = opened_catalogue();
         match panel.handle_key(ctrl('t')) {
             Effect::Management(request) => {
-                assert_eq!(request.action, ManagementAction::Run { id: "job-1".into() })
+                assert_eq!(
+                    request.action,
+                    ManagementAction::Run {
+                        id: "job-1".into(),
+                        document: None
+                    }
+                )
             }
             _ => panic!("expected a run"),
         }
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Run { id: "job-1".into() },
+            ManagementAction::Run {
+                id: "job-1".into(),
+                document: None,
+            },
             ManagementResult::View {
                 view: Box::new(catalogue()),
                 note: Some("Run nightly: skipped (overlap).".into()),
@@ -1459,6 +1503,28 @@ mod tests {
         ));
         let text = shown(&panel, 100, 20).join(" ");
         assert!(text.contains("Run nightly: skipped (overlap)."), "{text}");
+    }
+
+    /// An entry that carries its operation's input document opens the editor
+    /// on it first, with the entry's id as the run target.
+    #[test]
+    fn run_opens_the_editor_on_an_entrys_input_document() {
+        let mut view = catalogue();
+        view.groups[0].entries[0].run =
+            Some(serde_json::json!({"target": "", "style": "concise"}));
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
+        match panel.handle_key(ctrl('t')) {
+            Effect::EditManagement { area, target, text } => {
+                assert_eq!(area, Area::Skills);
+                assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                    serde_json::json!({"target": "", "style": "concise"})
+                );
+            }
+            _ => panic!("expected the run's editor"),
+        }
     }
 
     /// A remove names the entry the area no longer reports.
@@ -1507,7 +1573,10 @@ mod tests {
         panel.handle_key(ctrl('t'));
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Run { id: "job-1".into() },
+            ManagementAction::Run {
+                id: "job-1".into(),
+                document: None,
+            },
             ManagementResult::Applied {
                 note: Some("Run nightly: skipped (overlap).".into()),
                 read_error: "the scheduler is unavailable".into(),
@@ -1535,7 +1604,10 @@ mod tests {
         let mut panel = ManagementPanel::new(Area::Skills);
         panel.set_result(&reply(
             Area::Skills,
-            ManagementAction::Run { id: "job-1".into() },
+            ManagementAction::Run {
+                id: "job-1".into(),
+                document: None,
+            },
             ManagementResult::View {
                 view: Box::new(view),
                 note: Some("Run nightly\u{1b}[2J.".into()),

@@ -141,6 +141,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
                 states,
                 actions: super::entry_kinds(actions),
                 document: None,
+                run: None,
             },
         );
     }
@@ -178,7 +179,10 @@ mod tests {
             Some("A Skill has no remove action.")
         );
         assert_eq!(
-            refusal(&ManagementAction::Run { id: "skill".into() }),
+            refusal(&ManagementAction::Run {
+                id: "skill".into(),
+                document: None
+            }),
             Some("A Skill has no run action.")
         );
         assert_eq!(

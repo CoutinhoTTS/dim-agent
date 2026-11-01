@@ -225,6 +225,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
                     .copied()
                     .collect(),
                 document: None,
+                run: None,
             },
         );
     }

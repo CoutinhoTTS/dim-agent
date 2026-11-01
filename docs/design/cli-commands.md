@@ -360,7 +360,8 @@ owner reports them; a hook source is itself an entry, under the heading `sources
 label, a detail, its states (enabled, disabled, invalid, shadowed, read-only) and the actions it
 offers. An entry its owner does not let the client write (plugin-owned, locked) offers no write
 action, and its detail says why. What the owner could not use is listed after the entries as its
-issues.
+issues. An entry may carry the operation's input document when the run kind takes one: Ctrl+T
+opens the external editor on it first, and sends what it leaves with the run.
 
 ```text
 ╭─ Skills ──────────────────────────────────────╮
@@ -413,7 +414,8 @@ adapter and the methods its kinds call, and names here the kinds it adds.
   typed on the command line is the intent, as `dimcode logout PROVIDER` signs out without one.
 - run sends the area's named operation for the selected entry, reads the area again, and its
   message reports what the owner answered — a run the owner skipped says why. An operation that
-  takes parameters is the area's own step, not this kind's.
+  takes parameters is the area's own step, not this kind's: the entry carries the input
+  document, and the run kind opens the external editor on it before the call.
 - inspect asks the adapter for the entry's detail: a title and lines, not a view. The panel
   shows it in place of the list, the arrows and PageUp/PageDown scroll it, Esc returns to the
   list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
