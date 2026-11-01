@@ -48,6 +48,12 @@ has members. Dropping a `ProcessTree` signals only when the tree was neither
 confirmed terminated nor reaped on its own; otherwise a recycled pid or reused
 group could receive `SIGKILL`.
 
+`exec_root()` is `<home>/.dim/exec`, the persistent shell's own directory.
+`remove_exec_directory(path)` removes one directory below it and syncs the
+parent on Unix; it never reads ownership rows. SessionStore calls it during a
+delete after deciding with `session_output_owners` that no Session still needs
+the directory (ADR 013 D4). An absent directory counts as removed.
+
 `read_exec_shell_settings(cancel)` reads the current version-1 preference and
 detected shell choices, returning the byte revision, optional explicit executable
 and any parse error. `update_exec_shell_settings(expected_revision, executable_path,
@@ -81,11 +87,12 @@ sandbox off, the original spec comes back with neither value.
 A missing port or an unreadable source fails preparation as `isolation_config_invalid` before any
 payload starts; it never runs unsandboxed. Sandbox on without a backend fails as
 `isolation_unavailable`: always on Windows, and on Linux when bubblewrap is not on the captured
-`PATH`, whose reason says to install bubblewrap or turn Sandbox off in `/settings > Execution`.
+`PATH`, whose reason says to install bubblewrap or select Off in `/permissions > Process isolation`
+(also available in `/settings > Process isolation`).
 `HostPlatform::sandbox_backend()` reports the same decision before a process starts: `Available`,
 or `Unavailable` with that reason. On Linux it uses the same captured-`PATH` bubblewrap resolution
 as preparation. The App Server's `ExecutionBackend` part exposes it as `host.execution.backend`;
-the `/settings` and Web Execution rows display the reason. The availability report does not replace
+the TUI's `Process isolation` control and the legacy Web Execution rows display the reason. The availability report does not replace
 the preparation failure. The method is a separate part because `ExecutionSettings` provides the
 `ExecutionSettingsHost` port that `HostPlatform` reads; adding `HostPlatform` to
 `ExecutionSettings` would close a dependency cycle.
@@ -93,12 +100,12 @@ There is no policy file, no tier and no fallback. Ordinary user ShellInput does 
 operation. No process, task, lock, watcher or Timeline fact is added by preparation.
 
 The crate-local `ISOLATION_SUMMARY` is the static declaration line, `None` on Windows; on macOS it
-also names `$TMPDIR` as writable. It says the user decides in `/settings > Execution` whether
+also names `$TMPDIR` as writable. It says the user decides in `/permissions > Process isolation` whether
 commands run sandboxed, what the sandbox blocks, and that the model cannot change it. The exec and
 persistent-shell execute declarations add it after their environment line. It does not read the
 switches: declarations are read once, while each process start reads them.
 `Isolation::failure_hint(output)` returns a note when the output shows a typical denial; it names
-the switches in `/settings > Execution` and distinguishes the sandbox from command approval.
+`Process isolation` in `/permissions` and distinguishes the sandbox from Tool approval.
 
 For a persistent shell, background PIDs enter through the
 existing PTY marker. `PtyProcessTree::job_pid` uses portable-pty's foreground-group handle and

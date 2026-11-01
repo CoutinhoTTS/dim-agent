@@ -1,17 +1,18 @@
 # Rust 会话存储格式
 
-The current native format is **v28**, with source-owned `settings_documents`,
+The current native format is **v29**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
 branch end events, the tool-effect and digest fields, and tool schemas that may
 omit `type`, the Session catalog projection, a configuration's System source,
-a model limit that only a declaration writes, and a delegation's Agent owner
-and member leader, and Session file grants. Startup requires the exact v28 SQL schema and a single
-format marker of 28 before writable PRAGMAs, or the exact v27, v26, v25, v24, v23,
+a model limit that only a declaration writes, a delegation's Agent owner and
+member leader, Session file grants and command output ownership. Startup
+requires the exact v29 SQL schema and a single
+format marker of 29 before writable PRAGMAs, or the exact v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v28 one step after
-another ([#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v29 one step after
+another ([ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -24,17 +25,17 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v28, and v16 request rows stay readable as written.
+valid in v29, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v28 tables
+## Current v29 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 28)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 29)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -96,6 +97,8 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `session_grants.path` | `TEXT` | 否 | — | 联合主键第 2 列；规范绝对路径；文件 grant 精确匹配，目录 grant 按路径分量包含子项 |
 | `session_grants.kind` | `TEXT` | 否 | — | `CHECK (kind IN ('file', 'dir'))` |
 | `session_grants.mode` | `TEXT` | 否 | — | `CHECK (mode IN ('read', 'write'))`；write 同时允许读，read 不降级已有 write |
+| `session_output_owners.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)`；随 Session 删除（v29，ADR 013） |
+| `session_output_owners.path` | `TEXT` | 否 | — | 联合主键第 2 列；命令输出的规范绝对路径；fork 复制行，删除时按父目录清理 |
 | `session_metadata.session_id` | `TEXT` | 否 | — | 主键；外键到 `agent_sessions(session_id)`；每个 Session 至多一行，没有行表示修订号 0、没有标题（v16） |
 | `session_metadata.revision` | `INTEGER` | 否 | — | `CHECK(revision > 0)`；该 Session 已提交 `setTitle` 的次数，`setTitle` 的 CAS 修订号 |
 | `session_metadata.title` | `TEXT` | 是 | 隐式 `NULL` | 标题文本，原样保存；清除后为 `NULL`，行保留 |
@@ -158,7 +161,17 @@ Managed `providers.record` is `{kind:"managed", account, models, modelConfigOver
 
 静态目录的 record 为 `{kind, displayName, driverKind, auth, credentialAuthority, baseUrl, network, headers, credential, models, remoteModels, endpointTypes, modelConfigOverrides, disabledModelIds, enabled, definitionFingerprint, version, userModels?, modelPreferences?, endpointOverrides?}`。可选的 `userModels`、`modelPreferences`、`endpointOverrides` 沿 #329 格式决定保存用户模型、偏好和端点覆盖，缺失表示无对应配置。`kind` 为 `builtin` 或 `custom`；models 和覆盖均为完整 `ModelEntry`；`definitionFingerprint` 是 bundled 定义的 SHA-256，自定义记录为 null。`credentialAuthority` 为 `static`、`openai_codex` 或 `grok`，缺省仅解释为静态来源；后两者只允许对应内置 Provider 的固定非秘密绑定，credential 必须为空。`credential` 可保存静态凭据或不透明秘密引用，但不写回引用解析结果；`network` 保存逐连接代理与超时，只读 `provider.list` 不返回代理 URL；`provider.management` 只返回去除 user info 的 `proxyUrl`，代理认证仍不返回，展示值不得自动写回。`remoteModels` 标记已取得的独立模型快照，避免 bundled 升级覆盖；`endpointTypes` 保存显式协议映射，派生路由不落盘。凭据和 header 值只由 resolver 使用，管理面仅返回非秘密摘要。写入及读取边界校验模型、地址和请求头，外层 SQL 版本须与 record.version 一致；seed、编辑和删除规则见[Provider合同](../../../crates/dim-app-server/README.md)。
 
-`agents.profile` 是 `AgentProfile`：`{name, description, systemPrompt, tools?, model?}`；`model` 若存在为 `{providerId, modelId}`。`agent_sessions.config` 是 `SessionConfig`：`{permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole, interactive?}`；两者的 `tools` 是字符串数组形式的挂载列表，没有挂载列表时省略（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)，格式决定见 [#364 v19 格式决定](#364-v19-格式决定)）；其中 `model` 是 `ModelSelection {providerId, modelId, config?, metadata?}`，创建时固定完整模型参数，省略参数的身份记录仍可读取。`permissionPolicy` 为 `{preset, allowedTools, disallowedTools}`，`collaborationRole` 为 `leader` 或 `member`。可选字段 `interactive`（布尔，缺省 `true`）由[路线图](../roadmap.md) C2 加入，已实现，格式决定如下：保持 v13，不升级到 v14，这是配置 JSON 中增量的可选字段；缺少它的已存储记录表示 `true`，因为该字段出现之前创建的每个 Session 都是客户端 Session；只写入 `false`，交互式记录不含该字段，与该字段出现之前写入的记录格式相同；这一省略规则写在 `SessionConfig` 的 serde 定义上，原生存储是它唯一的序列化方，在其他地方暴露 `SessionConfig` 须另行决定；旧版守护进程忽略该字段，会把非交互记录读成交互式，这一点可以接受。字段合同见 [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)。`timeline_branches.info` 是 `BranchRecord`：`main` 为 `{id:"main"}`，子分支为 `{id, parent, branch_point, create_anchor}`；后两项是父分支的本地序号。运行时的 `TimelineInfo` 是它加上 `source`，该字段不落盘。JSON 字段名按各类型的 serde 定义，不能由 SQL 列名的拼写推断。
+`agents.profile` 是 `AgentProfile`：`{name, description, systemPrompt, tools?, model?}`；`model` 若存在为 `{providerId, modelId}`。`agent_sessions.config` 是 `SessionConfig`：`{permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole, interactive?}`；两者的 `tools` 是字符串数组形式的挂载列表，没有挂载列表时省略（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)，格式决定见 [#364 v19 格式决定](#364-v19-格式决定)）；其中 `model` 是 `ModelSelection {providerId, modelId, config?, metadata?}`，创建时固定完整模型参数，省略参数的身份记录仍可读取。`permissionPolicy` 为 `{preset, allowedTools, disallowedTools, fileAccess?, toolApproval?}`（兼容规则见下段），`collaborationRole` 为 `leader` 或 `member`。可选字段 `interactive`（布尔，缺省 `true`）由[路线图](../roadmap.md) C2 加入，已实现，格式决定如下：保持 v13，不升级到 v14，这是配置 JSON 中增量的可选字段；缺少它的已存储记录表示 `true`，因为该字段出现之前创建的每个 Session 都是客户端 Session；只写入 `false`，交互式记录不含该字段，与该字段出现之前写入的记录格式相同；这一省略规则写在 `SessionConfig` 的 serde 定义上，原生存储是它唯一的序列化方，在其他地方暴露 `SessionConfig` 须另行决定；旧版守护进程忽略该字段，会把非交互记录读成交互式，这一点可以接受。字段合同见 [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields)。`timeline_branches.info` 是 `BranchRecord`：`main` 为 `{id:"main"}`，子分支为 `{id, parent, branch_point, create_anchor}`；后两项是父分支的本地序号。运行时的 `TimelineInfo` 是它加上 `source`，该字段不落盘。JSON 字段名按各类型的 serde 定义，不能由 SQL 列名的拼写推断。
+
+`PermissionPolicy` 的增量可选字段沿用当前 v28 SQL schema 和格式标记，不重写旧记录。
+`fileAccess` 的值为 `read-only`、`workspace-read-write` 或 `unrestricted`，`toolApproval` 的值为
+`ask` 或 `bypass`；省略时序列化仍不写入，分别保留 `preset` 原有的文件行为和风险判定，不补成显式 Ask。
+同一扩展类型也用于 `permission/changed {policy}` 的持久化正文；每次更新保留未修改的覆盖字段和工具列表。
+字段语义属于 [Permission 合同](../../architecture/rust-agent/plugins/Permission.md#policy-contract)
+（[ADR 017](../../adr/017-independent-permission-controls.md)）。新二进制可读取旧策略不表示反向兼容：
+旧二进制拒绝含显式 `fileAccess` 或 `toolApproval` 的策略，包括 Session 配置和事件正文。
+写入这些字段后的数据库不支持降级；相同的 v28 标记并不保证旧二进制能恢复这些记录，也没有删除字段或
+转换为预设的降级路径。不得通过丢弃覆盖字段来恢复读取，因为这会改变权限决策。
 
 `context/configured` 的 `ModelConfiguration` 分别固定模型与工具部分：模型使用上述参数，`tools` 为已采用声明，可选 `toolSources` 为 `{key,version}[]` 的来源版本；没有来源时省略。模型更新保留已采用的工具部分，工具采用保留模型部分，完整合同见[App Server合同](../../../crates/dim-app-server/README.md)。
 
@@ -434,6 +447,16 @@ ProjectionCheckpoint = {
 - **单向**：v21 daemon 按现有精确 SQL 结构检查拒绝 `CHECK (version = 22)`，不会尝试解码新值；不做降级或备份。升级提交后沿用一次性 stderr 日志：`Upgraded native store <path> from format v21 to v22; earlier dimcode versions cannot open it.`
 - **验证**：`storage_flow.rs` 的 `a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas` 使用一次性 v21 库，核对所有原有业务行不变、新结构和标记、再次打开不再升级，并在采用工具配置和模型请求两条路径写入无 `type` 的组合 schema，关闭后恢复 Session，逐值核对。既有各版本升级与非法结构保留测试覆盖准入路径；冻结 wire fixtures 不变。
 
+### ADR 013 v29 格式决定
+
+[Command output ownership](../../adr/013-command-output-ownership.md)（ADR 013）的原生存储格式为 **v29**，从 v28 原地升级。
+
+- **新增结构与索引**：`session_output_owners(session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, PRIMARY KEY (session_id, path))` 与索引 `session_output_owners_by_path(path)`。其他 SQL 结构、持久化 JSON、内容寻址与既有索引不变。主键服务 fork 复制、Session 内读取和删除；索引服务删除时按目录判断“本库是否还有别的 Session 需要它”，主键无法承担该检查。
+- **为什么另立一表**：输出没有 `session_files` 行或 id，运行中会增长，并按目录删除；多态表需要可空键和类型判别，且每次清扫都要按类型过滤。该表的存在使 fork 在源 Session 删除后仍能读取被复制的输出。
+- **升级**：空库创建 v29；精确匹配且标记相符的 v28 库在现有启动准入事务内创建空表与索引，重建标记表并写入 29。更早的受支持格式先执行已有步骤，再执行本步。失败回滚；旧业务行不变，不回填历史输出（升级前的输出没有行，恢复的 Session 可能再请求一次，升级后的 fork 不继承）。
+- **单向**：v28 守护进程拒绝 v29 库；不降级。准入仍要求精确 SQL 结构及对应标记。
+- **验证**：`storage_flow.rs` 的 `a_v28_store_upgrades_in_place_once` 核对 v28 原地升级、业务行保持、新表初始为空和再次打开不再升级；`output_ownership_survives_a_fork_and_a_source_delete` 核对注册、fork 复制、源删除后 fork 读取、最后所有者删除目录，以及 `owns` 同时读取两张所有权表；`documented_native_records_restore_with_legacy_snapshot_bypassed` 经完整记录示例的输出行核对重启后原样恢复；既有各格式升级测试核对完整升级链。
+
 ### #717 v28 格式决定
 
 [Session grants](../../adr/012-session-grants.md) 的原生存储格式为 **v28**，从 #593 的 v27 原地升级。v27 保留委派归属的两列和两个索引。
@@ -565,6 +588,8 @@ ProjectionCheckpoint = {
 | v23 `session_catalog_with_preview` | `(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL` | 过滤无预览行的目录分页 |
 | v16 主键 `session_metadata` | `(session_id)` | `read`、`setTitle`、列表联结标题、删除与创建回滚按 Session 删除 |
 | v28 主键 `session_grants` | `(session_id, path)` | 一个 Session 的 grant 读取、add 的 upsert、remove 与 delete 按 Session 定点删除 |
+| v29 主键 `session_output_owners` | `(session_id, path)` | 注册的 upsert、`owns` 的精确查找、fork 复制与 delete 按 Session 定点删除 |
+| v29 `session_output_owners_by_path` | `(path)` | 删除一个目录前判断本库是否还有别的 Session 在该目录下有行 |
 
 ## 分页查询
 
@@ -580,7 +605,7 @@ ProjectionCheckpoint = {
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行）
+## 完整记录示例（v26；v27 未改动这些行，v28 追加 grants 行，v29 追加输出行）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -593,7 +618,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 28}],
+  "agent_store_format": [{"version": 29}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
@@ -739,8 +764,9 @@ current manual title.
   "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
   "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],
   "session_grants": [{"session_id": "s1", "path": "/work/notes.md", "kind": "file", "mode": "write"}],
+  "session_output_owners": [{"session_id": "s1", "path": "/work/command-output/s1/exec.log"}],
   "session_metadata": [{"session_id": "s1", "revision": 2, "title": "Example conversation", "title_source": "manual"}]
 }
 ```
 
-这十一条逻辑事件占十条物理事件行；`main` 的已发布 head 为 8，`child` 为 3。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目；压缩的 `retain_from` 指向事件 `e2`，即从该事件放置的条目起原样保留；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`main` 的 v16 `model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`child` 的 v17 `model/call` 以 `list` 引用三条消息的最后一个节点，`length` 为 3；它在逻辑历史中的上一个请求是 `main` 第 4 条 v16 行，没有可共用的节点，所以三条消息各写一个节点，`system` 按 v16 的写法得到同一地址。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 replacement。回滚 Session 时先删除快照，再删除事件、分支、内容、owner 和 Session 文件 owner 行，最后删除 `agent_sessions`；Agent 只有在不再被任何 Session 引用时才能删除。
+这十一条逻辑事件占十条物理事件行；`main` 的已发布 head 为 8，`child` 为 3。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目；压缩的 `retain_from` 指向事件 `e2`，即从该事件放置的条目起原样保留；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`main` 的 v16 `model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`child` 的 v17 `model/call` 以 `list` 引用三条消息的最后一个节点，`length` 为 3；它在逻辑历史中的上一个请求是 `main` 第 4 条 v16 行，没有可共用的节点，所以三条消息各写一个节点，`system` 按 v16 的写法得到同一地址。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 replacement。回滚 Session 时先删除快照，再删除事件、分支、内容、owner 和 Session 文件、grants、输出 owner 行，最后删除 `agent_sessions`；Agent 只有在不再被任何 Session 引用时才能删除。

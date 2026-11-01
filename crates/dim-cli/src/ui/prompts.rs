@@ -57,15 +57,11 @@ pub enum Effect {
     Resume(String),
     /// Reload the session list.
     Refresh,
-    /// Switch the session to full access and allow this call.
     RetryApproval {
         request_id: String,
         branch_id: String,
     },
-    FullAccess {
-        request_id: String,
-        branch_id: String,
-    },
+    OpenPermissions,
     /// Show this line's conversation and submit to it.
     FocusLine(String),
     /// A `/timeline` key on the user message `row_id` of the shown line.
@@ -101,8 +97,7 @@ pub enum Effect {
         projection_id: u64,
         run_id: String,
     },
-    /// Set the default tool-approval mode.
-    SetApprovals(String),
+    SetPermission(crate::permission::Change),
     /// Paint with this theme without saving it.
     ThemePreview(String),
     /// Keep this theme and save it.
@@ -142,8 +137,10 @@ pub enum Effect {
     Connected(String),
     /// Open the `/models` picker in place of this panel.
     OpenModels,
-    /// Sign this account provider out; the host reports the account again.
-    Logout(String),
+    /// Sign this described account out; the host reports its state again.
+    Logout(crate::model::session::AccountTarget),
+    /// Read this account's state; the host reports it back.
+    LoginStatus(String),
     /// Report this account provider's usage again.
     LoginUsage(String),
     /// Open this page in the browser.
@@ -296,10 +293,6 @@ impl ExitConfirm {
     }
 }
 
-/// The confirmation full access takes, here and in the `/approvals` panel.
-pub const CONFIRM_HINT: &str = "Tab switch  Enter confirm  Esc cancel";
-pub const CONFIRM_BODY: &str = "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task.";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
     AllowOnce,
@@ -309,9 +302,7 @@ pub enum PermissionAction {
     /// Allow this exact path for the rest of this Session.
     AllowSession,
     Reject,
-    /// Switch the session to the full-access preset, which also becomes the
-    /// default for later sessions, and allow this call. The loudest last.
-    FullAccess,
+    Permissions,
 }
 
 impl PermissionAction {
@@ -322,7 +313,7 @@ impl PermissionAction {
             Self::AllowAlways => t("Allow always"),
             Self::AllowSession => t("Allow for this session"),
             Self::Reject => t("Reject"),
-            Self::FullAccess => t("Full access"),
+            Self::Permissions => "Permissions",
         }
     }
 }
@@ -342,9 +333,6 @@ pub struct PermissionPrompt {
     /// The decisions offered: "always" only for a simple command the
     /// daemon can keep a rule for.
     actions: Vec<PermissionAction>,
-    /// `Some(focused button)` while full access awaits confirmation:
-    /// 0 = Confirm, 1 = Cancel.
-    confirming: Option<usize>,
 }
 
 impl PermissionPrompt {
@@ -364,7 +352,7 @@ impl PermissionPrompt {
             actions.push(PermissionAction::AllowSession);
         }
         actions.push(PermissionAction::Reject);
-        actions.push(PermissionAction::FullAccess);
+        actions.push(PermissionAction::Permissions);
         Self {
             member: None,
             offset: Cell::new(0),
@@ -375,7 +363,6 @@ impl PermissionPrompt {
             input,
             selected: 0,
             actions,
-            confirming: None,
         }
     }
 
@@ -507,13 +494,6 @@ impl PermissionPrompt {
         ]
     }
 
-    fn full_access(&self) -> Effect {
-        Effect::FullAccess {
-            request_id: self.request_id.clone(),
-            branch_id: self.branch_id.clone(),
-        }
-    }
-
     fn decide(
         &self,
         allow: bool,
@@ -563,21 +543,6 @@ impl PermissionPrompt {
                 _ => {}
             }
         }
-        if let Some(focus) = &mut self.confirming {
-            return match key.code {
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
-                    *focus = 1 - *focus;
-                    Effect::None
-                }
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.full_access(),
-                KeyCode::Enter if *focus == 0 => self.full_access(),
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.confirming = None;
-                    Effect::None
-                }
-                _ => Effect::None,
-            };
-        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => self.decide(true, false, None),
             KeyCode::Char('n') | KeyCode::Char('N') if plain(key) => {
@@ -603,27 +568,13 @@ impl PermissionPrompt {
                 PermissionAction::AllowAlways => self.decide(true, true, None),
                 PermissionAction::AllowSession => self.decide(true, false, self.grant()),
                 PermissionAction::Reject => self.decide(false, false, None),
-                PermissionAction::FullAccess => {
-                    self.confirming = Some(1);
-                    Effect::None
-                }
+                PermissionAction::Permissions => Effect::OpenPermissions,
             },
             _ => Effect::None,
         }
     }
 
     pub fn render(&self, width: usize, p: &Palette) -> Vec<String> {
-        if let Some(focus) = self.confirming {
-            return confirm_panel(
-                t("Confirm Full Access"),
-                &[t(CONFIRM_BODY).to_owned()],
-                &[t("Confirm").to_owned(), t("Cancel").to_owned()],
-                focus,
-                t(CONFIRM_HINT),
-                width,
-                p,
-            );
-        }
         let inner = width.saturating_sub(4).max(1);
         let title = paint(
             &truncate_cells(t("Permission required"), inner),
@@ -1556,12 +1507,9 @@ mod tests {
             Effect::Approval { allow: false, .. }
         ));
         p.handle_key(key(KeyCode::Right));
-        assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
-        assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
-        assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
         assert!(matches!(
-            p.handle_key(key(KeyCode::Char('y'))),
-            Effect::FullAccess { .. }
+            p.handle_key(key(KeyCode::Enter)),
+            Effect::OpenPermissions
         ));
 
         let read = PermissionPrompt::grant_for("read", &serde_json::json!({"path": "a"})).unwrap();
@@ -1604,7 +1552,7 @@ mod tests {
         assert!(rows[5].contains("› Allow once   "));
         assert!(!rows[5].contains("Allow always"));
         assert!(rows[5].contains("Reject   "));
-        assert!(rows[5].contains("Full access"));
+        assert!(rows[5].contains("Permissions"));
         assert!(rows[7].ends_with("─ y allow · n reject · ←→/Tab move · Enter confirm ─╯"));
         assert!(
             !p.render(100, &theme.palette)

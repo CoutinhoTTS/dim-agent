@@ -16,7 +16,9 @@ Commands:\n\
                                    it holds prompts, code and tool output.\n\
                                    --database defaults to the home's\n\
                                    rust/dimcode.sqlite\n\
-  login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
+  login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]\n\
+                                   Sign in to a Provider the daemon describes;\n\
+                                   without PROVIDER, list the accounts it describes\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh | --clear-preferences MODEL\n\
@@ -82,10 +84,10 @@ Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
-/approvals (alias /permissions) shows the preset and command rules; it also takes\n\
-  PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
-/approval in the terminal UI chooses ask (workspace-write) or full access for\n\
-  this session and later ones. The line prompt keeps /approvals.\n\
+/permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
+  approval (Ask/Bypass), and Process isolation controls in the terminal UI.\n\
+The line prompt accepts file-access read-only|workspace-read-write|unrestricted,\n\
+  tool-approval ask|bypass, PRESET, allow|deny exact|prefix COMMAND, or remove N.\n\
 Approval accepts only y/yes; empty input denies. For a simple exec command, a/always\n\
   also saves a command rule. Noninteractive approval exits 3.\n\
 The terminal UI offers a newer version on its npm channel (alpha, beta or latest),\n\
@@ -97,6 +99,9 @@ It also draws a progress bar where the terminal is known to (OSC 9;4);\n\
   DIM_TERMINAL_PROGRESS=off turns that off, =on draws it in any terminal.\n\
 Questions take option numbers (comma separated for several) or 0 to type your\n\
   own; empty input on the first question declines. Noninteractive questions exit 3.\n\
+Account commands sign in to every Provider the daemon describes with a login\n\
+  method. A build without the Dim account provider says so and offers API-key\n\
+  Providers instead.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval or answer required, 130 interrupted.\n";
 
@@ -121,7 +126,8 @@ pub enum Action {
         output: Option<PathBuf>,
         database: Option<PathBuf>,
     },
-    Login(String),
+    /// `login [PROVIDER]`: without one, list the described accounts.
+    Login(Option<String>),
     Account(String),
     Logout(String),
     Models(String),
@@ -196,6 +202,8 @@ pub struct Options {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub permission: Option<PermissionPreset>,
+    pub file_access: Option<dim_agent_types::FileAccess>,
+    pub tool_approval: Option<dim_agent_types::ToolApproval>,
     pub directory: Option<String>,
     pub device: bool,
     /// Set only for a hosted leaf `Tui`.
@@ -236,6 +244,8 @@ impl Options {
             provider: None,
             model: None,
             permission: None,
+            file_access: None,
+            tool_approval: None,
             directory: None,
             device: false,
             ui_identity: None,
@@ -600,13 +610,24 @@ impl Options {
                 "login" | "account" | "logout" | "models"
                     if matches!(options.action, Action::Chat) =>
                 {
-                    let provider = value(&mut args)?;
-                    options.action = match arg.as_str() {
-                        "login" => Action::Login(provider),
-                        "account" => Action::Account(provider),
-                        "logout" => Action::Logout(provider),
-                        _ => Action::Models(provider),
+                    let provider = match args.peek().map(String::as_str) {
+                        Some("-h" | "--help") => {
+                            options.action = Action::Help;
+                            return Ok(options);
+                        }
+                        Some(next) if !next.starts_with('-') => Some(value(&mut args)?),
+                        _ => None,
                     };
+                    if arg == "login" {
+                        options.action = Action::Login(provider);
+                    } else {
+                        let provider = provider.ok_or_else(|| format!("{arg} requires a value"))?;
+                        options.action = match arg.as_str() {
+                            "account" => Action::Account(provider),
+                            "logout" => Action::Logout(provider),
+                            _ => Action::Models(provider),
+                        };
+                    }
                 }
                 _ if options.client_secret => {
                     return Err(

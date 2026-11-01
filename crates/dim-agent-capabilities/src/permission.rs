@@ -6,6 +6,12 @@
 //! Session's `fileAccessFacts` service, which resolves the workspace, system,
 //! owned and grant facts; without that service a write keeps the
 //! workspace-only rule and a read the preset rule.
+//!
+//! The admission decision also asks the advisors registered with it (Hooks
+//! A.6.1): a branch part registers one with [`Permission::register_advice`]
+//! while it runs, and the advice is folded with Permission's own decision.
+//! [`Permission::decide`] stays the plain decision, for the admission's
+//! recheck after an answer.
 use crate::{
     file_access::FileAccessFacts,
     host::{HostError, HostFuture},
@@ -13,12 +19,13 @@ use crate::{
     workspace_tools::files::{canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
-    AgentError, Delivery, Dispatcher, Names, SessionConfig, SessionIdentity, StateCell, Timeline,
+    AgentError, Delivery, Dispatcher, Names, Registration, Registrations, SessionConfig,
+    SessionIdentity, StateCell, Timeline,
 };
 use dim_agent_types::{
-    AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
-    CommandRuleDecision, EventKind, PermissionChangedData, PermissionPolicy, PermissionPreset,
-    grant::GrantMode,
+    AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
+    CommandRuleDecision, EventKind, FileAccess, PermissionChangedData, PermissionPolicy,
+    PermissionPreset, ToolApproval, grant::GrantMode,
 };
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
@@ -35,6 +42,46 @@ pub enum Decision {
     Allow,
     Ask { reason: String },
     Deny { reason: String },
+}
+
+const CANCELLED: &str = "Tool execution cancelled.";
+
+/// Permission's own decision when advisors are asked: `allow` or `ask`,
+/// never `deny` (Hooks A.6.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionDecision {
+    Allow,
+    Ask,
+}
+
+/// The admission decision asked of one registered advisor (Hooks A.6.1).
+#[derive(Clone, Debug)]
+pub struct ToolAdviceRequest {
+    pub source: BranchSource,
+    pub call: ApprovalCallData,
+    pub risk: Option<String>,
+    pub decision: AdmissionDecision,
+}
+
+/// What one advisor answers (Hooks A.6.1). It is advice, not authority:
+/// Permission folds it with its own decision, and it never overrides a deny.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolAdviceReply {
+    None,
+    Allow,
+    Ask { reason: String },
+    Deny { reason: String },
+}
+
+/// An advisor registered with the branch's Permission (Hooks A.6.1): asked
+/// at each admission whose own decision is not a deny, in name order. An
+/// error counts as no advice.
+pub trait AdviseTool: Send + Sync + 'static {
+    fn advise(
+        &self,
+        request: ToolAdviceRequest,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolAdviceReply>;
 }
 
 /// The dispatched policy; `version` is the local sequence of the last
@@ -92,8 +139,81 @@ pub struct Permission {
     session_id: String,
     cwd: PathBuf,
     inner: Mutex<Inner>,
+    advisors: Arc<Registrations<Arc<dyn AdviseTool>>>,
 }
 impl Permission {
+    /// Registers `advise` under `name` on behalf of the part that owns `ctx`,
+    /// until that part unloads (Hooks A.6.1). A second advisor of the same
+    /// name fails.
+    pub fn register_advice(
+        &self,
+        ctx: &Ctx,
+        name: &str,
+        advise: Arc<dyn AdviseTool>,
+    ) -> Result<(), Error> {
+        self.advisors.register(ctx, name, advise).map(|_| ())
+    }
+
+    /// The admission decision (Hooks A.6.1): its own decision first, then
+    /// the advisors registered when it is made, in name order, when that
+    /// decision is not a deny. Any deny wins, then any ask, then any allow;
+    /// a provider error counts as none, and an advisor withdrawn while its
+    /// advice is pending has that advice dropped as none. A cancelled batch
+    /// drops the advice and fails the admission as cancelled.
+    pub async fn admit_decision(
+        &self,
+        call: &ApprovalCallData,
+        source: &BranchSource,
+        risk: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<Decision, HostError> {
+        let decision = self.decide(call, risk, cancel).await?;
+        let own = match decision {
+            Decision::Deny { .. } => return Ok(decision),
+            Decision::Allow => AdmissionDecision::Allow,
+            Decision::Ask { .. } => AdmissionDecision::Ask,
+        };
+        let (mut allow, mut ask, mut deny) = (false, None, None);
+        for registration in self.advisors.all() {
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled(CANCELLED.into()));
+            }
+            let request = ToolAdviceRequest {
+                source: source.clone(),
+                call: call.clone(),
+                risk: risk.map(str::to_owned),
+                decision: own,
+            };
+            let advised = tokio::select! {
+                biased;
+                advised = registration.value.advise(request, cancel.clone()) => Some(advised),
+                _ = withdrawn(&self.advisors, &registration) => None,
+                _ = cancel.cancelled() => {
+                    return Err(HostError::Cancelled(CANCELLED.into()));
+                }
+            };
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled(CANCELLED.into()));
+            }
+            match advised {
+                None | Some(Err(_)) | Some(Ok(ToolAdviceReply::None)) => {}
+                Some(Ok(ToolAdviceReply::Deny { reason })) => {
+                    deny.get_or_insert(reason);
+                }
+                Some(Ok(ToolAdviceReply::Ask { reason })) => {
+                    ask.get_or_insert(reason);
+                }
+                Some(Ok(ToolAdviceReply::Allow)) => allow = true,
+            }
+        }
+        Ok(match (deny, ask) {
+            (Some(reason), _) => Decision::Deny { reason },
+            (None, Some(reason)) => Decision::Ask { reason },
+            (None, None) if allow => Decision::Allow,
+            (None, None) => decision,
+        })
+    }
+
     /// Decides with the policy dispatched when the decision is made and, for a
     /// command call, the rules read now. A file call resolves its target before
     /// sampling that policy. Cancelled reads stop admission.
@@ -135,18 +255,31 @@ impl Permission {
             None => None,
         };
         let policy = self.state.get().policy;
+        let access = policy.file_access();
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
             return Ok(Decision::Deny {
                 reason: format!("Tool `{name}` is disallowed by the permission policy"),
             });
         }
-        if write && policy.preset != PermissionPreset::FullAccess {
+        if write && let decision @ Decision::Deny { .. } = decide(&policy, name, risk) {
+            return Ok(decision);
+        }
+        if write
+            && access == FileAccess::ReadOnly
+            && (policy.file_access.is_some()
+                || (policy.tool_approval.is_some() && !policy.allowed_tools.contains(name)))
+        {
+            return Ok(Decision::Deny {
+                reason: "File writes are not allowed by Read only file access".into(),
+            });
+        }
+        if write && access != FileAccess::Unrestricted {
             let facts = self.ctx.get_at(&self.facts);
             if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
                 let facts = tokio::select! {
-                    result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Write) => result,
-                    _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                    result = facts.0.facts(&self.session_id, access, target, GrantMode::Write) => result,
+                    _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
                 };
                 let facts = match facts {
                     Ok(facts) => facts,
@@ -159,31 +292,31 @@ impl Permission {
                         });
                     }
                 };
-                let preset = match policy.preset {
-                    PermissionPreset::ReadOnly => "read-only",
-                    PermissionPreset::WorkspaceWrite => "workspace-write",
-                    PermissionPreset::FullAccess => unreachable!("full-access skips the facts"),
+                let scope = match (
+                    access,
+                    policy.file_access.is_some() || policy.tool_approval.is_some(),
+                ) {
+                    (FileAccess::ReadOnly, true) => "Read only file access",
+                    (FileAccess::WorkspaceReadWrite, true) => "Workspace read/write file access",
+                    (FileAccess::ReadOnly, false) => "the read-only preset",
+                    (FileAccess::WorkspaceReadWrite, false) => "the workspace-write preset",
+                    (FileAccess::Unrestricted, _) => unreachable!("unrestricted skips the facts"),
                 };
                 if facts.system {
                     return Ok(Decision::Deny {
-                        reason: format!(
-                            "Writing to a system path is not allowed by the {preset} preset"
-                        ),
+                        reason: format!("Writing to a system path is not allowed by {scope}"),
                     });
                 }
                 if facts.owned {
                     return Ok(Decision::Deny {
                         reason: format!(
-                            "Writing to a session-owned file is not allowed by the {preset} preset"
+                            "Writing to a session-owned file is not allowed by {scope}"
                         ),
                     });
                 }
-                if policy.preset == PermissionPreset::WorkspaceWrite {
-                    if facts.workspace {
+                if access == FileAccess::WorkspaceReadWrite {
+                    if facts.workspace || facts.grant {
                         return Ok(decide(&policy, name, risk));
-                    }
-                    if facts.grant {
-                        return Ok(Decision::Allow);
                     }
                     return Ok(Decision::Ask {
                         reason: format!(
@@ -192,7 +325,7 @@ impl Permission {
                         ),
                     });
                 }
-            } else if policy.preset == PermissionPreset::WorkspaceWrite {
+            } else if access == FileAccess::WorkspaceReadWrite {
                 return Ok(match target {
                     Some(Ok((workspace, target))) if target.starts_with(&workspace) => {
                         decide(&policy, name, risk)
@@ -213,7 +346,7 @@ impl Permission {
             }
         }
         if category == Risk::Read
-            && policy.preset != PermissionPreset::FullAccess
+            && access != FileAccess::Unrestricted
             && path.is_some()
             && let Some(facts) = &read_facts
         {
@@ -231,8 +364,8 @@ impl Permission {
                 }
             };
             let facts = tokio::select! {
-                result = facts.0.facts(&self.session_id, policy.preset, target, GrantMode::Read) => result,
-                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                result = facts.0.facts(&self.session_id, access, target, GrantMode::Read) => result,
+                _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
             };
             let facts = match facts {
                 Ok(facts) => facts,
@@ -320,7 +453,7 @@ impl Permission {
         let Some(path) = path.filter(|_| resolvable) else {
             return Ok(None);
         };
-        if self.state.get().policy.preset == PermissionPreset::FullAccess {
+        if self.state.get().policy.file_access() == FileAccess::Unrestricted {
             return Ok(None);
         }
         let (cwd, path) = (self.cwd.clone(), path.to_owned());
@@ -336,7 +469,7 @@ impl Permission {
         });
         let target = tokio::select! {
             result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
-            _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+            _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
         };
         Ok(Some(target))
     }
@@ -421,6 +554,26 @@ impl Permission {
     }
 }
 
+/// Resolves when `registration` is no longer the advisor of its name, which
+/// is how its part's unload appears to an admission in flight (Hooks A.6.1).
+async fn withdrawn(
+    advisors: &Registrations<Arc<dyn AdviseTool>>,
+    registration: &Arc<Registration<Arc<dyn AdviseTool>>>,
+) {
+    let mut changes = advisors.changes();
+    loop {
+        if !advisors
+            .get(&registration.name)
+            .is_some_and(|current| Arc::ptr_eq(&current, registration))
+        {
+            return;
+        }
+        if changes.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Risk categories declared by tool owners in `ToolDefinition.risk`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Risk {
@@ -468,6 +621,14 @@ fn matches(rule: &CommandRule, command: &str) -> bool {
 fn decide(policy: &PermissionPolicy, name: &str, risk: Option<&str>) -> Decision {
     if policy.allowed_tools.iter().any(|item| item == name) {
         return Decision::Allow;
+    }
+    if let Some(approval) = policy.tool_approval {
+        return match approval {
+            ToolApproval::Bypass => Decision::Allow,
+            ToolApproval::Ask => Decision::Ask {
+                reason: format!("Tool `{name}` requires approval under Ask tool approval"),
+            },
+        };
     }
     let risk = Risk::of(risk);
     let (preset, verdict) = match policy.preset {
@@ -558,6 +719,7 @@ impl DynPlugin for PermissionPlugin {
                 session_id: identity.session_id.clone(),
                 cwd: PathBuf::from(&config.cwd),
                 inner: Mutex::new(Inner::default()),
+                advisors: Arc::new(Registrations::default()),
             });
             let closing = service.clone();
             ctx.effect(move || async move {

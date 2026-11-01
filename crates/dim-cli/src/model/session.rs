@@ -14,6 +14,11 @@ use crate::wire::Configuration;
 /// The Dim account provider, signed in with `/login`.
 pub const DIM_OAUTH_ID: &str = "dimcode-api-oauth";
 
+/// The namespace of the Dim account's calls: they target a provider id and
+/// name the account directory. A native OAuth namespace has one account and
+/// takes no target.
+pub const ACCOUNT_NAMESPACE: &str = "account";
+
 /// One piece of a draft sent with [`Command::SubmitDraft`], in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DraftPart {
@@ -197,8 +202,7 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
-    /// Set the default tool-approval mode.
-    SetApprovals(String),
+    SetPermission(crate::permission::Change),
     /// List the providers of the `/connect` panel.
     ListProviders,
     /// Change one provider.
@@ -215,8 +219,8 @@ pub enum Command {
     LoginUsage(String),
     /// `/web`: flip the daemon-owned Web entry switch.
     ToggleWeb,
-    /// `/logout`: sign the provider's account out.
-    Logout(String),
+    /// Sign the described account out.
+    Logout(AccountTarget),
     /// Run a shell-mode command through the App Server; `private` (`!!`)
     /// keeps its result out of the session.
     ShellRun {
@@ -454,8 +458,25 @@ pub struct PluginReply {
 pub struct OauthStart {
     pub attempt: u64,
     pub provider_id: String,
+    /// The account namespace the provider's sign-in methods belong to.
+    pub namespace: String,
     pub device: bool,
     pub email: Option<String>,
+}
+
+/// A described account operation: the provider and its account namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountTarget {
+    pub provider_id: String,
+    pub namespace: String,
+}
+
+/// A Provider entry's `account` descriptor (`provider.management`): the
+/// namespace its account methods live in and the sign-in methods it offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDescriptor {
+    pub namespace: String,
+    pub login_methods: Vec<String>,
 }
 
 /// How a sign-in is going.
@@ -577,6 +598,9 @@ pub struct ProviderEntry {
     pub custom: bool,
     pub base_url: Option<String>,
     pub api_key_preview: Option<String>,
+    /// Present when the daemon describes an account this provider signs in
+    /// through.
+    pub account: Option<AccountDescriptor>,
 }
 
 /// One model the picker offers.
@@ -778,8 +802,8 @@ pub enum Update {
     IsolationBackend(Result<SandboxBackend, String>),
     /// A transient status-line message.
     Toast(String),
-    /// The default tool-approval mode (wire name).
-    Approvals(Result<String, String>),
+    Permissions(Result<dim_agent_types::PermissionPolicy, String>),
+    PermissionSelected(crate::permission::Change),
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.
     ProviderResult {

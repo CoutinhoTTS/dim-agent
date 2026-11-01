@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use crate::ui::i18n::t;
 use crate::ui::line_input::LineInput;
-use crate::ui::render::panel::{bordered, follow_window, key_hints};
+use crate::ui::render::panel::{bordered, follow_window, key_hints, wrap_words};
 use crate::ui::rows::{Columns, Kind, Row, panel_row, title_plain};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::text::truncate_cells;
@@ -84,6 +84,7 @@ pub struct ListPanel {
     /// First row of the visible window, kept between frames.
     window: Cell<usize>,
     refreshable: bool,
+    notes: Vec<String>,
 }
 
 impl ListPanel {
@@ -113,6 +114,7 @@ impl ListPanel {
             page: Cell::new(6),
             window: Cell::new(0),
             refreshable,
+            notes: Vec::new(),
         }
     }
 
@@ -134,6 +136,12 @@ impl ListPanel {
     /// when the selection moves sets it here.
     pub fn set_hint(&mut self, hint: String) {
         self.hint = hint;
+    }
+
+    /// Explanatory paragraphs below the choices, separate from keyboard hints.
+    pub fn with_notes(mut self, notes: Vec<String>) -> Self {
+        self.notes = notes;
+        self
     }
 
     pub fn filter_is_empty(&self) -> bool {
@@ -243,11 +251,11 @@ impl ListPanel {
                 self.loading = true;
                 Event::Refresh
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::BackTab => {
                 self.selected = self.selected.saturating_sub(1);
                 Event::None
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Tab => {
                 if self.selected + 1 < count {
                     self.selected += 1;
                 }
@@ -310,7 +318,21 @@ impl ListPanel {
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
         let query_rows = if self.filterable { 3 } else { 0 };
-        let page = rows.saturating_sub(2 + query_rows + footer.len()).max(1);
+        let mut notes = Vec::new();
+        for note in &self.notes {
+            for line in wrap_words(note, inner.saturating_sub(6).max(1)) {
+                let prefix = if notes.is_empty() { "Hint: " } else { "      " };
+                notes.push(fg(
+                    &truncate_cells(&format!("{prefix}{line}"), inner),
+                    &p.muted,
+                ));
+            }
+        }
+        notes.truncate(rows.saturating_sub(3 + query_rows + shown.len().min(3)));
+        let note_rows = notes.len() + usize::from(!notes.is_empty());
+        let page = rows
+            .saturating_sub(2 + query_rows + note_rows + footer.len())
+            .max(1);
         self.page.set(page);
         let list: Vec<Row> = shown
             .iter()
@@ -383,6 +405,10 @@ impl ListPanel {
                     ));
                 }
             }
+        }
+        if !notes.is_empty() {
+            content.push(String::new());
+            content.extend(notes);
         }
         content.extend_from_slice(footer);
         bordered(

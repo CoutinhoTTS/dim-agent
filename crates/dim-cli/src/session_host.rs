@@ -7,8 +7,8 @@
 //! snapshot. Snapshot rows are shared with the projection, not copied.
 //!
 //! Features the protocol v3 App Server does not offer yet (provider
-//! management, Codex / Grok sign-in, usage, approval preferences) answer with
-//! an explicit "not available" update instead of failing silently.
+//! management, usage, approval preferences) answer with an explicit "not
+//! available" update instead of failing silently.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -21,11 +21,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, EmptyProvider,
-    EmptyReason, ExecutionSnapshot, ManagementReply, ModelItem, ModelList, ModelPolicyUpdate,
-    NeedsLimitsProvider, OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction,
-    ProviderEntry, SandboxBackend, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update, Usage,
+    ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
+    DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
+    ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
+    PluginItem, PluginReply, ProviderAction, ProviderEntry, SandboxBackend, SessionItem,
+    SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -44,7 +44,6 @@ use workflow::WorkflowReads;
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
-const UNAVAILABLE: &str = "not available in this build yet";
 /// The complete Provider editing interface, without legacy write fallbacks.
 const PROVIDER_METHODS: [&str; 4] = [
     "provider.management",
@@ -63,6 +62,7 @@ struct ProviderSummary {
     credential_configured: bool,
     enabled: bool,
     version: u32,
+    account: Option<AccountDescriptor>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,10 +73,18 @@ struct ManagementEntry {
     enabled: Option<bool>,
     version: Option<u32>,
     connection: Option<ManagementConnection>,
+    account: Option<ManagementAccount>,
     preferences: std::collections::BTreeMap<String, serde_json::Value>,
     /// What the update did with the record's models; absent from the reads.
     #[serde(default)]
     models_listed: Option<ModelsListed>,
+}
+/// `provider.management`'s safe account descriptor.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementAccount {
+    namespace: String,
+    login_methods: Vec<String>,
 }
 /// `provider.update`'s answer to what it did with the record's models when
 /// the patch changed its connection.
@@ -297,6 +305,8 @@ struct Login {
     /// The panel's attempt tag for its updates.
     tag: u64,
     provider_id: String,
+    /// The account namespace the attempt's methods belong to.
+    namespace: String,
     attempt_id: String,
     /// Device login: when its status is asked next.
     poll_at: Option<tokio::time::Instant>,
@@ -381,6 +391,15 @@ async fn run(
         refilled_catalogs: Default::default(),
         refill_requests: Vec::new(),
     };
+    worker.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
+        preset: worker
+            .options
+            .permission
+            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+        file_access: worker.options.file_access,
+        tool_approval: worker.options.tool_approval,
+        ..Default::default()
+    })));
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
             let _ = updates.send(Update::Failed(error.to_string()));
@@ -745,8 +764,8 @@ impl Worker {
     /// the permission preset, which the Session's branches and members inherit.
     fn create_params(&self) -> serde_json::Value {
         let mut params = json!({"cwd": self.options.cwd});
-        if let Some(preset) = self.options.permission {
-            params["permissionPolicy"] = json!({"preset": preset});
+        if let Some(policy) = permission::creation_policy(&self.options) {
+            params["permissionPolicy"] = policy;
         }
         params
     }
@@ -799,11 +818,11 @@ impl Worker {
         self.send(Update::Ready(configuration));
         self.send(features);
         if self.client.supports(&permission::PRESET_METHODS) {
-            let preset = permission::read(&mut self.client, &session_id)
+            let policy = permission::read(&mut self.client, &session_id)
                 .await
-                .map(|state| permission::name(state.policy.preset).to_owned())
+                .map(|state| state.policy)
                 .map_err(|error| format!("permission: unavailable ({error})"));
-            self.send(Update::Approvals(preset));
+            self.send(Update::Permissions(policy));
         }
         self.send(Update::Switched { session_id, kind });
         self.context_stale = true;
@@ -1155,6 +1174,15 @@ impl Worker {
             Command::NewSession => {
                 if !self.session_id.is_empty() {
                     self.parked = self.invalidate_projection();
+                    self.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
+                        preset: self
+                            .options
+                            .permission
+                            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+                        file_access: self.options.file_access,
+                        tool_approval: self.options.tool_approval,
+                        ..Default::default()
+                    })));
                     self.send(Update::Context(None));
                     self.send(Update::Switched {
                         session_id: String::new(),
@@ -1369,31 +1397,37 @@ impl Worker {
                     Err(error) => error.to_string(),
                 }));
             }
-            Command::SetApprovals(mode) => {
-                let result = match permission::parse_preset(&mode) {
-                    Err(error) => Err(error.to_string()),
-                    Ok(_)
-                        if !self.session_id.is_empty()
-                            && !self.client.supports(&permission::PRESET_METHODS) =>
-                    {
-                        Err("This daemon cannot change the permission preset".to_owned())
-                    }
-                    Ok(preset) => {
-                        let result = if self.session_id.is_empty() {
-                            Ok(())
-                        } else {
-                            let session_id = self.session_id.clone();
-                            permission::select(&mut self.client, &session_id, preset).await
-                        };
-                        result
-                            .map(|()| {
-                                self.options.permission = Some(preset);
-                                permission::name(preset).to_owned()
-                            })
-                            .map_err(|error| error.to_string())
-                    }
+            Command::SetPermission(change) => {
+                let result = if self.session_id.is_empty() {
+                    let mut policy = dim_agent_types::PermissionPolicy {
+                        preset: self
+                            .options
+                            .permission
+                            .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+                        file_access: self.options.file_access,
+                        tool_approval: self.options.tool_approval,
+                        ..Default::default()
+                    };
+                    change.apply(&mut policy);
+                    Ok(policy)
+                } else {
+                    let session_id = self.session_id.clone();
+                    permission::select_control(&mut self.client, &session_id, change)
+                        .await
+                        .map_err(|error| error.to_string())
                 };
-                self.send(Update::Approvals(result));
+                if result.is_ok() {
+                    match change {
+                        permission::Change::FileAccess(value) => {
+                            self.options.file_access = Some(value)
+                        }
+                        permission::Change::ToolApproval(value) => {
+                            self.options.tool_approval = Some(value)
+                        }
+                    }
+                    self.send(Update::PermissionSelected(change));
+                }
+                self.send(Update::Permissions(result));
             }
             Command::ListProviders => {
                 let providers = self.providers().await;
@@ -1404,15 +1438,7 @@ impl Worker {
                 let providers = self.providers().await;
                 self.send(Update::ProviderResult { result, providers });
             }
-            Command::OauthStart(start)
-                if !matches!(start.provider_id.as_str(), "openai-codex" | "grok-build") =>
-            {
-                self.login_start(start).await
-            }
-            Command::OauthStart(start) => self.send(Update::Oauth {
-                attempt: start.attempt,
-                event: OauthEvent::Done(Err(Some(format!("Sign-in is {UNAVAILABLE}")))),
-            }),
+            Command::OauthStart(start) => self.login_start(start).await,
             Command::OauthCancel => self.login_cancel().await,
             Command::UpgradeInstall(install) => {
                 let updates = self.updates.clone();
@@ -1434,20 +1460,29 @@ impl Worker {
                 let usage = self.account_usage(&provider_id).await;
                 self.send(Update::Usage(usage));
             }
-            Command::Logout(provider_id) => {
+            Command::Logout(target) => {
+                let method = format!("{}.logout", target.namespace);
                 let result = self
                     .client
-                    .rpc("account.logout", json!({"providerId": provider_id}))
+                    .rpc(
+                        &method,
+                        crate::login::target(&target.namespace, &target.provider_id),
+                    )
                     .await;
                 self.send(Update::Notice(match result {
-                    Ok(_) => "Signed out of DimAgent.".into(),
+                    Ok(_) => "Signed out.".into(),
                     Err(error) => format!("Sign-out failed: {error}"),
                 }));
-                let account = self
-                    .account(&provider_id)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Login(account));
+                if target.namespace == ACCOUNT_NAMESPACE {
+                    let account = self
+                        .account(&target.provider_id)
+                        .await
+                        .map_err(|error| error.to_string());
+                    self.send(Update::Login(account));
+                } else {
+                    let providers = self.providers().await;
+                    self.send(Update::Providers(providers));
+                }
             }
             Command::ShellRun {
                 run_id,
@@ -2368,6 +2403,7 @@ impl Worker {
                 version: summary.version,
                 name: summary.display_name,
                 driver: summary.driver_kind,
+                account: summary.account,
             })
             .collect())
     }
@@ -2403,6 +2439,10 @@ impl Worker {
                         version: entry
                             .version
                             .ok_or("Static Provider record version is missing")?,
+                        account: entry.account.map(|account| AccountDescriptor {
+                            namespace: account.namespace,
+                            login_methods: account.login_methods,
+                        }),
                     })
                 })
             })
@@ -3026,20 +3066,29 @@ impl Worker {
             user_code: String,
         }
         self.login_cancel().await;
-        let mut params = json!({
-            "providerId": start.provider_id,
-            "directory": crate::login::account_directory(),
-        });
-        if let Some(email) = &start.email {
-            params["email"] = json!(email);
+        let method = if start.device {
+            crate::login::device_begin(&start.namespace)
+        } else {
+            crate::login::browser_begin(&start.namespace)
+        };
+        if !self.client.supports(&[&method]) {
+            self.login_event(
+                start.attempt,
+                OauthEvent::Done(Err(Some(format!("This daemon does not offer {method}")))),
+            );
+            return;
+        }
+        let managed = start.namespace == ACCOUNT_NAMESPACE;
+        let mut params = crate::login::target(&start.namespace, &start.provider_id);
+        if managed {
+            params["directory"] = json!(crate::login::account_directory());
+            if let Some(email) = &start.email {
+                params["email"] = json!(email);
+            }
         }
         let mut listener = None;
         let attempt_id = if start.device {
-            match self
-                .client
-                .typed::<Device>("account.login.begin", params)
-                .await
-            {
+            match self.client.typed::<Device>(&method, params).await {
                 Ok(device) => {
                     self.login_event(
                         start.attempt,
@@ -3056,16 +3105,14 @@ impl Worker {
                 Err(error) => Err(error),
             }
         } else {
-            params["redirectUri"] = json!(self.options.redirect_uri);
-            match self
-                .client
-                .typed::<Browser>("account.login.browser.begin", params)
-                .await
-            {
+            if managed {
+                params["redirectUri"] = json!(self.options.redirect_uri);
+            }
+            match self.client.typed::<Browser>(&method, params).await {
                 Ok(browser) => {
                     let local = std::env::var_os("SSH_CONNECTION").is_none()
                         && std::env::var_os("SSH_TTY").is_none();
-                    let capture = if local {
+                    let capture = if local && managed {
                         mcp::Capture::bind(&self.options.redirect_uri).await
                     } else {
                         None
@@ -3107,6 +3154,7 @@ impl Worker {
                 self.login = Some(Login {
                     tag: start.attempt,
                     provider_id: start.provider_id,
+                    namespace: start.namespace,
                     attempt_id,
                     poll_at: start
                         .device
@@ -3128,8 +3176,8 @@ impl Worker {
             let _ = self
                 .client
                 .rpc(
-                    "account.login.cancel",
-                    json!({"providerId": login.provider_id, "attemptId": login.attempt_id}),
+                    &format!("{}.login.cancel", login.namespace),
+                    crate::login::attempt(&login.namespace, &login.provider_id, &login.attempt_id),
                 )
                 .await;
         }
@@ -3157,15 +3205,14 @@ impl Worker {
             return;
         };
         self.login_event(login.tag, OauthEvent::Exchanging);
+        let mut params =
+            crate::login::attempt(&login.namespace, &login.provider_id, &login.attempt_id);
+        params["callbackUrl"] = json!(callback);
         let result = self
             .client
             .rpc(
-                "account.login.browser.complete",
-                json!({
-                    "providerId": login.provider_id,
-                    "attemptId": login.attempt_id,
-                    "callbackUrl": callback,
-                }),
+                &format!("{}.login.browser.complete", login.namespace),
+                params,
             )
             .await;
         if let Some(stream) = browser {
@@ -3196,8 +3243,8 @@ impl Worker {
         let status = self
             .client
             .typed::<State>(
-                "account.login.status",
-                json!({"providerId": login.provider_id, "attemptId": login.attempt_id}),
+                &format!("{}.login.status", login.namespace),
+                crate::login::attempt(&login.namespace, &login.provider_id, &login.attempt_id),
             )
             .await;
         let failed = |error: String| OauthEvent::Done(Err(Some(error)));
@@ -3221,12 +3268,14 @@ impl Worker {
     }
 
     /// Refreshes the provider's catalog, so `/models` lists its models at
-    /// once.
+    /// once. The account namespace owns a cached catalog; a native OAuth
+    /// namespace's provider keeps the bundled one.
     async fn login_done(&mut self, login: Login) {
-        if let Err(error) = self
-            .client
-            .rpc("provider.refresh", json!({"providerId": login.provider_id}))
-            .await
+        if login.namespace == ACCOUNT_NAMESPACE
+            && let Err(error) = self
+                .client
+                .rpc("provider.refresh", json!({"providerId": login.provider_id}))
+                .await
         {
             self.send(Update::Notice(format!(
                 "Model catalog refresh failed: {error}"
@@ -3479,9 +3528,7 @@ impl Worker {
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content
         {
-            self.send(Update::Approvals(Ok(
-                permission::name(data.policy.preset).to_owned()
-            )));
+            self.send(Update::Permissions(Ok(data.policy.clone())));
         }
         if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
             self.context_stale = true;

@@ -1,3 +1,4 @@
+use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
@@ -199,14 +200,16 @@ const BUSINESS_TABLES: &[&str] = &[
     "session_files",
     "session_file_owners",
     "session_grants",
+    "session_output_owners",
     "session_metadata",
     "session_catalog",
 ];
-/// The business tables each upgrade step adds: v15's, then v16's and v28's;
-/// v17, v18, v19 through v22 and v24 add none; v27 only alters columns.
+/// The business tables each upgrade step adds: v15's, then v16's, v28's and
+/// v29's; v17, v18, v19 through v22 and v24 add none; v27 only alters columns.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
 const V28_TABLES: [&str; 1] = ["session_grants"];
+const V29_TABLES: [&str; 1] = ["session_output_owners"];
 /// Inserts the rows of `tables` from the complete record example in
 /// native-storage-format.md.
 fn insert_documented_records(connection: &Connection, tables: &[&str]) {
@@ -294,6 +297,10 @@ const V27_ADDITIONS: &[&str] = &[
 const V28_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_grants (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('file', 'dir')), mode TEXT NOT NULL CHECK (mode IN ('read', 'write')), PRIMARY KEY (session_id, path))",
 ];
+const V29_ADDITIONS: &[&str] = &[
+    "CREATE TABLE session_output_owners (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), path TEXT NOT NULL, PRIMARY KEY (session_id, path))",
+    "CREATE INDEX session_output_owners_by_path ON session_output_owners(path)",
+];
 const V23_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_catalog (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)",
     "CREATE INDEX session_catalog_by_activity ON session_catalog(updated_at_ms DESC, session_id)",
@@ -307,6 +314,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V23_ADDITIONS.iter().filter(|_| version >= 23))
         .chain(V27_ADDITIONS.iter().filter(|_| version >= 27))
         .chain(V28_ADDITIONS.iter().filter(|_| version >= 28))
+        .chain(V29_ADDITIONS.iter().filter(|_| version >= 29))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -506,7 +514,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .execute("DELETE FROM agent_store_format", [])
         .unwrap();
     connection
-        .execute("INSERT INTO agent_store_format VALUES (28)", [])
+        .execute("INSERT INTO agent_store_format VALUES (29)", [])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
@@ -2765,6 +2773,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .chain(V15_TABLES.iter().filter(|_| from < 15))
         .chain(["session_catalog"].iter().filter(|_| from < 23))
         .chain(V28_TABLES.iter().filter(|_| from < 28))
+        .chain(V29_TABLES.iter().filter(|_| from < 29))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -2784,8 +2793,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(28));
-    assert_eq!(marker(&connection), [28]);
+    assert_eq!(schema(&connection), schema_of(29));
+    assert_eq!(marker(&connection), [29]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2864,8 +2873,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(28));
-    assert_eq!(marker(&connection), [28]);
+    assert_eq!(schema(&connection), schema_of(29));
+    assert_eq!(marker(&connection), [29]);
     drop(connection);
 
     let database = Database::new();
@@ -2985,7 +2994,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
 
     let connection = Connection::open(&database.0).unwrap();
     assert_ne!(schema(&connection), schema_of(21));
-    assert_eq!(marker(&connection), [28]);
+    assert_eq!(marker(&connection), [29]);
     let body: String = connection
         .query_row(
             "SELECT body FROM timeline_content WHERE session_id = 'schema' AND kind = 'tools'",
@@ -3180,7 +3189,7 @@ async fn the_daemon_names_an_ignored_host_isolation_file() {
         .unwrap();
     let path = home.canonicalize().unwrap().join("host-isolation.json");
     let line = format!(
-        "Ignoring {}: command isolation is a user setting in /settings > Execution; delete the file.",
+        "Ignoring {}: command isolation is a user setting in /permissions > Process isolation; delete the file.",
         path.display()
     );
     assert!(stderr.lines().any(|report| report == line), "{stderr}");
@@ -3231,7 +3240,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v28; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v29; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
@@ -5487,8 +5496,8 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
             .unwrap()
     };
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(28));
-    assert_eq!(marker(&connection), [28]);
+    assert_eq!(schema(&connection), schema_of(29));
+    assert_eq!(marker(&connection), [29]);
     drop(connection);
 
     let listed_expected = json!({
@@ -5965,6 +5974,24 @@ async fn a_v27_store_upgrades_in_place_once() {
     assert!(rows(&connection, "session_grants").is_empty());
 }
 
+#[tokio::test]
+async fn a_v28_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(28);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (28)", [])
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(28));
+    upgrades_in_place_once(&database, connection, 28).await;
+    let connection = Connection::open(&database.0).unwrap();
+    assert!(rows(&connection, "session_output_owners").is_empty());
+}
+
 /// Grants upsert without downgrading write, survive a restart, are absent
 /// from a fork, and remove takes the same path it added.
 #[tokio::test]
@@ -6033,4 +6060,106 @@ async fn session_grants_upsert_remove_survive_restart_and_are_not_forked() {
     drop(sessions);
     store.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// ADR 013 D4: output rows are registered, copied by a fork and deleted with
+/// their Session; a directory another Session still names is kept. `owns`
+/// answers from the output table and the Session file table.
+#[tokio::test]
+async fn output_ownership_survives_a_fork_and_a_source_delete() {
+    let database = Database::new();
+    let directory = database.0.parent().unwrap().canonicalize().unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    (&root.plugin(FileStoragePlugin::new(vec![directory.clone()])))
+        .await
+        .unwrap();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions = dim_app_server::storage::SessionStore::new(db.clone(), root.clone(), 0);
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("source", &SessionConfig::default())
+        .await
+        .unwrap();
+
+    let output = directory.join("command-output/source/exec.log");
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+    std::fs::write(&output, b"output").unwrap();
+    sessions.register("source", output.clone()).await.unwrap();
+    assert!(sessions.owns("source", output.clone()).await.unwrap());
+    assert!(
+        !sessions
+            .owns("source", directory.join("other.log"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !sessions
+            .owns(
+                "source",
+                directory.join("command-output/source/../source/exec.log")
+            )
+            .await
+            .unwrap()
+    );
+    #[cfg(unix)]
+    {
+        let link = directory.join("command-output/source/link.log");
+        std::os::unix::fs::symlink(&output, &link).unwrap();
+        assert!(!sessions.owns("source", link).await.unwrap());
+    }
+
+    let file_id = "file-1";
+    let attachment = directory
+        .join("dimcode.sqlite.session-files")
+        .join(file_id)
+        .join("paste.txt");
+    std::fs::create_dir_all(attachment.parent().unwrap()).unwrap();
+    std::fs::write(&attachment, b"pasted").unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    connection
+        .execute("INSERT INTO session_files (file_id) VALUES (?1)", [file_id])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_file_owners (session_id, file_id) VALUES ('source', ?1)",
+            [file_id],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(sessions.owns("source", attachment.clone()).await.unwrap());
+    assert!(
+        !sessions
+            .owns(
+                "source",
+                directory.join("dimcode.sqlite.session-files/another/paste.txt")
+            )
+            .await
+            .unwrap()
+    );
+
+    sessions.fork_session("source", "fork", 0).await.unwrap();
+    assert!(sessions.owns("fork", output.clone()).await.unwrap());
+    assert!(sessions.owns("fork", attachment.clone()).await.unwrap());
+    assert_eq!(
+        sessions.owned_paths("fork").await.unwrap(),
+        vec![
+            directory.join("dimcode.sqlite.session-files").join(file_id),
+            output.clone(),
+        ]
+    );
+
+    assert!(sessions.delete_session("source").await.unwrap());
+    assert!(output.exists());
+    assert!(attachment.exists());
+    assert!(!sessions.owns("source", output.clone()).await.unwrap());
+    assert!(sessions.owns("fork", output.clone()).await.unwrap());
+
+    assert!(sessions.delete_session("fork").await.unwrap());
+    assert!(!output.exists());
+    assert!(!sessions.owns("fork", output).await.unwrap());
+
+    drop(sessions);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    root.shutdown().await.unwrap();
 }

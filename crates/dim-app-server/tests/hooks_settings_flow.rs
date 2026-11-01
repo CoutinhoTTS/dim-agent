@@ -156,8 +156,7 @@ async fn catalog_reports_sources_states_and_never_reads_foreign_hook_files() {
     assert_eq!(by_event("Stop")["state"], "ok");
     assert_eq!(by_event("Stop")["source"], "project");
     assert_eq!(by_event("UserPromptSubmit")["state"], "ok");
-    // Listed, and not run until its owner lands (#758).
-    assert_eq!(by_event("PreToolUse")["state"], "unsupported");
+    assert_eq!(by_event("PreToolUse")["state"], "ok");
     assert_eq!(by_event("UnknownEvent")["state"], "unsupported");
 
     // An invalid document is a source state, not a failed call.

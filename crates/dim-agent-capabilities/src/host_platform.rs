@@ -33,7 +33,7 @@ pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
 #[cfg(windows)]
 const WINDOWS_SANDBOX_UNAVAILABLE: &str =
-    "The sandbox has no backend on Windows; turn Sandbox off in /settings > Execution";
+    "The sandbox has no backend on Windows; select Off in /permissions > Process isolation";
 
 /// The declaration line for the tools that start processes; `None` where the
 /// platform has no sandbox backend. It is static because declarations are read
@@ -41,11 +41,11 @@ const WINDOWS_SANDBOX_UNAVAILABLE: &str =
 /// default gives each process tree a writable TMPDIR.
 pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(target_os = "macos") {
     Some(
-        "Isolation: the user decides in /settings > Execution whether commands run sandboxed. When the sandbox is on, commands can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access unless the user also turned Network on. You cannot change the boundary; retrying or an approval does not lift it.",
+        "Isolation: the user selects Process isolation in /permissions. When sandboxed, commands can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access unless Network allowed is selected. You cannot change the boundary; retrying or an approval does not lift it.",
     )
 } else if cfg!(unix) {
     Some(
-        "Isolation: the user decides in /settings > Execution whether commands run sandboxed. When the sandbox is on, commands can write only inside the session workspace, read only there and in system directories, and have no network access unless the user also turned Network on. You cannot change the boundary; retrying or an approval does not lift it.",
+        "Isolation: the user selects Process isolation in /permissions. When sandboxed, commands can write only inside the session workspace, read only there and in system directories, and have no network access unless Network allowed is selected. You cannot change the boundary; retrying or an approval does not lift it.",
     )
 } else {
     None
@@ -244,7 +244,7 @@ pub struct ProcessSpecError {
 }
 
 /// Whether a new process can be sandboxed on this host, or why it cannot. The
-/// Execution row shows this; preparation reads the same backend.
+/// Process isolation control shows this; preparation reads the same backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxBackend {
     Available,
@@ -283,7 +283,7 @@ impl Isolation {
         DENIALS.iter().any(|denial| lower.contains(denial)).then(
             || {
                 format!(
-                    "This command ran under the sandbox the user turned on, which may have caused the failure. It blocks network access and file access outside {reach}. Retrying or an approval does not lift it. Ask the user to change Sandbox or Network in /settings > Execution."
+                    "This command ran under the sandbox the user turned on, which may have caused the failure. It blocks network access and file access outside {reach}. Retrying or an approval does not lift it. Ask the user to change Process isolation in /permissions."
                 )
             },
         )
@@ -2077,6 +2077,36 @@ impl HostPlatform {
             reaped: false,
             temporary: None,
         })
+    }
+
+    /// The directory the persistent shell owns: `<home>/.dim/exec`.
+    pub fn exec_root(&self) -> PathBuf {
+        let root = self.home.join(".dim").join("exec");
+        std::fs::canonicalize(&root).unwrap_or(root)
+    }
+
+    /// Removes `path`, one persistent shell output directory below
+    /// [`exec_root`](Self::exec_root), and syncs its parent. An absent
+    /// directory counts as removed. The caller has decided with the
+    /// ownership rows that no Session still needs it (ADR 013 D4).
+    pub fn remove_exec_directory(&self, path: &Path) -> io::Result<()> {
+        let root = self.exec_root();
+        if path == root || !path.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a persistent shell output directory",
+            ));
+        }
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 }
 
