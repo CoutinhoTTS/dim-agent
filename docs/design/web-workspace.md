@@ -360,12 +360,13 @@ Skills and Session owners rather than adding parallel browser-only state.
 
 The legacy CLI Web's Diagnostics page carried a daemon log mode
 (`web.debug_logging`, `off`/`on`/`auto`), a trace archive location and the
-diagnostics metadata cards. This repository serves neither logging control and
-keeps the metadata cards, so this section fixes what replaces each legacy
-surface. The metadata cards stay a read-only projection: server version,
-protocol version, instance, connection phase, `daemon.ping` Session and
-connection counts, round-trip latency and the advertised methods. No read
-returns a credential, token, header, request body or host file path.
+diagnostics metadata cards. This repository has no equivalent for the mode, the
+trace location or trace-archive creation and keeps the metadata cards, so this
+section fixes what replaces each legacy surface. The metadata cards stay a
+read-only projection: server version, protocol version, instance, connection
+phase, `daemon.ping` Session and connection counts, round-trip latency and the
+advertised methods. No read returns a credential, token, header, request body or
+host file path.
 
 | Legacy surface | Current contract | On this page |
 | --- | --- | --- |
@@ -410,25 +411,26 @@ the recording switch is not a process-log mode, and no card presents one as the
 other.
 
 **Compatibility.** Existing configuration needs no migration: this server serves
-no `web` namespace, so a legacy `web.debug_logging.set` call is `unknown_method`
-and changes nothing, and a legacy CLI `config.json` key without a target field
-is reported as unsupported by the migration with its source kept
-([Migration](../../crates/dim-migration/src/settings.rs)). `RUST_LOG` and
-`daemon.log` keep their behavior, and this decision stores nothing: no format,
-revision or protocol change and no new error. The page adds no read or write
-beyond the ones above, so its only write remains the recording switch's
-`settings.update` with the read revision and its existing conflict error.
+no `web` namespace, so any caller of `web.debug_logging.set` gets
+`unknown_method` and changes nothing, and a legacy CLI `config.json` key
+without a target field is reported as unsupported by the migration with its
+source kept ([Migration](../../crates/dim-migration/src/settings.rs)).
+`RUST_LOG` and `daemon.log` keep their behavior, and this decision stores
+nothing: no format, revision or protocol change and no new error. The page adds
+no read or write beyond the ones above, so its only write remains the recording
+switch's `settings.update` with the read revision and its existing conflict
+error.
 
-**Verification.** No automated test: the decision changes no method, document or
-emitted behavior. The page verifies by rendering with a disposable home that the
-metadata, the recording switch and the start-up note appear and that no mode
-control or trace location is offered. A later proposal that does add a run-time
-control must first name its owner, levels, persistence, authority and failure
-behavior, and then add disposable-home flows for the emitted log lines, the
-off/on boundary, restart persistence, rejection of project-origin input and safe
-reads, plus rendered Web verification. This adds no part, event, service,
-configuration or stored document; §7 applies unchanged and no requirement is
-raised to a mechanism owner.
+**Verification.** No automated test: the decision changes no method, stored
+document or emitted behavior. The page verifies by rendering with a disposable
+home that the metadata, the recording switch and the start-up note appear and
+that no mode control or trace location is offered. A later proposal that does
+add a run-time control must first name its owner, levels, persistence,
+authority and failure behavior, and then add disposable-home flows for the
+emitted log lines, the off/on boundary, restart persistence, rejection of
+project-origin input and safe reads, plus rendered Web verification. This adds
+no part, event, service, configuration or stored document; §7 applies unchanged
+and no requirement is raised to a mechanism owner.
 
 #### Admission and sensitive data
 
