@@ -1163,6 +1163,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::config::BranchLifecycle@main",
             "scope": null,
             "status": "Ready"
@@ -1200,6 +1205,12 @@
             "service": "dim_agent_capabilities::permission::Permission@main",
             "scope": null,
             "provider": 69,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
+            "scope": null,
+            "provider": 51,
             "generation": 1
           },
           {
@@ -1243,6 +1254,12 @@
           {
             "service": "dim_agent_capabilities::permission::Permission@main",
             "provider": 69,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
+            "provider": 51,
             "declared": true,
             "external": true
           },
