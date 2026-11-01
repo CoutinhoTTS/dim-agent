@@ -29,6 +29,9 @@ mod server;
 #[path = "cli_flow/tasks.rs"]
 mod tasks;
 
+#[path = "support/daemon.rs"]
+mod daemon_cleanup;
+
 use dim_agent_capabilities::images::{MAX_BASE64_BYTES, MAX_EDGE, base64_len};
 use serde_json::{Value, json};
 use std::{
@@ -75,7 +78,8 @@ impl Home {
 }
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        daemon_cleanup::stop_daemon(&self.0);
+        daemon_cleanup::remove_directory(&self.0);
     }
 }
 
@@ -801,6 +805,32 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn a_home_drop_leaves_no_daemon_behind() {
+    let home = Home::new();
+    let path = home.0.clone();
+    let output = home.command().args(["models", "fixture"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pattern = path.to_str().unwrap();
+    assert_eq!(
+        daemon_cleanup::pids_naming(pattern).len(),
+        1,
+        "the CLI did not start its daemon for {}",
+        path.display()
+    );
+    drop(home);
+    assert!(
+        daemon_cleanup::pids_naming(pattern).is_empty(),
+        "the test left its daemon running for {}",
+        path.display()
+    );
+    assert!(!path.exists(), "the test left {} on disk", path.display());
 }
 
 #[test]
