@@ -1754,6 +1754,10 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         json!({"modelId":"beta"}),
         json!({"providerId":null,"modelId":null}),
         json!({"modelPreferences":{"reasoningEffort":"unsupported"}}),
+        json!({"modelPreferences":{"reasoningEffort":null}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"set"}}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"clear","value":"high"}}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"nope"}}}),
     ] {
         let mut request = branch.clone();
         request
@@ -2047,6 +2051,91 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
         adopted
     );
 
+    // The attach reply names the adopted model and values, not the creation
+    // configuration.
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(attached["result"]["model"]["modelId"], "reasoning");
+    assert_eq!(
+        attached["result"]["modelPreferences"], adopted,
+        "{attached}"
+    );
+
+    // Clearing one field keeps the other.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    let tier_only = json!({"serviceTier":"priority"});
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        tier_only
+    );
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(
+        attached["result"]["modelPreferences"], tier_only,
+        "{attached}"
+    );
+
+    // Repeating the clear changes nothing and publishes no new configured fact.
+    let revision = configured(&mut client, &session_id).await["revision"].clone();
+    let repeated = client
+        .rpc(
+            "session.model.update",
+            json!({"sessionId":session_id,"branchId":"main",
+                "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+        )
+        .await;
+    assert_eq!(repeated["result"]["outcome"], "unchanged", "{repeated}");
+    let data = configured(&mut client, &session_id).await;
+    assert_eq!(data["revision"], revision);
+    assert_eq!(data["model_preferences"], tier_only);
+
+    // A set beside a clear in one request applies both.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":"low",
+                        "serviceTier":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        json!({"reasoningEffort":"low"})
+    );
+
+    // Clearing the other field leaves no value, and the attach reply agrees.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    let data = configured(&mut client, &session_id).await;
+    assert!(data.get("model_preferences").is_none(), "{data}");
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
+    assert_eq!(attached["result"]["model"]["modelId"], "reasoning");
+
     // A model whose configuration carries no preference shows no field.
     assert_ok(
         &client
@@ -2060,6 +2149,17 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
     let data = configured(&mut client, &session_id).await;
     assert_eq!(data["model_id"], "plain");
     assert!(data.get("model_preferences").is_none(), "{data}");
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(
+        attached["result"]["model"]["modelId"], "plain",
+        "{attached}"
+    );
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
 
     server.shutdown();
     server.join().await.unwrap();

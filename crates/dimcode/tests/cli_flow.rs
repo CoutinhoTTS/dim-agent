@@ -190,7 +190,9 @@ impl Wire {
 }
 
 /// The record `session.attach` replies for the Session it names: that
-/// Session's `SessionInfo`, as `session.list` gives it.
+/// Session's `SessionInfo`, whose model follows its latest adopted
+/// configuration rather than the creation model `session.list` reports until
+/// #795 lands.
 fn attach_record(request: &Value) -> Value {
     json!({
         "sessionId": request["params"]["sessionId"],

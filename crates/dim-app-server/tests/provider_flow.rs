@@ -36,6 +36,19 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn preference_update(
+    preferences: ModelPreferences,
+) -> dim_app_server::protocol::ModelPreferenceUpdate {
+    dim_app_server::protocol::ModelPreferenceUpdate {
+        reasoning_effort: preferences
+            .reasoning_effort
+            .map(dim_app_server::protocol::PreferenceUpdate::Value),
+        service_tier: preferences
+            .service_tier
+            .map(dim_app_server::protocol::PreferenceUpdate::Value),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Seen {
     path: String,
@@ -3466,7 +3479,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                         tools: None,
                         tool_sources: vec![],
                     },
-                    ModelPreferences::default(),
+                    &dim_app_server::protocol::ModelPreferenceUpdate::default(),
                     &cancel,
                 )
                 .await
@@ -3485,10 +3498,10 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                     tools: None,
                     tool_sources: vec![],
                 },
-                ModelPreferences {
+                &preference_update(ModelPreferences {
                     reasoning_effort: Some("low".into()),
                     ..Default::default()
-                },
+                }),
                 &cancel,
             )
             .await
@@ -3857,13 +3870,13 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 };
                 assert!(
                     provider
-                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                         .await
                         .is_err()
                 );
                 current.metadata = None;
                 let unstamped = provider
-                    .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                    .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                     .await
                     .unwrap();
                 assert!(
@@ -3907,7 +3920,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 current.metadata = selected.metadata;
                 assert!(
                     provider
-                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                         .await
                         .is_ok()
                 );
@@ -7172,7 +7185,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         ..Default::default()
     };
     let error = provider
-        .apply_preferences(&current, effort.clone(), &cancel)
+        .apply_preferences(&current, &preference_update(effort.clone()), &cancel)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Model route changed"), "{error}");
@@ -7184,7 +7197,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         ..current
     };
     provider
-        .apply_preferences(&current, effort, &cancel)
+        .apply_preferences(&current, &preference_update(effort), &cancel)
         .await
         .unwrap();
     root.shutdown().await.unwrap();
