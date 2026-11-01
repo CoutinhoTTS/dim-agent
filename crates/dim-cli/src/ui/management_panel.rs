@@ -28,7 +28,7 @@ use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
 };
-use crate::sanitize::safe;
+use crate::sanitize::{safe, safe_line};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::{Effect, WriteTarget};
@@ -81,7 +81,9 @@ pub const STRINGS: &[&str] = &[
     "No .dimcode/hooks.json in this workspace.",
     "Owned by plugin {plugin}.",
     "The user document turns every hook off (disableAllHooks).",
-    "The user document changed since it was read; nothing was written. Your next edit opens the current document.",
+    "The user document changed since it was read; nothing was written.",
+    "Your next edit opens the current document.",
+    "Your next add reopens your text.",
     "Added {name}.",
     "Run {name}: {outcome}.",
     "Recent runs of {name}",
@@ -93,8 +95,8 @@ pub const STRINGS: &[&str] = &[
     "at {instant}",
     "cron {expression}",
     "cron {expression} in {zone}",
-    "The job changed since it was read; nothing was written. Your next edit opens the current job.",
-    "The jobs changed since they were read; nothing was written. Your next add opens your text again.",
+    "The job changed since it was read; nothing was written.",
+    "The jobs changed since they were read; nothing was written.",
     "The job changed since it was read; nothing was removed.",
     "The Scheduler has no area document.",
     "No scheduled job has that id.",
@@ -234,15 +236,11 @@ impl ManagementPanel {
                 self.message = None;
             }
             ManagementResult::Applied { note, read_error } => {
-                // The action was done, so its own message stands; what failed
-                // is the read, which the footer reports once, wrapped. The
-                // view before the failed read still names what was removed.
-                let previous = self.view.take().unwrap_or_default();
-                let message = match note {
-                    Some(note) => note.clone(),
-                    None => outcome(&reply.request.action, &previous, None),
-                };
-                self.message = Some(Ok(message));
+                // The action was done, so its own line stands; what failed is
+                // the read, which the footer reports once, wrapped. No view
+                // is kept until the next read.
+                self.view = None;
+                self.message = Some(Ok(note.clone()));
                 self.read_error = Some(read_error.clone());
                 self.list.loading();
             }
@@ -309,8 +307,8 @@ impl ManagementPanel {
         if let Some(id) = &self.confirming {
             let label = self
                 .entry(id)
-                .map(|entry| entry.label.clone())
-                .unwrap_or_else(|| id.clone());
+                .map(|entry| safe_line(&entry.label))
+                .unwrap_or_else(|| safe_line(id));
             self.list.set_hint(tf(
                 "Remove {name}? Enter confirm · Esc cancel",
                 &[("name", &label)],
@@ -368,10 +366,32 @@ impl ManagementPanel {
     /// A draft was written but the owner kept the stored document: the
     /// message names where the user's text still is.
     pub fn kept(&mut self, path: &str) {
+        self.keep_text(path, &[]);
+    }
+
+    /// A conflict kept the user's text: the message names what the next
+    /// attempt does with it and where the text is.
+    pub fn conflicted(&mut self, creating: bool, path: &str) {
+        let next = if creating {
+            t("Your next add reopens your text.")
+        } else {
+            t("Your next edit opens the current document.")
+        };
+        self.keep_text(path, &[next]);
+    }
+
+    /// Adds `sentences`, then where the text is, to the message the reply
+    /// left, which stands first.
+    fn keep_text(&mut self, path: &str, sentences: &[&str]) {
         let kept = tf("Your text is kept in {path}.", &[("path", path)]);
+        let mut tail = sentences.join(" ");
+        if !tail.is_empty() {
+            tail.push(' ');
+        }
+        tail.push_str(&kept);
         self.message = Some(match self.message.take() {
-            Some(Err(error)) => Err(format!("{error} {kept}")),
-            _ => Err(kept),
+            Some(Err(error)) => Err(format!("{error} {tail}")),
+            _ => Err(tail),
         });
     }
 
@@ -633,7 +653,7 @@ fn render_detail(detail: &ShownDetail, width: usize, rows: usize, p: &Palette) -
         width,
         Some(rows),
         &p.border,
-        Some(&title_plain(&safe(&detail.title), inner, p)),
+        Some(&title_plain(&safe_line(&detail.title), inner, p)),
         Some(&key_hints(t("↑↓ scroll · Esc back"), p)),
     )
 }
@@ -709,14 +729,15 @@ fn hint(area: Area, kinds: &[ActionKind]) -> String {
 fn items(view: &ManagementView) -> Vec<Item> {
     let mut items = Vec::new();
     for group in &view.groups {
-        items.push(Item::heading(safe(&group.heading)));
+        items.push(Item::heading(safe_line(&group.heading)));
         for entry in &group.entries {
-            // The owner's text is drawn, so it is safe before it is stored:
-            // an escape sequence in a name cannot reach the screen.
+            // The owner's text is drawn on one line, so it is made safe and
+            // kept on that line before it is stored: an escape sequence, a
+            // newline or a tab in a name cannot reach or break the screen.
             let mut item = Item::new(
                 entry.id.clone(),
-                safe(&entry.label),
-                safe(&states(entry).join("  ")),
+                safe_line(&entry.label),
+                safe_line(&states(entry).join("  ")),
             );
             item.search = format!("{} {}", entry.id, entry.detail.join(" "));
             items.push(item);
@@ -1011,13 +1032,13 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage skills.".into(),
+                "This daemon cannot manage Skills.".into(),
             )),
         ));
         assert!(
             shown(&panel, 60, 10)
                 .join(" ")
-                .contains("This daemon cannot manage skills.")
+                .contains("This daemon cannot manage Skills.")
         );
     }
 
@@ -1161,11 +1182,11 @@ mod tests {
             Area::Skills,
             ManagementAction::List,
             ManagementResult::Refused(ManagementRefusal::Refused(
-                "This daemon cannot manage skills.".into(),
+                "This daemon cannot manage Skills.".into(),
             )),
         ));
         let text = shown(&panel, 60, 12).join("\n");
-        assert!(text.contains("This daemon cannot manage skills."), "{text}");
+        assert!(text.contains("This daemon cannot manage Skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
         match panel.handle_key(ctrl('r')) {
             Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
@@ -1210,6 +1231,36 @@ mod tests {
             }),
             Some(&serde_json::json!({"hooks": {}}))
         );
+    }
+
+    /// A conflict kept the user's text: the panel says what the next attempt
+    /// does with it, by kind, and where the text is.
+    #[test]
+    fn a_conflict_names_what_the_next_attempt_does_with_the_kept_text() {
+        for (creating, sentence) in [
+            (false, "Your next edit opens the current document."),
+            (true, "Your next add reopens your text."),
+        ] {
+            let mut panel = opened_hooks();
+            panel.set_result(&reply(
+                Area::Hooks,
+                ManagementAction::Save {
+                    id: None,
+                    expected_revision: "user:1".into(),
+                    document: serde_json::json!({"hooks": {}}),
+                },
+                ManagementResult::Refused(ManagementRefusal::Conflict {
+                    message: "The user document changed since it was read; nothing was written."
+                        .into(),
+                    view: Box::new(hooks_view()),
+                }),
+            ));
+            panel.conflicted(creating, "/home/u/edit/hooks-1.json");
+            let text = shown(&panel, 72, 20).join(" ");
+            assert!(text.contains(sentence), "{text}");
+            assert!(text.contains("Your text is kept in"), "{text}");
+            assert!(text.contains("hooks-1.json"), "{text}");
+        }
     }
 
     /// Filtering keeps the entry's keys: the hint follows the new selection.
@@ -1372,9 +1423,10 @@ mod tests {
             "the detail replaces the list: {text}"
         );
         assert!(text.contains("↑↓ scroll · Esc back"), "{text}");
-        // Esc returns to the list, with the selection kept.
+        // Esc returns to the list, with the selection kept. The wrapped hint
+        // takes two rows of the list here, so the panel is drawn two taller.
         assert!(matches!(panel.handle_key(key(KeyCode::Esc)), Effect::None));
-        let text = shown(&panel, 60, 12).join("\n");
+        let text = shown(&panel, 60, 14).join("\n");
         assert!(
             text.contains("nightly") && text.contains("release"),
             "{text}"
@@ -1528,10 +1580,10 @@ mod tests {
         assert!(!text.contains("Removed job-1."), "{text}");
     }
 
-    /// A remove whose read-back fails still names the entry it removed:
-    /// the label comes from the view the panel had before the failed read.
+    /// An applied action always carries its line, even when the read-back
+    /// failed, and the panel draws it with the read error once.
     #[test]
-    fn an_applied_remove_names_the_entry_it_removed() {
+    fn an_applied_remove_shows_its_line_and_draws_the_read_error_once() {
         let mut panel = opened_catalogue();
         panel.handle_key(ctrl('x'));
         panel.handle_key(key(KeyCode::Enter));
@@ -1539,13 +1591,17 @@ mod tests {
             Area::Skills,
             ManagementAction::Remove { id: "job-1".into() },
             ManagementResult::Applied {
-                note: None,
+                note: "Removed job-1.".into(),
                 read_error: "the scheduler is unavailable".into(),
             },
         ));
-        let text = shown(&panel, 100, 20).join(" ");
-        assert!(text.contains("Removed nightly."), "{text}");
-        assert!(!text.contains("Removed job-1."), "{text}");
+        let text = shown(&panel, 100, 20).join("\n");
+        assert!(text.contains("Removed job-1."), "{text}");
+        assert_eq!(
+            text.matches("the scheduler is unavailable").count(),
+            1,
+            "the read error is drawn once: {text}"
+        );
     }
 
     /// A run whose read-back fails keeps the owner's answer, and the read
@@ -1558,7 +1614,7 @@ mod tests {
             Area::Skills,
             ManagementAction::Run { id: "job-1".into() },
             ManagementResult::Applied {
-                note: Some("Run nightly: skipped (overlap).".into()),
+                note: "Run nightly: skipped (overlap).".into(),
                 read_error: "the scheduler is unavailable".into(),
             },
         ));

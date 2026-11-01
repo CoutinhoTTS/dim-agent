@@ -377,7 +377,7 @@ fn project_hooks_start_disabled_and_the_user_enables_them() {
         String::from_utf8_lossy(&saved.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&saved.stdout).contains("Saved the hooks document."),
+        String::from_utf8_lossy(&saved.stdout).contains("Saved."),
         "{}",
         String::from_utf8_lossy(&saved.stdout)
     );
@@ -592,7 +592,7 @@ fn hooks_edit_writes_what_the_editor_leaves() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved the hooks document."),
+        terminal.transcript.contains("Saved."),
         "{}",
         terminal.transcript
     );
@@ -796,7 +796,7 @@ fn hooks_edit_runs_an_editor_path_with_a_space() {
     daemon.join().unwrap();
     assert!(status.success(), "{}", terminal.transcript);
     assert!(
-        terminal.transcript.contains("Saved the hooks document."),
+        terminal.transcript.contains("Saved."),
         "{}",
         terminal.transcript
     );
@@ -854,10 +854,7 @@ fn hooks_set_writes_a_file_with_the_revision_read_before_it() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "Saved the hooks document.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Saved.\n");
 }
 
 /// `hooks set -` reads its document from stdin and keeps it when the write
@@ -1263,10 +1260,7 @@ fn hooks_set_reports_the_save_when_the_read_after_it_fails() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "Saved the hooks document.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Saved.\n");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("hooks catalog unavailable"), "{stderr}");
     assert!(drafts(&home).is_empty(), "the written draft is removed");
@@ -1630,7 +1624,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
         daemon.join().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage hooks."),
+            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Hooks."),
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -1650,7 +1644,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     assert!(
         terminal
             .transcript
-            .contains("This daemon cannot manage hooks."),
+            .contains("This daemon cannot manage Hooks."),
         "{}",
         terminal.transcript
     );
@@ -1693,7 +1687,7 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     daemon.join().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage hooks."),
+        String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage Hooks."),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1732,7 +1726,7 @@ fn tui_hooks_panel_says_when_the_daemon_cannot_manage_them() {
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/hooks\r");
-    terminal.until("This daemon cannot manage hooks.");
+    terminal.until("This daemon cannot manage Hooks.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
