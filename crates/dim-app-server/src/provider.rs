@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -1421,6 +1421,53 @@ impl ProviderService {
         Ok(list)
     }
 
+    /// Every model execution would accept, one snapshot per provider.
+    pub async fn selectable_models(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModelCapabilitySnapshot>, HostError> {
+        self.check(cancel)?;
+        let mut providers: BTreeSet<String> = self
+            .oauth
+            .providers(cancel)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|provider| provider.provider_id)
+            .collect();
+        providers.extend(
+            self.list(cancel)
+                .await?
+                .providers
+                .into_iter()
+                .map(|provider| provider.provider_id),
+        );
+        let mut models = Vec::new();
+        for provider_id in providers {
+            let catalog = match self.catalog_for(provider_id.clone(), cancel).await {
+                Ok(Some(catalog)) => catalog,
+                Ok(None) | Err(_) => continue,
+            };
+            for model in &catalog.models {
+                let Some(model) = catalog.selectable(&model.id) else {
+                    continue;
+                };
+                models.push(
+                    capability_snapshot(
+                        model,
+                        ModelId {
+                            provider_id: provider_id.clone(),
+                            model_id: model.id.clone(),
+                        },
+                    )
+                    .map_err(|error| failure(error.to_string()))?,
+                );
+            }
+        }
+        self.check(cancel)?;
+        Ok(models)
+    }
+
     pub async fn delete_static(
         self: &Arc<Self>,
         provider_id: String,
@@ -2088,6 +2135,15 @@ impl ResolveModelSelection for ProductResolver {
         })
     }
 }
+impl SelectableModels for ProductResolver {
+    fn selectable(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>> {
+        let owner = self.0.clone();
+        Box::pin(async move { owner.selectable_models(&cancel).await })
+    }
+}
 struct ManagedRecovery {
     owner: Arc<ProviderService>,
     authority: CredentialAuthority,
@@ -2342,7 +2398,8 @@ impl DynPlugin for ProviderPlugin {
             })?;
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
-            ctx.provide(ModelSelectionHost(resolver))?;
+            ctx.provide(ModelSelectionHost(resolver.clone()))?;
+            ctx.provide(SelectableModelsHost(resolver))?;
             let auxiliary = Arc::new(auxiliary::AuxiliaryModel {
                 owner: service.clone(),
                 host,

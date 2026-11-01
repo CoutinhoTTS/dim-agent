@@ -513,7 +513,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         let legacy = config.file_roots[index].join("host-isolation.json");
         if legacy.is_file() {
             eprintln!(
-                "Ignoring {}: command isolation is a user setting in /settings > Execution; delete the file.",
+                "Ignoring {}: command isolation is a user setting in /permissions > Process isolation; delete the file.",
                 legacy.display()
             );
         }
@@ -1130,7 +1130,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
 /// the names its process parts share across languages. Registering them again
 /// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
-    use dim_agent_capabilities::host::{AuxiliaryModelHost, ModelSelectionHost};
+    use dim_agent_capabilities::host::{
+        AuxiliaryModelHost, ModelSelectionHost, SelectableModelsHost,
+    };
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
     register::<storage::SqliteStorage>(catalog, None);
@@ -1152,6 +1154,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<provider::ProviderService>(catalog, None);
     register::<ModelSelectionHost>(catalog, None);
     register::<AuxiliaryModelHost>(catalog, None);
+    register::<SelectableModelsHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
