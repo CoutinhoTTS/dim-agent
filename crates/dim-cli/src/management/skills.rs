@@ -12,8 +12,9 @@ use serde_json::json;
 use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
-    ActionKind, Area, EntryState, ManagementAction, ManagementEntry, ManagementView,
+    ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView,
 };
+use crate::ui::i18n::t;
 
 /// One entry of `skills.catalog`.
 #[derive(Debug, Deserialize)]
@@ -110,7 +111,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
             states.push(EntryState::Shadowed { by: by.clone() });
         }
         groups.push(
-            entry.source.as_deref().unwrap_or(Area::Skills.name()),
+            entry.source.as_deref().unwrap_or(t("skills")),
             ManagementEntry {
                 id: entry.id.clone(),
                 label: entry.name.clone(),

@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "No hay entradas.",
         "No matching entry." => "Ninguna entrada coincide.",
         "Issues" => "Problemas",
+        "sources" => "Fuentes",
+        "skills" => "Skills",
         "enabled" => "activado",
         "shadowed by {name}" => "ocultado por {name}",
         "Reloaded." => "Recargado.",

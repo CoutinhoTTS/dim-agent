@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "항목이 없습니다.",
         "No matching entry." => "일치하는 항목이 없습니다.",
         "Issues" => "문제",
+        "sources" => "소스",
+        "skills" => "스킬",
         "enabled" => "활성",
         "shadowed by {name}" => "{name}에 의해 가려짐",
         "Reloaded." => "다시 로드했습니다.",

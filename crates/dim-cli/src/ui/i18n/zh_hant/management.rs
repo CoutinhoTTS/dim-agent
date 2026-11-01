@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "沒有項目。",
         "No matching entry." => "沒有符合的項目。",
         "Issues" => "問題",
+        "sources" => "來源",
+        "skills" => "技能",
         "enabled" => "已啟用",
         "shadowed by {name}" => "被 {name} 覆蓋",
         "Reloaded." => "已重新載入。",

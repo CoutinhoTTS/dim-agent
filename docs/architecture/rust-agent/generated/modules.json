@@ -25448,7 +25448,6 @@
       "to": "dim_cli::model::session",
       "references": [
         "path ActionKind",
-        "path Area::Skills",
         "path EntryState::Shadowed",
         "path ManagementAction",
         "path ManagementAction::List",
@@ -25458,11 +25457,18 @@
         "path ManagementEntry",
         "path ManagementView",
         "use crate::model::session::ActionKind",
-        "use crate::model::session::Area",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementEntry",
         "use crate::model::session::ManagementView"
+      ]
+    },
+    {
+      "from": "dim_cli::management::skills",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
       ]
     },
     {

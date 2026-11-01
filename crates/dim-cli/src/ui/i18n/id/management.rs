@@ -4,6 +4,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No entries." => "Tidak ada entri.",
         "No matching entry." => "Tidak ada entri yang cocok.",
         "Issues" => "Masalah",
+        "sources" => "Sumber",
+        "skills" => "Skill",
         "enabled" => "aktif",
         "shadowed by {name}" => "tertutup oleh {name}",
         "Reloaded." => "Dimuat ulang.",

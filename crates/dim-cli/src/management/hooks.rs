@@ -210,7 +210,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
             states.push(EntryState::ReadOnly);
         }
         groups.push(
-            "sources",
+            t("sources"),
             ManagementEntry {
                 id: source.source.clone(),
                 label: source.source.clone(),

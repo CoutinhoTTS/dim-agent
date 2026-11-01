@@ -46,6 +46,8 @@ pub const STRINGS: &[&str] = &[
     "No entries.",
     "No matching entry.",
     "Issues",
+    "sources",
+    "skills",
     "enabled",
     "disabled",
     "invalid",
