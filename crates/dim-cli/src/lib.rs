@@ -577,7 +577,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .ok_or("App Server did not start")?;
         let (provider, device) = dim_acp::auth::terminal_method(&mut client, method).await?;
         options.device = device;
-        return login::login(&mut client, &options, &provider).await;
+        return login::login(&mut client, &options, Some(&provider)).await;
     }
     if let Action::Acp { agent_id, .. } = &options.action {
         return run_acp(root, &options, agent_id.clone()).await;
@@ -649,37 +649,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             export::write(&mut client, session_id, *format, output.as_deref()).await?;
             Ok(0)
         }
-        Action::Login(provider) => login::login(&mut client, &options, provider).await,
-        Action::Account(provider) => {
-            #[derive(serde::Deserialize)]
-            struct Snapshot {
-                account: Option<Identity>,
-            }
-            #[derive(serde::Deserialize)]
-            struct Identity {
-                issuer: String,
-                subject: String,
-            }
-            let snapshot: Snapshot = client
-                .typed("account.status", serde_json::json!({"providerId":provider}))
-                .await?;
-            match snapshot.account {
-                Some(account) => println!(
-                    "Signed in: {} ({})",
-                    crate::sanitize::safe(&account.subject),
-                    crate::sanitize::safe(&account.issuer)
-                ),
-                None => println!("Signed out."),
-            }
-            Ok(0)
-        }
-        Action::Logout(provider) => {
-            client
-                .rpc("account.logout", serde_json::json!({"providerId":provider}))
-                .await?;
-            println!("Signed out.");
-            Ok(0)
-        }
+        Action::Login(provider) => login::login(&mut client, &options, provider.as_deref()).await,
+        Action::Account(provider) => login::account(&mut client, provider).await,
+        Action::Logout(provider) => login::logout(&mut client, provider).await,
         Action::Models(provider) => {
             crate::ui::i18n::set(
                 crate::ui::i18n::saved_locale(&options.home)

@@ -2078,6 +2078,36 @@ impl HostPlatform {
             temporary: None,
         })
     }
+
+    /// The directory the persistent shell owns: `<home>/.dim/exec`.
+    pub fn exec_root(&self) -> PathBuf {
+        let root = self.home.join(".dim").join("exec");
+        std::fs::canonicalize(&root).unwrap_or(root)
+    }
+
+    /// Removes `path`, one persistent shell output directory below
+    /// [`exec_root`](Self::exec_root), and syncs its parent. An absent
+    /// directory counts as removed. The caller has decided with the
+    /// ownership rows that no Session still needs it (ADR 013 D4).
+    pub fn remove_exec_directory(&self, path: &Path) -> io::Result<()> {
+        let root = self.exec_root();
+        if path == root || !path.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a persistent shell output directory",
+            ));
+        }
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    }
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {

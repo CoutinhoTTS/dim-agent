@@ -2545,6 +2545,7 @@
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/files.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "params",
         "tokio::select",
@@ -2561,6 +2562,8 @@
         "assert_eq",
         "env",
         "format",
+        "rusqlite::params",
+        "tokio::join",
         "vec"
       ]
     },
@@ -8361,6 +8364,7 @@
         "mod runner",
         "path runner::HooksBranchPlugin::new",
         "path runner::HooksSessionPlugin::new",
+        "use runner::HooksBranchPlugin",
         "use runner::HooksRuntime",
         "use runner::HooksSessionPlugin"
       ]
@@ -8516,6 +8520,27 @@
     },
     {
       "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path AdmissionDecision::Allow",
+        "path AdmissionDecision::Ask",
+        "path AdviseTool",
+        "path Permission",
+        "path ToolAdviceReply",
+        "path ToolAdviceReply::Allow",
+        "path ToolAdviceReply::Ask",
+        "path ToolAdviceReply::Deny",
+        "path ToolAdviceReply::None",
+        "path ToolAdviceRequest",
+        "use crate::permission::AdmissionDecision",
+        "use crate::permission::AdviseTool",
+        "use crate::permission::Permission",
+        "use crate::permission::ToolAdviceReply",
+        "use crate::permission::ToolAdviceRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
@@ -8637,7 +8662,9 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolDefinition",
-        "use dim_agent_types::ToolDefinition"
+        "path ToolMetadata",
+        "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolMetadata"
       ]
     },
     {
@@ -8650,6 +8677,8 @@
         "path HookEvent::UserPromptSubmit",
         "path HookHandler",
         "path HooksDocument",
+        "path OnFailure",
+        "path OnFailure::Block",
         "path OnFailure::Continue",
         "path handlers",
         "use crate::hooks::HooksDocument"
@@ -8703,6 +8732,16 @@
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform::current"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner::tests",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path ToolAdviceReply::Allow",
+        "path ToolAdviceReply::Ask",
+        "path ToolAdviceReply::Deny",
+        "path ToolAdviceReply::None"
       ]
     },
     {
@@ -9714,6 +9753,17 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_runtime::registrations",
+      "references": [
+        "path Registration",
+        "path Registrations",
+        "path Registrations::default",
+        "use dim_agent_runtime::Registration",
+        "use dim_agent_runtime::Registrations"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::state",
       "references": [
         "path StateCell",
@@ -9727,9 +9777,11 @@
       "references": [
         "path AgentEvent",
         "path ApprovalCallData",
+        "path BranchSource",
         "path EventKind::PermissionChanged",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind"
       ]
     },
@@ -10733,7 +10785,9 @@
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
-        "use crate::host::HostError"
+        "path SessionFilesHost",
+        "use crate::host::HostError",
+        "use crate::host::SessionFilesHost"
       ]
     },
     {
@@ -12178,11 +12232,13 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
+        "path SessionFilesHost",
         "path ToolDriver",
         "path ToolExecutionContext",
         "path ToolHost",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
+        "use crate::host::SessionFilesHost",
         "use crate::host::ToolDriver",
         "use crate::host::ToolExecutionContext",
         "use crate::host::ToolHost"
@@ -22635,6 +22691,14 @@
     },
     {
       "from": "dim_app_server::storage::files",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
       "to": "dim_agent_runtime::error",
       "references": [
         "path dim_agent_runtime::Result"
@@ -22684,6 +22748,17 @@
     },
     {
       "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path HostPlatform::current",
+        "path ShellStatus::Unavailable",
+        "use dim_agent_capabilities::host_platform::HostPlatform",
+        "use dim_agent_capabilities::host_platform::ShellStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig::default",
@@ -22710,6 +22785,8 @@
       "references": [
         "path SessionFiles",
         "path SessionFiles::new",
+        "path like_prefix",
+        "path release",
         "path share"
       ]
     },
@@ -22998,6 +23075,7 @@
         "path files",
         "path files::release",
         "path files::share",
+        "path files::share_output",
         "use super::files",
         "use super::files::SessionFiles"
       ]
@@ -23724,8 +23802,10 @@
       "to": "dim_cli::login",
       "references": [
         "mod login",
+        "path login::account",
         "path login::account_directory",
-        "path login::login"
+        "path login::login",
+        "path login::logout"
       ]
     },
     {
@@ -24679,6 +24759,14 @@
       "references": [
         "path Input::new",
         "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::login",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path ACCOUNT_NAMESPACE",
+        "use crate::model::session::ACCOUNT_NAMESPACE"
       ]
     },
     {
@@ -26080,6 +26168,16 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::login",
+      "references": [
+        "path crate::login::attempt",
+        "path crate::login::browser_begin",
+        "path crate::login::device_begin",
+        "path crate::login::target"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
         "path mcp::Started",
@@ -26110,7 +26208,9 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::model::session",
       "references": [
+        "path ACCOUNT_NAMESPACE",
         "path Account",
+        "path AccountDescriptor",
         "path Command",
         "path Command::Approval",
         "path Command::AskAnswers",
@@ -26248,7 +26348,9 @@
         "path Update::UsageReport",
         "path Update::Web",
         "path Usage",
+        "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
+        "use crate::model::session::AccountDescriptor",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
         "use crate::model::session::ContextReading",
@@ -28739,8 +28841,10 @@
       "from": "dim_cli::ui::oauth_view",
       "to": "dim_cli::model::session",
       "references": [
+        "path ACCOUNT_NAMESPACE",
+        "path AccountDescriptor",
         "path AccountInfo",
-        "path DIM_OAUTH_ID",
+        "path AccountTarget",
         "path OauthEvent",
         "path OauthEvent::Device",
         "path OauthEvent::Done",
@@ -28749,8 +28853,10 @@
         "path OauthEvent::Url",
         "path OauthStart",
         "path Usage",
+        "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
-        "use crate::model::session::DIM_OAUTH_ID",
+        "use crate::model::session::AccountDescriptor",
+        "use crate::model::session::AccountTarget",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
         "use crate::model::session::Usage"
@@ -28894,13 +29000,15 @@
       "from": "dim_cli::ui::oauth_view::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path AccountDescriptor",
         "path AccountInfo",
         "path DIM_OAUTH_ID",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
         "path OauthStart",
-        "path Usage"
+        "path Usage",
+        "use crate::model::session::DIM_OAUTH_ID"
       ]
     },
     {
@@ -28917,7 +29025,8 @@
         "path Focus::Input",
         "path Focus::Submit",
         "path OauthView",
-        "path OauthView::new"
+        "path OauthView::described",
+        "path OauthView::dim"
       ]
     },
     {
@@ -29239,6 +29348,7 @@
       "from": "dim_cli::ui::prompts",
       "to": "dim_cli::model::session",
       "references": [
+        "path crate::model::session::AccountTarget",
         "path crate::model::session::GrantRequest",
         "path crate::model::session::OauthStart",
         "path crate::model::session::PluginAction",
@@ -29461,16 +29571,20 @@
       "from": "dim_cli::ui::providers_panel",
       "to": "dim_cli::model::session",
       "references": [
-        "path DIM_OAUTH_ID",
+        "path ACCOUNT_NAMESPACE",
+        "path Account",
         "path OauthEvent",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
         "path ProviderAction::Disconnect",
         "path ProviderEntry",
-        "use crate::model::session::DIM_OAUTH_ID",
+        "path Usage",
+        "use crate::model::session::ACCOUNT_NAMESPACE",
+        "use crate::model::session::Account",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::ProviderAction",
-        "use crate::model::session::ProviderEntry"
+        "use crate::model::session::ProviderEntry",
+        "use crate::model::session::Usage"
       ]
     },
     {
@@ -29517,8 +29631,10 @@
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView",
+        "path OauthView::described",
+        "path OauthView::dim",
         "path OauthView::native_selection",
-        "path OauthView::new",
+        "path OauthView::provider_id",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -29528,6 +29644,8 @@
       "references": [
         "path Effect",
         "path Effect::Close",
+        "path Effect::LoginStatus",
+        "path Effect::Logout",
         "path Effect::None",
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
@@ -29618,9 +29736,9 @@
       "from": "dim_cli::ui::providers_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path DIM_OAUTH_ID",
         "path ProviderAction::Create",
-        "path ProviderEntry"
+        "path ProviderEntry",
+        "path crate::model::session::AccountDescriptor"
       ]
     },
     {
@@ -29651,6 +29769,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::Char",
+        "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Up",
         "path KeyEvent::new",
@@ -32188,7 +32307,7 @@
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView",
-        "path OauthView::new",
+        "path OauthView::dim",
         "use crate::ui::oauth_view::OauthView"
       ]
     },
@@ -32229,6 +32348,7 @@
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
         "path Effect::LanguageRestore",
+        "path Effect::LoginStatus",
         "path Effect::LoginUsage",
         "path Effect::Logout",
         "path Effect::None",
@@ -32776,7 +32896,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
-        "path OauthView::new"
+        "path OauthView::dim"
       ]
     },
     {

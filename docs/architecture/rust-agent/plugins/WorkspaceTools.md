@@ -36,6 +36,10 @@ waits for tracked calls, including handoff. File mutations stage complete bytes
 and retain coordinator admission through I/O/publication. Foreground commands
 release their process trees before returning; collaboration members do not
 background commands. Output files are not deleted simply by plugin unload.
+A result that carries `outputPath` registers that path with `sessionFiles` before
+it leaves the part; a registration failure fails the call (ADR 013 D2). A
+`SessionFilesHost` in the process is read without injection, so a host without
+native storage keeps working and its output stays unowned.
 Before admission, `ToolHost.resolve_write` resolves a native `write` or `edit`
 target and returns that same call with an absolute canonical `path`. ToolExecutor
 uses it for approval and execution; the original model call remains in history.

@@ -119,6 +119,7 @@ flowchart LR
   p57 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p66
   p60 -->|"dim_agent_capabilities::approval::Approval@main"| p65
   p38 -->|"dim_agent_capabilities::hooks::runner::HooksRuntime@session"| p65
+  p69 -->|"dim_agent_capabilities::permission::Permission@main"| p65
   p57 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p65
   p57 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p65
   p57 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p65

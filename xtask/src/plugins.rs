@@ -114,10 +114,27 @@ impl SessionFilesService for GraphFiles {
         })
     }
 
+    fn register(
+        &self,
+        _: String,
+        _: PathBuf,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<(), SessionFileError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async {
+            Err(SessionFileError {
+                code: SessionFileErrorCode::NodeUnavailable,
+                message: "Graph generation stores no output".into(),
+            })
+        })
+    }
+
     fn owns(
         &self,
         _: String,
-        _: std::path::PathBuf,
+        _: PathBuf,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = std::result::Result<bool, SessionFileError>>
@@ -126,6 +143,19 @@ impl SessionFilesService for GraphFiles {
         >,
     > {
         Box::pin(async { Ok(false) })
+    }
+
+    fn owned_paths(
+        &self,
+        _: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Vec<PathBuf>, SessionFileError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }
 

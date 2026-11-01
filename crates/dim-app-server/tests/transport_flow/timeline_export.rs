@@ -283,7 +283,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":28,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":29,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -353,6 +353,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (25, "", false),
             (26, "", false),
             (27, "", false),
+            (28, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -366,13 +367,19 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
+            // Every format before v29 lacks the output ownership table.
+            let output = if version < 29 {
+                "DROP TABLE session_output_owners;"
+            } else {
+                ""
+            };
             // v25 dropped the end-sequence index; every earlier version has it.
             let end_index = if end_index {
                 "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence);"
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {grants} {dropped} {end_index} DROP TABLE agent_store_format;
+            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
             if version < 27 {
@@ -388,8 +395,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 29));
-                INSERT INTO agent_store_format VALUES (29);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 30));
+                INSERT INTO agent_store_format VALUES (30);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

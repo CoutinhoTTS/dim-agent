@@ -74,6 +74,66 @@ below uses synthetic data; an account need not have a 5h window.
   [######----------------------------------]
 ```
 
+## Provider accounts
+
+The native client signs in to every Provider whose `provider.management` entry
+carries an [`account` descriptor](appserver/provider-management.md#31-read-models).
+That descriptor is the only source: the client keeps no per-provider list, and
+it compares no Provider id. The described accounts are the provider list; the
+descriptor's `loginMethods` say which flow each one starts (`browser` or
+`device`); and the calls are the descriptor's namespace's —
+`<namespace>.login.begin` (device), `<namespace>.login.browser.begin`,
+`<namespace>.login.browser.complete`, `<namespace>.login.status`,
+`<namespace>.login.cancel` and `<namespace>.logout`. A namespace that the
+daemon does not advertise is reported as unsupported instead of starting a
+flow that cannot finish.
+
+The `account` namespace is the Dim account. Its calls also carry `providerId`
+and the account directory, and `/login` keeps its account panel — identity,
+plan and usage, and the enterprise-email entry — because the descriptor carries
+neither identity nor usage. Every other namespace is a single account whose
+calls carry only the attempt id.
+
+The terminal UI offers these operations on the `/connect` row of each described
+account. A signed-out account says `Sign in`, and opening it starts its only
+flow; a signed-in one shows its state and offers `Sign out`. A row whose
+namespace is `account` opens the Dim account's `/login` panel instead, with its
+identity, plan and usage. A Provider without a descriptor keeps the connection
+form, and opening it starts nothing.
+
+```text
+/connect
+╭─ Providers ──────────────────────────────────╮
+│  OpenAI Codex                     Sign in    │
+│  Grok Build                       Sign in    │
+│› Add custom provider                         │
+╰─ Enter open · Esc clear/close ───────────────╯
+        │ Enter on a signed-out described row
+        ▼
+╭─ OpenAI Codex OAuth ─────────────────────────╮
+│   Browser login                              │
+│ https://…/authorize?…                        │
+│   Callback URL: (paste here)                 │
+│   Submit callback                            │
+╰─ Select to copy · Enter opens link ──────────╯
+
+╭─ Grok Build OAuth ───────────────────────────╮
+│   Device login                               │
+│   Enter code:    ABCD-EFGH                   │
+│ https://…/device                             │
+│   Restart device login                       │
+│   Waiting for authorization                  │
+╰─ Select to copy · Enter opens link ──────────╯
+```
+
+`dimcode login [PROVIDER]` starts the same flow in the line client and prints
+the URL or the code the daemon returns; without a PROVIDER it lists the
+described accounts. `dimcode logout PROVIDER` signs one out, and
+`dimcode account PROVIDER` prints its non-secret state. `--help` lists these
+forms and never contacts a daemon. A build without the Dim account provider
+says so, and names the API-key Provider alternative, from each of these
+commands.
+
 ## Process isolation settings
 
 `/settings` and `/permissions` expose the same `Process isolation` control. It replaces the old
@@ -126,6 +186,10 @@ a user can through this control; that write creates no grant and changes no runn
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
 | `dimcode hooks list [--cwd DIR]` | List the effective hook catalog over `hooks.catalog` ([Hooks](plugins/Hooks.md#a7-management-methods)): each source with its path, enablement and state, and each handler with its event, matcher, command and state. |
 | `dimcode hooks enable\|disable [--cwd DIR]` | Enable or disable the project hooks of the workspace at `DIR` (the current directory by default) over `hooks.set_enabled`, recorded against the project root Settings authorizes for it. |
+| `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
+| `dimcode account PROVIDER` | Print the described account's non-secret state. |
+| `dimcode logout PROVIDER` | Sign the described account out. |
+| `/connect` | List the Providers `provider.management` reports; a described account opens its sign-in or sign-out step, and any other Provider opens the connection form. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
