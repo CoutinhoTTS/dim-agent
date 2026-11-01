@@ -415,6 +415,9 @@ Writes follow [Execution settings](#execution-settings):
 - a refusal that does not involve a newer document — text that does not parse, or one the owner
   refuses — keeps the draft's revision, so the edit key reopens the user's text and writes it
   again;
+- a reply that does not concern the draft — a toggle, a read, another area's reply — keeps the
+  draft and its revision; only a conflict on the draft's own save, a reload of its area, or its
+  own settlement drops that link;
 - what counts as a write is decided by the method behind the action: a toggle, a save, and a
   Skills reload (`skills.refresh`), which the owner declares mutating; a Hooks reload is a read,
   since it calls nothing before `hooks.catalog`;

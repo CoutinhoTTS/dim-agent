@@ -1363,7 +1363,8 @@ fn tui_hooks_panel_keeps_the_users_text_when_the_write_is_refused() {
 }
 
 /// A text the owner refuses without a newer document keeps the panel's
-/// revision, so the next Ctrl+E reopens the user's text and writes it again.
+/// revision through a toggle on another entry, so the next Ctrl+E reopens
+/// the user's text and writes it again.
 #[test]
 fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
     let home = Home::new();
@@ -1397,6 +1398,16 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
             "code":-32000,
             "message":"hooks document is invalid",
             "data":{"appError":"hooks_invalid"}}}));
+        // A toggle on another entry goes through: it is no draft of its own,
+        // so it leaves the kept text linked to its revision.
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
+        let request = wire.read("hooks.set_enabled");
+        assert_eq!(request["params"]["enabled"], true);
+        assert_eq!(request["params"]["expectedRevision"], "projects:1");
+        wire.reply(&request, json!({"revision": "projects:2"}));
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, document_catalog("user:1", json!({"hooks": {}})));
         // No newer document: the revision stays, and the reopened draft is
         // written with it.
         let request = wire.read("hooks.save");
@@ -1420,6 +1431,11 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
     terminal.raw(b"\x05");
     terminal.until("hooks document is invalid");
     terminal.until("Your text is kept");
+    terminal.raw(b"\x1b[B");
+    terminal.until("/work/.dimcode/hooks.json");
+    terminal.raw(b"\r");
+    terminal.until("Enabled project.");
+    terminal.raw(b"\x1b[A");
     terminal.raw(b"\x05");
     terminal.until("Saved.");
     terminal.raw(b"\x1b");

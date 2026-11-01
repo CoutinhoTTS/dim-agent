@@ -1724,10 +1724,17 @@ impl App {
             }
             Update::Management(reply) => {
                 let save = matches!(reply.request.action, ManagementAction::Save { .. });
-                if !save {
-                    // A read drops the draft's link to the revision it was
-                    // taken at; the file itself stays until its owner
-                    // removes it.
+                // Only a reload of the draft's own area discards it. Every
+                // other reply — a toggle, a read, another area's reply —
+                // leaves the kept text and the revision it came from for the
+                // edit key; a revision the owner no longer honors answers
+                // the next write with a conflict.
+                if reply.request.action == ManagementAction::Reload
+                    && self
+                        .management_edit
+                        .as_ref()
+                        .is_some_and(|kept| kept.area == reply.request.area)
+                {
                     self.management_edit = None;
                 }
                 if let Some(Prompt::Management(panel)) = &mut self.prompt {
@@ -1772,11 +1779,19 @@ impl App {
                             self.set_notice(format!("{} {read_error}", t("Saved.")));
                         }
                         (ManagementResult::Refused(error), Some(kept)) => {
-                            let kept = tf(
+                            let where_it_is = tf(
                                 "Your text is kept in {path}.",
                                 &[("path", &kept.draft.path().display().to_string())],
                             );
-                            self.set_notice(format!("{error} {kept}"));
+                            self.set_notice(format!("{error} {where_it_is}"));
+                            // A conflict drops the link, as it does with the
+                            // panel open; a refusal keeps it, so the edit key
+                            // reopens this text at its revision.
+                            if let ManagementResult::Refused(ManagementRefusal::Refused(_)) =
+                                &reply.result
+                            {
+                                self.management_edit = Some(kept);
+                            }
                         }
                         (ManagementResult::Refused(error), None) => {
                             self.set_notice(error.to_string())
@@ -8774,7 +8789,8 @@ mod tests {
         assert_eq!(text, "Saved. catalog unavailable");
         assert!(!text.contains("kept in"), "{text}");
         assert!(app.management_edit.is_none());
-        // Refused: the file stays and the notice names it.
+        // Refused: the file stays, the notice names it, and the link keeps
+        // the revision the draft came from.
         let path = draft(&mut app);
         app.apply(save_reply(ManagementResult::Refused(
             ManagementRefusal::Refused("nope".into()),
@@ -8783,6 +8799,21 @@ mod tests {
         let (text, _) = app.notice.clone().unwrap();
         assert!(text.contains("nope"), "{text}");
         assert!(text.contains(&path.display().to_string()), "{text}");
-        assert!(app.management_edit.is_none());
+        let kept = app.management_edit.as_ref().expect("the link stays");
+        assert_eq!(kept.revision, "user:1");
+        assert_eq!(kept.draft.path(), path.as_path());
+        // A conflict keeps the file and names it, and drops the link.
+        let path = draft(&mut app);
+        app.apply(save_reply(ManagementResult::Refused(
+            ManagementRefusal::Conflict {
+                message: "The user document changed since it was read.".into(),
+                view: Box::new(view()),
+            },
+        )));
+        assert!(path.exists(), "the conflicted draft stays");
+        let (text, _) = app.notice.clone().unwrap();
+        assert!(text.contains("The user document changed"), "{text}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(app.management_edit.is_none(), "a conflict drops the link");
     }
 }
