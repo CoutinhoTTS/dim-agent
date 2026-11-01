@@ -29,6 +29,9 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  hooks list                       List hook handlers, their sources and states\n\
+  hooks enable                     Run this workspace's .dimcode/hooks.json\n\
+  hooks disable                    Stop running this workspace's hooks\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
@@ -121,6 +124,10 @@ pub enum Action {
     McpLogout(String),
     McpEnable {
         id: String,
+        enabled: bool,
+    },
+    HooksList,
+    HooksEnable {
         enabled: bool,
     },
     /// `recording [on|off]`: the daemon's model request record.
@@ -464,6 +471,15 @@ impl Options {
                         _ => {
                             return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
+                    };
+                }
+                "hooks" if matches!(options.action, Action::Chat) => {
+                    options.action = match value(&mut args)?.as_str() {
+                        "list" => Action::HooksList,
+                        command @ ("enable" | "disable") => Action::HooksEnable {
+                            enabled: command == "enable",
+                        },
+                        _ => return Err("Use hooks list, hooks enable or hooks disable".into()),
                     };
                 }
                 "recording" if matches!(options.action, Action::Chat) => {

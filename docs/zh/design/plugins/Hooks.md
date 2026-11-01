@@ -198,12 +198,12 @@ sequenceDiagram
   HB->>HB: 对照已消费事件复核
   alt 仍然有效
     HB->>TL: Branch::input：Append（PostToolUse、SessionStart）或 Queue（Stop 续跑）
-  else 已消费中断或更新的操作者输入
+  else 已消费中断、更新的操作者输入，或 SessionStart 时已开始的回合
     HB->>HB: 丢弃输出，记诊断
   end
 ```
 
-`PostToolUse` 对 `step/tool-result` 批次中结果不是错误的每个匹配调用运行，`PostToolUseFailure` 对结果为 `is_error` 的每个匹配调用运行；一个批次写一个 Append 输入。`Stop` 在结果为 `completed` 的 `turn/end` 上运行；阻止会写一个携带原因的 Queue 续跑输入，连续最多 3 次（A8）。`SessionStart` 在 `main` 的历史中没有 `turn/start` 且没有 `hooks:session-start/*` 带键块时运行一次；其 Append 输入与任何空闲 Append 一样，等待第一个驱动输入。`Notification` 在 `approval/request` 上运行，不写任何东西。带 `async: true` 的处理器可在上述任何点运行，没有任何东西等待或读取它们的输出。`HooksBranch` 还从它消费的已采用 `context/configured` 中，记下每个已声明 MCP 工具的迁移别名（G.2）。
+`PostToolUse` 对 `step/tool-result` 批次中结果不是错误的每个匹配调用运行，`PostToolUseFailure` 对结果为 `is_error` 的每个匹配调用运行；一个批次写一个 Append 输入。`Stop` 在结果为 `completed` 的 `turn/end` 上运行；阻止会写一个携带原因的 Queue 续跑输入，连续最多 3 次（A8）。`SessionStart` 在 `main` 的历史中没有 `turn/start` 且没有 `hooks:session-start/*` 带键块时运行一次；其 Append 输入与任何空闲 Append 一样，等待第一个驱动输入。分支上已有回合开始时，`SessionStart` 的输出同样被丢弃，因为该块必须先于第一个回合。`Notification` 在 `approval/request` 上运行，不写任何东西。带 `async: true` 的处理器可在上述任何点运行，没有任何东西等待或读取它们的输出。`HooksBranch` 还从它消费的已采用 `context/configured` 中，记下每个已声明 MCP 工具的迁移别名（G.2）。
 
 ## 4. 时序与冲突
 
@@ -415,6 +415,8 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 | `Stop` | `decision: "block"` 及 `reason`；`hookSpecificOutput.additionalContext` | stderr 作为原因 | Queue 续跑（先原因，后上下文） |
 | `SessionStart` | `hookSpecificOutput.additionalContext` | 失败 | 带键 Append 块 |
 | `Notification` | — | 失败 | — |
+
+`Stop` 的阻止若原因为空（退出 2 而无 stderr，或 `decision: "block"` 没有 `reason`），不写续跑输入；运行器记一条警告，写明处理器的来源与事件。
 
 上下文与原因每个 Hook 各最多 16 KiB。Dim 不支持的字段（`updatedInput`、`updatedPermissions`、`updatedToolOutput`、`message`、`continue`、`stopReason`、`suppressOutput`、`systemMessage`、`initialUserMessage`、`sessionTitle`）被忽略并记诊断。
 

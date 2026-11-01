@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
     execution_settings::ExecutionSettingsHost,
     file_storage::FileStorage,
     file_storage::FileStoragePlugin,
+    hooks::{HookSourcesHost, NoHookSources},
     host::{
         SessionFileError, SessionFileErrorCode, SessionFilesHost, SessionFilesService,
         StoredSessionFile,
@@ -163,6 +164,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     });
     defaults::mock_model_hosts(&mut builder);
     builder.session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
+    builder.session_value(Arc::new(HookSourcesHost(Arc::new(NoHookSources))));
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,
@@ -171,6 +173,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
+    dim_agent_capabilities::hooks::install(&mut builder);
     dim_agent_attachments::install(&mut builder);
     dim_agent_questions::install(&mut builder);
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));

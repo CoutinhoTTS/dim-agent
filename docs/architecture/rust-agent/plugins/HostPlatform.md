@@ -117,6 +117,11 @@ policies without another read. `cwd` is an already resolved working directory.
 The builder preserves shell flags, forced environment overrides and runtime PATH
 prefixes, including Git Bash mapping. It does not start the user's command.
 
+`spawn` closes the child's standard input. `spawn_with_stdin(spec, bytes)`
+starts the same tree and writes `bytes` to that input from a task of the
+caller's runtime, then closes it; a child that exits without reading the bytes
+does not fail the start. Hooks is its consumer.
+
 Refusals are `ProcessSpecError { code, reason }` data: malformed/unreadable
 preferences (`EXEC_SHELL_CONFIG_INVALID`), unavailable shells
 (`EXEC_SHELL_UNAVAILABLE`), a network-share cwd with cmd
@@ -147,6 +152,7 @@ boundary.
 [host_platform_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_flow.rs):
 `shell_resolution_follows_the_preference_and_never_fails_the_service`,
 `spawn_isolates_the_environment_and_terminate_releases_the_tree`,
+`spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe`,
 `unchanged_shell_preferences_reuse_detection_and_edits_recover`, and
 `sandbox_backend_reports_the_bubblewrap_preparation_uses`.
 The unit test `bubblewrap_binds_file_roots_after_the_directories_that_contain_them` in
@@ -179,5 +185,5 @@ workspace, and the same command with the sandbox off.
 | 作用域 | 进程 |
 | 注入 | `P:ExecutionSettingsHost`、`P:FileStorage` |
 | 提供 | `P:HostPlatform` |
-| 被注入于 | `PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
+| 被注入于 | `HooksSession`、`PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
 <!-- /generated -->

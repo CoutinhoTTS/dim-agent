@@ -198,12 +198,12 @@ sequenceDiagram
   HB->>HB: recheck against consumed events
   alt still valid
     HB->>TL: Branch::input: Append (PostToolUse, SessionStart) or Queue (Stop follow-up)
-  else interrupt or newer operator input consumed
+  else interrupt, newer operator input consumed, or a started turn at SessionStart
     HB->>HB: drop output, diagnostic
   end
 ```
 
-`PostToolUse` runs per matching call of a `step/tool-result` batch whose result is not an error, `PostToolUseFailure` per matching call whose result has `is_error`; one batch writes one Append input. `Stop` runs on `turn/end` with status `completed`; a block writes a Queue follow-up carrying the reason, at most 3 consecutive (A8). `SessionStart` runs once on `main` when its history has no `turn/start` and no `hooks:session-start/*` keyed block; its Append input waits, as any idle Append does, for the first driving input. `Notification` runs on `approval/request` and writes nothing. Handlers with `async: true` run on any of these points and nothing waits for or reads their output. `HooksBranch` also keeps, from the adopted `context/configured` it consumes, the migration alias of each declared MCP tool (G.2).
+`PostToolUse` runs per matching call of a `step/tool-result` batch whose result is not an error, `PostToolUseFailure` per matching call whose result has `is_error`; one batch writes one Append input. `Stop` runs on `turn/end` with status `completed`; a block writes a Queue follow-up carrying the reason, at most 3 consecutive (A8). `SessionStart` runs once on `main` when its history has no `turn/start` and no `hooks:session-start/*` keyed block; its Append input waits, as any idle Append does, for the first driving input. `SessionStart` output is also dropped once a turn has started on the branch, because its block must come before the first turn. `Notification` runs on `approval/request` and writes nothing. Handlers with `async: true` run on any of these points and nothing waits for or reads their output. `HooksBranch` also keeps, from the adopted `context/configured` it consumes, the migration alias of each declared MCP tool (G.2).
 
 ## 4. Timing and conflicts
 
@@ -415,6 +415,8 @@ Event fields:
 | `Stop` | `decision: "block"` with `reason`; `hookSpecificOutput.additionalContext` | stderr as reason | Queue follow-up (reason, then context) |
 | `SessionStart` | `hookSpecificOutput.additionalContext` | failure | Keyed Append block |
 | `Notification` | — | failure | — |
+
+A `Stop` block whose reason is empty, an exit 2 with no stderr or a `decision: "block"` without a `reason`, writes no follow-up; the runner logs a warning naming the handler's source and the event.
 
 Context and reasons are each at most 16 KiB per hook. Fields Dim does not support (`updatedInput`, `updatedPermissions`, `updatedToolOutput`, `message`, `continue`, `stopReason`, `suppressOutput`, `systemMessage`, `initialUserMessage`, `sessionTitle`) are ignored with a diagnostic.
 
