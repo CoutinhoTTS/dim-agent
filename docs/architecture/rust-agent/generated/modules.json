@@ -1776,6 +1776,7 @@
         "matches",
         "tokio::select",
         "tracing::error",
+        "tracing::info",
         "unreachable",
         "vec"
       ]
@@ -2024,8 +2025,10 @@
       "parent": "dim_app_server::mcp",
       "file": "crates/dim-app-server/src/mcp/server.rs",
       "unexpandedMacros": [
+        "env",
         "format",
         "matches",
+        "serde_json::json",
         "tokio::pin",
         "tokio::select"
       ]
@@ -17528,6 +17531,7 @@
       "to": "dim_app_server::connection::mcp",
       "references": [
         "mod mcp",
+        "path mcp::app_error",
         "path mcp::session_state"
       ]
     },
@@ -17618,6 +17622,8 @@
         "path Call::Idle",
         "path Call::InputLookup",
         "path Call::List",
+        "path Call::McpAppCall",
+        "path Call::McpAppWidget",
         "path Call::McpRefresh",
         "path Call::ModelUpdate",
         "path Call::PermissionGet",
@@ -17665,7 +17671,9 @@
         "path Reply::ExecEnded",
         "path Reply::Fork",
         "path Reply::List",
+        "path Reply::McpAppCall",
         "path Reply::McpState",
+        "path Reply::McpWidget",
         "path Reply::ModelUpdate",
         "path Reply::Permission",
         "path Reply::Ping",
@@ -17736,7 +17744,8 @@
       "from": "dim_app_server::connection::mcp",
       "to": "dim_agent_capabilities::methods",
       "references": [
-        "path RpcError"
+        "path RpcError",
+        "path RpcError::app"
       ]
     },
     {
@@ -17775,6 +17784,7 @@
       "from": "dim_app_server::connection::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
+        "path error",
         "use crate::mcp::management::error"
       ]
     },
@@ -17784,6 +17794,14 @@
       "references": [
         "path McpSession",
         "path McpSessionState",
+        "path crate::mcp::McpAppError",
+        "path crate::mcp::McpAppError::Absent",
+        "path crate::mcp::McpAppError::NotCallable",
+        "path crate::mcp::McpAppError::Refused",
+        "path crate::mcp::McpAppError::Unavailable",
+        "path crate::mcp::McpAppError::Unknown",
+        "path crate::mcp::McpAppError::UnknownServer",
+        "path crate::mcp::McpAppError::Unsupported",
         "use crate::mcp::McpSession",
         "use crate::mcp::McpSessionState"
       ]
@@ -18843,6 +18861,8 @@
         "mod server",
         "path McpServer",
         "path McpServerError",
+        "path server::McpCall",
+        "path server::McpResource",
         "path server::McpServerError",
         "path server::McpServerError::AuthRequired",
         "path server::McpServerError::Cleanup",
@@ -18853,6 +18873,7 @@
         "path server::McpServerState",
         "path server::McpTool",
         "path server::Result",
+        "path server::ViewFailure",
         "use server::McpServer",
         "use server::McpServerError"
       ]
@@ -18863,10 +18884,13 @@
       "references": [
         "mod session",
         "path McpSessionPlugin::new",
+        "use session::McpAppCallResult",
+        "use session::McpAppError",
         "use session::McpSession",
         "use session::McpSessionPlugin",
         "use session::McpSessionState",
         "use session::McpSourceState",
+        "use session::McpWidgetResult",
         "use session::install"
       ]
     },
@@ -19469,6 +19493,7 @@
       "to": "dim_agent_types",
       "references": [
         "path JsonObject",
+        "path JsonObject::new",
         "use dim_agent_types::JsonObject"
       ]
     },
@@ -19476,6 +19501,7 @@
       "from": "dim_app_server::mcp::server",
       "to": "dim_agent_types::content",
       "references": [
+        "path ContentBlock",
         "path ContentBlock::Image",
         "path ContentBlock::Text",
         "path ImageSource",
@@ -19663,8 +19689,17 @@
     },
     {
       "from": "dim_app_server::mcp::session",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JsonObject"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
       "to": "dim_agent_types::content",
       "references": [
+        "path ToolContent",
+        "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ToolContent"
       ]
@@ -19679,6 +19714,7 @@
         "path ToolResult",
         "path ToolResult::default",
         "path ToolSource::Dynamic",
+        "path dim_agent_types::JsonSchema",
         "use dim_agent_types::ToolCall",
         "use dim_agent_types::ToolDefinition",
         "use dim_agent_types::ToolMetadata",
@@ -19734,17 +19770,27 @@
       "from": "dim_app_server::mcp::session",
       "to": "dim_app_server::mcp::server",
       "references": [
+        "path APP_MEDIA_TYPE",
         "path McpServerError::AuthRequired",
         "path McpServerError::Cancelled",
         "path McpServerError::Closed",
         "path McpServerError::InsufficientScope",
+        "path McpServerState",
         "path McpServerState::AuthRequired",
         "path McpServerState::Closed",
         "path McpServerState::Failed",
         "path McpTool",
+        "path ToolScope::App",
+        "path ToolScope::Model",
+        "path ViewFailure",
+        "path ViewFailure::Refused",
+        "path ViewFailure::Unanswered",
+        "use super::server::APP_MEDIA_TYPE",
         "use super::server::McpServerError",
         "use super::server::McpServerState",
-        "use super::server::McpTool"
+        "use super::server::McpTool",
+        "use super::server::ToolScope",
+        "use super::server::ViewFailure"
       ]
     },
     {
@@ -20580,6 +20626,14 @@
         "path crate::agents::AgentOpError::Settle",
         "path crate::agents::AgentOpError::Unknown",
         "path crate::agents::AgentOpError::Unload"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
+      "to": "dim_app_server::mcp::session",
+      "references": [
+        "path crate::mcp::McpAppCallResult",
+        "path crate::mcp::McpWidgetResult"
       ]
     },
     {
