@@ -788,7 +788,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         Some(state) => {
             let build = rutis_loader::resolve::Build::default();
             let names = dim_agent_runtime::Names::copy(builder.catalog(), &build);
-            let owners = plugin_manager::Owners::new(root.clone(), &names)
+            let owners = plugin_manager::Owners::new(root.clone(), &names, state.refusals.clone())
                 .map_err(|error| ServerError::Configuration(error.to_string()))?;
             Some((state.clone(), owners))
         }

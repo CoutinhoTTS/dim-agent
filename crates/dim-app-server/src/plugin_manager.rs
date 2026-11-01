@@ -132,6 +132,9 @@ pub(crate) struct State {
     /// deep-merged over each manifest's `config`.
     configs: BTreeMap<String, Value>,
     record: Mutex<Record>,
+    /// Content refusals PluginManager made itself, shared by the startup
+    /// owners and every generation of its row (§3.7). In memory only.
+    pub(crate) refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
     /// The built-in rows of the assembly.
     builtins: OnceLock<BTreeSet<String>>,
     /// The catalog the runtime started with (§4 `instanceNames`).
@@ -190,6 +193,7 @@ impl State {
             defaults,
             configs: configs.clone(),
             record: Mutex::new(record),
+            refusals: Arc::new(Mutex::new(BTreeMap::new())),
             builtins: OnceLock::new(),
             catalog: OnceLock::new(),
             applying: tokio::sync::Mutex::new(()),
@@ -216,7 +220,9 @@ impl State {
         let _ = self.builtins.set(builtins);
         let _ = self.catalog.set(catalog);
         let record = self.record.lock().unwrap().clone();
-        let (patches, off) = self.derive(&record);
+        // The content startup that follows reads every manifest again and
+        // withdraws there (§3.1), so the unreadable ids are not needed here.
+        let (patches, off, _) = self.derive(&record);
         Ok(StartupLayer {
             patches,
             off,
@@ -238,13 +244,15 @@ impl State {
     /// The `plugins` layer `record` implies (§3): a row for each name that
     /// uses a default or installed plugin with code, and each built-in row
     /// whose name is off or uses another plugin turned off; with those
-    /// built-in names.
-    fn derive(&self, record: &Record) -> (Vec<Patch>, Vec<String>) {
+    /// built-in names and the ids of the used plugins whose manifest cannot
+    /// be read.
+    fn derive(&self, record: &Record) -> (Vec<Patch>, Vec<String>, Vec<String>) {
         let builtins = self.builtins.get().expect("set at startup");
         let catalog = self.catalog.get().expect("set at startup");
         let mut rows = Vec::new();
         let mut patches = Vec::new();
         let mut off = Vec::new();
+        let mut unreadable = Vec::new();
         for name in names(record, &self.defaults, builtins) {
             let used = using(record, &self.defaults, builtins, &name);
             if builtins.contains(&name) && used != Some(Use::Builtin) {
@@ -279,7 +287,12 @@ impl State {
                     rows.push(row_value(&name, id, &dir, &code, config));
                 }
                 Ok(_) => {}
-                Err(error) => tracing::warn!(%name, %error, "plugin manifest unreadable"),
+                Err(error) => {
+                    tracing::warn!(%name, %error, "plugin manifest unreadable");
+                    if let Some(plugin) = used.as_ref().and_then(|used| own_id(&name, used)) {
+                        unreadable.push(plugin.to_owned());
+                    }
+                }
             }
         }
         patches.insert(
@@ -289,7 +302,7 @@ impl State {
                 ..Default::default()
             },
         );
-        (patches, off)
+        (patches, off, unreadable)
     }
 }
 impl State {
@@ -319,13 +332,18 @@ impl State {
             let plugin = own_id(&name, &used).expect("not a built-in").to_owned();
             match Manifest::read(&dir) {
                 Ok(manifest) => {
+                    let mut outcome = Outcome::default();
                     owners
-                        .register(&plugin, &dir, &manifest, kinds, &mut Outcome::default())
+                        .register(&plugin, &dir, &manifest, kinds, &mut outcome)
                         .await;
+                    log_refused(&plugin, &outcome);
+                    in_use.insert(plugin);
                 }
-                Err(error) => tracing::warn!(%name, %error, "plugin manifest unreadable"),
+                Err(error) => {
+                    tracing::warn!(%name, %error, "plugin manifest unreadable");
+                    owners.withdraw(&plugin, kinds).await;
+                }
             }
-            in_use.insert(plugin);
         }
         for plugin in owners.held(kinds).await {
             if !in_use.contains(&plugin) {
@@ -497,8 +515,8 @@ fn dir_of(record: &Record, defaults: &Defaults, name: &str, used: &Use) -> Optio
 struct Outcome {
     status: Option<Value>,
     skipped: Vec<Kind>,
-    /// Content an owner refused: `{kind, error}`.
-    refused: Vec<Value>,
+    /// Content an owner refused or PluginManager could not read, by kind.
+    refused: Vec<Refusal>,
     restart_required: bool,
 }
 impl Outcome {
@@ -511,7 +529,7 @@ impl Outcome {
             map.insert("skipped".into(), json!(self.skipped));
         }
         if !self.refused.is_empty() {
-            map.insert("refused".into(), json!(self.refused));
+            map.insert("refused".into(), json!(refused_entries(&self.refused)));
         }
         if self.restart_required {
             map.insert("restartRequired".into(), json!(true));
@@ -524,6 +542,22 @@ impl Outcome {
 struct Change {
     before: Option<Use>,
     after: Option<Use>,
+}
+
+/// Logs each content refusal of a reconcile at `warn` (§3.7), with the
+/// plugin id, the kind and the error.
+fn log_refused(plugin: &str, outcome: &Outcome) {
+    for (kind, error) in &outcome.refused {
+        // The kind's name as the replies show it: its `Serialize`, the one
+        // place the names are written.
+        let name = serde_json::to_value(kind).unwrap_or_default();
+        tracing::warn!(
+            %plugin,
+            kind = name.as_str().unwrap_or_default(),
+            %error,
+            "plugin content refused",
+        );
+    }
 }
 
 /// The operations of one PluginManager generation.
@@ -544,13 +578,36 @@ pub(crate) struct Owners {
     ctx: Ctx,
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
+    /// Content refusals PluginManager made itself, by plugin id and kind
+    /// (§3.7). In memory only.
+    refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
 }
 
 /// The row names of the content owners and the kind each takes.
 const OWNERS: [(&str, Kind); 2] = [("SkillsCatalog", Kind::Skills), ("Mcp", Kind::Mcp)];
 
-fn refused(kind: Kind, error: impl std::fmt::Display) -> Value {
-    json!({"kind": kind, "error": error.to_string()})
+/// A content refusal: the kind and the error it came with (§3.7).
+type Refusal = (Kind, String);
+
+/// What a reply's or `plugin.list`'s `refused` holds (A.1): `{kind, error}`.
+fn refused_entries(refusals: &[Refusal]) -> Vec<Value> {
+    refusals
+        .iter()
+        .map(|(kind, error)| json!({"kind": kind, "error": error}))
+        .collect()
+}
+
+fn refused(kind: Kind, error: impl std::fmt::Display) -> Refusal {
+    (kind, error.to_string())
+}
+
+/// A plugin's JSON content document at `path` (§3.7): the one read and parse
+/// for every kind whose owner takes one. The error names the path.
+fn read_content(path: &Path) -> Result<Value, String> {
+    std::fs::read(path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
@@ -571,12 +628,18 @@ fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
 }
 
 impl Owners {
-    /// The owners as `ctx` reads them, keyed from `names`.
-    pub fn new(ctx: Ctx, names: &Names<'_>) -> rutis::Result<Self> {
+    /// The owners as `ctx` reads them, keyed from `names`, keeping their
+    /// refusals in `refusals`.
+    pub fn new(
+        ctx: Ctx,
+        names: &Names<'_>,
+        refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+    ) -> rutis::Result<Self> {
         Ok(Self {
             ctx,
             skills: names.key()?,
             mcp: names.key()?,
+            refusals,
         })
     }
 
@@ -636,30 +699,30 @@ impl Owners {
             }
         }
         if kinds.contains(&Kind::Mcp) {
+            // Only a failed read keeps PluginManager's refusal of the kind.
+            // Every other outcome clears it: the document read and handed
+            // over, the kind not carried by the manifest, and the kind
+            // skipped because its owner is absent, which read nothing
+            // (§3.7).
+            self.clear_refusal(plugin, Kind::Mcp);
             match (self.ctx.get_at(&self.mcp), &manifest.mcp) {
                 (None, Some(_)) => outcome.skipped.push(Kind::Mcp),
                 (None, None) => {}
-                (Some(mcp), Some(path)) => {
-                    let document = std::fs::read(path)
-                        .map_err(|error| error.to_string())
-                        .and_then(|bytes| {
-                            serde_json::from_slice::<Value>(&bytes)
-                                .map_err(|error| error.to_string())
-                        });
-                    let result = match document {
-                        Ok(document) => mcp
+                (Some(mcp), Some(path)) => match read_content(path) {
+                    Ok(document) => {
+                        if let Err(error) = mcp
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
-                            .map_err(|error| error.to_string()),
-                        Err(error) => {
-                            let _ = mcp.withdraw_plugin(plugin.into(), &cancel).await;
-                            Err(format!("{}: {error}", path.display()))
+                        {
+                            outcome.refused.push(refused(Kind::Mcp, error.to_string()));
                         }
-                    };
-                    if let Err(error) = result {
+                    }
+                    Err(error) => {
+                        let _ = mcp.withdraw_plugin(plugin.into(), &cancel).await;
+                        self.keep_refusal(plugin, Kind::Mcp, &error);
                         outcome.refused.push(refused(Kind::Mcp, error));
                     }
-                }
+                },
                 (Some(mcp), None) => {
                     if let Err(error) = mcp.withdraw_plugin(plugin.into(), &cancel).await {
                         tracing::warn!(%plugin, %error, "MCP withdrawal refused");
@@ -669,8 +732,12 @@ impl Owners {
         }
     }
 
-    /// Withdraws `plugin`'s content of `kinds` from each present owner.
+    /// Withdraws `plugin`'s content of `kinds` from each present owner, and
+    /// the refusals that go with it.
     async fn withdraw(&self, plugin: &str, kinds: &[Kind]) {
+        for kind in kinds {
+            self.clear_refusal(plugin, *kind);
+        }
         let cancel = self.ctx.cancellation_token();
         if kinds.contains(&Kind::Skills)
             && let Some(catalog) = self.ctx.get_at(&self.skills)
@@ -686,8 +753,28 @@ impl Owners {
         }
     }
 
-    /// What the present owners hold refused for `plugin` now.
-    async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Value> {
+    /// PluginManager's own refusal of `kind` for `plugin` (§3.7).
+    fn keep_refusal(&self, plugin: &str, kind: Kind, error: &str) {
+        self.refusals
+            .lock()
+            .unwrap()
+            .insert((plugin.to_owned(), kind), error.to_owned());
+    }
+
+    /// Drops PluginManager's refusal of `kind` for `plugin`: its document
+    /// was handed over, the kind was withdrawn, or the plugin was removed.
+    fn clear_refusal(&self, plugin: &str, kind: Kind) {
+        self.refusals
+            .lock()
+            .unwrap()
+            .remove(&(plugin.to_owned(), kind));
+    }
+
+    /// What is refused for `plugin` now (§3.7): PluginManager's own refusal
+    /// of a kind it could not read, else what that kind's owner reports.
+    /// Nothing for a kind whose owner is absent, as turning it off runs no
+    /// `register`: its content is not there to be refused.
+    async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Refusal> {
         let mut found = Vec::new();
         if manifest.skills.is_some()
             && let Some(catalog) = self.ctx.get_at(&self.skills)
@@ -698,12 +785,18 @@ impl Owners {
             }
         }
         if manifest.mcp.is_some()
-            && let Some(error) = self
-                .ctx
-                .get_at(&self.mcp)
-                .and_then(|mcp| mcp.plugin_refusal(plugin))
+            && let Some(mcp) = self.ctx.get_at(&self.mcp)
         {
-            found.push(refused(Kind::Mcp, error));
+            let error = self
+                .refusals
+                .lock()
+                .unwrap()
+                .get(&(plugin.to_owned(), Kind::Mcp))
+                .cloned()
+                .or_else(|| mcp.plugin_refusal(plugin));
+            if let Some(error) = error {
+                found.push(refused(Kind::Mcp, error));
+            }
         }
         found
     }
@@ -1299,11 +1392,13 @@ impl Manager {
 
     /// Brings the loader to the record (§3): derives the `plugins` layer
     /// from `plugins.json` and reconciles it. A row rutis refuses stays in
-    /// the loader with its reason, as after a restart.
+    /// the loader with its reason, as after a restart. A used plugin whose
+    /// manifest cannot be read gets no row, so it runs none of its content
+    /// either (§3.1).
     async fn apply(&self) {
         let _applying = self.state.applying.lock().await;
         let record = self.state.record.lock().unwrap().clone();
-        let (patches, _) = self.state.derive(&record);
+        let (patches, _, unreadable) = self.state.derive(&record);
         let mut layers = self.loader.layers();
         match layers.iter_mut().find(|layer| layer.name == LAYER) {
             Some(layer) => layer.patches = patches,
@@ -1311,6 +1406,9 @@ impl Manager {
         }
         if let Err(error) = self.loader.reconcile(layers, None).await {
             tracing::warn!(%error, "plugin layer reconcile refused");
+        }
+        for plugin in unreadable {
+            self.owners.withdraw(&plugin, &CONTENT).await;
         }
     }
 
@@ -1343,6 +1441,8 @@ impl Manager {
         };
         let manifest = match dir.as_deref().map(Manifest::read) {
             Some(Ok(manifest)) => manifest,
+            // `apply` above already withdrew a plugin whose manifest it could
+            // not read.
             Some(Err(error)) => {
                 return Outcome {
                     status: Some(json!({"status": "failed", "error": error.to_string()})),
@@ -1469,7 +1569,8 @@ impl Manager {
                                 let plugin = own_id(&name, used).expect("not a built-in");
                                 let refused = self.owners.refused(plugin, &manifest).await;
                                 if !refused.is_empty() {
-                                    fields.insert("refused".into(), json!(refused));
+                                    fields
+                                        .insert("refused".into(), json!(refused_entries(&refused)));
                                 }
                             }
                             Some(Err(error)) => {
@@ -1571,6 +1672,7 @@ impl DynPlugin for PluginManagerPlugin {
                     ctx: ctx.clone(),
                     skills: self.skills.clone(),
                     mcp: self.mcp.clone(),
+                    refusals: self.state.refusals.clone(),
                 },
                 ctx: ctx.clone(),
                 runtimes: self.runtimes.clone(),
