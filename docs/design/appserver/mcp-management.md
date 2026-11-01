@@ -340,8 +340,8 @@ probe while Mcp is not serving answers `service_reloading`
 - The reply of `mcp.test` stops being `{tools}` and becomes the probe report in §4.5, and a probe
   that fails is a reply rather than an RPC error. That is also a breaking change on protocol v3:
   a client that read `{tools}` must read `tools` under the report and take the outcome from
-  `status`. The Web settings page changes in the same implementation; the native CLI does not call
-  the method; every other client sees the wrapper replace the old reply.
+  `status`. The Web settings page changes in the same implementation; the native CLI adopts the
+  report in `dimcode mcp test`; every other client sees the wrapper replace the old reply.
 - The edit flow is `mcp.configuration` then `mcp.update` with the returned `revision`; creating an
   entry takes the token from `mcp.catalog`'s source revision (D1).
 - A client renders `command`, `cwd` and `endpoint`, the name lists and the counts, and offers

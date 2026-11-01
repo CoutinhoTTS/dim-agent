@@ -494,31 +494,35 @@ async fn run_mcp(
         return Ok(0);
     }
     match mcp::apply(client, &request.action, &options.cwd).await {
-        Ok(mcp::Answer::Tools { id, tools }) => {
-            print_report(mcp::tools_detail(&id, &tools).lines, Vec::new())
-        }
-        Ok(mcp::Answer::Detail(detail)) => {
-            // The adapter's lines and the owner's words are made safe before
-            // they reach the terminal.
-            let lines = detail.lines.iter().map(|line| safe(line)).collect();
-            let notes = match &request.action {
-                ManagementAction::Run { .. } => {
-                    let mut notes = vec![
+        // A test's tools are typed: one row per tool, `name\tdescription`,
+        // and the no-tools sentence when the owner found none.
+        Ok(mcp::Answer::Tools { tools, .. }) => {
+            let (lines, notes) = if tools.is_empty() {
+                (
+                    Vec::new(),
+                    vec![
+                        crate::ui::i18n::t("The server exposes no tools.").to_owned(),
                         "The connection was temporary; no configuration was saved.".to_owned(),
-                    ];
-                    if detail.lines.len() != 1
-                        || detail.lines[0] != crate::ui::i18n::t("The server exposes no tools.")
-                    {
-                        notes.insert(0, "Columns: tool, description.".to_owned());
-                    }
-                    notes
-                }
-                ManagementAction::Inspect { .. } => {
-                    vec!["Inspection does not connect or contact the server.".to_owned()]
-                }
-                _ => Vec::new(),
+                    ],
+                )
+            } else {
+                (
+                    tools.iter().map(mcp::tool_row).collect(),
+                    vec![
+                        "Columns: tool, description.".to_owned(),
+                        "The connection was temporary; no configuration was saved.".to_owned(),
+                    ],
+                )
             };
             print_report(lines, notes)
+        }
+        // An inspect's detail is printed as the adapter built it.
+        Ok(mcp::Answer::Detail(detail)) => {
+            let lines = detail.lines.iter().map(|line| safe(line)).collect();
+            print_report(
+                lines,
+                vec!["Inspection does not connect or contact the server.".to_owned()],
+            )
         }
         Ok(mcp::Answer::Area { note, .. }) => match (&request.action, note) {
             (_, Some(note)) => print_report(vec![safe(&note)], Vec::new()),
@@ -532,10 +536,10 @@ async fn run_mcp(
         // stderr with the exit still 0.
         Err(mcp::Failure::ReadFailed { note, error }) => {
             let mut lines: Vec<String> = note.iter().map(|note| safe(note)).collect();
-            if lines.is_empty() {
-                if let ManagementAction::Remove { id } = &request.action {
-                    lines.push(format!("Removed {}.", safe(id)));
-                }
+            if lines.is_empty()
+                && let ManagementAction::Remove { id } = &request.action
+            {
+                lines.push(format!("Removed {}.", safe(id)));
             }
             print_report(lines, vec![error])
         }

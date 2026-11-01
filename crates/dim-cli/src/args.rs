@@ -502,6 +502,7 @@ impl Options {
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
+                    use crate::model::session::{Area, ManagementAction, ManagementRequest};
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
                         "login" => {
@@ -525,8 +526,39 @@ impl Options {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
+                        "add" => Action::ManagementAdd {
+                            area: Area::Mcp,
+                            path: value(&mut args)?.into(),
+                        },
+                        "edit" => Action::ManagementEdit {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                        },
+                        "set" => Action::ManagementSet {
+                            area: Area::Mcp,
+                            id: Some(value(&mut args)?),
+                            path: value(&mut args)?.into(),
+                        },
+                        "remove" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Remove {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "test" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Run {
+                                id: value(&mut args)?,
+                            },
+                        }),
+                        "inspect" => Action::Management(ManagementRequest {
+                            area: Area::Mcp,
+                            action: ManagementAction::Inspect {
+                                id: value(&mut args)?,
+                            },
+                        }),
                         _ => {
-                            return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }

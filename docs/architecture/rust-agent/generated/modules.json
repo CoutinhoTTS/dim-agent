@@ -25785,7 +25785,7 @@
         "path mcp::editable",
         "path mcp::seed",
         "path mcp::target",
-        "path mcp::tools_detail",
+        "path mcp::tool_row",
         "use crate::management::mcp"
       ]
     },
@@ -25841,10 +25841,8 @@
         "path Area::Scheduled",
         "path Area::Skills",
         "path ManagementAction::Add",
-        "path ManagementAction::Inspect",
         "path ManagementAction::List",
         "path ManagementAction::Remove",
-        "path ManagementAction::Run",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",
@@ -25865,13 +25863,6 @@
       "references": [
         "path safe",
         "use crate::sanitize::safe"
-      ]
-    },
-    {
-      "from": "dim_cli::management_command",
-      "to": "dim_cli::ui::i18n",
-      "references": [
-        "path crate::ui::i18n::t"
       ]
     },
     {
@@ -36686,6 +36677,10 @@
     {
       "module": "dim_cli::args",
       "path": "Area::Hooks"
+    },
+    {
+      "module": "dim_cli::args",
+      "path": "Area::Mcp"
     },
     {
       "module": "dim_cli::args",

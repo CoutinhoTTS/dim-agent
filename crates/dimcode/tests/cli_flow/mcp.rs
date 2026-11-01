@@ -67,10 +67,10 @@ fn notes() -> Value {
 /// its source.
 fn configuration(wire: &mut Wire, id: &str, source: &str, reply: Value) {
     let request = wire.read("mcp.configuration");
-    assert_eq!(
-        request["params"],
-        json!({"cwd": "/workspace", "id": id, "source": source})
-    );
+    assert_eq!(request["params"]["id"], id);
+    assert_eq!(request["params"]["source"], source);
+    // The panel reads the Session's workspace, and a command its own cwd.
+    assert!(request["params"]["cwd"].is_string());
     wire.reply(&request, reply);
 }
 
@@ -532,4 +532,847 @@ fn tui_mcp_panel_shows_a_failed_catalog_read() {
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
+}
+
+/// A `mcp.catalog` reply for the standalone commands: the same entries, and
+/// a source revision the tests write at.
+fn cli_catalog() -> Value {
+    catalog(true, None)
+}
+
+/// The create document `mcp add` takes, as the panel's template has it.
+fn new_entry(source: &str) -> Value {
+    json!({
+        "id": "example",
+        "source": source,
+        "configuration": {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-everything"],
+            "env": {},
+            "enabled": false,
+        },
+    })
+}
+
+/// `mcp add` reads the catalog once for the id check and the source
+/// revision, writes `mcp.save`, and reports the area again.
+#[test]
+fn mcp_add_creates_an_entry_with_the_sources_revision() {
+    for (stdin, source, expected) in [(false, "user", "user:1"), (true, "project", "project:1")] {
+        let home = Home::new();
+        let path = home.0.join("entry.json");
+        let document = new_entry(source);
+        fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+        let saved = document.clone();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            let request = wire.read("mcp.catalog");
+            assert!(request["params"]["cwd"].is_string());
+            wire.reply(&request, cli_catalog());
+            let request = wire.read("mcp.save");
+            assert_eq!(request["params"]["id"], "example");
+            assert_eq!(request["params"]["source"], source);
+            assert_eq!(request["params"]["expectedVersion"], expected);
+            assert_eq!(request["params"]["configuration"], saved["configuration"]);
+            assert!(request["params"]["cwd"].is_string());
+            wire.reply(&request, json!({}));
+            area(wire, cli_catalog(), docs(true));
+        });
+        let mut command = home.command();
+        command.args(["mcp", "add"]);
+        if stdin {
+            command.arg("-");
+        } else {
+            command.arg(&path);
+        }
+        let mut child = command
+            .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if stdin {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(serde_json::to_string(&document).unwrap().as_bytes())
+                .unwrap();
+        }
+        let output = wait(child);
+        daemon.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "Added example.\n"
+        );
+        assert!(output.stderr.is_empty());
+    }
+}
+
+/// An id the catalog already lists is refused before anything is written:
+/// `mcp.save` would replace that entry.
+#[test]
+fn mcp_add_refuses_an_id_the_catalog_lists() {
+    let home = Home::new();
+    let path = home.0.join("entry.json");
+    let mut document = new_entry("user");
+    document["id"] = json!("docs");
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(
+                !line.contains("mcp.save"),
+                "the refused add wrote: {line:?}"
+            );
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "add"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("docs is already in mcp list"), "{error}");
+    assert!(error.contains(path.to_str().unwrap()), "{error}");
+}
+
+/// `mcp edit` opens the patch the configuration read seeds, without a
+/// stored argument or value, and writes it at that revision.
+#[test]
+fn mcp_edit_opens_the_patch_without_stored_values() {
+    let home = Home::new();
+    let script = editor(
+        &home,
+        "editor.sh",
+        "expected='{\n  \"command\": \"npx\",\n  \"cwd\": \"\",\n  \"env\": {}\n}'\n\
+         [ \"$(cat \"$1\")\" = \"$expected\" ] || exit 1\n\
+         printf '%s' '{\"command\":\"npx\",\"cwd\":\"/workspace\",\"env\":{\"DOCS_TOKEN\":\"value\"}}' > \"$1\"",
+    );
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        configuration(wire, "docs", "user", docs(true));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.update");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert_eq!(
+            request["params"]["patch"],
+            json!({"command": "npx", "cwd": "/workspace",
+                   "env": {"DOCS_TOKEN": "value"}})
+        );
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        area(wire, cli_catalog(), docs(true));
+    });
+    let mut command = home.command();
+    command
+        .env_remove("VISUAL")
+        .env("EDITOR", &script)
+        .args(["mcp", "edit", "docs"]);
+    let mut terminal = Terminal::launch_tui(command);
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert!(status.success(), "{}", terminal.transcript);
+    assert!(
+        terminal.transcript.contains("Saved the MCP entry."),
+        "{}",
+        terminal.transcript
+    );
+}
+
+/// `mcp set` reads the entry's revision immediately before the write, and
+/// text that says what is stored writes nothing.
+#[test]
+fn mcp_set_reads_the_revision_immediately_before_the_write() {
+    let home = Home::new();
+    let path = home.0.join("patch.json");
+    fs::write(
+        &path,
+        json!({"command": "npx", "cwd": "/workspace", "env": {"DOCS_TOKEN": "value"}}).to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        configuration(wire, "docs", "user", docs(true));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.update");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        area(wire, cli_catalog(), docs(true));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "set", "docs"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Saved the MCP entry.\n"
+    );
+
+    // The seed's own text is no change, and no write.
+    let home = Home::new();
+    let path = home.0.join("patch.json");
+    fs::write(
+        &path,
+        json!({"command": "npx", "cwd": "", "env": {}}).to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        configuration(wire, "docs", "user", docs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("mcp.update"), "the unchanged set wrote");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "set", "docs"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "No change.\n");
+}
+
+/// A stale revision writes nothing, reads the area again, and names the
+/// file that keeps the user's text.
+#[test]
+fn mcp_set_keeps_the_users_text_on_a_conflict() {
+    let home = Home::new();
+    let path = home.0.join("patch.json");
+    fs::write(
+        &path,
+        json!({"command": "npx", "cwd": "/workspace", "env": {}}).to_string(),
+    )
+    .unwrap();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        configuration(wire, "docs", "user", docs(true));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.update");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"The MCP settings changed; read them before updating",
+            "data":{"appError":"mcp_settings_conflict"}}}));
+        area(wire, cli_catalog(), docs(true));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "set", "docs"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("The MCP entry changed since it was read; nothing was written."),
+        "{error}"
+    );
+    assert!(error.contains("Your text is kept in"), "{error}");
+    assert!(error.contains(path.to_str().unwrap()), "{error}");
+}
+
+/// `mcp remove` deletes at the source revision; when the read after it
+/// fails, the removal stands and the error goes to stderr with exit 0.
+#[test]
+fn mcp_remove_removes_at_the_sources_revision() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.remove");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+        // The command prints the removal; the read that reports the area
+        // after the write is the adapter's, and its view belongs to the
+        // panel, so no configuration is read here.
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "docs"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    daemon.join().unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Removed docs.\n");
+
+    // The entry was removed; the read that reports the area failed.
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.remove");
+        wire.reply(&request, json!({}));
+        let request = wire.read("mcp.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"MCP settings are unavailable",
+            "data":{"appError":"mcp_unavailable"}}}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Removed docs.\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("MCP settings are unavailable"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A plugin entry's write is refused before the request is formed: its
+/// source has no Settings revision.
+#[test]
+fn mcp_remove_refuses_a_plugin_entry() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("mcp.remove"), "the plugin entry wrote");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "remove", "notes"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("plugin MCP entries change through their plugin")
+    );
+}
+
+/// `mcp test` prints one row per tool, and a test that finds none says so
+/// without a row.
+#[test]
+fn mcp_test_prints_the_tools() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.test");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(
+            &request,
+            json!({"status": "connected", "latencyMs": 4, "tools": [
+                {"name": "search", "description": "Search docs",
+                 "inputSchema": {"type": "object"}},
+                {"name": "fetch", "description": null,
+                 "inputSchema": {"type": "object"}},
+            ]}),
+        );
+    });
+    let output = home
+        .command()
+        .args(["mcp", "test", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "search\tSearch docs\nfetch\n"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Columns: tool, description.\nThe connection was temporary; no configuration was saved.\n"
+    );
+
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.test");
+        wire.reply(
+            &request,
+            json!({"status": "connected", "latencyMs": 1, "tools": []}),
+        );
+    });
+    let output = home
+        .command()
+        .args(["mcp", "test", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "The server exposes no tools.\nThe connection was temporary; no configuration was saved.\n"
+    );
+}
+
+/// A failed test is the owner's refusal, with its message and exit 1.
+#[test]
+fn mcp_test_reports_a_failed_probe() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.test");
+        wire.reply(
+            &request,
+            json!({"status": "authRequired", "latencyMs": 2,
+            "expired": true, "tools": null}),
+        );
+    });
+    let output = home
+        .command()
+        .args(["mcp", "test", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("The server rejected the stored credential"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `mcp inspect` prints the effective entry and its connections, and
+/// writes nothing back.
+#[test]
+fn mcp_inspect_prints_the_effective_entry_and_connections() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.inspect");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(
+            &request,
+            json!({
+                "enabled": true,
+                "configuration": {
+                    "type": "stdio", "command": "npx", "argsCount": 2, "cwd": null,
+                    "envNames": ["DOCS_TOKEN"],
+                },
+                "connections": [{"state": {"status": "connected"}, "tools": [
+                    {"name": "search", "description": "Search docs",
+                     "inputSchema": {"type": "object"}},
+                ]}],
+            }),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("mcp.update"), "the inspect wrote back");
+            line.clear();
+        }
+    });
+    let output = home
+        .command()
+        .args(["mcp", "inspect", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("user · stdio · enabled · signed in (missing scopes: repo)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Executable: npx"), "{stdout}");
+    assert!(stdout.contains("Environment names: DOCS_TOKEN"), "{stdout}");
+    assert!(stdout.contains("Connection 1 · connected"), "{stdout}");
+    assert!(stdout.contains("  search — Search docs"), "{stdout}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Inspection does not connect or contact the server.\n"
+    );
+}
+
+/// A daemon without the namespace refuses each new verb before any read.
+#[test]
+fn mcp_commands_refuse_a_daemon_without_the_namespace() {
+    for verb in ["add", "set", "remove", "test", "inspect"] {
+        let home = Home::new();
+        let file = home.0.join("document.json");
+        fs::write(&file, json!({}).to_string()).unwrap();
+        let mut args = vec!["mcp".to_owned(), verb.to_owned()];
+        if verb == "set" {
+            args.push("docs".to_owned());
+        }
+        match verb {
+            "add" | "set" => args.push(file.to_str().unwrap().to_owned()),
+            _ => args.push("docs".to_owned()),
+        }
+        let daemon = home.daemon(|wire| {
+            wire.hello(&[]);
+            wire.hold();
+        });
+        let output = home
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("This daemon cannot manage MCP."),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+/// `mcp enable` and `mcp disable` keep printing what they printed before
+/// the panel shared their implementation.
+#[test]
+fn mcp_enable_keeps_its_existing_output() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1", "projectRevision": "project:1",
+                "userApplication": {}, "projectApplication": null,
+                "servers": [
+                    {"id": "docs", "source": "user", "enabled": false, "transport": "stdio"},
+                ],
+            }),
+        );
+        let request = wire.read("mcp.set_enabled");
+        assert_eq!(request["params"]["id"], "docs");
+        assert_eq!(request["params"]["source"], "user");
+        assert_eq!(request["params"]["expectedVersion"], "user:1");
+        assert_eq!(request["params"]["enabled"], true);
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "enable", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled \"docs\" (user).\n"
+    );
+    assert!(output.stderr.is_empty());
+
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:1", "projectRevision": "project:1",
+                "userApplication": {}, "projectApplication": null,
+                "servers": [],
+            }),
+        );
+        let request = wire.read("mcp.set_enabled");
+        assert_eq!(request["params"]["id"], "gone");
+        assert_eq!(request["params"]["source"], "project");
+        assert_eq!(request["params"]["expectedVersion"], "project:1");
+        assert_eq!(request["params"]["enabled"], false);
+        assert!(request["params"]["cwd"].is_string());
+        wire.reply(&request, json!({}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "disable", "gone"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Disabled \"gone\" (project).\n"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "\"gone\" is not in mcp list; withdrew any stored enablement of it in this workspace.\n"
+    );
+}
+
+/// A create the owner refuses over a newer document keeps the user's text
+/// and reads the area again; the next add writes it at the newer revision.
+#[test]
+fn tui_mcp_panel_keeps_the_users_text_when_a_create_finds_a_conflict() {
+    let home = Home::new();
+    let script = editor(&home, "editor.sh", EDITS_THE_ENTRY);
+    let (shown, wait_shown) = mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        started(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        area(wire, catalog(true, None), docs(true));
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, catalog(true, None));
+        let request = wire.read("mcp.save");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"The MCP settings changed; read them before updating",
+            "data":{"appError":"mcp_settings_conflict"}}}));
+        // The conflict writes nothing: the area is read again.
+        area(wire, catalog(true, None), docs(true));
+        // The next add reopens the user's text and writes it at the
+        // revision the catalog reports now.
+        let request = wire.read("mcp.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "user:2", "projectRevision": "project:1",
+                "userApplication": {"error": null, "cleanupError": null},
+                "pluginApplication": {"error": null, "cleanupError": null},
+                "projectApplication": {"error": null, "cleanupError": null},
+                "servers": [
+                    {"id": "docs", "source": "user", "enabled": true,
+                     "transport": "stdio"},
+                ],
+            }),
+        );
+        let request = wire.read("mcp.save");
+        assert_eq!(request["params"]["expectedVersion"], "user:2");
+        assert_eq!(request["params"]["id"], "example");
+        wire.reply(&request, json!({}));
+        area(wire, catalog(true, None), docs(true));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/mcp\r");
+    terminal.until("Executable: npx");
+    terminal.raw(b"\x0e");
+    terminal.until("The MCP entries changed since they were read; nothing was written.");
+    terminal.until("text is kept in");
+    terminal.raw(b"\x0e");
+    terminal.until("Added example.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// Tool text from a third-party server is drawn on one line, without the
+/// escape sequences it carries.
+#[test]
+fn mcp_test_sanitizes_tool_text() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, cli_catalog());
+        let request = wire.read("mcp.test");
+        wire.reply(
+            &request,
+            json!({"status": "connected", "latencyMs": 1, "tools": [
+                {"name": "search", "description": "Search\u{1b}[2J\ndocs",
+                 "inputSchema": {"type": "object"}},
+            ]}),
+        );
+    });
+    let output = home
+        .command()
+        .args(["mcp", "test", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, "search\tSearch docs\n");
+    assert!(
+        !stdout.contains('\u{1b}') && !stdout.contains("[2J"),
+        "{stdout:?}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("[2J"));
+}
+
+/// The typed patch and the owner's decoder agree, through the real App
+/// Server: add with the panel's template, patch one env key and `cwd`,
+/// inspect what the store holds, remove, and list again.
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn mcp_entries_round_trip_through_the_real_app_server() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let project = home.0.join("work");
+    fs::create_dir_all(&project).unwrap();
+    let command = |args: &[&str]| {
+        let mut command = home.command();
+        command
+            .arg("--server")
+            .arg(&binary)
+            .arg("--model-config")
+            .arg(&config)
+            .arg("--cwd")
+            .arg(&project);
+        command.args(args);
+        command
+    };
+    let run = |args: &[&str], input: Option<String>| {
+        let mut command = command(args);
+        command
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        wait(child)
+    };
+    let document = json!({
+        "id": "round-trip",
+        "source": "user",
+        "configuration": {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-everything"],
+            "env": {},
+            "enabled": false,
+        },
+    });
+    let output = run(&["mcp", "add", "-"], Some(document.to_string()));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Added round-trip.\n"
+    );
+    let patch = json!({"cwd": "/tmp", "env": {"ROUND_TRIP": "value"}});
+    let output = run(&["mcp", "set", "round-trip", "-"], Some(patch.to_string()));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Saved the MCP entry.\n"
+    );
+    let output = run(&["mcp", "inspect", "round-trip"], None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Working directory: /tmp"), "{stdout}");
+    assert!(stdout.contains("Environment names: ROUND_TRIP"), "{stdout}");
+    let output = run(&["mcp", "remove", "round-trip"], None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Removed round-trip.\n"
+    );
+    let output = run(&["mcp", "list"], None);
+    assert!(output.status.success());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("round-trip"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
