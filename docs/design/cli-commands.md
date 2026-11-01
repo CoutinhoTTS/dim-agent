@@ -427,9 +427,7 @@ generation never replaces it ([title metadata](appserver/session-title-metadata.
 it and `title: null` clears it. Title text belongs to no branch and to no Timeline
 event, so a rename adds nothing the model reads.
 
-`session.rename` is a Session method: a client discovers it through
-`session.methods {sessionId}` and `hello.features` does not list it. A daemon whose
-Session lists no `session.rename` gets the unsupported-daemon error, and the typed
+`session.rename` is a Session method: the client calls it directly and `hello.features` does not list it. A Session that does not serve it answers `unknown_method`, which the client reports as the unsupported-daemon error, and the typed
 text is never submitted in its place. The same holds for a Session that is not
 attached yet: with no Session shown, `/rename` reports that and sends nothing.
 

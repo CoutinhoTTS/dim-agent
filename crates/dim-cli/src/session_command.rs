@@ -19,16 +19,6 @@ struct Renamed {
     title: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct Listed {
-    methods: Vec<Declared>,
-}
-
-#[derive(Deserialize)]
-struct Declared {
-    name: String,
-}
-
 /// The `session.delete` reply. An App Server before the field answers `{}`,
 /// which reads as `None` and as a delete that removed the rows.
 #[derive(Deserialize)]
@@ -95,18 +85,14 @@ pub async fn rename(client: &mut Client, session_id: &str, title: Option<&str>) 
 /// `/rename` report it.
 ///
 /// `session.rename` is a Session method, so `hello.features` does not list
-/// it: the Session's own method list is where a client discovers it
+/// it: calling it is how a client finds out whether the Session serves it,
+/// and `unknown_method` is the answer that it does not
 /// ([session boundary](../../../docs/design/contracts/session-boundary.md)).
 pub(crate) async fn set_title(
     client: &mut Client,
     session_id: &str,
     title: Option<&str>,
 ) -> RenameReply {
-    match serves_rename(client, session_id).await {
-        Ok(false) => return RenameReply::Unsupported,
-        Ok(true) => {}
-        Err(error) => return RenameReply::Failed(error.to_string()),
-    }
     match client
         .typed::<Renamed>(
             "session.rename",
@@ -118,22 +104,11 @@ pub(crate) async fn set_title(
             Some(title) => RenameReply::Titled(title),
             None => RenameReply::Untitled,
         },
-        Err(error) => RenameReply::Failed(error.to_string()),
+        Err(error) => match crate::client::app_error(&error) {
+            Some("unknown_method") => RenameReply::Unsupported,
+            _ => RenameReply::Failed(error.to_string()),
+        },
     }
-}
-
-/// Whether the Session lists `session.rename` among the methods it serves.
-async fn serves_rename(client: &mut Client, session_id: &str) -> Result<bool> {
-    if !client.supports(&["session.methods"]) {
-        return Ok(false);
-    }
-    let listed: Listed = client
-        .typed("session.methods", json!({"sessionId": session_id}))
-        .await?;
-    Ok(listed
-        .methods
-        .iter()
-        .any(|declared| declared.name == "session.rename"))
 }
 
 /// `dimcode session delete`: permanently deletes the named Session.

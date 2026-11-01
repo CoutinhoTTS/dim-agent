@@ -4,12 +4,6 @@
 use super::*;
 use std::sync::mpsc;
 
-/// The `session.methods` reply of a Session that does or does not serve
-/// `session.rename`.
-fn methods(rename: bool) -> Value {
-    json!({"methods": if rename { vec![json!({"name":"session.rename","mutating":true})] } else { vec![] }})
-}
-
 /// The `session.rename` reply for the title the call carried.
 fn renamed(request: &Value) -> Value {
     json!({
@@ -58,7 +52,6 @@ fn serve_until_exit(wire: &mut Wire, forbidden: &str) -> Vec<Value> {
         }
         let request: Value = serde_json::from_str(&line).unwrap();
         match request["method"].as_str().unwrap_or_default() {
-            "session.methods" => wire.reply(&request, methods(true)),
             "session.rename" => {
                 titles.push(request["params"]["title"].clone());
                 wire.reply(&request, renamed(&request));
@@ -87,10 +80,7 @@ fn serve_until_exit(wire: &mut Wire, forbidden: &str) -> Vec<Value> {
 fn session_rename_sets_the_manual_title() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["session.methods"]);
-        let listed = wire.read("session.methods");
-        assert_eq!(listed["params"], json!({"sessionId":"session"}));
-        wire.reply(&listed, methods(true));
+        wire.hello(&[]);
         let rename = wire.read("session.rename");
         assert_eq!(
             rename["params"],
@@ -121,9 +111,7 @@ fn session_rename_sets_the_manual_title() {
 fn session_rename_clear_sends_a_null_title() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["session.methods"]);
-        let listed = wire.read("session.methods");
-        wire.reply(&listed, methods(true));
+        wire.hello(&[]);
         let rename = wire.read("session.rename");
         assert_eq!(
             rename["params"],
@@ -150,11 +138,13 @@ fn session_rename_clear_sends_a_null_title() {
 }
 
 #[test]
-fn session_rename_without_exactly_one_title_is_a_usage_error() {
+fn session_rename_without_a_title_is_a_usage_error() {
     let home = Home::new();
     for args in [
         vec!["session", "rename", "session"],
         vec!["session", "rename", "session", "Manual title", "--clear"],
+        vec!["session", "rename", "session", ""],
+        vec!["session", "rename", "session", "  "],
     ] {
         let output = home.command().args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}");
@@ -171,44 +161,44 @@ fn session_rename_without_exactly_one_title_is_a_usage_error() {
 }
 
 #[test]
-fn session_rename_reports_a_daemon_without_the_method() {
-    for listed in [None, Some(false)] {
-        let home = Home::new();
-        let daemon = home.daemon(move |wire| {
-            wire.hello(if listed.is_some() {
-                &["session.methods"]
-            } else {
-                &[]
-            });
-            if let Some(serve) = listed {
-                let request = wire.read("session.methods");
-                wire.reply(&request, methods(serve));
-            }
-            wire.hold();
-        });
-        let output = home
-            .command()
-            .args(["session", "rename", "session", "Manual title"])
-            .output()
-            .unwrap();
-        daemon.join().unwrap();
-        assert_eq!(output.status.code(), Some(1), "{listed:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("This daemon does not support renaming Sessions"),
-            "{listed:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
+fn session_rename_calls_the_method_and_reports_unknown_method_as_unsupported() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        // The rename itself is the first request: there is no
+        // `session.methods` probe in front of it.
+        let rename = wire.read("session.rename");
+        assert_eq!(
+            rename["params"],
+            json!({"sessionId":"session","title":"Manual title"})
         );
-    }
+        wire.send(json!({"jsonrpc":"2.0","id":rename["id"],"error":{
+            "code":-32601,"message":"Unknown method: session.rename",
+            "data":{"appError":"unknown_method"}}}));
+        wire.hold();
+    });
+    let output = home
+        .command()
+        .args(["session", "rename", "session", "Manual title"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("This daemon does not support renaming Sessions"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
 fn session_rename_reports_an_unknown_session() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["session.methods"]);
-        let listed = wire.read("session.methods");
-        wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{
+        wire.hello(&[]);
+        let rename = wire.read("session.rename");
+        wire.send(json!({"jsonrpc":"2.0","id":rename["id"],"error":{
             "code":-32000,"message":"Session is closed",
             "data":{"appError":"session_closed"}}}));
         wire.hold();
@@ -233,7 +223,7 @@ fn tui_rename_sets_and_clears_the_title_without_submitting_it() {
     for fullscreen in [false, true] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
-            startup(wire, &["session.methods"]);
+            startup(wire, &[]);
             let titles = serve_until_exit(wire, "/rename");
             assert_eq!(titles, vec![json!("Foo"), Value::Null]);
         });
@@ -262,7 +252,7 @@ fn tui_palette_rename_waits_for_the_title() {
         for key in [b"\r".as_slice(), b"\t".as_slice()] {
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
-                startup(wire, &["session.methods"]);
+                startup(wire, &[]);
                 let titles = serve_until_exit(wire, "/rename");
                 assert_eq!(titles, vec![json!("Foo")], "Enter or Tab renamed early");
             });
@@ -291,7 +281,7 @@ fn tui_rename_alone_is_refused_with_the_needs_notice() {
     for fullscreen in [false, true] {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
-            startup(wire, &["session.methods"]);
+            startup(wire, &[]);
             let titles = serve_until_exit(wire, "/rename");
             assert!(titles.is_empty(), "{titles:?}");
         });
@@ -321,7 +311,7 @@ fn tui_rename_during_a_running_turn_is_a_command_not_a_queued_input() {
         let home = Home::new();
         let (running, is_running) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
-            startup(wire, &["session.methods"]);
+            startup(wire, &[]);
             let submit = wire.read("session.submit");
             assert_eq!(submit["params"]["text"], "hello");
             wire.reply(&submit, json!({"event":{}}));
@@ -348,7 +338,6 @@ fn tui_rename_during_a_running_turn_is_a_command_not_a_queued_input() {
                 }
                 let request: Value = serde_json::from_str(&line).unwrap();
                 match request["method"].as_str().unwrap_or_default() {
-                    "session.methods" => wire.reply(&request, methods(true)),
                     "session.rename" => {
                         assert_eq!(request["params"]["title"], "Foo");
                         wire.reply(&request, renamed(&request));
@@ -394,7 +383,7 @@ fn tui_rename_without_a_session_sends_nothing() {
     for fullscreen in [false, true] {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
-            startup(wire, &["session.methods"]);
+            startup(wire, &[]);
             let titles = serve_until_exit(wire, "/rename");
             assert!(titles.is_empty(), "{titles:?}");
         });
@@ -441,6 +430,9 @@ fn tui_rename_reports_a_daemon_without_the_method() {
                 }
                 let request: Value = serde_json::from_str(&line).unwrap();
                 match request["method"].as_str().unwrap_or_default() {
+                    "session.rename" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method: session.rename",
+                        "data":{"appError":"unknown_method"}}})),
                     "session.submit" => {
                         let text = request["params"]["text"].as_str().unwrap_or_default();
                         assert!(!text.contains("/rename"), "{text:?}");

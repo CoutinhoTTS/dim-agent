@@ -221,8 +221,9 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
-    /// `/rename`: set the shown Session's manual title, or clear it when the
-    /// text is empty. Nothing here reaches the model.
+    /// `/rename`: set the shown Session's manual title, or clear it when
+    /// `title` is `None`; an empty text is refused, and only `--clear`
+    /// clears. Nothing here reaches the model.
     Rename(Option<String>),
     /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
     Goal(crate::goal::Request),

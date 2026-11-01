@@ -731,7 +731,10 @@ impl Options {
             return Err("session export requires --format markdown|json".into());
         }
         if let Action::SessionRename { title, clear, .. } = &options.action
-            && title.is_some() == *clear
+            && (title.is_some() == *clear
+                || title
+                    .as_deref()
+                    .is_some_and(|title| title.trim().is_empty()))
         {
             return Err(
                 "Use session rename SESSION TITLE or session rename SESSION --clear".into(),

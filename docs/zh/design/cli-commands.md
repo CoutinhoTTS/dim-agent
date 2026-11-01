@@ -350,8 +350,8 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 [SessionTitle](plugins/SessionTitle.md)）。`session.rename {sessionId, title}` 设置它，
 `title: null` 清除它。标题文本不属于任何线，也不产生 Timeline 事件，所以重命名不增添模型读到的内容。
 
-`session.rename` 是 Session 方法：客户端经 `session.methods {sessionId}` 发现它，`hello.features`
-并不列出它。Session 未列出 `session.rename` 的守护进程得到不支持的守护进程错误，输入的文字绝不
+`session.rename` 是 Session 方法：客户端直接调用它，`hello.features` 并不列出它。不提供它的
+Session 回答 `unknown_method`，客户端将其报告为不支持的守护进程错误，输入的文字绝
 作为替代被提交。尚未附加 Session 时同理：没有显示中的 Session，`/rename` 直接说明并不发送任何内容。
 
 `dimcode session rename SESSION TITLE` 打印服务端返回的标题，`--clear` 打印该 Session 已无标题。
