@@ -859,8 +859,8 @@ pub(crate) fn projected_messages(
     compaction: Option<&ContextCompactionData>,
     history: &[HistoryEntry],
 ) -> Vec<Arc<Message>> {
-    let mut messages = Vec::with_capacity(projected_messages_len(compaction, history));
     let (replacement, baseline, history) = segments(compaction, history);
+    let mut messages = Vec::with_capacity(replacement.len() + baseline.len() + history.len());
     messages.extend(replacement.iter().cloned().map(Arc::new));
     messages.extend(baseline.iter().map(|entry| entry.message.clone()));
     messages.extend(history.iter().map(|entry| entry.message.clone()));
