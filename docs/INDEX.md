@@ -80,6 +80,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Client Session catalog](design/appserver/session-catalog.md) (#556)（[中文](zh/design/appserver/session-catalog.md)）
 - [Session broadcast notices](design/appserver/session-notices.md)（[中文](zh/design/appserver/session-notices.md)）
+- [Bounded latest-turn history window](design/appserver/session-history-window.md) (#712)
 - [SessionStore title metadata](design/appserver/session-title-metadata.md)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (#193)（[中文](zh/design/appserver/restore-shared-read.md)）
 - [Idle Session unload](design/appserver/idle-unload.md) (#126, #331)（[中文](zh/design/appserver/idle-unload.md)）

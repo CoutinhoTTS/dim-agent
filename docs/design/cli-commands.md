@@ -230,6 +230,43 @@ the prompt twice is an argument error. `--json` serves `exec` and `migration`,
 and `tui` requires a terminal. Help/version and argument errors do not start
 the daemon.
 
+### Daemon startup failure
+
+All entries that start a daemon share the client startup in `connect_inner`.
+The daemon is detached and its stderr is the append-only `daemon.log`, so a
+per-launch note is the only channel that does not parse history or depend on a
+pipe the client may close. Before spawning, the CLI removes
+`<native home>/dimcode.sqlite.startup`, where the native home is the daemon's
+own home, `<home>/rust`. When the spawned daemon exits before the client
+connects, the CLI reads that note (at most 16 KiB, and only a regular
+file; on Unix it must also be owned by the current user and offer no group or
+other permissions). On Unix that mode is the note's protection, since the
+daemon writes it 0600; on Windows the client checks only the regular file, its
+size and the header, and the private home's inherited ACL is the boundary. It
+requires the `dimcode-startup-failure v1 pid=<child pid>` header, removes
+control characters other than newline and tab from the body, and returns it as
+the command's error followed by `Details: <native home>/daemon.log`. The
+storage gate writes the note on a diagnosed incompatibility and names the
+store, its marker, the daemon's supported format, whether the store is newer,
+mismatched, unrecognized or too old, and the recovery paths ([native storage format §
+startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
+Without a matching note the existing `App Server exited (<status>); see ...`
+remains. The failed launch removes the note after reading; a successful
+connection removes any note. The CLI never prints `daemon.log`, never deletes,
+recreates, downgrades or rewrites the store, and exits 1.
+Development documentation continues to use `./dev` and its isolated home; the
+terminal note itself names a compatible build or `--home PATH`.
+
+```text
+$ dima
+Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
+  Store format: v30
+  Daemon format: v29
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v30, or use --home PATH for a separate environment.
+  Details: /Users/me/.dimcode-alpha/rust/daemon.log
+```
+
 The interactive export parser reads the format token and treats the remainder
 of the line as a literal path, including spaces, without shell evaluation or
 quote expansion. Missing paths and unsupported formats print usage and return

@@ -36,6 +36,19 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn preference_update(
+    preferences: ModelPreferences,
+) -> dim_app_server::protocol::ModelPreferenceUpdate {
+    dim_app_server::protocol::ModelPreferenceUpdate {
+        reasoning_effort: preferences
+            .reasoning_effort
+            .map(dim_app_server::protocol::PreferenceUpdate::Value),
+        service_tier: preferences
+            .service_tier
+            .map(dim_app_server::protocol::PreferenceUpdate::Value),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Seen {
     path: String,
@@ -561,19 +574,50 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 )
                 .await
                 .unwrap();
+            // A same-origin 307 is followed on the request's own network, and
+            // the target serves the stream.
             let before = direct.lock().unwrap().len();
+            let before_proxied = proxied.lock().unwrap().len();
             let connection = resolver
                 .0
                 .resolve(request.clone(), cancel.clone())
                 .await
                 .unwrap();
-            assert!(
-                host.0
-                    .invoke(request, connection.connection, cancel.clone())
-                    .await
-                    .is_err()
+            let mut output = host
+                .0
+                .invoke(request, connection.connection, cancel.clone())
+                .await
+                .unwrap();
+            let (mut text, mut failed, mut stopped) = (String::new(), false, false);
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(chunk) = output.next().await {
+                    match chunk {
+                        Ok(ModelChunk::Text(value)) => text.push_str(&value),
+                        Ok(ModelChunk::MessageStop { .. }) => stopped = true,
+                        Err(_) => failed = true,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(text, "network reply");
+            assert!(stopped && !failed);
+            let seen = direct.lock().unwrap();
+            let paths: Vec<_> = seen[before..]
+                .iter()
+                .map(|(uri, _)| uri.path().to_owned())
+                .collect();
+            assert_eq!(
+                paths,
+                ["/redirect/v1/chat/completions", "/v1/chat/completions"]
             );
-            assert_eq!(direct.lock().unwrap().len(), before + 1);
+            for (_, headers) in &seen[before..] {
+                assert_eq!(headers["authorization"], "Bearer model-secret");
+                assert!(!headers.contains_key("proxy-authorization"));
+            }
+            drop(seen);
+            assert_eq!(proxied.lock().unwrap().len(), before_proxied);
         }
         root.shutdown().await.unwrap();
     }
@@ -3435,7 +3479,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                         tools: None,
                         tool_sources: vec![],
                     },
-                    ModelPreferences::default(),
+                    &dim_app_server::protocol::ModelPreferenceUpdate::default(),
                     &cancel,
                 )
                 .await
@@ -3454,10 +3498,10 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                     tools: None,
                     tool_sources: vec![],
                 },
-                ModelPreferences {
+                &preference_update(ModelPreferences {
                     reasoning_effort: Some("low".into()),
                     ..Default::default()
-                },
+                }),
                 &cancel,
             )
             .await
@@ -3826,13 +3870,13 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 };
                 assert!(
                     provider
-                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                         .await
                         .is_err()
                 );
                 current.metadata = None;
                 let unstamped = provider
-                    .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                    .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                     .await
                     .unwrap();
                 assert!(
@@ -3876,7 +3920,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 current.metadata = selected.metadata;
                 assert!(
                     provider
-                        .apply_preferences(&current, ModelPreferences::default(), &cancel)
+                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
                         .await
                         .is_ok()
                 );
@@ -7141,7 +7185,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         ..Default::default()
     };
     let error = provider
-        .apply_preferences(&current, effort.clone(), &cancel)
+        .apply_preferences(&current, &preference_update(effort.clone()), &cancel)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Model route changed"), "{error}");
@@ -7153,7 +7197,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         ..current
     };
     provider
-        .apply_preferences(&current, effort, &cancel)
+        .apply_preferences(&current, &preference_update(effort), &cancel)
         .await
         .unwrap();
     root.shutdown().await.unwrap();

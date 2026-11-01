@@ -474,6 +474,11 @@ fn acp_stdio_temporary_mcp_rebinds_expired_resources_before_submission() {
     daemon.join().unwrap();
 }
 
+/// The prompt reply only arrives once the shared recovery deadline expires.
+/// Waiting up to this long only bounds a settlement that never happens; it is
+/// not the test's budget, so a loaded machine does not shorten it.
+const RECOVERY_SETTLEMENT: Duration = Duration::from_secs(300);
+
 #[test]
 fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
     let home = Home::new();
@@ -495,10 +500,7 @@ fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
         wire.read("session.submit");
         drop(wire);
         let mut wire = accept_native(&listener);
-        wire.0
-            .get_ref()
-            .set_read_timeout(Some(Duration::from_secs(40)))
-            .unwrap();
+        wire.0.get_ref().set_read_timeout(None).unwrap();
         recovery_hello(&mut wire, "first");
         wire.read("session.input_lookup");
         waiting.send(()).unwrap();
@@ -522,16 +524,7 @@ fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
     )
     .unwrap();
     peer.input.flush().unwrap();
-    let mut fd = libc::pollfd {
-        fd: peer.output.get_ref().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    assert!(
-        unsafe { libc::poll(&mut fd, 1, 40_000) } > 0,
-        "The shared recovery deadline did not settle"
-    );
-    let result = peer.response(3);
+    let result = peer.response_within(3, RECOVERY_SETTLEMENT);
     assert_eq!(result["result"]["stopReason"], "cancelled");
     assert_eq!(
         result["result"]["_meta"]["dim"]["nativeCancellation"],
@@ -777,8 +770,14 @@ impl Peer {
     }
 
     fn response(&mut self, id: i64) -> Value {
+        self.response_within(id, PATIENCE)
+    }
+
+    /// Waits up to `patience` for the reply, for flows whose timing the CLI's
+    /// own recovery deadline sets.
+    fn response_within(&mut self, id: i64, patience: Duration) -> Value {
         loop {
-            let frame = self.frame();
+            let frame = self.frame_within(patience);
             if frame.get("id") == Some(&json!(id)) {
                 return frame;
             }
@@ -797,6 +796,10 @@ impl Peer {
     }
 
     fn frame(&mut self) -> Value {
+        self.frame_within(PATIENCE)
+    }
+
+    fn frame_within(&mut self, patience: Duration) -> Value {
         if self.output.buffer().is_empty() {
             let mut fd = libc::pollfd {
                 fd: self.output.get_ref().as_raw_fd(),
@@ -804,7 +807,7 @@ impl Peer {
                 revents: 0,
             };
             assert!(
-                unsafe { libc::poll(&mut fd, 1, PATIENCE.as_millis() as i32) } > 0,
+                unsafe { libc::poll(&mut fd, 1, patience.as_millis() as i32) } > 0,
                 "ACP frame timed out"
             );
         }
