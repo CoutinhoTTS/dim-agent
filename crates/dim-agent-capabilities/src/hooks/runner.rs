@@ -829,6 +829,12 @@ impl Branch {
     /// Advances the consumed view; a live event that needs work is spawned or
     /// enqueued, and the handler returns.
     fn fold(self: &Arc<Self>, event: &AgentEvent, live: bool) {
+        // The live subscription delivers only `FOLLOWED_EVENTS`, while a
+        // replay hands over every branch event: skipping the rest here keeps
+        // both paths folding the same set (AGENTS rule 4).
+        if !FOLLOWED_EVENTS.contains(&event.kind.key()) {
+            return;
+        }
         let job = {
             let mut view = self.view.lock().unwrap();
             view.fold(event)
@@ -1207,10 +1213,10 @@ fn session_started(event: &AgentEvent) -> bool {
     })
 }
 
-/// The events this branch folds, in the one list its live subscription uses.
-/// Every arm [`View::fold`] and [`Branch::fold`] match names its key here: a
-/// kind folded on replay but not delivered live would leave a live Session's
-/// view disagreeing with a rebuilt one (AGENTS rule 4).
+/// The kinds this branch folds and its live subscription delivers. The
+/// dispatcher filters live events by this list, and [`Branch::fold`] skips a
+/// replay event outside it, so both paths fold the same set (AGENTS rule 4):
+/// a key an arm names but this list misses folds on neither path.
 const FOLLOWED_EVENTS: [&str; 12] = [
     "stop/interrupt",
     "input/message",
@@ -1424,7 +1430,7 @@ mod tests {
         assert!(both.contains("start context"), "{both}");
     }
 
-    /// F4: a result settles its call, and the call's input (whole file
+    /// A result settles its call, and the call's input (whole file
     /// contents for `write`/`edit`) does not stay in the folded view.
     #[test]
     fn a_settled_tool_call_leaves_nothing_behind_in_the_view() {
@@ -1468,14 +1474,18 @@ mod tests {
         );
     }
 
-    /// AGENTS rule 4: a live fold must see what a replay does. The dispatcher
-    /// matches a live event with `event.kind.key()`, and the subscription uses
-    /// `FOLLOWED_EVENTS` alone, so that list is exactly the keys of the kinds
-    /// `View::fold` and `Branch::fold` match: a kind the folds handle and the
-    /// list misses leaves a live Session's view behind a rebuilt one, and a
-    /// listed key no fold matches is dead weight.
+    /// AGENTS rule 4: the live subscription and a replay fold the same set.
+    /// `Branch::fold` skips a replay event outside `FOLLOWED_EVENTS`, and the
+    /// dispatcher delivers live events by the same list, so a kind the list
+    /// misses is folded on neither path.
+    ///
+    /// One event per current arm: the test pins that every kind these arms
+    /// name has its key in the list, so a typo or a missing key in the
+    /// constant fails it, and that the list holds no key no arm names. It
+    /// cannot discover an arm nobody added here; that arm folds nothing
+    /// through the branch and its flow test fails instead.
     #[test]
-    fn the_live_subscription_follows_exactly_the_kinds_the_folds_match() {
+    fn every_kind_the_folds_name_is_followed() {
         let folded = [
             // The nine arms of `View::fold`.
             event(
@@ -1673,7 +1683,7 @@ mod tests {
         assert_eq!(view.follow_ups, 0, "an operator turn did not reset it");
     }
 
-    /// F10: `fold` registers the run's token before its task starts, so the
+    /// `fold` registers the run's token before its task starts, so the
     /// answer that folds first cancels the registered one.
     #[test]
     fn a_live_request_registers_its_token_before_its_task_starts() {
@@ -1825,7 +1835,7 @@ mod tests {
         })
     }
 
-    /// F10: the answer folds after the request and before `approval()` runs;
+    /// The answer folds after the request and before `approval()` runs;
     /// the registered token is already cancelled when the task starts, and no
     /// `PermissionRequest` command may start.
     #[cfg(unix)]
@@ -1852,7 +1862,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// F10: the answer folds while the sources are being read, after the task
+    /// The answer folds while the sources are being read, after the task
     /// started; the point still starts no command.
     #[cfg(unix)]
     #[tokio::test]
