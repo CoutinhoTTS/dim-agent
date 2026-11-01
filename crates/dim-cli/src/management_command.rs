@@ -265,24 +265,20 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
         // sent with.
         ManagementResult::Applied { read_error, .. } => {
             let line = management::applied_line(&request.action, None);
-            print_report(vec![line], vec![read_error]);
+            print_report(vec![safe_line(&line)], vec![read_error]);
             Ok(0)
         }
         // A save reports the area after it, whose read names the entry.
         ManagementResult::View { view, .. } => {
             let name = management::entry_name(&view, &request.action);
-            print_report(
-                vec![management::applied_line(&request.action, name)],
-                Vec::new(),
-            );
+            let line = management::applied_line(&request.action, name);
+            print_report(vec![safe_line(&line)], Vec::new());
             Ok(0)
         }
         // A detail belongs to an inspect, which applies nothing.
         ManagementResult::Detail(_) => {
-            print_report(
-                vec![management::applied_line(&request.action, None)],
-                Vec::new(),
-            );
+            let line = management::applied_line(&request.action, None);
+            print_report(vec![safe_line(&line)], Vec::new());
             Ok(0)
         }
     }
@@ -345,7 +341,7 @@ async fn run_skills(
         // still stands.
         skills::Outcome::ReadFailed(error) => {
             let line = management::applied_line(&request.action, None);
-            print_report(vec![line], vec![error]);
+            print_report(vec![safe_line(&line)], vec![error]);
             return Ok(0);
         }
         skills::Outcome::Refused(error) => return Err(error.into()),

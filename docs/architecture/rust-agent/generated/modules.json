@@ -33595,7 +33595,8 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::sanitize",
       "references": [
-        "path crate::sanitize::safe"
+        "path crate::sanitize::safe",
+        "path crate::sanitize::safe_line"
       ]
     },
     {

@@ -972,6 +972,18 @@ fn reported_note(result: &ManagementResult) -> Option<&str> {
     }
 }
 
+/// The notice a management reply leaves: the line the action reports and,
+/// when the read after it failed, why. The owner writes both parts — a
+/// job's name, a run's state — so they are made safe, and kept to one line,
+/// at the one place that joins them.
+fn management_notice(line: &str, read_error: Option<&str>) -> String {
+    let line = crate::sanitize::safe_line(line);
+    match read_error {
+        Some(error) => format!("{line} {}", crate::sanitize::safe_line(error)),
+        None => line,
+    }
+}
+
 /// Where a line the user is drafting opens.
 /// A fork waiting for its `y`.
 struct ForkAsk {
@@ -1828,13 +1840,13 @@ impl App {
                                 },
                                 str::to_owned,
                             );
-                            let notice = match result {
+                            let read_error = match result {
                                 ManagementResult::Applied { read_error, .. } => {
-                                    format!("{note} {read_error}")
+                                    Some(read_error.as_str())
                                 }
-                                _ => note,
+                                _ => None,
                             };
-                            self.set_notice(notice);
+                            self.set_notice(management_notice(&note, read_error));
                         }
                         (_, None) => {}
                     }
@@ -1857,7 +1869,7 @@ impl App {
                             let line = note.clone().unwrap_or_else(|| {
                                 management::applied_line(&reply.request.action, None)
                             });
-                            self.set_notice(format!("{line} {read_error}"))
+                            self.set_notice(management_notice(&line, Some(read_error)))
                         }
                         ManagementResult::Refused(error) => self.set_notice(error.to_string()),
                         // A reload is not an inspect: the adapter answers it
@@ -1867,13 +1879,11 @@ impl App {
                 } else if let Some(note) = reported_note(&reply.result) {
                     // An action that opened no draft, such as a run, still
                     // reports what the owner answered.
-                    let notice = match &reply.result {
-                        ManagementResult::Applied { read_error, .. } => {
-                            format!("{note} {read_error}")
-                        }
-                        _ => note.to_owned(),
+                    let read_error = match &reply.result {
+                        ManagementResult::Applied { read_error, .. } => Some(read_error.as_str()),
+                        _ => None,
                     };
-                    self.set_notice(notice);
+                    self.set_notice(management_notice(note, read_error));
                 } else if let ManagementResult::Applied {
                     note: None,
                     read_error,
@@ -1883,7 +1893,7 @@ impl App {
                     // view: the entry's label is the one it held when it sent
                     // the action.
                     let line = management::applied_line(&reply.request.action, named.as_deref());
-                    self.set_notice(format!("{line} {read_error}"));
+                    self.set_notice(management_notice(&line, Some(read_error)));
                 }
             }
             Update::Login(account) => {
@@ -9065,6 +9075,38 @@ mod tests {
         }));
         let (text, _) = app.notice.clone().unwrap();
         assert_eq!(text, "Disabled commit. catalog unavailable");
+    }
+
+    /// A run whose owner answer carries an escape sequence and a newline
+    /// reaches the status row on one line, without the escape.
+    #[test]
+    fn a_closed_panel_run_keeps_the_owners_answer_on_one_line() {
+        use crate::model::session::{ManagementReply, ManagementView};
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/w".into(),
+        );
+        app.apply(Update::Management(ManagementReply {
+            request: ManagementRequest {
+                area: Area::Scheduled,
+                action: ManagementAction::Run { id: "job-1".into() },
+            },
+            result: ManagementResult::View {
+                view: Box::new(ManagementView::default()),
+                note: Some("Run daily\u{1b}[31m: skipped\n(overlap).".into()),
+            },
+        }));
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Run daily: skipped (overlap).");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\n') && !text.contains('\r'),
+            "{text:?}"
+        );
     }
 
     /// A create the owner refuses, or a conflict on one, keeps the draft
