@@ -24922,6 +24922,7 @@
       "references": [
         "mod hooks",
         "path hooks::Failure::Conflict",
+        "path hooks::Failure::ReadFailed",
         "path hooks::Failure::Refused",
         "path hooks::apply",
         "path hooks::view"
@@ -24932,6 +24933,9 @@
       "to": "dim_cli::management::skills",
       "references": [
         "mod skills",
+        "path skills::Outcome::Catalog",
+        "path skills::Outcome::ReadFailed",
+        "path skills::Outcome::Refused",
         "path skills::apply",
         "path skills::view"
       ]
@@ -24954,11 +24958,13 @@
         "path ManagementAction::Toggle",
         "path ManagementEntry",
         "path ManagementGroup",
-        "path ManagementRefusal",
         "path ManagementRefusal::Conflict",
         "path ManagementRefusal::Refused",
         "path ManagementRequest",
-        "path ManagementView",
+        "path ManagementResult",
+        "path ManagementResult::Applied",
+        "path ManagementResult::Refused",
+        "path ManagementResult::View",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::ManagementAction",
@@ -24966,7 +24972,7 @@
         "use crate::model::session::ManagementGroup",
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementRequest",
-        "use crate::model::session::ManagementView"
+        "use crate::model::session::ManagementResult"
       ]
     },
     {
@@ -25124,6 +25130,7 @@
       "to": "dim_cli::management::hooks",
       "references": [
         "path hooks::Catalog",
+        "path hooks::Failure::ReadFailed",
         "path hooks::apply",
         "path hooks::catalog",
         "use crate::management::hooks"
@@ -25134,6 +25141,9 @@
       "to": "dim_cli::management::skills",
       "references": [
         "path skills::Catalog",
+        "path skills::Outcome::Catalog",
+        "path skills::Outcome::ReadFailed",
+        "path skills::Outcome::Refused",
         "path skills::apply",
         "use crate::management::skills"
       ]
@@ -25155,13 +25165,18 @@
         "path Area::Hooks",
         "path Area::Skills",
         "path ManagementAction::List",
+        "path ManagementAction::Reload",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",
+        "path ManagementResult::Applied",
+        "path ManagementResult::Refused",
+        "path ManagementResult::View",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::ManagementAction",
-        "use crate::model::session::ManagementRequest"
+        "use crate::model::session::ManagementRequest",
+        "use crate::model::session::ManagementResult"
       ]
     },
     {
@@ -29186,6 +29201,9 @@
         "path ManagementRefusal::Refused",
         "path ManagementReply",
         "path ManagementRequest",
+        "path ManagementResult::Applied",
+        "path ManagementResult::Refused",
+        "path ManagementResult::View",
         "path ManagementView",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
@@ -29195,6 +29213,7 @@
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementReply",
         "use crate::model::session::ManagementRequest",
+        "use crate::model::session::ManagementResult",
         "use crate::model::session::ManagementView"
       ]
     },
@@ -29299,6 +29318,8 @@
         "path ManagementRefusal::Refused",
         "path ManagementReply",
         "path ManagementRequest",
+        "path ManagementResult::Refused",
+        "path ManagementResult::View",
         "path ManagementView",
         "path ManagementView::default",
         "use crate::model::session::ManagementGroup",
@@ -32764,6 +32785,9 @@
         "path ManagementAction::Save",
         "path ManagementRefusal::Conflict",
         "path ManagementRequest",
+        "path ManagementResult::Applied",
+        "path ManagementResult::Refused",
+        "path ManagementResult::View",
         "path SessionPort",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -32818,6 +32842,7 @@
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementRefusal",
         "use crate::model::session::ManagementRequest",
+        "use crate::model::session::ManagementResult",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update"
@@ -33592,9 +33617,12 @@
         "path Command::Submit",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Save",
-        "path ManagementRefusal",
         "path ManagementRefusal::Refused",
         "path ManagementRequest",
+        "path ManagementResult",
+        "path ManagementResult::Applied",
+        "path ManagementResult::Refused",
+        "path ManagementResult::View",
         "path SessionPort",
         "path SwitchKind::Forked",
         "path Update",

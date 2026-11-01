@@ -267,6 +267,15 @@ Writes follow [Execution settings](#execution-settings):
 - a refusal that does not involve a newer document — text that does not parse, or one the owner
   refuses — keeps the draft's revision, so the edit key reopens the user's text and writes it
   again;
+- what counts as a write is decided by the method behind the action: a toggle, a save, and a
+  Skills reload (`skills.refresh`), which the owner declares mutating; a Hooks reload is a read,
+  since it calls nothing before `hooks.catalog`;
+- a write the daemon accepted is reported as done: a failure of the read that follows is
+  reported after the action, as a read failure, never as a refusal or a conflict. The CLI prints
+  the action's line, then the read error on standard error, and exits 0; a toggle's line names
+  the id, since the read is what supplies the name, and a read on its own that fails is still a
+  failure. The panel shows the action's message and the read error, keeps no view until the next
+  read, and settles the draft as on success: its file is removed and its link dropped;
 - loading and writing disable mutation.
 
 ### The external editor

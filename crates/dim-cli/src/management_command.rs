@@ -17,7 +17,9 @@ use crate::args::Options;
 use crate::client::Client;
 use crate::management::{self, editor, hooks, skills};
 use crate::mcp_command::print_report;
-use crate::model::session::{ActionKind, Area, ManagementAction, ManagementRequest};
+use crate::model::session::{
+    ActionKind, Area, ManagementAction, ManagementRequest, ManagementResult,
+};
 use crate::sanitize::safe;
 
 /// Runs `request` and prints its area's report.
@@ -155,13 +157,16 @@ async fn write(
             document,
         },
     };
-    if let Err(error) = management::apply(client, &request, &options.cwd).await {
-        return Err(format!("{error} Your text is kept in {kept}.").into());
+    let saved = format!("Saved the {} document.", area.name());
+    match management::apply(client, &request, &options.cwd).await {
+        ManagementResult::View(_) => print_report(vec![saved], Vec::new()),
+        // The document was replaced; only the report after it failed, so the
+        // command did what it was asked and says why it cannot show the area.
+        ManagementResult::Applied { read_error } => print_report(vec![saved], vec![read_error]),
+        ManagementResult::Refused(error) => {
+            return Err(format!("{error} Your text is kept in {kept}.").into());
+        }
     }
-    print_report(
-        vec![format!("Saved the {} document.", area.name())],
-        Vec::new(),
-    );
     Ok(0)
 }
 
@@ -175,9 +180,26 @@ async fn run_skills(
     request: &ManagementRequest,
 ) -> Result<i32> {
     management::supported(client, request).map_err(failed)?;
-    let catalog = skills::apply(client, &request.action, &options.cwd)
-        .await
-        .map_err(failed)?;
+    let catalog = match skills::apply(client, &request.action, &options.cwd).await {
+        skills::Outcome::Catalog(catalog) => catalog,
+        // A toggle or a rescan was applied, so the command did what it was
+        // asked; only the report after it failed. The toggle's line names the
+        // id the user gave, since the read is what supplies the name.
+        skills::Outcome::ReadFailed(error) => {
+            let line = match &request.action {
+                ManagementAction::Toggle { id, enabled } => format!(
+                    "{} {}.",
+                    if *enabled { "Enabled" } else { "Disabled" },
+                    safe(id)
+                ),
+                ManagementAction::Reload => "Reloaded.".to_owned(),
+                _ => return Err(failed(error)),
+            };
+            print_report(vec![line], vec![error]);
+            return Ok(0);
+        }
+        skills::Outcome::Refused(error) => return Err(failed(error)),
+    };
     match &request.action {
         ManagementAction::Toggle { id, enabled } => {
             let name = catalog
@@ -206,29 +228,51 @@ async fn run_hooks(
     request: &ManagementRequest,
 ) -> Result<i32> {
     management::supported(client, request).map_err(failed)?;
-    let catalog = hooks::apply(client, &request.action, &options.cwd)
-        .await
-        .map_err(|error| error.to_string())?;
-    match &request.action {
-        ManagementAction::Toggle { enabled, .. } => {
-            let cwd = options.cwd.to_string_lossy();
-            let note = if *enabled {
-                "It runs this workspace's .dimcode/hooks.json, including later edits to it, in active and new sessions."
-            } else {
-                "The file is kept; it runs again after hooks enable."
+    let catalog = match hooks::apply(client, &request.action, &options.cwd).await {
+        Ok(catalog) => catalog,
+        // A toggle was applied; only the report after it failed. Its line
+        // names the workspace, not anything the missing read would carry.
+        Err(hooks::Failure::ReadFailed(error)) => {
+            let ManagementAction::Toggle { enabled, .. } = &request.action else {
+                return Err(failed(error));
             };
+            let cwd = options.cwd.to_string_lossy();
             print_report(
                 vec![format!(
                     "{} project hooks for {}.",
                     if *enabled { "Enabled" } else { "Disabled" },
                     safe(&cwd)
                 )],
-                vec![note.to_owned()],
+                vec![toggle_note(*enabled).to_owned(), error],
+            );
+            return Ok(0);
+        }
+        Err(error) => return Err(failed(error.to_string())),
+    };
+    match &request.action {
+        ManagementAction::Toggle { enabled, .. } => {
+            let cwd = options.cwd.to_string_lossy();
+            print_report(
+                vec![format!(
+                    "{} project hooks for {}.",
+                    if *enabled { "Enabled" } else { "Disabled" },
+                    safe(&cwd)
+                )],
+                vec![toggle_note(*enabled).to_owned()],
             );
         }
         _ => print_report(hook_rows(&catalog), hook_notes(&catalog)),
     }
     Ok(0)
+}
+
+/// What turning this workspace's project hooks on or off does to the file.
+fn toggle_note(enabled: bool) -> &'static str {
+    if enabled {
+        "It runs this workspace's .dimcode/hooks.json, including later edits to it, in active and new sessions."
+    } else {
+        "The file is kept; it runs again after hooks enable."
+    }
 }
 
 /// One Skill: its name, source, state, file and description.

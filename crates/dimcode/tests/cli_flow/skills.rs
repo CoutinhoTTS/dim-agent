@@ -122,6 +122,95 @@ fn skills_enable_from_a_daemon_without_sources_reports_the_entry() {
     );
 }
 
+/// A toggle the daemon accepted is done even when the read after it fails:
+/// the line names the id the user gave, since the read is what supplies the
+/// name, and the command exits 0.
+#[test]
+fn skills_enable_reports_the_toggle_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let expected = fs::canonicalize(&project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("skills.set_enabled");
+        assert_eq!(
+            request["params"],
+            json!({"cwd": expected, "id": "user:commit", "enabled": true})
+        );
+        wire.reply(&request, json!({"version": 5}));
+        let request = wire.read("skills.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"catalog unavailable",
+            "data":{"appError":"skills_unavailable"}}}));
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["skills", "enable", "user:commit"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Enabled user:commit.\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("catalog unavailable"), "{stderr}");
+}
+
+/// A reload the daemon accepted is done even when the read after it fails:
+/// the owner rescanned the roots, so the command says so and exits 0.
+#[test]
+fn skills_reload_reports_the_rescan_when_the_read_after_it_fails() {
+    let home = Home::new();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let expected = fs::canonicalize(&project)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        let request = wire.read("skills.refresh");
+        assert_eq!(request["params"]["cwd"], expected);
+        wire.reply(&request, json!({"version": 6, "issues": []}));
+        let request = wire.read("skills.catalog");
+        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+            "code":-32000,
+            "message":"catalog unavailable",
+            "data":{"appError":"skills_unavailable"}}}));
+    });
+    let output = home
+        .command()
+        .arg("--cwd")
+        .arg(&project)
+        .args(["skills", "reload"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "Reloaded.\n");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("catalog unavailable"), "{stderr}");
+}
+
 #[test]
 fn skills_list_prints_every_source_and_the_issues() {
     let home = Home::new();

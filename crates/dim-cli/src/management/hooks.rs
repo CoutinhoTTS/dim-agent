@@ -58,7 +58,7 @@ pub struct Hook {
     pub state: String,
 }
 
-/// Why a Hooks action did not happen.
+/// Why a Hooks action did not produce a catalog.
 pub enum Failure {
     /// The stored document changed since it was read: nothing was written,
     /// and this is the catalog as it now is.
@@ -66,6 +66,8 @@ pub enum Failure {
         message: String,
         catalog: Box<Catalog>,
     },
+    /// The action was applied and the read that follows failed.
+    ReadFailed(String),
     /// The daemon or the owner refused it: nothing was written.
     Refused(String),
 }
@@ -73,7 +75,9 @@ pub enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict { message, .. } | Self::Refused(message) => formatter.write_str(message),
+            Self::Conflict { message, .. } | Self::ReadFailed(message) | Self::Refused(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -91,6 +95,7 @@ pub async fn apply(
     cwd: &Path,
 ) -> Result<Catalog, Failure> {
     let cwd = cwd.to_string_lossy().into_owned();
+    let mut applied = false;
     match action {
         ManagementAction::List | ManagementAction::Reload => {}
         ManagementAction::Toggle { id, enabled } => {
@@ -111,6 +116,7 @@ pub async fn apply(
                 )
                 .await
                 .map_err(|error| refusal(&error))?;
+            applied = true;
         }
         ManagementAction::Save {
             expected_revision,
@@ -138,9 +144,16 @@ pub async fn apply(
                     catalog: Box::new(catalog),
                 });
             }
+            applied = true;
         }
     }
-    catalog(client, &cwd).await.map_err(Failure::Refused)
+    catalog(client, &cwd).await.map_err(|error| {
+        if applied {
+            Failure::ReadFailed(error)
+        } else {
+            Failure::Refused(error)
+        }
+    })
 }
 
 /// The catalog as its owner reports it.

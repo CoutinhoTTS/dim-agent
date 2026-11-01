@@ -45,35 +45,50 @@ pub struct Catalog {
     pub issues: Vec<Issue>,
 }
 
+/// What a Skills action came to.
+pub enum Outcome {
+    /// The area as its owner reports it after the action.
+    Catalog(Catalog),
+    /// The action was applied and the read that follows failed.
+    ReadFailed(String),
+    /// Nothing was applied, and this is why.
+    Refused(String),
+}
+
 /// Performs `action`, then reads the area back as its owner reports it.
-pub async fn apply(
-    client: &mut Client,
-    action: &ManagementAction,
-    cwd: &Path,
-) -> Result<Catalog, String> {
+///
+/// The action is applied once the method behind it returns: the owner
+/// declares every Skills method except `skills.catalog` mutating, so a
+/// `skills.refresh` that succeeded rescanned the roots even when the read
+/// after it fails.
+pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -> Outcome {
     let params = json!({"cwd": cwd.to_string_lossy()});
-    match action {
-        ManagementAction::List => {}
+    let applied = match action {
+        ManagementAction::List => false,
         ManagementAction::Reload => {
-            client
-                .rpc("skills.refresh", params.clone())
-                .await
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = client.rpc("skills.refresh", params.clone()).await {
+                return Outcome::Refused(error.to_string());
+            }
+            true
         }
         ManagementAction::Toggle { id, enabled } => {
             let mut params = params;
             params["id"] = json!(id);
             params["enabled"] = json!(enabled);
-            client
-                .rpc("skills.set_enabled", params)
-                .await
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = client.rpc("skills.set_enabled", params).await {
+                return Outcome::Refused(error.to_string());
+            }
+            true
         }
         ManagementAction::Save { .. } => {
-            return Err("A Skill has no document to edit.".into());
+            return Outcome::Refused("A Skill has no document to edit.".into());
         }
+    };
+    match catalog(client, &cwd.to_string_lossy()).await {
+        Ok(catalog) => Outcome::Catalog(catalog),
+        Err(error) if applied => Outcome::ReadFailed(error),
+        Err(error) => Outcome::Refused(error),
     }
-    catalog(client, &cwd.to_string_lossy()).await
 }
 
 /// The catalog as its owner reports it.

@@ -365,12 +365,23 @@ pub enum ActionKind {
     Edit,
 }
 
-/// What a management request came to: the area's view after it, or why the
-/// area could not be read or the action refused.
+/// A management request and what it came to.
 #[derive(Debug, Clone)]
 pub struct ManagementReply {
     pub request: ManagementRequest,
-    pub result: Result<ManagementView, ManagementRefusal>,
+    pub result: ManagementResult,
+}
+
+/// What a management request came to.
+#[derive(Debug, Clone)]
+pub enum ManagementResult {
+    /// The area as its owner reports it after the request.
+    View(ManagementView),
+    /// The action was applied and the read that reports the area failed: the
+    /// change was made, and this is why it is not shown.
+    Applied { read_error: String },
+    /// Nothing was applied, and this is why.
+    Refused(ManagementRefusal),
 }
 
 /// Why a management request did not produce a view.

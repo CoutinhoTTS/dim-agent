@@ -22,7 +22,7 @@
 
 use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementEntry, ManagementRefusal,
-    ManagementReply, ManagementRequest, ManagementView,
+    ManagementReply, ManagementRequest, ManagementResult, ManagementView,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
@@ -74,6 +74,9 @@ pub struct ManagementPanel {
     busy: bool,
     /// What the last request came to.
     message: Option<Result<String, String>>,
+    /// Why the read that follows an applied action failed: the action was
+    /// done, and the area is not reported.
+    read_error: Option<String>,
 }
 
 impl ManagementPanel {
@@ -91,6 +94,7 @@ impl ManagementPanel {
             view: None,
             busy: true,
             message: None,
+            read_error: None,
         }
     }
 
@@ -100,8 +104,9 @@ impl ManagementPanel {
             return;
         }
         self.busy = false;
+        self.read_error = None;
         match &reply.result {
-            Ok(view) => {
+            ManagementResult::View(view) => {
                 // The read that opens a panel says nothing; every later
                 // answer names what it did.
                 self.message = match (&reply.request.action, self.view.is_some()) {
@@ -111,7 +116,17 @@ impl ManagementPanel {
                 };
                 self.set_view(view.clone());
             }
-            Err(ManagementRefusal::Refused(error)) => {
+            ManagementResult::Applied { read_error } => {
+                // The action was done, so its own message stands; what failed
+                // is the read, and only that is reported after it. The area
+                // has no view until the next read, as after a failed one.
+                let shown = self.view.take().unwrap_or_default();
+                self.message = Some(Ok(outcome(&reply.request.action, &shown)));
+                self.read_error = Some(read_error.clone());
+                self.list.loading();
+                self.list.set_items(Err(read_error.clone()), None);
+            }
+            ManagementResult::Refused(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
                 if self.view.is_none() {
                     // Nothing was shown yet: the list says why instead of
@@ -119,7 +134,7 @@ impl ManagementPanel {
                     self.list.set_items(Err(error.clone()), None);
                 }
             }
-            Err(ManagementRefusal::Conflict { message, view }) => {
+            ManagementResult::Refused(ManagementRefusal::Conflict { message, view }) => {
                 // The owner wrote nothing; this is the document as it now is.
                 self.message = Some(Err(message.clone()));
                 self.set_view((**view).clone());
@@ -181,6 +196,7 @@ impl ManagementPanel {
     pub fn saving(&mut self) {
         self.busy = true;
         self.message = Some(Ok(t("Working...").to_owned()));
+        self.read_error = None;
     }
 
     /// The edit could not go on: say why, and let the keys through again.
@@ -308,6 +324,11 @@ impl ManagementPanel {
             };
             for row in wrap_words(text, inner) {
                 footer.push(fg(&row, color));
+            }
+        }
+        if let Some(error) = &self.read_error {
+            for row in wrap_words(error, inner) {
+                footer.push(fg(&row, &p.danger));
             }
         }
         if !footer.is_empty() {
@@ -509,7 +530,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Ok(view()),
+            result: ManagementResult::View(view()),
         });
         panel
     }
@@ -583,7 +604,7 @@ mod tests {
                     enabled: false,
                 },
             },
-            result: Ok(view()),
+            result: ManagementResult::View(view()),
         });
         assert!(
             shown(&panel, 72, 20)
@@ -608,7 +629,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::Reload,
             },
-            result: Ok(view()),
+            result: ManagementResult::View(view()),
         });
         assert!(shown(&panel, 72, 20).join("\n").contains("Reloaded."));
         // An entry that offers no toggle ignores Enter and says so by its
@@ -644,7 +665,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Ok(ManagementView::default()),
+            result: ManagementResult::View(ManagementView::default()),
         });
         assert!(shown(&panel, 40, 10).join("\n").contains("No entries."));
         let mut panel = ManagementPanel::new(Area::Skills);
@@ -653,7 +674,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Err(ManagementRefusal::Refused(
+            result: ManagementResult::Refused(ManagementRefusal::Refused(
                 "This daemon cannot manage skills.".into(),
             )),
         });
@@ -706,7 +727,7 @@ mod tests {
                 area: Area::Hooks,
                 action: ManagementAction::List,
             },
-            result: Ok(hooks_view()),
+            result: ManagementResult::View(hooks_view()),
         });
         let text = shown(&panel, 72, 20).join("\n");
         assert!(text.contains("read-only  invalid"), "{text}");
@@ -746,7 +767,7 @@ mod tests {
                 area: Area::Hooks,
                 action: ManagementAction::List,
             },
-            result: Ok(hooks_view()),
+            result: ManagementResult::View(hooks_view()),
         });
         panel.handle_key(key(KeyCode::End));
         let text = shown(&panel, 72, 20).join("\n");
@@ -774,7 +795,7 @@ mod tests {
                 area: Area::Hooks,
                 action: ManagementAction::List,
             },
-            result: Ok(view),
+            result: ManagementResult::View(view),
         });
         assert!(matches!(
             panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)),
@@ -797,7 +818,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Ok(ManagementView {
+            result: ManagementResult::View(ManagementView {
                 actions: vec![ActionKind::Reload],
                 ..ManagementView::default()
             }),
@@ -819,7 +840,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::List,
             },
-            result: Err(ManagementRefusal::Refused(
+            result: ManagementResult::Refused(ManagementRefusal::Refused(
                 "This daemon cannot manage skills.".into(),
             )),
         });
@@ -842,7 +863,7 @@ mod tests {
                 area: Area::Hooks,
                 action: ManagementAction::List,
             },
-            result: Ok(hooks_view()),
+            result: ManagementResult::View(hooks_view()),
         });
         panel.set_result(&ManagementReply {
             request: ManagementRequest {
@@ -852,7 +873,7 @@ mod tests {
                     document: serde_json::json!({"hooks": {}}),
                 },
             },
-            result: Err(ManagementRefusal::Conflict {
+            result: ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
                 view: Box::new(ManagementView {
                     revision: Some("user:2".into()),

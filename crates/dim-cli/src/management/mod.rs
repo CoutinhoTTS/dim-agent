@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::client::Client;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
-    ManagementRequest, ManagementView,
+    ManagementRequest, ManagementResult,
 };
 
 /// One area's management methods: the read that reports the area, and the
@@ -152,21 +152,31 @@ pub async fn apply(
     client: &mut Client,
     request: &ManagementRequest,
     cwd: &Path,
-) -> Result<ManagementView, ManagementRefusal> {
-    supported(client, request).map_err(ManagementRefusal::Refused)?;
+) -> ManagementResult {
+    if let Err(error) = supported(client, request) {
+        return ManagementResult::Refused(ManagementRefusal::Refused(error));
+    }
     let actions = actions(client, request.area);
     match request.area {
-        Area::Skills => {
-            let catalog = skills::apply(client, &request.action, cwd)
-                .await
-                .map_err(ManagementRefusal::Refused)?;
-            Ok(skills::view(&catalog, &actions))
-        }
+        Area::Skills => match skills::apply(client, &request.action, cwd).await {
+            skills::Outcome::Catalog(catalog) => {
+                ManagementResult::View(skills::view(&catalog, &actions))
+            }
+            skills::Outcome::ReadFailed(error) => ManagementResult::Applied { read_error: error },
+            skills::Outcome::Refused(message) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
+        },
         Area::Hooks => match hooks::apply(client, &request.action, cwd).await {
-            Ok(catalog) => Ok(hooks::view(&catalog, &actions)),
-            Err(hooks::Failure::Refused(message)) => Err(ManagementRefusal::Refused(message)),
+            Ok(catalog) => ManagementResult::View(hooks::view(&catalog, &actions)),
+            Err(hooks::Failure::ReadFailed(error)) => {
+                ManagementResult::Applied { read_error: error }
+            }
+            Err(hooks::Failure::Refused(message)) => {
+                ManagementResult::Refused(ManagementRefusal::Refused(message))
+            }
             Err(hooks::Failure::Conflict { message, catalog }) => {
-                Err(ManagementRefusal::Conflict {
+                ManagementResult::Refused(ManagementRefusal::Conflict {
                     message,
                     view: Box::new(hooks::view(&catalog, &actions)),
                 })

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::management::editor;
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, SessionPort, SwitchKind, Update,
+    ManagementRefusal, ManagementRequest, ManagementResult, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -1674,17 +1674,25 @@ impl App {
                 if let Some(Prompt::Management(panel)) = &mut self.prompt {
                     panel.set_result(&reply);
                     // The write took it: the file is no longer the user's
-                    // text. A refused write keeps it and says where it is;
+                    // text. That holds when only the read that reports the
+                    // area failed, since the change itself was made. A
+                    // refused write keeps the file and says where it is;
                     // after a conflict the area was read again, so the link
                     // to the stale revision goes and the next edit opens
                     // the current document.
                     if save {
                         match (&reply.result, self.management_edit.take()) {
-                            (Ok(_), Some(kept)) => kept.draft.remove(),
-                            (Err(ManagementRefusal::Conflict { .. }), Some(kept)) => {
+                            (
+                                ManagementResult::View(_) | ManagementResult::Applied { .. },
+                                Some(kept),
+                            ) => kept.draft.remove(),
+                            (
+                                ManagementResult::Refused(ManagementRefusal::Conflict { .. }),
+                                Some(kept),
+                            ) => {
                                 panel.kept(&kept.draft.path().display().to_string());
                             }
-                            (Err(_), Some(kept)) => {
+                            (ManagementResult::Refused(_), Some(kept)) => {
                                 panel.kept(&kept.draft.path().display().to_string());
                                 self.management_edit = Some(kept);
                             }
@@ -1696,29 +1704,43 @@ impl App {
                     // the reply still settles the draft and says what it
                     // came to.
                     match (&reply.result, self.management_edit.take()) {
-                        (Ok(_), Some(kept)) => {
+                        (ManagementResult::View(_), Some(kept)) => {
                             kept.draft.remove();
                             self.set_notice(t("Saved.").to_owned());
                         }
-                        (Err(error), Some(kept)) => {
+                        (ManagementResult::Applied { read_error }, Some(kept)) => {
+                            kept.draft.remove();
+                            self.set_notice(format!("{} {read_error}", t("Saved.")));
+                        }
+                        (ManagementResult::Refused(error), Some(kept)) => {
                             let kept = tf(
                                 "Your text is kept in {path}.",
                                 &[("path", &kept.draft.path().display().to_string())],
                             );
                             self.set_notice(format!("{error} {kept}"));
                         }
-                        (Err(error), None) => self.set_notice(error.to_string()),
-                        (Ok(_), None) => {}
+                        (ManagementResult::Refused(error), None) => {
+                            self.set_notice(error.to_string())
+                        }
+                        (ManagementResult::View(_) | ManagementResult::Applied { .. }, None) => {}
                     }
                 } else if reply.request.action == ManagementAction::Reload {
-                    if let Ok(view) = &reply.result {
-                        let text = crate::ui::management_panel::reloaded(reply.request.area, view);
-                        self.reports.push(Block::Status {
-                            text,
-                            tone: Tone::Muted,
-                        });
-                    } else if let Err(error) = &reply.result {
-                        self.set_notice(error.to_string());
+                    match &reply.result {
+                        ManagementResult::View(view) => {
+                            let text =
+                                crate::ui::management_panel::reloaded(reply.request.area, view);
+                            self.reports.push(Block::Status {
+                                text,
+                                tone: Tone::Muted,
+                            });
+                        }
+                        // The owner rescanned; only the read of the result
+                        // failed, so the rescan stands and the read is what
+                        // the notice reports after it.
+                        ManagementResult::Applied { read_error } => {
+                            self.set_notice(format!("{} {read_error}", t("Reloaded.")))
+                        }
+                        ManagementResult::Refused(error) => self.set_notice(error.to_string()),
                     }
                 }
             }
@@ -8359,7 +8381,7 @@ mod tests {
                 issues: Vec::new(),
             }
         }
-        fn save_reply(result: Result<ManagementView, ManagementRefusal>) -> Update {
+        fn save_reply(result: ManagementResult) -> Update {
             Update::Management(ManagementReply {
                 request: ManagementRequest {
                     area: Area::Hooks,
@@ -8395,16 +8417,29 @@ mod tests {
         };
         // Written: the file goes and the outcome is a notice.
         let path = draft(&mut app);
-        app.apply(save_reply(Ok(view())));
+        app.apply(save_reply(ManagementResult::View(view())));
         assert!(!path.exists(), "the written draft is removed");
         assert_eq!(
             app.notice.as_ref().map(|(text, _)| text.as_str()),
             Some("Saved.")
         );
         assert!(app.management_edit.is_none());
+        // Written, and only the read after it failed: the write still took
+        // the text, so the file goes too and the notice says what failed.
+        let path = draft(&mut app);
+        app.apply(save_reply(ManagementResult::Applied {
+            read_error: "catalog unavailable".into(),
+        }));
+        assert!(!path.exists(), "an applied write keeps no draft");
+        let (text, _) = app.notice.clone().unwrap();
+        assert_eq!(text, "Saved. catalog unavailable");
+        assert!(!text.contains("kept in"), "{text}");
+        assert!(app.management_edit.is_none());
         // Refused: the file stays and the notice names it.
         let path = draft(&mut app);
-        app.apply(save_reply(Err(ManagementRefusal::Refused("nope".into()))));
+        app.apply(save_reply(ManagementResult::Refused(
+            ManagementRefusal::Refused("nope".into()),
+        )));
         assert!(path.exists(), "the refused draft stays");
         let (text, _) = app.notice.clone().unwrap();
         assert!(text.contains("nope"), "{text}");
