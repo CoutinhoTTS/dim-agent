@@ -267,4 +267,68 @@ mod tests {
         restore_reasoning(&mut config, &declared, ModelProtocol::Anthropic);
         assert_eq!(config, ModelConfig::default());
     }
+
+    /// A clear reports the values the model declares, as a `--model-config`
+    /// model carrying an effort, a thinking declaration and a tier does.
+    #[test]
+    fn a_clear_restores_the_declared_values() {
+        let declared = ModelConfig {
+            reasoning: Some(ProviderReasoningConfig {
+                effort: Some("low".into()),
+                budget_tokens: Some(2048.),
+                ..Default::default()
+            }),
+            provider_options: Some(ProviderOptions {
+                openai_compatible: Some(OpenAiCompatibleProviderOptions {
+                    reasoning_effort: Some("low".into()),
+                    service_tier: Some("priority".into()),
+                    thinking: Some(CompatibleThinking {
+                        thinking_type: Some(ThinkingType::Disabled),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut config = ModelConfig {
+            reasoning: Some(ProviderReasoningConfig {
+                effort: Some("high".into()),
+                summary: Some(SummaryStyle::Auto),
+                ..Default::default()
+            }),
+            provider_options: Some(ProviderOptions {
+                openai_compatible: Some(OpenAiCompatibleProviderOptions {
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("default".into()),
+                    enable_thinking: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        restore_reasoning(&mut config, &declared, ModelProtocol::OpenaiCompatible);
+        restore_service_tier(&mut config, &declared, ModelProtocol::OpenaiCompatible);
+        let options = config
+            .provider_options
+            .as_ref()
+            .unwrap()
+            .openai_compatible
+            .as_ref()
+            .unwrap();
+        assert_eq!(options.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            options.thinking,
+            Some(CompatibleThinking {
+                thinking_type: Some(ThinkingType::Disabled)
+            })
+        );
+        assert_eq!(options.enable_thinking, None);
+        assert_eq!(options.service_tier.as_deref(), Some("priority"));
+        let reasoning = config.reasoning.as_ref().unwrap();
+        assert_eq!(reasoning.effort.as_deref(), Some("low"));
+        assert_eq!(reasoning.budget_tokens, Some(2048.));
+        assert_eq!(reasoning.summary, Some(SummaryStyle::Auto));
+    }
 }

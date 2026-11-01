@@ -2056,13 +2056,29 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
     assert_eq!(data["revision"], revision);
     assert_eq!(data["model_preferences"], tier_only);
 
+    // A set beside a clear in one request applies both.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":"low",
+                        "serviceTier":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        json!({"reasoningEffort":"low"})
+    );
+
     // Clearing the other field leaves no value, and the attach reply agrees.
     assert_ok(
         &client
             .rpc(
                 "session.model.update",
                 json!({"sessionId":session_id,"branchId":"main",
-                    "modelPreferences":{"serviceTier":{"action":"clear"}}}),
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
             )
             .await,
     );
