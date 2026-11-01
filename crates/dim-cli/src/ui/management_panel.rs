@@ -27,6 +27,7 @@ use std::cell::Cell;
 use crate::model::session::{
     ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
     ManagementRefusal, ManagementReply, ManagementRequest, ManagementResult, ManagementView,
+    RemoveVerb,
 };
 use crate::sanitize::safe;
 use crate::ui::i18n::{t, tf};
@@ -54,6 +55,7 @@ pub const STRINGS: &[&str] = &[
     "Ctrl+X remove",
     "Tab inspect",
     "Remove {name}? Enter confirm · Esc cancel",
+    "Reset {name}? Enter confirm · Esc cancel",
     "↑↓ scroll · Esc back",
     "Loading...",
     "No entries.",
@@ -64,6 +66,7 @@ pub const STRINGS: &[&str] = &[
     "enabled",
     "disabled",
     "invalid",
+    "unavailable",
     "read-only",
     "shadowed by {name}",
     "Working...",
@@ -71,6 +74,7 @@ pub const STRINGS: &[&str] = &[
     "Saved.",
     "Added.",
     "Removed {name}.",
+    "Reset {name} to its catalog entry.",
     "Ran {name}.",
     "No change.",
     "Your text is kept in {path}.",
@@ -218,6 +222,9 @@ impl ManagementPanel {
     }
 
     fn set_view(&mut self, view: ManagementView) {
+        if let Some(title) = &view.title {
+            self.list.set_title(safe(title));
+        }
         let items = items(&view);
         let selected = self.list.selected_id();
         self.list.set_items(Ok(items), selected.as_deref());
@@ -261,14 +268,15 @@ impl ManagementPanel {
 
     fn refresh_hint(&mut self) {
         if let Some(id) = &self.confirming {
-            let label = self
+            let (label, verb) = self
                 .entry(id)
-                .map(|entry| entry.label.clone())
-                .unwrap_or_else(|| id.clone());
-            self.list.set_hint(tf(
-                "Remove {name}? Enter confirm · Esc cancel",
-                &[("name", &label)],
-            ));
+                .map(|entry| (entry.label.clone(), entry.remove_verb))
+                .unwrap_or_else(|| (id.clone(), RemoveVerb::default()));
+            let prompt = match verb {
+                RemoveVerb::Remove => "Remove {name}? Enter confirm · Esc cancel",
+                RemoveVerb::Reset => "Reset {name}? Enter confirm · Esc cancel",
+            };
+            self.list.set_hint(tf(prompt, &[("name", &label)]));
             return;
         }
         if self.detail.is_some() {
@@ -687,6 +695,7 @@ fn states(entry: &ManagementEntry) -> Vec<String> {
         states.push(match state {
             EntryState::Invalid => t("invalid").to_owned(),
             EntryState::Shadowed { by } => tf("shadowed by {name}", &[("name", by)]),
+            EntryState::Unavailable => t("unavailable").to_owned(),
             EntryState::ReadOnly => t("read-only").to_owned(),
         });
     }
@@ -709,6 +718,16 @@ fn outcome(
             .map(|entry| entry.label.clone())
             .unwrap_or_else(|| id.to_owned())
     };
+    let removed_verb = |id: &str| {
+        previous
+            .into_iter()
+            .chain(std::iter::once(view))
+            .flat_map(|view| &view.groups)
+            .flat_map(|group| &group.entries)
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.remove_verb)
+            .unwrap_or_default()
+    };
     match action {
         ManagementAction::Toggle { id, enabled } => tf(
             if *enabled {
@@ -720,7 +739,10 @@ fn outcome(
         ),
         ManagementAction::Save { .. } => t("Saved.").to_owned(),
         ManagementAction::Add { .. } => t("Added.").to_owned(),
-        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", &name(id))]),
+        ManagementAction::Remove { id } => match removed_verb(id) {
+            RemoveVerb::Remove => tf("Removed {name}.", &[("name", &name(id))]),
+            RemoveVerb::Reset => tf("Reset {name} to its catalog entry.", &[("name", &name(id))]),
+        },
         ManagementAction::Run { id } => tf("Ran {name}.", &[("name", &name(id))]),
         ManagementAction::List | ManagementAction::Reload => t("Reloaded.").to_owned(),
         // An inspect answers with a detail, never with a view to name.
@@ -758,12 +780,14 @@ mod tests {
             enabled,
             states,
             actions,
+            remove_verb: RemoveVerb::Remove,
             document: None,
         }
     }
 
     fn view() -> ManagementView {
         ManagementView {
+            title: None,
             revision: None,
             document: None,
             create: None,
@@ -976,6 +1000,7 @@ mod tests {
     /// read-only, and an unreadable source says it is invalid.
     fn hooks_view() -> ManagementView {
         ManagementView {
+            title: None,
             revision: Some("user:1".into()),
             document: Some(serde_json::json!({"hooks": {}})),
             create: None,
@@ -990,6 +1015,7 @@ mod tests {
                         enabled: true,
                         states: Vec::new(),
                         actions: vec![ActionKind::Edit],
+                        remove_verb: RemoveVerb::Remove,
                         document: None,
                     },
                     ManagementEntry {
@@ -999,6 +1025,7 @@ mod tests {
                         enabled: true,
                         states: vec![EntryState::ReadOnly, EntryState::Invalid],
                         actions: vec![],
+                        remove_verb: RemoveVerb::Remove,
                         document: None,
                     },
                 ],
@@ -1139,6 +1166,7 @@ mod tests {
             ManagementResult::Refused(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
                 view: Box::new(ManagementView {
+                    title: None,
                     revision: Some("user:2".into()),
                     document: Some(serde_json::json!({"hooks": {}})),
                     actions: vec![ActionKind::Reload],
@@ -1180,6 +1208,7 @@ mod tests {
     /// An area whose entries offer every kind, as the Scheduler's jobs do.
     fn catalogue() -> ManagementView {
         ManagementView {
+            title: None,
             revision: None,
             document: None,
             create: Some(serde_json::json!({"name": "example"})),
@@ -1200,6 +1229,7 @@ mod tests {
                             ActionKind::Run,
                             ActionKind::Inspect,
                         ],
+                        remove_verb: RemoveVerb::Remove,
                         document: Some(EntryDocument {
                             revision: "3".into(),
                             document: serde_json::json!({"name": "nightly"}),
@@ -1212,6 +1242,7 @@ mod tests {
                         enabled: false,
                         states: vec![EntryState::Invalid],
                         actions: vec![ActionKind::Toggle],
+                        remove_verb: RemoveVerb::Remove,
                         document: Some(EntryDocument {
                             revision: "7".into(),
                             document: serde_json::json!({"name": "release"}),
@@ -1266,6 +1297,60 @@ mod tests {
             ),
             _ => panic!("expected a remove"),
         }
+    }
+
+    /// A remove asks with the verb its entry reports, and its outcome says
+    /// the same; either verb sends one remove request.
+    #[test]
+    fn a_remove_says_reset_when_the_entry_reports_reset() {
+        let mut view = catalogue();
+        view.groups[0].entries[0].remove_verb = RemoveVerb::Reset;
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            view.clone(),
+        ));
+        assert!(matches!(panel.handle_key(ctrl('x')), Effect::None));
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(
+            text.contains("Reset nightly? Enter confirm · Esc cancel"),
+            "{text}"
+        );
+        assert!(!text.contains("Remove nightly?"), "{text}");
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Remove { id: "job-1".into() }
+            ),
+            _ => panic!("expected a remove"),
+        }
+        let mut after = view;
+        after.groups[0].entries.retain(|entry| entry.id != "job-1");
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::Remove { id: "job-1".into() },
+            after,
+        ));
+        let text = shown(&panel, 120, 20).join(" ");
+        assert!(
+            text.contains("Reset nightly to its catalog entry."),
+            "{text}"
+        );
+        assert!(!text.contains("Removed nightly."), "{text}");
+    }
+
+    /// A row whose owner reports it unavailable says so beside its state.
+    #[test]
+    fn an_entry_whose_owner_reports_it_unavailable_says_so() {
+        let mut view = catalogue();
+        view.groups[0].entries[0]
+            .states
+            .push(EntryState::Unavailable);
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(text.contains("enabled  unavailable"), "{text}");
     }
 
     /// Tab and Ctrl+X are the panel's even while the filter holds text: the

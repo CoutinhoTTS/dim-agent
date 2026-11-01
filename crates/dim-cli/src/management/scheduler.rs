@@ -16,7 +16,7 @@ use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
     ActionKind, EntryDocument, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
-    ManagementView,
+    ManagementView, RemoveVerb,
 };
 use crate::ui::i18n::{t, tf};
 
@@ -384,6 +384,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &Path) -> M
                 enabled: job.enabled,
                 states,
                 actions: super::entry_kinds(available),
+                remove_verb: RemoveVerb::Remove,
                 document: Some(EntryDocument {
                     revision: job.revision.to_string(),
                     document: job.document(),
@@ -392,6 +393,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind], cwd: &Path) -> M
         );
     }
     ManagementView {
+        title: None,
         revision: None,
         document: None,
         create: Some(create(cwd)),

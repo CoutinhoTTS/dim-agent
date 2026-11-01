@@ -42,6 +42,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ rolar · Esc voltar",
         "Added." => "Adicionado.",
         "Removed {name}." => "{name} removido.",
+        "unavailable" => "indisponível",
+        "Reset {name}? Enter confirm · Esc cancel" => {
+            "Restaurar {name}? Enter confirmar · Esc cancelar"
+        }
+        "Reset {name} to its catalog entry." => "{name} restaurado para a entrada do catálogo.",
         "Ran {name}." => "{name} executado.",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "O documento do usuário mudou desde que foi lido; nada foi escrito. Sua próxima edição abre o documento atual."

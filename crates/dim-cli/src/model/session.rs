@@ -343,6 +343,9 @@ pub struct ManagementRequest {
 /// The client infers nothing here: every fact comes from the owner's reply.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ManagementView {
+    /// The title a scoped area's panel shows in place of the area's name;
+    /// `None` draws the area's name.
+    pub title: Option<String>,
     /// The revision the next write takes.
     pub revision: Option<String>,
     /// The area's document, when its owner reports one the client can edit.
@@ -380,9 +383,21 @@ pub struct ManagementEntry {
     /// What the row names besides on and off.
     pub states: Vec<EntryState>,
     pub actions: Vec<ActionKind>,
+    /// The verb the remove confirmation and outcome use.
+    pub remove_verb: RemoveVerb,
     /// The entry's own document, for an area whose documents are per entry
     /// and whose entries offer edit.
     pub document: Option<EntryDocument>,
+}
+
+/// What a remove does, for the confirmation and the outcome wording.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoveVerb {
+    /// Take the entry out of the area.
+    #[default]
+    Remove,
+    /// Return the entry to its owner's default.
+    Reset,
 }
 
 /// One entry's document and the revision a write of it takes.
@@ -400,6 +415,8 @@ pub enum EntryState {
     Invalid,
     /// Another entry of the same name takes precedence.
     Shadowed { by: String },
+    /// The owner cannot use it as it is; the entry's detail says why.
+    Unavailable,
     /// The owner does not let the client write the entry; the entry's detail
     /// says why.
     ReadOnly,

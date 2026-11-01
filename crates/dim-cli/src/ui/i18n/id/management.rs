@@ -40,6 +40,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ gulir · Esc kembali",
         "Added." => "Ditambahkan.",
         "Removed {name}." => "{name} dihapus.",
+        "unavailable" => "tidak tersedia",
+        "Reset {name}? Enter confirm · Esc cancel" => "Reset {name}? Enter konfirmasi · Esc batal",
+        "Reset {name} to its catalog entry." => "{name} direset ke entri katalog.",
         "Ran {name}." => "{name} dijalankan.",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka dokumen saat ini."

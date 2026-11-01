@@ -42,6 +42,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ スクロール · Esc で戻る",
         "Added." => "作成しました。",
         "Removed {name}." => "{name} を削除しました。",
+        "unavailable" => "利用不可",
+        "Reset {name}? Enter confirm · Esc cancel" => {
+            "{name} をリセットしますか？Enter で確定 · Esc でキャンセル"
+        }
+        "Reset {name} to its catalog entry." => "{name} をカタログ項目にリセットしました。",
         "Ran {name}." => "{name} を実行しました。",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"

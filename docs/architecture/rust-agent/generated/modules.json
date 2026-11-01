@@ -25453,11 +25453,13 @@
         "path ManagementAction::Toggle",
         "path ManagementEntry",
         "path ManagementView",
+        "path RemoveVerb::Remove",
         "use crate::model::session::ActionKind",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementEntry",
-        "use crate::model::session::ManagementView"
+        "use crate::model::session::ManagementView",
+        "use crate::model::session::RemoveVerb"
       ]
     },
     {
@@ -25515,13 +25517,15 @@
         "path ManagementDetail",
         "path ManagementEntry",
         "path ManagementView",
+        "path RemoveVerb::Remove",
         "use crate::model::session::ActionKind",
         "use crate::model::session::EntryDocument",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementDetail",
         "use crate::model::session::ManagementEntry",
-        "use crate::model::session::ManagementView"
+        "use crate::model::session::ManagementView",
+        "use crate::model::session::RemoveVerb"
       ]
     },
     {
@@ -25577,11 +25581,13 @@
         "path ManagementAction::Toggle",
         "path ManagementEntry",
         "path ManagementView",
+        "path RemoveVerb::Remove",
         "use crate::model::session::ActionKind",
         "use crate::model::session::EntryState",
         "use crate::model::session::ManagementAction",
         "use crate::model::session::ManagementEntry",
-        "use crate::model::session::ManagementView"
+        "use crate::model::session::ManagementView",
+        "use crate::model::session::RemoveVerb"
       ]
     },
     {
@@ -29783,6 +29789,7 @@
         "path EntryState::Invalid",
         "path EntryState::ReadOnly",
         "path EntryState::Shadowed",
+        "path EntryState::Unavailable",
         "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::Inspect",
@@ -29803,6 +29810,9 @@
         "path ManagementResult::Refused",
         "path ManagementResult::View",
         "path ManagementView",
+        "path RemoveVerb::Remove",
+        "path RemoveVerb::Reset",
+        "path RemoveVerb::default",
         "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::EntryState",
@@ -29813,7 +29823,8 @@
         "use crate::model::session::ManagementReply",
         "use crate::model::session::ManagementRequest",
         "use crate::model::session::ManagementResult",
-        "use crate::model::session::ManagementView"
+        "use crate::model::session::ManagementView",
+        "use crate::model::session::RemoveVerb"
       ]
     },
     {
@@ -29939,6 +29950,7 @@
         "path Area::Hooks",
         "path Area::Skills",
         "path EntryState",
+        "path EntryState::Unavailable",
         "path ManagementAction",
         "path ManagementAction::Inspect",
         "path ManagementAction::List",
@@ -29960,6 +29972,8 @@
         "path ManagementResult::View",
         "path ManagementView",
         "path ManagementView::default",
+        "path RemoveVerb::Remove",
+        "path RemoveVerb::Reset",
         "use crate::model::session::EntryDocument",
         "use crate::model::session::ManagementGroup",
         "use crate::model::session::ManagementReply",

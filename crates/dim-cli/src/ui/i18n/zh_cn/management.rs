@@ -36,6 +36,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ 滚动 · Esc 返回",
         "Added." => "已新建。",
         "Removed {name}." => "已删除 {name}。",
+        "unavailable" => "不可用",
+        "Reset {name}? Enter confirm · Esc cancel" => "重置 {name}？Enter 确认 · Esc 取消",
+        "Reset {name} to its catalog entry." => "已将 {name} 重置为目录条目。",
         "Ran {name}." => "已运行 {name}。",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "用户文档在读取后已被修改；本次没有写入。下次编辑会打开当前文档。"

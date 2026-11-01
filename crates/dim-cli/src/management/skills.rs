@@ -12,7 +12,7 @@ use serde_json::json;
 use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
-    ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView,
+    ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView, RemoveVerb,
 };
 use crate::ui::i18n::t;
 
@@ -140,11 +140,13 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
                 enabled: entry.enabled,
                 states,
                 actions: super::entry_kinds(actions),
+                remove_verb: RemoveVerb::Remove,
                 document: None,
             },
         );
     }
     ManagementView {
+        title: None,
         revision: None,
         document: None,
         create: None,

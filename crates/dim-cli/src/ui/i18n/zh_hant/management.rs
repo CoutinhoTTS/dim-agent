@@ -36,6 +36,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓ scroll · Esc back" => "↑↓ 捲動 · Esc 返回",
         "Added." => "已新增。",
         "Removed {name}." => "已刪除 {name}。",
+        "unavailable" => "無法使用",
+        "Reset {name}? Enter confirm · Esc cancel" => "重設 {name}？Enter 確認 · Esc 取消",
+        "Reset {name} to its catalog entry." => "已將 {name} 重設為目錄項目。",
         "Ran {name}." => "已執行 {name}。",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "使用者文件在讀取後已被修改；這次沒有寫入。下次編輯會開啟目前文件。"
