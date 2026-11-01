@@ -217,7 +217,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
                 id: source.source.clone(),
                 label: source.source.clone(),
                 detail: detail(source),
-                enabled: source.enabled,
+                enabled: Some(source.enabled),
                 states,
                 actions: offered
                     .iter()

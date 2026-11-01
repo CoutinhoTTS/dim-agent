@@ -375,8 +375,9 @@ pub struct ManagementEntry {
     /// What the entry says about itself, a line each, shown for the entry the
     /// panel has selected.
     pub detail: Vec<String>,
-    /// Whether the entry is on; a toggle asks for the other state.
-    pub enabled: bool,
+    /// Whether the entry is on; a toggle asks for the other state. `None`
+    /// for an entry that has no on/off state, such as a command rule.
+    pub enabled: Option<bool>,
     /// What the row names besides on and off.
     pub states: Vec<EntryState>,
     pub actions: Vec<ActionKind>,

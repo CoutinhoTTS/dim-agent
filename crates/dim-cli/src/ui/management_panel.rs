@@ -407,11 +407,15 @@ impl ManagementPanel {
         if !entry.actions.contains(&ActionKind::Toggle) {
             return Effect::None;
         }
+        // An entry that has no on/off state has nothing to toggle.
+        let Some(enabled) = entry.enabled else {
+            return Effect::None;
+        };
         let request = ManagementRequest {
             area: self.area,
             action: ManagementAction::Toggle {
                 id: entry.id.clone(),
-                enabled: !entry.enabled,
+                enabled: !enabled,
             },
         };
         self.busy = true;
@@ -600,7 +604,10 @@ pub fn reloaded(area: Area, view: &ManagementView) -> String {
         .iter()
         .flat_map(|group| &group.entries)
         .collect();
-    let disabled = entries.iter().filter(|entry| !entry.enabled).count();
+    let disabled = entries
+        .iter()
+        .filter(|entry| entry.enabled == Some(false))
+        .count();
     let mut lines = vec![tf(
         "Reloaded {area}: {entries} entries, {disabled} disabled.",
         &[
@@ -680,9 +687,15 @@ fn items(view: &ManagementView) -> Vec<Item> {
     items
 }
 
-/// An entry's states: on or off, then the ones its owner adds.
+/// An entry's states: on or off, when it has one, then the ones its owner
+/// adds.
 fn states(entry: &ManagementEntry) -> Vec<String> {
-    let mut states = vec![t(if entry.enabled { "enabled" } else { "disabled" }).to_owned()];
+    let mut states = Vec::new();
+    match entry.enabled {
+        Some(true) => states.push(t("enabled").to_owned()),
+        Some(false) => states.push(t("disabled").to_owned()),
+        None => {}
+    }
     for state in &entry.states {
         states.push(match state {
             EntryState::Invalid => t("invalid").to_owned(),
@@ -744,7 +757,7 @@ mod tests {
     fn entry(
         id: &str,
         label: &str,
-        enabled: bool,
+        enabled: Option<bool>,
         states: Vec<EntryState>,
         actions: Vec<ActionKind>,
     ) -> ManagementEntry {
@@ -775,20 +788,20 @@ mod tests {
                         entry(
                             "user:commit",
                             "commit",
-                            true,
+                            Some(true),
                             Vec::new(),
                             vec![ActionKind::Toggle],
                         ),
                         entry(
                             "user:review",
                             "review",
-                            false,
+                            Some(false),
                             vec![EntryState::Shadowed {
                                 by: "commit".into(),
                             }],
                             vec![ActionKind::Toggle],
                         ),
-                        entry("user:locked", "locked", true, Vec::new(), vec![]),
+                        entry("user:locked", "locked", Some(true), Vec::new(), vec![]),
                     ],
                 },
                 ManagementGroup {
@@ -796,7 +809,7 @@ mod tests {
                     entries: vec![entry(
                         "workspace:/w:deploy",
                         "deploy",
-                        true,
+                        Some(true),
                         Vec::new(),
                         vec![ActionKind::Toggle],
                     )],
@@ -945,6 +958,40 @@ mod tests {
         ));
     }
 
+    /// An entry that has no on/off state draws neither word, and a toggle it
+    /// offers has nothing to ask for.
+    #[test]
+    fn an_entry_without_an_on_off_state_draws_no_word() {
+        let mut view = view();
+        view.groups.push(ManagementGroup {
+            heading: "rules".into(),
+            entries: vec![entry(
+                "deny prefix git push",
+                "deny prefix git push",
+                None,
+                Vec::new(),
+                vec![ActionKind::Toggle, ActionKind::Remove],
+            )],
+        });
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view));
+        // The rule is the only entry of the last group.
+        panel.handle_key(key(KeyCode::End));
+        let text = shown(&panel, 72, 20).join("\n");
+        let row = text
+            .lines()
+            .find(|line| line.contains("deny prefix git push"))
+            .expect("the rule has a row");
+        assert!(
+            !row.contains("enabled") && !row.contains("disabled"),
+            "the row names no state: {row}"
+        );
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+    }
+
     /// A panel with nothing to show says so, and a failed read keeps the
     /// error rather than an empty list.
     #[test]
@@ -987,7 +1034,7 @@ mod tests {
                         id: "user".into(),
                         label: "user".into(),
                         detail: vec!["The user's own document; always in effect.".into()],
-                        enabled: true,
+                        enabled: Some(true),
                         states: Vec::new(),
                         actions: vec![ActionKind::Edit],
                         document: None,
@@ -996,7 +1043,7 @@ mod tests {
                         id: "plugin:kit".into(),
                         label: "plugin:kit".into(),
                         detail: vec!["Owned by plugin kit.".into()],
-                        enabled: true,
+                        enabled: Some(true),
                         states: vec![EntryState::ReadOnly, EntryState::Invalid],
                         actions: vec![],
                         document: None,
@@ -1191,7 +1238,7 @@ mod tests {
                         id: "job-1".into(),
                         label: "nightly".into(),
                         detail: vec!["every 60 minutes".into(), "no run yet".into()],
-                        enabled: true,
+                        enabled: Some(true),
                         states: Vec::new(),
                         actions: vec![
                             ActionKind::Toggle,
@@ -1209,7 +1256,7 @@ mod tests {
                         id: "job-2".into(),
                         label: "release".into(),
                         detail: vec!["at 2030-01-01T00:00:00Z".into()],
-                        enabled: false,
+                        enabled: Some(false),
                         states: vec![EntryState::Invalid],
                         actions: vec![ActionKind::Toggle],
                         document: Some(EntryDocument {
