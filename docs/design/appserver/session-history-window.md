@@ -279,21 +279,22 @@ CREATE INDEX IF NOT EXISTS timeline_history_anchors
 It is not a format step because it carries no data and no decode rule. Every
 supported format's rows produce the same index, it is fully derivable from
 `timeline_events`, and a store with or without it decodes to the same events.
-The gate in `SqliteStorage::open` ([sqlite.rs:349](../../../crates/dim-app-server/src/storage/sqlite.rs#L349))
+The gate in `SqliteStorage::open` ([sqlite.rs:244](../../../crates/dim-app-server/src/storage/sqlite.rs#L244))
 still compares the exact schema, except for this one name: `schema()` omits it,
-so a v28 store without the index is recognised, upgraded if needed, and gets the
-index in the same transaction; a store with the index is recognised the same
-way. Any other unexpected object still rejects the store.
+so a store of the current format without the index is recognised, upgraded if
+needed, and gets the index in the same transaction; a store with the index is
+recognised the same way. Any other unexpected object still rejects the store.
 
 Consequences:
 
-- The marker stays 28 and a newer daemon can open every older v28 store.
+- The marker stays 29: the index takes no format step, and a newer daemon can
+  open every older store of this format.
 - An older daemon that predates this change rejects a store that already has the
   index, because its gate does not know the name. Its message says the schema is
   unsupported; no row is changed, and the newer daemon opens the store again.
   The alternative, a format bump, has the same downgrade result for a different
-  reason (an unknown version), and the next free version is contested by the
-  command output and file access changes ([#691](https://github.com/arcships/dim/issues/691)).
+  reason (an unknown version) and would spend a version on a change that carries
+  no data and no decode rule.
 - The index holds one row per turn and one per user input, unlike the per-event
   indexes that dominate write amplification ([#588](https://github.com/arcships/dim/issues/588));
   it is a partial index on `kind`, like `timeline_tool_use_starts`
@@ -457,7 +458,7 @@ The implementation in this change carries these.
 7. **Compatibility.** A request without the new fields behaves as today, and a
    v3 client that does not read the new fields still folds pages.
    `hello.features` lists `session.history.latestTurn`.
-8. **Index at open.** A v28 store opened by the new daemon contains
+8. **Index at open.** A v29 store opened by the new daemon contains
    `timeline_history_anchors`; dropping the index and reopening recreates it;
    reopening does not change the marker; `open_read_only` accepts a store with
    and without it. No row changes and no version bump.
@@ -498,6 +499,6 @@ The implementation in this change carries these.
 | Document | Change |
 | --- | --- |
 | [Documentation index](../../INDEX.md) | Add this design |
-| [Native storage format](native-storage-format.md) | State that the derived index is created at open and is not part of the v28 schema gate |
+| [Native storage format](native-storage-format.md) | State that the derived index is created at open and is not part of the v29 schema gate |
 | [Clients](../clients.md) | None now; a client document that describes opening a thread can link this window instead of forward paging |
 | [sessions service](sessions-service.md), [session access](../contracts/session-access.md) | None (D8) |

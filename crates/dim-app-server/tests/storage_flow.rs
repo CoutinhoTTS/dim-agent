@@ -8,7 +8,7 @@ use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
     *,
 };
-use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
+use dim_app_server::storage::{NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
@@ -6179,7 +6179,7 @@ async fn the_history_window_index_is_created_at_open_without_a_format_step() {
         )
         .unwrap();
     assert!(indexed);
-    assert_eq!(marker(&connection), [28]);
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     connection
         .execute_batch("DROP INDEX timeline_history_anchors")
         .unwrap();
@@ -6197,11 +6197,11 @@ async fn the_history_window_index_is_created_at_open_without_a_format_step() {
         )
         .unwrap();
     assert!(indexed, "a later open recreates the index");
-    assert_eq!(marker(&connection), [28]);
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
     drop(connection);
 
     let (read, format) = SqliteStorage::open_read_only(database.0.clone()).unwrap();
-    assert_eq!(format, 28);
+    assert_eq!(format, STORE_FORMAT);
     read.close().await.unwrap();
 }
 
