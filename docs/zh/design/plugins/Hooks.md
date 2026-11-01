@@ -473,7 +473,7 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `hooks.catalog`（不修改状态） | `{cwd?}` | `userRevision`、`projectsRevision`；每个来源：`source`、`path`（插件来源为 `dir`）、`enabled`、`state`（`ok`、`missing`、带消息的 `invalid`）；每个处理器：`event`、`matcher`、`command`、`timeout`、`onFailure`、`async`、`state`（`ok`、`unsupported`、`invalid`）；`disableAllHooks` |
+| `hooks.catalog`（不修改状态） | `{cwd?}` | `userRevision`、`userDocument`（用户文档的存储形式，`hooks.save` 以该版本替换它）、`projectsRevision`；每个来源：`source`、`path`（插件来源为 `dir`）、`enabled`、`state`（`ok`、`missing`、带消息的 `invalid`）；每个处理器：`event`、`matcher`、`command`、`timeout`、`onFailure`、`async`、`state`（`ok`、`unsupported`、`invalid`）；`disableAllHooks` |
 | `hooks.save` | `{expectedRevision, document}` | `{revision}`；以 CAS 写 `hooks` 的用户作用域，由其 `BusinessDocument` 校验 |
 | `hooks.set_enabled` | `{cwd, enabled, expectedRevision}` | `{revision}`；为 Settings 给 `cwd` 授权的项目根以 CAS 写 `hooks-projects` |
 

@@ -282,6 +282,25 @@ async fn a_user_document_is_saved_with_revisions_and_reports_disable_all_hooks()
     assert_eq!(catalog["sources"][0]["state"], "ok");
     assert_eq!(catalog["hooks"].as_array().unwrap().len(), 2);
     assert_eq!(catalog["disableAllHooks"], false);
+    // The reply carries the document a client edits: reading it and writing
+    // it back is the client's whole edit path, with no second source.
+    assert_eq!(
+        catalog["userDocument"]["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "welcome"
+    );
+    let written = fixture
+        .call(
+            "hooks.save",
+            json!({
+                "expectedRevision": catalog["userRevision"],
+                "document": catalog["userDocument"],
+            }),
+        )
+        .await
+        .unwrap();
+    let revision = written["revision"].as_str().unwrap().to_owned();
+    let catalog = fixture.call("hooks.catalog", json!({})).await.unwrap();
+    assert_eq!(catalog["hooks"].as_array().unwrap().len(), 2);
 
     // A document that does not parse is refused without writing.
     let rejected = fixture
