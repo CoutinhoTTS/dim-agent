@@ -154,6 +154,15 @@ fn queue(
             .unwrap()
     }
 }
+/// How long a flow waits for the Session fact it asserts on, such as a close,
+/// before it fails instead of hanging.
+const SETTLED: Duration = Duration::from_secs(10);
+/// Waits for `fact` and fails the flow with `what` when it never holds.
+async fn settled<T>(what: &str, fact: impl Future<Output = T>) -> T {
+    tokio::time::timeout(SETTLED, fact)
+        .await
+        .unwrap_or_else(|_| panic!("the flow never observed that {what}"))
+}
 /// Appends `records` and holds the writer thread in their publish callback,
 /// after their round committed, until the returned sender drops, which a
 /// failing test's unwinding also does. The batches queued meanwhile all meet
@@ -2015,8 +2024,7 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_orphan() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        for reopen in [false, true] {
+    for reopen in [false, true] {
         let database = Database::new();
         let mut db = SqliteStorage::open(database.0.clone()).unwrap();
         let mut store = SqliteTimelineStore::new(db.clone());
@@ -2025,39 +2033,81 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(store.clone());
         let mut agent = MinimalHost::start(&builder).await.unwrap();
-        let bad = agent.create_session(SessionConfig::default()).await.unwrap();
-        let mut good = agent.create_session(SessionConfig::default()).await.unwrap();
+        let bad = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let mut good = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
         let bad_id = bad.id().to_owned();
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_output BEFORE INSERT ON timeline_events WHEN NEW.kind = 'step/text' AND NEW.session_id = (SELECT session_id FROM injected_session) BEGIN SELECT RAISE(ABORT, 'injected output commit failure'); END; CREATE TABLE injected_session(session_id TEXT)").unwrap();
-        connection.execute("INSERT INTO injected_session VALUES (?1)", [&bad_id]).unwrap();
+        connection
+            .execute("INSERT INTO injected_session VALUES (?1)", [&bad_id])
+            .unwrap();
         let (admitted_bad, admitted_good) = tokio::join!(
             bad.submit("failed output".into(), InputMode::Queue, "main"),
             good.submit("healthy output".into(), InputMode::Queue, "main"),
         );
         admitted_bad.unwrap();
         admitted_good.unwrap();
-        let error = bad.closed().await.unwrap_err();
+        let error = settled("the failed Session closes", bad.closed())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("injected output commit failure"));
-        good.idle("main").await.unwrap();
+        settled("the healthy branch idles", good.idle("main"))
+            .await
+            .unwrap();
         assert_eq!(store.writer_memo_requests(good.id()), 1);
         assert_eq!(store.writer_memo_requests(&bad_id), 0);
         assert!(agent.get_session(&bad_id).is_none());
         assert!(agent.get_session(good.id()).is_some());
         let bad_history = bad.history("main", None).await.unwrap();
-        assert!(bad_history.iter().any(|event| matches!(event.kind, EventKind::ModelCall(_))));
-        assert!(!bad_history.iter().any(|event| matches!(event.kind, EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))));
-        assert!(bad.submit("late".into(), InputMode::Queue, "main").await.unwrap_err().to_string().contains("injected output commit failure"));
+        assert!(
+            bad_history
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::ModelCall(_)))
+        );
+        assert!(!bad_history.iter().any(|event| matches!(
+            event.kind,
+            EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_)
+        )));
+        assert!(
+            bad.submit("late".into(), InputMode::Queue, "main")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("injected output commit failure")
+        );
         assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("healthy output"))));
-        connection.execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session").unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_output; DROP TABLE injected_session")
+            .unwrap();
         connection.execute_batch("CREATE TRIGGER fail_restore BEFORE INSERT ON timeline_events WHEN NEW.session_id = (SELECT session_id FROM restore_failure) BEGIN SELECT RAISE(ABORT, 'injected restore settlement failure'); END; CREATE TABLE restore_failure(session_id TEXT)").unwrap();
-        connection.execute("INSERT INTO restore_failure VALUES (?1)", [&bad_id]).unwrap();
+        connection
+            .execute("INSERT INTO restore_failure VALUES (?1)", [&bad_id])
+            .unwrap();
         let head = store.head(&key(&bad_id, "main")).await.unwrap();
-        let failed_restore = agent.restore_session(bad_id.clone()).await.err().expect("a failed settlement must reject restore");
-        assert!(failed_restore.to_string().contains("injected restore settlement failure"), "{failed_restore}");
+        let failed_restore = settled(
+            "a failed settlement rejects restore",
+            agent.restore_session(bad_id.clone()),
+        )
+        .await
+        .err()
+        .expect("a failed settlement must reject restore");
+        assert!(
+            failed_restore
+                .to_string()
+                .contains("injected restore settlement failure"),
+            "{failed_restore}"
+        );
         assert!(agent.get_session(&bad_id).is_none());
         assert_eq!(store.head(&key(&bad_id, "main")).await.unwrap(), head);
-        connection.execute_batch("DROP TRIGGER fail_restore; DROP TABLE restore_failure").unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_restore; DROP TABLE restore_failure")
+            .unwrap();
         drop(connection);
         if reopen {
             let good_id = good.id().to_owned();
@@ -2073,29 +2123,50 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
             agent = MinimalHost::start(&builder).await.unwrap();
             good = agent.restore_session(good_id).await.unwrap();
         }
-        let session = agent.restore_session(bad_id).await.unwrap();
-        assert!(bad.submit("old generation".into(), InputMode::Queue, "main").await.is_err());
-        good.submit("still healthy".into(), InputMode::Queue, "main").await.unwrap();
-        good.idle("main").await.unwrap();
+        let session = settled("the orphan restores", agent.restore_session(bad_id))
+            .await
+            .unwrap();
+        assert!(
+            bad.submit("old generation".into(), InputMode::Queue, "main")
+                .await
+                .is_err()
+        );
+        good.submit("still healthy".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        settled("the healthy branch idles after recovery", good.idle("main"))
+            .await
+            .unwrap();
         assert!(good.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("still healthy"))));
-        session.idle("main").await.unwrap();
+        settled(
+            "the restored branch settles the orphaned turn",
+            session.idle("main"),
+        )
+        .await
+        .unwrap();
         let history = session.history("main", None).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))));
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Failed { .. }))));
-        session.submit("after recovery".into(), InputMode::Queue, "main").await.unwrap();
-        session.idle("main").await.unwrap();
+        session
+            .submit("after recovery".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        settled("the restored branch ends its turn", session.idle("main"))
+            .await
+            .unwrap();
         assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
         assert_eq!(store.writer_memo_requests(session.id()), 1);
         assert!(session.unload_if_idle().await.unwrap());
-        session.closed().await.unwrap();
+        settled("the unloaded Session closes", session.closed())
+            .await
+            .unwrap();
         let id = session.id().to_owned();
         drop(session);
         assert_eq!(store.writer_memo_requests(&id), 0);
         agent.close().await.unwrap();
         store.close().await.unwrap();
         db.close().await.unwrap();
-        }
-    }).await.expect("Session failure and recovery completed");
+    }
 }
 
 #[tokio::test]
