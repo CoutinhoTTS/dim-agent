@@ -709,8 +709,8 @@ impl Env {
     }
 
     /// Writes a `context/configured` whose tool part declares `names`, from
-    /// the Session's own declarations, so the branch runs with a part of the
-    /// test's choosing before any adoption replaces it.
+    /// the Session's own declarations, so a test can change the branch's part
+    /// mid-flight as removing a tool source does.
     async fn declare_tools(&self, session: &Session, names: &[&str]) {
         let registry = self
             .probe
@@ -3555,62 +3555,125 @@ async fn matchers_keep_selecting_tools_with_an_adopted_tool_part() {
     env.close().await;
 }
 
-/// G.2: a branch that declared a tool part takes every alias from that part,
-/// so a call whose part no longer declares its tool has none even though the
-/// Session mounts and serves the tool.
+/// G.2: with an adopted tool part, `PreToolUse` selects an MCP tool by its
+/// alias.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_adopted_tool_part_does_not_fall_back_to_the_registry() {
+async fn an_adopted_tool_part_alias_selects_at_pre_tool_use() {
     let env = Env::with_tools(Extra::Served, &["read", "exec"]).await;
-    let (reached, fallback, declared) = (
-        env.path("point-reached"),
-        env.path("bash-fallback"),
-        env.path("bash-declared"),
-    );
+    let pre = env.path("pre-ran");
     env.sources.set(document(serde_json::json!({
-        "PostToolUse": [
-            {"hooks": [{"type": "command", "command": marking(&reached, "reached")}]},
-            {"matcher": "Bash", "hooks": [{"type": "command", "command": marking(&fallback, "bash")}]},
-        ],
+        "PreToolUse": [{
+            "matcher": "mcp__server__lookup_item",
+            "hooks": [{"type": "command", "command": marking(&pre, "pre")}],
+        }],
     })));
     let session = env.session().await;
-    // A call the request offers, held open until the branch's declaration no
-    // longer carries `exec`: its result folds under the later part.
-    let (started, release) = (env.path("exec-started"), env.path("exec-release"));
+    turn(&session, "tool:lookup {\"query\":\"x\"}").await;
+    assert!(
+        pre.exists(),
+        "the MCP alias did not select lookup at PreToolUse"
+    );
+    assert_eq!(last_result(&session).await.is_error, None);
+    env.close().await;
+}
+
+/// G.2: with an adopted tool part, `PermissionRequest` selects an MCP tool
+/// by its alias.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_tool_part_alias_selects_at_permission_request() {
+    let env = Env::with_tools(Extra::Served, &["read", "exec"]).await;
+    let permission = env.path("permission-ran");
+    env.sources.set(document(serde_json::json!({
+        "PermissionRequest": [{
+            "matcher": "mcp__server__lookup_item",
+            "hooks": [{"type": "command", "command": allowing(&permission)}],
+        }],
+    })));
+    let session = env.session_with(PermissionPreset::WorkspaceWrite).await;
     session
         .submit(
-            format!(
-                "tool:exec {{\"command\":\"printf started > {}; while [ ! -e {} ]; do sleep 0.02; done\"}}",
-                started.display(),
-                release.display()
-            ),
+            "tool:lookup {\"query\":\"x\"}".into(),
             InputMode::Queue,
             "main",
         )
         .await
         .unwrap();
-    wait_file(&started, "the exec call did not start").await;
-    env.declare_tools(&session, &["read"]).await;
-    std::fs::write(&release, "").unwrap();
-    // A point reads its document once, before it runs a handler, so its own
-    // marker shows that read happened and the swap below cannot reach it.
-    wait_file(&reached, "the first tool point did not run").await;
+    // The hook answers the approval; a group that the alias does not select
+    // leaves the call waiting for an answer that never comes.
+    wait_file(
+        &permission,
+        "the MCP alias did not select lookup at PermissionRequest",
+    )
+    .await;
     session.idle("main").await.unwrap();
-    // The same point selects `exec` once the part carries it. The branch
-    // drains the first result's batch before this turn's, so `fallback`
-    // already holds the first run when `declared` appears.
-    env.sources.set(document(serde_json::json!({
-        "PostToolUse": [{
-            "matcher": "Bash",
-            "hooks": [{"type": "command", "command": marking(&declared, "bash")}],
-        }],
-    })));
-    env.declare_tools(&session, &["read", "exec"]).await;
-    turn(&session, "tool:exec {\"command\":\"true\"}").await;
-    wait_file(&declared, "the Bash matcher did not select exec").await;
-    assert!(
-        !fallback.exists(),
-        "the resolver fell back to the registry for a tool the branch's part does not declare"
+    assert_eq!(last_result(&session).await.is_error, None);
+    env.close().await;
+}
+
+/// G.2: a batch's alias is the declaration in force where the batch folded,
+/// so a reconfiguration consumed while the queue drains does not change it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_batch_keeps_the_alias_of_the_declaration_it_folded_under() {
+    let env = Env::with_tools(Extra::Served, &["read", "exec"]).await;
+    let (holding, release, mcp) = (
+        env.path("holding"),
+        env.path("release"),
+        env.path("mcp-ran"),
     );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [
+            {"hooks": [{"type": "command", "command": format!(
+                "printf started > {}; while [ ! -e {} ]; do sleep 0.02; done",
+                holding.display(),
+                release.display(),
+            )}]},
+            {"matcher": "mcp__server__lookup_item", "hooks": [{"type": "command", "command": marking(&mcp, "mcp")}]},
+        ],
+    })));
+    let session = env.session().await;
+    let note = env.path("work/note.txt");
+    std::fs::write(&note, "note\n").unwrap();
+    session
+        .submit(
+            format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&holding, "the PostToolUse hook did not start").await;
+    session
+        .submit(
+            "tool:lookup {\"query\":\"x\"}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_event(&session, |kind| {
+        let EventKind::ToolResult(data) = kind else {
+            return None;
+        };
+        data.results
+            .iter()
+            .any(|result| {
+                matches!(&result.result.content, ToolContent::Text(text) if text == "looked up")
+            })
+            .then_some(())
+    })
+    .await;
+    // The configuration a source's removal leaves: the registered tools with
+    // no sources, which no longer declares `lookup`.
+    env.declare_tools(&session, &["read", "exec"]).await;
+    // Idle returns once the dispatcher has delivered the reconfiguration, so
+    // the branch has folded it before the queue moves.
+    session.idle("main").await.unwrap();
+    std::fs::write(&release, "").unwrap();
+    wait_file(
+        &mcp,
+        "the batch took the alias of a declaration folded after it",
+    )
+    .await;
     env.close().await;
 }
 

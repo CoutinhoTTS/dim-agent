@@ -216,7 +216,9 @@ reported by `hooks.catalog` rather than at the hook point.
 `a_pasted_matcher_does_not_select_the_other_tool`,
 `bash_selects_a_registered_tool_with_risk_execute_process`,
 `matchers_keep_selecting_tools_with_an_adopted_tool_part`,
-`an_adopted_tool_part_does_not_fall_back_to_the_registry`,
+`an_adopted_tool_part_alias_selects_at_pre_tool_use`,
+`an_adopted_tool_part_alias_selects_at_permission_request`,
+`a_tool_batch_keeps_the_alias_of_the_declaration_it_folded_under`,
 `the_first_deny_in_catalog_order_is_the_reason`,
 `an_interrupt_while_pre_tool_use_runs_cancels_the_call_and_ends_the_command`,
 `a_hooks_unload_drops_a_pending_pre_tool_use_advice`;

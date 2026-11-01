@@ -589,7 +589,7 @@ Dim does not read Claude or Codex files and has no import command. To migrate, c
 
 ### G.2 Tool names
 
-Matchers are tested against the Dim tool name and its alias, so pasted matchers keep selecting the same tools; `tool_name` on stdin is always the Dim name. The alias is a property of the tool's declaration, and `HooksBranch` resolves it the same way on every tool event: from the tool part the branch adopted, or, when it adopted none, from the Session's current host and registered tools, which each of its requests declares.
+Matchers are tested against the Dim tool name and its alias, so pasted matchers keep selecting the same tools; `tool_name` on stdin is always the Dim name. The alias is a property of the tool's declaration, and `HooksBranch` resolves it the same way on every tool event: when the branch has adopted a tool part, the aliases come from that part's declarations, and the registry is read only when it has adopted none.
 
 | Dim tool | Alias accepted by matchers |
 | --- | --- |
