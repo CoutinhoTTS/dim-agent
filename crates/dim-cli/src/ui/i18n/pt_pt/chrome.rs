@@ -488,6 +488,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "Permissão necessária: {tool}",
         "Question waiting for your answer" => "Pergunta à espera de resposta",
         "Notify when agent needs you" => "Notificar quando o agente precisar de si",
+        "Show ACP sessions" => "Mostrar sessões ACP",
         // keys.rs
         "show the key bindings" => "ver atalhos de teclado",
         "Application keys" => "Teclas da aplicação",

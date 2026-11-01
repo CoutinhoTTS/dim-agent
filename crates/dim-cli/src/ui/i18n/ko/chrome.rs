@@ -440,6 +440,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "권한 필요: {tool}",
         "Question waiting for your answer" => "답변 대기 중인 질문",
         "Notify when agent needs you" => "에이전트 요청 시 알림",
+        "Show ACP sessions" => "ACP 세션 표시",
         // keys.rs
         "show the key bindings" => "단축키 보기",
         "Application keys" => "앱 단축키",

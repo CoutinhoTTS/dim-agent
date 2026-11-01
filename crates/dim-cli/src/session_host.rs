@@ -1184,11 +1184,19 @@ impl Worker {
             Command::Resume(session_id) => {
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
-            Command::ListSessions { id, query, cursor } => {
+            Command::ListSessions {
+                id,
+                query,
+                cursor,
+                show_acp,
+            } => {
                 self.cancel_catalog().await?;
                 let paged = self.client.offers("session.catalog");
                 let (method, params) = if paged {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
+                    if show_acp && self.client.offers("session.catalog.origins") {
+                        params["withAcpSessions"] = json!(true);
+                    }
                     if let Some(cursor) = cursor {
                         params["cursor"] = cursor.into();
                     }
@@ -3326,6 +3334,7 @@ impl Worker {
                             cwd: session.cwd,
                             updated_at: session.updated_at,
                             model: session.model.model_id,
+                            origin: session.origin,
                         })
                         .collect(),
                     next_cursor,
@@ -3947,6 +3956,9 @@ struct SessionSummary {
     #[serde(default)]
     preview: Option<String>,
     title: Option<String>,
+    /// The creation origin, from a daemon that reports one (#557).
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {

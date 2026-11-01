@@ -53,6 +53,12 @@ It does not own:
 | `internal` | Dim created it for its own work: a Collaboration member, whose leader is its parent, or a Session a process plugin launched through `sessions.launch` |
 | `unknown` | The store does not record it: the Session predates the field, or an import did not map the source's provenance |
 
+`internal` is the class [#557](https://github.com/arcships/dim/issues/557) calls *child Sessions*. The value is not named
+`child` because a child needs a parent and internal work need not have one: a Collaboration member has a leader and
+reports `parentSessionId`, while a Session a process plugin launched is internal work with no parent. The two facts are
+separate fields, so a client that wants the issue's child reads `origin: "internal"` together with a present
+`parentSessionId`; a client that hides child Sessions sends neither the internal class nor the ACP class.
+
 The origin is recorded once, in the creation transaction, and is fixed for the Session's life. It is not derived from
 the connection's `clientKind` (a connection is not durable), from `interactive` (a runtime property a client may set),
 from `collaboration_role` (runtime semantics; the paragraph below), from the Session id or from message text. A
