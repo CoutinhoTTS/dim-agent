@@ -1368,6 +1368,15 @@ fn tui_hooks_panel_settles_a_save_whose_read_fails() {
         assert!(terminal.wait().success());
         daemon.join().unwrap();
         assert!(drafts(&home).is_empty(), "the written draft is removed");
+        assert_eq!(
+            terminal
+                .transcript
+                .matches("hooks catalog unavailable")
+                .count(),
+            1,
+            "the read error is drawn once: {}",
+            terminal.transcript
+        );
     }
 }
 

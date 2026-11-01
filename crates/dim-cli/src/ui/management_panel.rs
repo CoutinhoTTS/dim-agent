@@ -119,13 +119,12 @@ impl ManagementPanel {
             }
             ManagementResult::Applied { read_error } => {
                 // The action was done, so its own message stands; what failed
-                // is the read, and only that is reported after it. The area
-                // has no view until the next read, as after a failed one.
+                // is the read, which the footer reports once, wrapped. The
+                // area has no view until the next read.
                 let shown = self.view.take().unwrap_or_default();
                 self.message = Some(Ok(outcome(&reply.request.action, &shown)));
                 self.read_error = Some(read_error.clone());
                 self.list.loading();
-                self.list.set_items(Err(read_error.clone()), None);
             }
             ManagementResult::Refused(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
