@@ -6,6 +6,8 @@ fn hello(wire: &mut Wire) {
     wire.hello(&["hooks.catalog", "hooks.set_enabled", "hooks.save"]);
 }
 
+/// The catalog a daemon serves before it reports the user document: the
+/// reply of a daemon that has the methods but none of the newer facts.
 fn catalog() -> Value {
     json!({
         "userRevision": "user:1",
@@ -442,6 +444,16 @@ fn drafts(home: &Home) -> Vec<PathBuf> {
 fn drains(wire: &mut Wire) {
     let mut line = String::new();
     while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        line.clear();
+    }
+}
+
+/// Reads requests until the client leaves, and fails on a write: a flow that
+/// refuses before writing sends none.
+fn drains_without_saving(wire: &mut Wire) {
+    let mut line = String::new();
+    while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        assert!(!line.contains("\"hooks.save\""), "unexpected write: {line}");
         line.clear();
     }
 }
@@ -918,6 +930,126 @@ fn tui_hooks_panel_edits_the_user_document() {
         assert!(terminal.wait().success());
         daemon.join().unwrap();
     }
+}
+
+/// A daemon that reports no user document offers no edit: the user source
+/// has no Ctrl+E, and the key does nothing, in both terminal modes.
+#[test]
+fn tui_hooks_panel_offers_no_edit_without_a_user_document() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            hello(wire);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("hooks.catalog");
+            wire.reply(&request, catalog());
+            drains_without_saving(wire);
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        terminal.write(b"/hooks\r");
+        terminal.until("The user's own document; always in effect.");
+        let opened = terminal.transcript.clone();
+        assert!(opened.contains("Ctrl+R"), "{opened}");
+        assert!(!opened.contains("Ctrl+E"), "no edit is offered: {opened}");
+        terminal.raw(b"\x05");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// `hooks edit` refuses a daemon that reports no user document before the
+/// editor opens: no draft is made and nothing is written.
+#[test]
+fn hooks_edit_refuses_a_daemon_without_a_user_document() {
+    let home = Home::new();
+    let script = editor(
+        &home,
+        "editor.sh",
+        "printf '%s' '{\"hooks\":{\"Stop\":[]}}' > \"$1\"",
+    );
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, catalog());
+        drains_without_saving(wire);
+    });
+    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, &["hooks", "edit"]));
+    let status = terminal.wait();
+    daemon.join().unwrap();
+    assert_eq!(status.code(), Some(1), "{}", terminal.transcript);
+    assert!(
+        terminal
+            .transcript
+            .contains("The daemon reports no hook document to edit."),
+        "{}",
+        terminal.transcript
+    );
+    assert!(drafts(&home).is_empty(), "the editor never opened");
+}
+
+/// `hooks set -` refuses a daemon that reports no user document: nothing is
+/// written and the text it read leaves no draft behind.
+#[test]
+fn hooks_set_refuses_a_daemon_without_a_user_document() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        let request = wire.read("hooks.catalog");
+        wire.reply(&request, catalog());
+        drains_without_saving(wire);
+    });
+    let mut child = home
+        .command()
+        .args(["hooks", "set", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json!({"hooks": {"Stop": []}}).to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("The daemon reports no hook document to edit."),
+        "{stderr}"
+    );
+    assert!(drafts(&home).is_empty(), "no draft for a refused write");
 }
 
 /// An editor that answers differently once the draft already holds its own

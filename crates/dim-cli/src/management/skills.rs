@@ -12,7 +12,7 @@ use serde_json::json;
 use super::Groups;
 use crate::client::Client;
 use crate::model::session::{
-    ActionKind, EntryState, ManagementAction, ManagementEntry, ManagementView,
+    ActionKind, Area, EntryState, ManagementAction, ManagementEntry, ManagementView,
 };
 
 /// One entry of `skills.catalog`.
@@ -20,8 +20,9 @@ use crate::model::session::{
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub id: String,
-    /// `user`, `project` or `plugin:<plugin id>`.
-    pub source: String,
+    /// `user`, `project` or `plugin:<plugin id>`. A daemon older than this
+    /// fact reports none, and the client never derives one.
+    pub source: Option<String>,
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -84,7 +85,8 @@ pub async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> 
 }
 
 /// One source's entries under its heading, in the order the owner reports
-/// them; `actions` are the kinds the daemon advertises for this area.
+/// them; `actions` are the kinds the daemon advertises for this area. An
+/// entry whose owner reports no source goes under the area's own heading.
 pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView {
     let mut groups = Groups::default();
     for entry in &catalog.entries {
@@ -93,7 +95,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
             states.push(EntryState::Shadowed { by: by.clone() });
         }
         groups.push(
-            &entry.source,
+            entry.source.as_deref().unwrap_or(Area::Skills.name()),
             ManagementEntry {
                 id: entry.id.clone(),
                 label: entry.name.clone(),

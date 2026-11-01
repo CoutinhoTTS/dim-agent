@@ -1083,8 +1083,9 @@ than one per feature ([management surfaces](../../docs/design/cli-commands.md#ma
   connection, turns its owner's reply into one view at that boundary, performs the area's
   actions, and refuses an area whose methods the daemon does not advertise;
 - the panel (`crates/dim-cli/src/ui/management_panel.rs`) draws every area on the shared list
-  panel, grouped by the source heading the owner reports; the selected entry's detail, its
-  states and the last outcome are drawn below the list;
+  panel, grouped by the source heading the owner reports, and an entry whose owner reports no
+  source goes under the area's own heading; the selected entry's detail, its states and the last
+  outcome are drawn below the list;
 - both surfaces reach the worker through one request and one reply on the session port,
   `Command::Management(ManagementRequest)` and `Update::Management(ManagementReply)`;
 - `dimcode <area> <verb>` calls the same adapter over its own connection, so a subcommand needs

@@ -244,7 +244,7 @@ fn rows(catalog: &skills::Catalog) -> Vec<String> {
             format!(
                 "{}\t{}\t{}\t{}\t{}",
                 safe(&entry.name),
-                safe(&entry.source),
+                safe(entry.source.as_deref().unwrap_or("-")),
                 state,
                 safe(&entry.file_path),
                 safe(&entry.description),

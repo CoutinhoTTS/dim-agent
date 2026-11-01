@@ -200,6 +200,11 @@ The client infers nothing the methods do not report. A view that needs a fact th
 carry gets that fact from the producer: `skills.catalog` reports each entry's `source`, and
 `hooks.catalog` reports the user document with its revision.
 
+A daemon older than one of those facts gets the area without it: Skills that report no `source`
+are listed under the area's own heading, `skills`, and Hooks that report no `userDocument` offer
+no edit. The client never derives such a fact from an id, a path or anything else, so it needs no
+feature to recognise the newer contract.
+
 ### The view
 
 Entries are grouped under source headings — user, project, `plugin:<id>`, built-in — as the
