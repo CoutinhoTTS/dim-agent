@@ -1,11 +1,15 @@
 //! `/goal` at the line-mode prompt: shows the goal in force on `main`, and
 //! writes it through the methods Goal registers (cli-commands.md).
-use crate::{Result, client::Client, display::Display, goal, session::read_history};
+use crate::{
+    Result,
+    client::Client,
+    display::Display,
+    goal,
+    session::{Interrupts, read_history, settle},
+};
 
-#[cfg(unix)]
-type Interrupts = tokio::signal::unix::Signal;
-#[cfg(windows)]
-type Interrupts = tokio::signal::windows::CtrlC;
+/// What the prompt says when Ctrl+C arrives while a form is in flight.
+const NOTICE: &str = "Waiting for the goal command before accepting more input.";
 
 /// Runs one `/goal`; `text` is the whole command line.
 pub async fn command(
@@ -43,7 +47,7 @@ pub async fn command(
         }
         Ok(Reply::Done(call))
     };
-    match settle(interrupts, operation).await? {
+    match settle(interrupts, NOTICE, operation).await? {
         Reply::Unavailable => display.record(goal::NOT_AVAILABLE)?,
         Reply::Done(call) => {
             for line in goal::report("main", call, display.goal.goal().as_ref()) {
@@ -67,22 +71,4 @@ async fn catch_up(client: &mut Client, session_id: &str, display: &mut Display) 
         display.event(serde_json::from_value(value)?, true)
     })
     .await
-}
-
-/// Waits for an operation; interrupts are reported and consumed until it
-/// settles.
-async fn settle<T>(
-    interrupts: &mut Interrupts,
-    operation: impl std::future::Future<Output = T>,
-) -> T {
-    tokio::pin!(operation);
-    loop {
-        tokio::select! {
-            biased;
-            _ = interrupts.recv() => {
-                println!("\nWaiting for the goal command before accepting more input.");
-            }
-            result = &mut operation => break result,
-        }
-    }
 }

@@ -3001,9 +3001,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/goal_command.rs",
       "unexpandedMacros": [
-        "serde_json::json",
-        "tokio::pin",
-        "tokio::select"
+        "serde_json::json"
       ]
     },
     {
@@ -3193,7 +3191,6 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "tokio::pin",
         "tokio::select"
       ]
     },
@@ -24915,8 +24912,12 @@
       "from": "dim_cli::goal_command",
       "to": "dim_cli::session",
       "references": [
+        "path Interrupts",
         "path read_history",
-        "use crate::session::read_history"
+        "path settle",
+        "use crate::session::Interrupts",
+        "use crate::session::read_history",
+        "use crate::session::settle"
       ]
     },
     {
@@ -25682,6 +25683,16 @@
         "use crate::permission::Rules",
         "use crate::permission::State",
         "use crate::permission::Switch"
+      ]
+    },
+    {
+      "from": "dim_cli::permission_command",
+      "to": "dim_cli::session",
+      "references": [
+        "path Interrupts",
+        "path settle",
+        "use crate::session::Interrupts",
+        "use crate::session::settle"
       ]
     },
     {

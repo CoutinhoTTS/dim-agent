@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    future::pending,
+    future::{Future, pending},
     io::Write,
 };
 
@@ -183,6 +183,30 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value, method: &str) -> Result<
     serde_json::from_value(value).map_err(|_| format!("Invalid {method} notification").into())
 }
 
+/// Ctrl+C at the line-mode prompt.
+#[cfg(unix)]
+pub(crate) type Interrupts = tokio::signal::unix::Signal;
+#[cfg(windows)]
+pub(crate) type Interrupts = tokio::signal::windows::CtrlC;
+
+/// Waits for a line command's operation; interrupts are reported and
+/// consumed until it settles, so the prompt returns only after the daemon
+/// answered.
+pub(crate) async fn settle<T>(
+    interrupts: &mut Interrupts,
+    notice: &str,
+    operation: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            _ = interrupts.recv() => println!("\n{notice}"),
+            result = &mut operation => break result,
+        }
+    }
+}
+
 pub async fn chat(
     client: &mut Client,
     options: &Options,
@@ -343,19 +367,12 @@ pub async fn chat(
                 }
                 Some("/effort" | "/reasoning" | "/fast" | "/agent") => {
                     let text = text.as_deref().expect("plain configuration command");
-                    let result = {
-                        let operation = configure(client, &session_id, text, &mut display);
-                        tokio::pin!(operation);
-                        loop {
-                            tokio::select! {
-                                biased;
-                                _ = interrupts.recv() => {
-                                    println!("\nWaiting for configuration result before accepting more input.");
-                                }
-                                result = &mut operation => break result,
-                            }
-                        }
-                    };
+                    let result = settle(
+                        &mut interrupts,
+                        "Waiting for configuration result before accepting more input.",
+                        configure(client, &session_id, text, &mut display),
+                    )
+                    .await;
                     if let Err(error) = result {
                         display.record(&format!("Error: {error}"))?;
                     }
@@ -398,16 +415,12 @@ pub async fn chat(
                         let path = path.trim_start();
                         export::write(client, &session_id, format.parse()?, Some(std::path::Path::new(path))).await
                     };
-                    tokio::pin!(operation);
-                    let result = loop {
-                        tokio::select! {
-                            biased;
-                            _ = interrupts.recv() => {
-                                println!("\nWaiting for export result before accepting more input.");
-                            }
-                            result = &mut operation => break result,
-                        }
-                    };
+                    let result = settle(
+                        &mut interrupts,
+                        "Waiting for export result before accepting more input.",
+                        operation,
+                    )
+                    .await;
                     if let Err(error) = result {
                         display.record(&format!("Error: {error}"))?;
                     }
