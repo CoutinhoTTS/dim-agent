@@ -144,7 +144,10 @@ revision 冲突；后端原因；保存后 `exec` 在新边界下运行——Net
 把该工作区记录在用户本地的 `hooks-projects` 中，所以项目文件不能启用自己
 （[Hooks](plugins/Hooks.md#a7-管理方法)）。
 
-全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。现有的
+全局的 home、工作区、server 和模型配置选项保持现有含义，放在命令前后都可以。`--server PATH`
+指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
+`app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
+退出，或未及时开始服务时，也按同一要求报错。现有的
 login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
 `--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
 `--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。

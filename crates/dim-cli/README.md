@@ -223,7 +223,7 @@ cargo build --locked -p dimcode
 target/debug/dimcode --help
 ```
 
-Help and version commands do not start a daemon or read credentials. This crate is a library; the `dimcode` crate builds the single executable, which runs the CLI and, as `dimcode app-server`, the App Server. The CLI starts its daemon by running its own executable with `app-server`, through a `dimcode-server` link to it in `<home>/rust` so that process lists (`ps`, `pgrep dimcode-server`, Activity Monitor) tell the daemon from the clients that share the executable; `--server PATH` selects an explicit App Server binary instead and runs it by its own name.
+Help and version commands do not start a daemon or read credentials. This crate is a library; the `dimcode` crate builds the single executable, which runs the CLI and, as `dimcode app-server`, the App Server. The CLI starts its daemon by running its own executable with `app-server`, through a `dimcode-server` link to it in `<home>/rust` so that process lists (`ps`, `pgrep dimcode-server`, Activity Monitor) tell the daemon from the clients that share the executable; `--server PATH` names a standalone `dim-app-server` binary, which the CLI runs by its own name, while the default instead runs this executable's `app-server` subcommand. Naming this executable is an error: it serves the App Server only behind that subcommand; a path that does not exist, a program that exits before serving, or one that does not start serving in time is reported with the same requirement.
 
 ## API-key configuration
 

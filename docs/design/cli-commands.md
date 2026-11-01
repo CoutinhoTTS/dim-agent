@@ -172,12 +172,18 @@ there. `dimcode hooks enable|disable` records the workspace in the user-local `h
 project file cannot enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
 
 Global home, workspace, server and model-profile options retain their current
-meanings and work before or after the command. Existing login/account/logout,
-models, MCP and daemon commands remain available. Existing `--prompt`, piped
-stdin and `--resume` calls retain their behavior; `exec resume` also accepts the
-same existing global options. Supplying the Session twice or the prompt twice
-is an argument error. `--json` serves `exec` and `migration`, and `tui` requires a terminal.
-Help/version and argument errors do not start the daemon.
+meanings and work before or after the command. `--server PATH` names a
+standalone `dim-app-server` binary, which the CLI runs by its own name; the
+default instead runs this executable's `app-server` subcommand, so naming this
+executable is an error. A path that does not exist, a program that exits
+before serving, or one that does not start serving in time is reported with the
+same requirement. Existing
+login/account/logout, models, MCP and daemon commands remain available. Existing
+`--prompt`, piped stdin and `--resume` calls retain their behavior; `exec resume`
+also accepts the same existing global options. Supplying the Session twice or
+the prompt twice is an argument error. `--json` serves `exec` and `migration`,
+and `tui` requires a terminal. Help/version and argument errors do not start
+the daemon.
 
 The interactive export parser reads the format token and treats the remainder
 of the line as a literal path, including spaces, without shell evaluation or
