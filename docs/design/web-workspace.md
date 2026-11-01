@@ -378,6 +378,11 @@ host file path.
 | Component and subscription records | Not restored (D2, D4); a failed assembly is `session_build_failed`, and `xtask graph` shows the assembled services | Not shown |
 | Effective log filter | The daemon does not report it | Not shown |
 
+**User-visible change.** Compared with the legacy page, the Diagnostics page
+keeps the metadata cards and the recording switch, has no log-mode control and
+no trace location, and its process-log card states the rule and the two
+commands. Nothing outside this page changes.
+
 **No process-log mode control.** Process logging is the host's output layer
 (ADR 005 D1): the App Server installs one `tracing` subscriber from `RUST_LOG`
 when it starts, and D4 keeps one subscriber for the process rather than one per
