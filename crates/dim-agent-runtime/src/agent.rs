@@ -283,7 +283,8 @@ impl Agent {
                 .filter_map(|info| session.0.tree.get(&info.id))
                 .collect();
             /// One scope of a Session: its view, the loader row ids its
-            /// profile requires, the required parts it mounted and the branch.
+            /// profile requires, the required views creation awaited and the
+            /// branch.
             type Scope<'a> = (
                 &'a FiberView,
                 &'a [String],
@@ -291,12 +292,12 @@ impl Agent {
                 Option<&'a str>,
             );
             let mut scopes: Vec<Scope> =
-                vec![(&session.0.view, &loaded.required[..], &loaded.parts, None)];
+                vec![(&session.0.view, &loaded.required[..], &loaded.awaited, None)];
             for branch in &branches {
                 scopes.push((
                     branch.0.scope_view(),
                     branch.0.required_rows(),
-                    branch.0.required_parts(),
+                    branch.0.awaited(),
                     Some(branch.id()),
                 ));
             }
