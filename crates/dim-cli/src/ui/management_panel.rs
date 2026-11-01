@@ -138,9 +138,10 @@ pub struct ManagementPanel {
     /// Why the read that follows an applied action failed: the action was
     /// done, and the area is not reported.
     read_error: Option<String>,
-    /// The kind a command opened the panel with, run when its first view
-    /// arrives and spent there.
-    pending: Option<ActionKind>,
+    /// The panel opens in its create editor: its first view opens the
+    /// editor on the area's create document, as Ctrl+N would, and any other
+    /// reply drops the step.
+    creating: bool,
     /// The editor the panel asked for without a key, for the event loop.
     effect: Option<Effect>,
 }
@@ -184,16 +185,16 @@ impl ManagementPanel {
             busy: true,
             message: None,
             read_error: None,
-            pending: None,
+            creating: false,
             effect: None,
         }
     }
 
-    /// A panel a command opened with one kind to run when its first view
-    /// arrives, as `/workflow:save` opens the add step.
-    pub fn opening(area: Area, pending: Option<ActionKind>) -> Self {
+    /// A panel a command opened in its create editor, as `/workflow:save`
+    /// opens it: the first view opens the editor on the create document.
+    pub fn opening_create(area: Area) -> Self {
         let mut panel = Self::new(area);
-        panel.pending = pending;
+        panel.creating = true;
         panel
     }
 
@@ -205,10 +206,10 @@ impl ManagementPanel {
         self.busy = false;
         self.confirming = None;
         self.read_error = None;
-        // The kind a command opened the panel with is spent on the first
-        // view, and any other reply drops it.
+        // The create step is spent on the first view, and any other reply
+        // drops it.
         let opening = self.view.is_none();
-        let pending = self.pending.take();
+        let creating = std::mem::take(&mut self.creating);
         match &reply.result {
             ManagementResult::View { view, note } => {
                 let view = &**view;
@@ -223,10 +224,8 @@ impl ManagementPanel {
                     })),
                 };
                 self.set_view(view.clone());
-                if let Some(kind) = pending
-                    && opening
-                {
-                    self.run_pending(kind);
+                if creating && opening {
+                    self.open_create();
                 }
             }
             ManagementResult::Detail(detail) => {
@@ -259,19 +258,15 @@ impl ManagementPanel {
         self.refresh_hint();
     }
 
-    /// Runs the kind a command opened the panel with, now that its first
-    /// view is here: what the kind's key produces, or the sentence the
-    /// support check gives when the view does not offer it.
-    fn run_pending(&mut self, kind: ActionKind) {
-        if !self.offers(kind) {
+    /// Opens the create editor now that the first view is here: what Ctrl+N
+    /// produces, or the sentence the support check gives when the view
+    /// offers no add.
+    fn open_create(&mut self) {
+        if !self.offers(ActionKind::Add) {
             self.message = Some(Err(crate::management::unsupported(self.area)));
             return;
         }
-        let effect = match kind {
-            ActionKind::Add => self.add(),
-            // A command opens an area with a kind a key could produce.
-            _ => Effect::None,
-        };
+        let effect = self.add();
         if matches!(effect, Effect::EditManagement { .. }) {
             self.effect = Some(effect);
         }

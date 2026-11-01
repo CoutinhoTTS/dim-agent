@@ -426,9 +426,9 @@ the remove confirmation included.
   list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
   prints the same lines, or the area's own verb where its design names one.
 
-A command may open its area with one kind to run when the first view arrives, as
-`/workflow:save` opens the add step: the panel produces what the kind's key would produce, and an
-area that does not offer the kind stays on its list with the sentence the support check gives.
+`/workflow:save` opens its area in the panel's create editor: the first view opens the editor on
+the area's create document, as Ctrl+N would, and an area that does not offer add stays on its list
+with the sentence the support check gives.
 
 An entry of an area whose documents are per entry offers edit for its own document: the Save
 action then carries the entry's id, and the adapter keeps the revision it read with the draft.
@@ -596,7 +596,7 @@ the panel's confirmation.
 
 ### The Workflow area
 
-Workflow (#816): the `/workflow` panel, `/workflow:save` its add step in both modes, and `dimcode
+Workflow (#816): the `/workflow` panel, `/workflow:save` its create editor in both modes, and `dimcode
 workflow list|enable NAME|disable NAME|edit NAME|set NAME PATH|add PATH|start NAME [PATH]|history
 NAME` over `workflow.list`, `workflow.save`, `workflow.start` and `workflow.status`
 ([Workflow](plugins/Workflow.md#a3-management-methods)), plus the Settings client methods the
@@ -710,7 +710,7 @@ names one. A command run in a workspace that Settings does not know prints the o
 | `dimcode workflow start NAME [PATH]` | Start the definition over `workflow.start` with the parameters from `PATH`, or from stdin for `-`, or with none; report `Started NAME: RUN_ID`, without a `report_to`. |
 | `dimcode workflow history NAME` | Print the definition's lines and its recent runs over `workflow.status`, resolving the name as `workflow.start` does. |
 | `/workflow` | Open the Workflow panel of the Session's workspace ([management surfaces](#management-surfaces)): a definition per entry with its source, state, parameters and issues, and the toggle, edit, add, run and inspect kinds. |
-| `/workflow:save` | Open the Workflow panel and its create editor: the add kind at the command surface. |
+| `/workflow:save` | Open the Workflow panel in its create editor. |
 | `dimcode login [PROVIDER] [--directory URL] [--device] [--redirect-uri URI]` | Start the described account's browser or device sign-in ([Provider accounts](#provider-accounts)); without PROVIDER, list the described accounts. |
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |

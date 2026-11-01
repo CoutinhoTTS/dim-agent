@@ -33497,8 +33497,6 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::session",
       "references": [
-        "path ActionKind",
-        "path ActionKind::Add",
         "path Area",
         "path Area::Hooks",
         "path Area::Scheduled",
@@ -33623,7 +33621,6 @@
         "path Update::Web",
         "path Update::Withdrawn",
         "path crate::model::session::PluginAction::Install",
-        "use crate::model::session::ActionKind",
         "use crate::model::session::Area",
         "use crate::model::session::Command",
         "use crate::model::session::CompactReply",
@@ -33834,7 +33831,8 @@
       "to": "dim_cli::ui::management_panel",
       "references": [
         "path ManagementPanel",
-        "path ManagementPanel::opening",
+        "path ManagementPanel::new",
+        "path ManagementPanel::opening_create",
         "path crate::ui::management_panel::reloaded",
         "use crate::ui::management_panel::ManagementPanel"
       ]

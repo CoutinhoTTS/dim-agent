@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::management::{self, editor};
 use crate::model::session::{
-    ActionKind, Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart,
-    ManagementAction, ManagementRefusal, ManagementRequest, ManagementResult, SessionPort,
-    SubmitMode, SwitchKind, Update,
+    Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
+    ManagementRefusal, ManagementRequest, ManagementResult, SessionPort, SubmitMode, SwitchKind,
+    Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -3363,13 +3363,21 @@ impl App {
         }
     }
 
-    /// `/<area>` opens the management panel of `area`, which reads it. A
-    /// command may open it with one kind to run when the first view arrives,
-    /// as `/workflow:save` opens the add step.
-    fn open_management(&mut self, area: Area, pending: Option<ActionKind>) {
-        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::opening(
-            area, pending,
-        ))));
+    /// `/<area>` opens the management panel of `area`, which reads it.
+    fn open_management(&mut self, area: Area) {
+        self.open_prompt(Prompt::Management(Box::new(ManagementPanel::new(area))));
+        self.host.send(Command::Management(ManagementRequest {
+            area,
+            action: ManagementAction::List,
+        }));
+    }
+
+    /// `/workflow:save` opens the panel in its create editor: the first view
+    /// opens the editor on the create document.
+    fn open_management_create(&mut self, area: Area) {
+        self.open_prompt(Prompt::Management(Box::new(
+            ManagementPanel::opening_create(area),
+        )));
         self.host.send(Command::Management(ManagementRequest {
             area,
             action: ManagementAction::List,
@@ -3553,7 +3561,7 @@ impl App {
                 Outcome::Continue
             }
             "skills" => {
-                self.open_management(Area::Skills, None);
+                self.open_management(Area::Skills);
                 Outcome::Continue
             }
             "reload-skills" => {
@@ -3564,19 +3572,19 @@ impl App {
                 Outcome::Continue
             }
             "hooks" => {
-                self.open_management(Area::Hooks, None);
+                self.open_management(Area::Hooks);
                 Outcome::Continue
             }
             "scheduled" => {
-                self.open_management(Area::Scheduled, None);
+                self.open_management(Area::Scheduled);
                 Outcome::Continue
             }
             "workflow" => {
-                self.open_management(Area::Workflow, None);
+                self.open_management(Area::Workflow);
                 Outcome::Continue
             }
             "workflow:save" => {
-                self.open_management(Area::Workflow, Some(ActionKind::Add));
+                self.open_management_create(Area::Workflow);
                 Outcome::Continue
             }
             "connect" => {
