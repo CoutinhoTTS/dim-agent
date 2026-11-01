@@ -344,7 +344,7 @@ optional account feature must not prevent identity or usage from loading.
 | --- | --- |
 | Appearance | Language, system/light/dark theme and text size, applied immediately |
 | Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
-| Modality | Default model selection for image generation, editing and understanding |
+| Modality | Operation defaults for image generation, editing, enhancement and understanding from `modality.capabilities`, written with `modality.configure` and its snapshot revision; understanding's Session consumer is a requirement on Agent/Prompt |
 | MCP | List, add/edit transports, enable/disable, test, authentication/sign-out and confirmed removal, preserving secret fields omitted from edits |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
 | Skills | List, enable/disable, source installation, update and confirmed removal |
@@ -371,10 +371,10 @@ host file path.
 | Legacy surface | Current contract | On this page |
 | --- | --- | --- |
 | Diagnostics metadata | `hello` and `daemon.ping` fields listed above | Kept |
-| `off` | No `RUST_LOG`: the daemon keeps errors only ([ADR 005](../../adr/005-observability.md) D1) | The default; nothing to set |
+| `off` | No `RUST_LOG`: the daemon keeps errors only ([ADR 005](../adr/005-observability.md) D1) | The default; nothing to set |
 | `on` | A `RUST_LOG` directive string read when the daemon starts; not run-time state (D1) | The start-up rule and its steps; no control |
 | `auto` | None: no daemon-side rule raises its own logging | Deliberately absent, below |
-| Trace archive location | Removed with the diagnostics channel ([ADR 005](../../adr/005-observability.md) D2, D5) | `dimcode export` and `daemon.log` named as the read paths |
+| Trace archive location | Removed with the diagnostics channel ([ADR 005](../adr/005-observability.md) D2, D5) | `dimcode export` and `daemon.log` named as the read paths |
 | Component and subscription records | Not restored (D2, D4); a failed assembly is `session_build_failed`, and `xtask graph` shows the assembled services | Not shown |
 | Effective log filter | The daemon does not report it | Not shown |
 
@@ -408,9 +408,9 @@ reconstructed), and no archive to point at. Raising process logging takes
 (`RUST_LOG=debug dimcode`); `daemon.log` appends across starts, so a diagnosis
 keeps the earlier evidence in one file. The complete record of what a run
 committed is `dimcode export SESSION_ID`
-([Timeline export](../appserver/timeline-export.md)), and the model-request
+([Timeline export](appserver/timeline-export.md)), and the model-request
 recording switch on the same page is the record of model wire exchanges
-([ADR 016](../../adr/016-model-request-log.md)); that switch stays user scope,
+([ADR 016](../adr/016-model-request-log.md)); that switch stays user scope,
 so project content cannot enable it. The page keeps the three as separate cards:
 the recording switch is not a process-log mode, and no card presents one as the
 other.
@@ -437,6 +437,58 @@ project-origin input and safe reads, plus rendered Web verification. This adds
 no part, event, service, configuration or stored document; §7 applies unchanged
 and no requirement is raised to a mechanism owner.
 
+#### Modality defaults
+
+The current page writes Provider model capability declarations through
+`provider.models.edit`; that is not a runtime default. The page is replaced by
+the owner contract; Provider records, model descriptors, Agent defaults, chat
+model selection and Session behavior are unchanged.
+
+The page renders one row per operation the owner reports for the `image`
+category — `generate`, `edit`, `enhance` and `understand`. It offers the owner's
+`options`, an Automatic choice when no default is pinned, and shows `effective`
+so automatic resolution is visible. Options carry ids only; the page joins
+display names from its existing Provider list or catalog reads by
+`{providerId, modelId}` and shows an id when no name is available. An unavailable
+default stays selected with its reason; the page never replaces it with another
+model. Save sends one `modality.configure` per changed key, using the revision
+from the previous reply; a conflict stops the loop and keeps the draft, and keys
+already accepted stay saved. A `modality_conflict` keeps the typed draft,
+disables Save until reload and offers the owner's new snapshot; a stale page
+reloads after any Provider or model mutation made in the Web session. A missing
+owner method or an unavailable category is an actionable error, not an empty
+success. In the product build no adapter exists, so `generate`, `edit` and
+`enhance` show the owner's `adapter` reason and their defaults cannot be set;
+`understand` resolves and displays its default. The page does not edit Provider
+model capability declarations; those are Provider metadata, not a routing
+default.
+
+That page is currently the only Web editor of Provider's `modalityCapabilities`,
+and it declares `image.generate` only. The replacement needs no new declaration
+surface: an image operation's options are the models an available adapter
+serves, an adapter's `operations` decides that, and understanding needs
+Provider's `vision` capability, which the Provider model editor already edits.
+After the replacement no Web surface declares `image.generate` or `image.edit`;
+Provider's catalog, probe results and `provider.catalog` output are unchanged.
+
+Image understanding is a Modality row, but its default has no runtime consumer
+yet: the Session image-understanding path must read it through the Agent/Prompt
+requirement in [Modality §9.4](plugins/Modality.md#94-session-image-understanding-consumer).
+Until that lands the page resolves and displays the default and labels it as not
+yet applied; it must not claim that the Session's image understanding already
+uses it. Agent defaults remains the Session model selector, not the
+understanding default.
+
+```text
+┌ Modality ────────────────────────────────────────────────┐
+│ Image generation   [Automatic — currently P / M      ▾]  │
+│ Image editing      [P / M                             ▾] │
+│ Image enhancement  [P / M — no adapter in this build  ▾] │
+│ Image understanding[P / M — not yet applied           ▾] │
+│ reasons: no adapter in this build                        │
+└──────────────────────────────────────────────────────────┘
+```
+
 #### Admission and sensitive data
 
 Replace the read-only exception with an explicit, reviewed method allowlist for
@@ -445,6 +497,8 @@ whole management namespaces. Daemon shutdown, Web-entry management, UI-host
 control and arbitrary file access remain unavailable. Unauthenticated and bare
 WebSocket clients gain no management access. Advertised methods must use the same
 filter as dispatch so the UI cannot mistake a blocked method for an available one.
+Only `modality.capabilities` and `modality.configure` are admitted from the
+`modality` namespace; task and realtime methods remain unavailable.
 
 Audit every added read for secret-bearing fields before enabling it. Return only
 owner-provided safe projections; any missing safe projection is a requirement for
@@ -504,7 +558,7 @@ defaults, archive flags or copied credentials cannot substitute for owner behavi
 
 | Owner | Problem and why existing mechanisms do not suffice | Required capability and ordering |
 | --- | --- | --- |
-| [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing or understanding tasks | Typed default selection and task routing consumed by the runtime; persist the selection before reporting success |
+| [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing, enhancement or understanding tasks | Typed per-operation defaults with owner-computed options, effective automatic resolution and actionable reasons; `modality.capabilities`/`modality.configure` consumed by task dispatch; save persists before success; exactly those two methods admitted on the Web entry. Understanding's Session consumer is the Agent/Prompt requirement in Modality §9.4. |
 | [Session catalog](appserver/session-catalog.md) | A saved Session is not necessarily archived; reopening it cannot represent restore | Durable archive classification with search, restore and confirmed deletion; commit classification before publishing the new catalog view |
 | Skills | Plugin packages do not cover manifest-free skill repositories or selective installation | Owner-managed repository preview, selected installation and loose-skill update/removal, with explicit overwrite confirmation and catalog publication after persistence |
 | MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | An owner operation for scope migration that preserves hidden values and checks both source revisions; publish success only after the move commits |
