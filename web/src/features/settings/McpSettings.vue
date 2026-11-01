@@ -5,7 +5,7 @@ import { readMcp, readMcpAuthStart, readMcpEditableEntry, readMcpInspection, rea
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
-import { bindSettingsDirty, messageFrom } from "./context"
+import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
 
 type SecretField = { name: string; action: "keep" | "set" | "remove"; value: string; stored?: boolean }
 type Draft = {
@@ -244,6 +244,7 @@ async function finishAuth(cancel = false): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
+reloadSettingsOnReconnect(connection, load, computed(() => draft.value !== undefined || !!clientSecret.value || !!callback.value || !!authorization.value))
 onMounted(load)
 onBeforeUnmount(() => {
   mounted = false
