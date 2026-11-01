@@ -667,12 +667,15 @@ pub(super) fn provide(
                         )?;
                         let source = writable(mcp_source)?;
                         if matches!(mcp_source, McpSource::Project(_)) {
-                            // A save replaces the whole entry, so an overlay is
-                            // refused while its entry exists, and a record whose
-                            // entry an external edit deleted is refused rather
-                            // than merged into the new entry. The save deletes
-                            // nothing: a concurrent move may own that record.
-                            // An unreadable overlay fails the save.
+                            // A save replaces the whole entry, so an overlay
+                            // is refused while its entry exists, and a record
+                            // whose entry an external edit deleted is refused
+                            // rather than merged into the new entry. The save
+                            // deletes nothing: a concurrent move may own that
+                            // record, and may have committed the entry between
+                            // the reads, so the entry read again after the
+                            // record decides the answer. An unreadable overlay
+                            // fails the save.
                             match directory
                                 .editable(mcp_source, p.id.clone(), &stopping)
                                 .await
@@ -688,7 +691,21 @@ pub(super) fn provide(
                                         .map_err(error)?
                                         .is_some()
                                     {
-                                        return Err(error(McpError::StaleSecretRecord));
+                                        match directory
+                                            .editable(mcp_source, p.id.clone(), &stopping)
+                                            .await
+                                        {
+                                            Ok(entry) if entry.secrets_in_user_scope => {
+                                                return Err(error(
+                                                    McpError::CredentialsAreUserScoped,
+                                                ));
+                                            }
+                                            Ok(_) => {}
+                                            Err(McpError::UnknownServer) => {
+                                                return Err(error(McpError::StaleSecretRecord));
+                                            }
+                                            Err(failure) => return Err(error(failure)),
+                                        }
                                     }
                                 }
                                 Err(failure) => return Err(error(failure)),

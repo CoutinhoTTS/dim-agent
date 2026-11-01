@@ -1499,6 +1499,30 @@ async fn a_save_racing_a_move_keeps_the_moves_overlay() {
         .await
         .unwrap();
 
+    // B's move committed the entry and its record. A's guard reads the record
+    // (now the move's) and the entry again: the entry exists with the record,
+    // so the answer is mcp_credentials_are_user_scoped, never the stale
+    // refusal that names mcp.remove.
+    let overlay = fixture
+        .mcp
+        .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap()
+        .expect("the move writes the record A's guard now reads");
+    assert!(overlay.auth.is_some());
+    assert_eq!(overlay.url.as_deref(), Some("https://example.test/mcp"));
+    let editable = fixture
+        .mcp
+        .editable(McpSource::Project(1), "user-only".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(editable.secrets_in_user_scope);
+    let McpServerSettings::Remote { url, auth, .. } = &editable.configuration else {
+        panic!("the moved entry is remote");
+    };
+    assert_eq!(url, "https://example.test/mcp");
+    assert!(auth.is_some(), "the completed move keeps its credential");
+
     assert!(
         matches!(
             fixture
@@ -1517,24 +1541,14 @@ async fn a_save_racing_a_move_keeps_the_moves_overlay() {
         ),
         "the save that raced the move loses its project revision check"
     );
-    let overlay = fixture
-        .mcp
-        .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
-        .await
-        .unwrap()
-        .expect("the failed save does not delete the move's overlay");
-    assert!(overlay.auth.is_some());
-    assert_eq!(overlay.url.as_deref(), Some("https://example.test/mcp"));
-    let editable = fixture
-        .mcp
-        .editable(McpSource::Project(1), "user-only".into(), &cancel)
-        .await
-        .unwrap();
-    assert!(editable.secrets_in_user_scope);
-    let McpServerSettings::Remote { url, auth, .. } = &editable.configuration else {
-        panic!("the moved entry is remote");
-    };
-    assert_eq!(url, "https://example.test/mcp");
-    assert!(auth.is_some(), "the completed move keeps its credential");
+    assert!(
+        fixture
+            .mcp
+            .overlay(SettingsScope::Project(1), "user-only".into(), &cancel)
+            .await
+            .unwrap()
+            .is_some(),
+        "the failed save does not delete the move's overlay"
+    );
     fixture.close().await;
 }
