@@ -8,7 +8,7 @@ use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
     *,
 };
-use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
+use dim_app_server::storage::{NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use rutis::host::CtxHost;
 use std::{
@@ -396,7 +396,7 @@ fn v15_store(path: &std::path::Path) -> Connection {
 /// The schema statements of a store, sorted.
 fn schema(connection: &Connection) -> Vec<String> {
     let mut statements: Vec<String> = connection
-        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'timeline_history_anchors'")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -6233,4 +6233,98 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
     store.close().await.unwrap();
     db.close().await.unwrap();
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_history_window_index_is_created_at_open_without_a_format_step() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let indexed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed);
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    connection
+        .execute_batch("DROP INDEX timeline_history_anchors")
+        .unwrap();
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None, "the index is not a format step");
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let indexed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='timeline_history_anchors')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed, "a later open recreates the index");
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    drop(connection);
+
+    let (read, format) = SqliteStorage::open_read_only(database.0.clone()).unwrap();
+    assert_eq!(format, STORE_FORMAT);
+    read.close().await.unwrap();
+}
+
+/// A window's fixed watermark must end a batch: two events committed as one
+/// batch make `through` 1 a storage error, not an empty page.
+#[tokio::test]
+async fn a_history_window_read_rejects_a_through_inside_a_batch() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = sessions.timeline_store();
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut first = text(1, "one");
+    first.batch_end = 2;
+    let (published, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key("session", "main"),
+            vec![first, text(2, "two")],
+            Box::new(move |result| {
+                let _ = published.send(result);
+            }),
+        )
+        .unwrap();
+    tokio::time::timeout(PUBLISHED, receiver)
+        .await
+        .expect("the writer did not publish the write")
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        store.read(&key("session", "main"), 1..=1).await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+    assert!(matches!(
+        sessions.read_page_before("session", "main", 2, 10, 1, 1).await,
+        Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
+    ));
+    assert_eq!(
+        sessions
+            .read_page_before("session", "main", 3, 10, 2, 1)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    drop(store);
+    drop(sessions);
+    db.close().await.unwrap();
 }

@@ -591,12 +591,19 @@ pub struct History {
     pub session_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub branch_id: Option<String>,
-    #[serde(deserialize_with = "cursor")]
-    pub after: u64,
-    #[serde(deserialize_with = "page_limit")]
-    pub limit: usize,
+    #[serde(default, deserialize_with = "optional_cursor")]
+    pub after: Option<u64>,
+    #[serde(default, deserialize_with = "optional_page_limit")]
+    pub limit: Option<usize>,
     #[serde(default, deserialize_with = "optional_cursor")]
     pub through: Option<u64>,
+    /// The newest turn at or below `through`, newest page first
+    /// (session-history-window §4.2).
+    #[serde(default)]
+    pub latest_turn: bool,
+    /// Exclusive upper cursor of a backward page.
+    #[serde(default, deserialize_with = "optional_cursor")]
+    pub before: Option<u64>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1220,6 +1227,12 @@ fn page_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize
         return Err(serde::de::Error::custom("Expected a positive page limit"));
     }
     usize::try_from(value).map_err(serde::de::Error::custom)
+}
+
+fn optional_page_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error> {
+    page_limit(deserializer).map(Some)
 }
 
 fn submission_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {

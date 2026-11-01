@@ -1807,6 +1807,7 @@
       "parent": "dim_app_server::connection",
       "file": "crates/dim-app-server/src/connection/tree.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -2602,6 +2603,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
+        "rusqlite::params",
         "tokio::pin"
       ]
     },
@@ -15629,6 +15631,7 @@
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
+        "path dim_agent_runtime::StoredEvent",
         "path dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineKey"
       ]
@@ -15766,6 +15769,7 @@
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path SessionStore",
+        "path crate::storage::TurnWindow",
         "use crate::storage::SessionStore"
       ]
     },
@@ -17963,6 +17967,7 @@
         "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::reloading",
+        "path RpcError::wire",
         "path params"
       ]
     },
@@ -17985,8 +17990,16 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::BranchEnded",
         "path AgentError::InvalidInput"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::StoredEvent"
       ]
     },
     {
@@ -18012,6 +18025,13 @@
     },
     {
       "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::outbound",
+      "references": [
+        "path crate::outbound::MAX_FRAME_BYTES"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
       "to": "dim_app_server::protocol",
       "references": [
         "path BranchCreate",
@@ -18028,6 +18048,13 @@
         "path Reply::empty",
         "path Submit",
         "path SubmitResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path crate::storage::TurnWindow"
       ]
     },
     {
@@ -22442,7 +22469,8 @@
         "mod timeline",
         "use timeline::SessionStore",
         "use timeline::SessionStorePlugin",
-        "use timeline::SqliteTimelineStore"
+        "use timeline::SqliteTimelineStore",
+        "use timeline::TurnWindow"
       ]
     },
     {
