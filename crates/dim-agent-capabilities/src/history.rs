@@ -867,6 +867,18 @@ pub(crate) fn projected_messages(
     messages
 }
 
+/// The replay rule's messages in order, without building a list.
+pub(crate) fn projected_message_refs<'a>(
+    compaction: Option<&'a ContextCompactionData>,
+    history: &'a [HistoryEntry],
+) -> impl Iterator<Item = &'a Message> + 'a {
+    let (replacement, baseline, history) = segments(compaction, history);
+    replacement
+        .iter()
+        .chain(baseline.iter().map(|entry| entry.message.as_ref()))
+        .chain(history.iter().map(|entry| entry.message.as_ref()))
+}
+
 /// The replay rule applied to a whole `ContextHistory`.
 pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<Arc<Message>> {
     projected_messages(context_compaction(context), history)

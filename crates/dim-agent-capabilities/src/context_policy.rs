@@ -138,6 +138,14 @@ impl PolicyContext {
         crate::history::projected_messages(self.compaction(), history)
     }
 
+    /// The same messages by reference, for checks that only compare them.
+    pub fn message_refs<'a>(
+        &'a self,
+        history: &'a [HistoryEntry],
+    ) -> impl Iterator<Item = &'a Message> + 'a {
+        crate::history::projected_message_refs(self.compaction(), history)
+    }
+
     pub fn retained_entry(&self, history: &[HistoryEntry], cut: &str) -> Result<usize, String> {
         let cut = self
             .order

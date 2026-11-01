@@ -211,12 +211,20 @@ fn builder_with_context(
     history: HistoryRenderer,
     context: Context,
 ) -> AgentBuilder {
+    builder_with_prepare(model, history, context, Arc::new(IdentityContext))
+}
+fn builder_with_prepare(
+    model: Arc<dyn ModelDriver>,
+    history: HistoryRenderer,
+    context: Context,
+    prepare: Arc<dyn PrepareContext>,
+) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .process_value(Arc::new(ModelHost(model)))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(history))
-        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(PrepareContextHost(prepare)))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context)))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
         .require_feature(
@@ -226,6 +234,41 @@ fn builder_with_context(
         );
     defaults::install(&mut builder);
     builder
+}
+
+/// Edits the prepared request's timeline prefix: change its first message,
+/// drop it, or append a message after the prefix.
+#[derive(Clone, Copy)]
+enum PrefixEdit {
+    Change,
+    Drop,
+    Append,
+}
+struct RewritePrefix(PrefixEdit);
+impl PrepareContext for RewritePrefix {
+    fn prepare(
+        &self,
+        request: Arc<ModelRequest>,
+        _: ContextSource,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<ModelRequest>> {
+        let edit = self.0;
+        Box::pin(async move {
+            let mut request = (*request).clone();
+            match edit {
+                PrefixEdit::Change => {
+                    request.messages[0] = Arc::new(Message::text(Role::User, "changed"))
+                }
+                PrefixEdit::Drop => {
+                    request.messages.remove(0);
+                }
+                PrefixEdit::Append => request
+                    .messages
+                    .push(Arc::new(Message::text(Role::User, "appended"))),
+            }
+            Ok(Arc::new(request))
+        })
+    }
 }
 
 fn external_history(events: &ContextHistory) -> std::result::Result<Vec<HistoryEntry>, String> {
@@ -1473,5 +1516,125 @@ async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
         })
         .unwrap();
     assert!(last_call.messages.len() >= 2);
+    agent.close().await.unwrap();
+}
+
+/// A request whose prefix differs from the branch's projection is refused
+/// before the model sees it.
+#[tokio::test]
+async fn a_changed_prefix_message_fails_the_preparation() {
+    let agent = MinimalHost::start(&builder_with_prepare(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context::default(),
+        Arc::new(RewritePrefix(PrefixEdit::Change)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("original".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ModelCall(_)))
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::ModelOutputEnd(data)
+            if matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. }
+                if error.contains("must preserve the timeline history prefix"))
+    )));
+    assert!(matches!(
+        events.last().unwrap().kind,
+        EventKind::TurnEnd(TurnEndData {
+            outcome: TurnOutcome::Failed { .. },
+            ..
+        })
+    ));
+    agent.close().await.unwrap();
+}
+
+/// A request shorter than the branch's projection is refused the same way.
+#[tokio::test]
+async fn a_short_request_fails_the_preparation() {
+    let agent = MinimalHost::start(&builder_with_prepare(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context::default(),
+        Arc::new(RewritePrefix(PrefixEdit::Drop)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("original".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ModelCall(_)))
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::ModelOutputEnd(data)
+            if matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. }
+                if error.contains("must preserve the timeline history prefix"))
+    )));
+    agent.close().await.unwrap();
+}
+
+/// The same prefix with a message appended after it is what a renderer may
+/// add, so the turn reaches the model with both messages.
+#[tokio::test]
+async fn a_message_appended_after_the_prefix_reaches_the_model() {
+    let agent = MinimalHost::start(&builder_with_prepare(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context::default(),
+        Arc::new(RewritePrefix(PrefixEdit::Append)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("original".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let sent = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .expect("the turn reaches the model");
+    assert_eq!(
+        sent.messages,
+        vec![
+            Arc::new(Message::text(Role::User, "original")),
+            Arc::new(Message::text(Role::User, "appended")),
+        ]
+    );
+    assert!(events.iter().any(
+        |event| matches!(&event.kind, EventKind::Text(data) if data.delta == "Echo: appended")
+    ));
     agent.close().await.unwrap();
 }
