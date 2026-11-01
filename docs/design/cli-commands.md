@@ -786,8 +786,11 @@ Assistant: ...
 [permission] main: File access = Workspace read/write  <- changed by another client
 ```
 
-There is no status line: the scrollback client has no persistent area, and the editor's hint
-line is fixed help text truncated to the terminal width.
+The scrollback client draws a status line under the composer: the agent marker and the
+tool-approval mode (`Ask (legacy)` for the legacy policy), the goal marker, the context use against
+its window, and one slot for the state in force — a notice, a required answer or permission,
+`esc interrupt`, or the background task count. The model, with its effort when both fit, is
+right-aligned on the same line; the line is clipped to the terminal width.
 
 ### Headless execution
 
