@@ -43,6 +43,20 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+### Queue strip
+
+With a message queued, the strip above the composer draws the queue in a titled border: messages oldest first, the next to run at the top, then a hint naming the keys that act on them. With an empty draft, `↑` withdraws the newest queued message into the composer to edit; `Ctrl+S` steers with the next one. The hint names a command only when the command table has one for the queue, so a typed `/name` it shows runs locally instead of being sent to the model. No command views the queue, so the hint names keys only.
+
+```text
+╭─ Queue (2) ─────────────────────────────────────╮
+│ › fix the failing test in session_host          │
+│ › then update the design note                   │
+│ ↑ edit · ctrl+s steer now                       │
+╰─────────────────────────────────────────────────╯
+```
+
+A queued message the strip does not show adds its count to the hint: `+3 more · ↑ edit · ctrl+s steer now`. The strip shows at most five messages and keeps the height it reached while the queue drains.
+
 ## Usage report
 
 In both TUI modes, `/usage` prints the main branch's context usage. When the

@@ -255,7 +255,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "Nada em execução",
         "No queued message" => "Sem mensagens em fila",
         "Only in fullscreen (/tui)" => "Só em ecrã inteiro (/tui)",
-        "/{name} is not yet available" => "/{name} ainda indisponível",
         "new session" => "nova sessão",
         "resumed {id} · {count} messages" => "{id} retomada · {count} mensagens",
         " · earlier history: /timeline" => " · histórico anterior: /timeline",
@@ -270,9 +269,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "resposta necessária",
         "permission required" => "permissão necessária",
         "esc interrupt" => "esc interromper",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ editar · ctrl+s orientar já · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count} mais · ↑ editar · ctrl+s orientar já · /queue"
+        "↑ edit · ctrl+s steer now" => "↑ editar · ctrl+s orientar já",
+        "+{count} more · ↑ edit · ctrl+s steer now" => {
+            "+{count} mais · ↑ editar · ctrl+s orientar já"
         }
         "Queue ({count})" => "Fila ({count})",
         "Thinking…" => "A pensar…",

@@ -4706,6 +4706,7 @@
         "matches",
         "print",
         "println",
+        "unreachable",
         "vec"
       ]
     },
@@ -32743,6 +32744,16 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path i18n::LOCALES",
+        "path i18n::active",
+        "path i18n::set",
+        "path t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::new"
@@ -32870,6 +32881,8 @@
         "path LOAD_MORE",
         "path Prompt::Ask",
         "path Prompt::Login",
+        "path QUEUE_HINT",
+        "path QUEUE_HINT_MORE",
         "path ThemeContext",
         "path WebOpened",
         "path banner",

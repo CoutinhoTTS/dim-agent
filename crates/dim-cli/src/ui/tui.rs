@@ -3054,11 +3054,7 @@ impl App {
                 ))));
                 Outcome::Continue
             }
-            other => {
-                self.notices
-                    .push(tf("/{name} is not yet available", &[("name", other)]));
-                Outcome::Continue
-            }
+            other => unreachable!("{other} is not in the command table"),
         }
     }
 
@@ -4606,6 +4602,11 @@ fn format_elapsed(elapsed: Duration) -> String {
 /// Message rows the queue strip shows at most.
 const QUEUE_ROWS: usize = 5;
 
+/// The queue strip's hint, and its form when messages are not shown. Every
+/// `/name` it can draw is a command in the table.
+const QUEUE_HINT: &str = "↑ edit · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str = "+{count} more · ↑ edit · ctrl+s steer now";
+
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
 /// queue's, at most [`QUEUE_ROWS`]), blank past the queue's end, so the
@@ -4627,12 +4628,9 @@ fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palet
         .collect();
     rows.resize_with(height, String::new);
     let hint = if hidden == 0 {
-        t("↑ edit · ctrl+s steer now · /queue").to_owned()
+        t(QUEUE_HINT).to_owned()
     } else {
-        tf(
-            "+{count} more · ↑ edit · ctrl+s steer now · /queue",
-            &[("count", &hidden.to_string())],
-        )
+        tf(QUEUE_HINT_MORE, &[("count", &hidden.to_string())])
     };
     rows.push(fg(&truncate_cells(&hint, inner), &p.muted));
     let title = paint(
@@ -7130,6 +7128,33 @@ mod tests {
         let three: Vec<_> = (1..=3).map(item).collect();
         let full = queue_strip(&three, 3, 80, p);
         assert_eq!(queue_strip(&three[..1], 3, 80, p).len(), full.len());
+    }
+
+    /// The queue strip names only commands the table has, in every locale.
+    #[test]
+    fn the_queue_strip_names_only_commands_that_exist() {
+        let previous = i18n::active();
+        for (locale, code, _) in i18n::LOCALES {
+            i18n::set(locale);
+            for hint in [QUEUE_HINT, QUEUE_HINT_MORE] {
+                let text = t(hint);
+                for (at, _) in text.match_indices('/') {
+                    let name: String = text[at + 1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        COMMANDS.iter().any(|command| command.slash
+                            && (command.name == name || command.aliases.contains(&name.as_str()))),
+                        "{code}: {text:?} names /{name}, which is not a command"
+                    );
+                }
+            }
+        }
+        i18n::set(previous);
     }
 
     /// A finished command keeps the status row its running block had.

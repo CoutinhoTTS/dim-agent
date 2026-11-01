@@ -36,6 +36,20 @@ Home    scroll to the top (fullscreen, empty draft)
 End     scroll to the bottom (fullscreen, empty draft)
 ```
 
+### 队列条
+
+有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。草稿为空时，`↑` 把最新排队的消息取回输入框编辑；`Ctrl+S` 以下一条消息 steer。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
+
+```text
+╭─ Queue (2) ─────────────────────────────────────╮
+│ › fix the failing test in session_host          │
+│ › then update the design note                   │
+│ ↑ edit · ctrl+s steer now                       │
+╰─────────────────────────────────────────────────╯
+```
+
+队列条没有显示的消息把数量加进提示：`+3 more · ↑ edit · ctrl+s steer now`。队列条最多显示五条消息，并在队列排空时保持已达到的高度。
+
 ## 用量报告
 
 两种 TUI 模式下，`/usage` 都输出主分支的上下文用量。当前模型使用 Dim OAuth 时，
