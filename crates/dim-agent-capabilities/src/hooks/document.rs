@@ -6,9 +6,8 @@ use std::{
     time::Duration,
 };
 
-/// The document events this build knows. `PreToolUse` is listed and never
-/// runs until its owner lands (#758); every other event name is
-/// `unsupported`.
+/// The document events this build runs. Every other event name is
+/// `unsupported` and never runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookEvent {
     SessionStart,
@@ -45,10 +44,6 @@ impl HookEvent {
     }
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|event| event.name() == name)
-    }
-    /// Whether this build runs the event at all.
-    pub fn supported(self) -> bool {
-        !matches!(self, Self::PreToolUse)
     }
     /// What a non-tool matcher is tested against; `None` for a tool event and
     /// for the events whose matcher is ignored.
@@ -259,7 +254,7 @@ pub fn handlers(
     name: Option<&str>,
     alias: Option<&str>,
 ) -> Vec<HookHandler> {
-    if !event.supported() || !effective(snapshot) {
+    if !effective(snapshot) {
         return Vec::new();
     }
     let mut seen = HashSet::new();
@@ -331,7 +326,7 @@ pub fn entries(snapshot: &HookSourcesSnapshot) -> Vec<HookEntry> {
             continue;
         };
         for (event, groups) in &document.hooks {
-            let supported = HookEvent::from_name(event).is_some_and(HookEvent::supported);
+            let supported = HookEvent::from_name(event).is_some();
             for group in groups {
                 let invalid = Matcher::parse(group.matcher.as_deref()).is_err();
                 for setting in &group.hooks {

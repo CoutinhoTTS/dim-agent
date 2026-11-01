@@ -78,6 +78,19 @@ points that follow from them: `PostToolUse` and `PostToolUseFailure` after a
 settled tool result, `PermissionRequest` and `Notification` at an approval
 request, and `Stop` at a completed turn.
 
+It also registers the advisor `hooks` with the branch's Permission
+([Permission](Permission.md), Hooks A.6.1), which is how `PreToolUse` reaches
+the admission: `Permission::admit_decision` asks it while it decides a call,
+and the advisor reads the sources, runs the matching `PreToolUse` handlers
+concurrently, and answers with the combination A.5 fixes — any deny, then any
+ask, then any allow, and the first deny in catalog order is the reason, so the
+handlers after it are terminated while the ones before it run to completion.
+The advice is not authority: Permission folds it with its own decision, a deny
+of its own is not asked about, and Approval's recheck after an answer asks
+nothing. A deny or ask reason reads `Hook <source>: <reason>`. While the part
+is mounted the branch's calls wait for their advice; an unload drops a pending
+advice as no opinion, so Permission decides alone.
+
 The dispatcher handler only folds the event and starts the work; it never
 runs a command and never waits. A branch task drains the queued points in
 order, so handlers of one point start together, the point's combined output is
@@ -123,6 +136,7 @@ compacted context baseline.
 | Service | Purpose |
 | --- | --- |
 | `B:Approval` | Answer a `PermissionRequest` decision for the pending admission. |
+| `B:Permission` | Register the `hooks` advisor the admission decision asks (`PreToolUse`). |
 | `S:HooksRuntime` | Read sources, build payloads and run the point's handlers. |
 | `B:BranchLifecycle` | Close the branch's jobs and settle its processes. |
 | `B:TimelineIdentity` | Name the branch in the payload and in the main-branch rule. |
@@ -133,7 +147,7 @@ compacted context baseline.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime` |
+| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Permission`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime` |
 | 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->
@@ -189,8 +203,20 @@ reported by `hooks.catalog` rather than at the hook point.
 `an_unload_with_the_default_on_failure_writes_the_input`,
 `the_handlers_after_the_first_block_are_terminated`,
 `two_proceeding_handlers_keep_their_contexts_in_catalog_order`,
-`a_failure_finishing_after_a_later_result_blocks_by_its_own_handler`;
-`runner.rs`'s `a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
+`a_failure_finishing_after_a_later_result_blocks_by_its_own_handler`,
+`a_pre_tool_use_deny_fails_one_call_of_a_batch_and_runs_the_others`,
+`a_pre_tool_use_allow_runs_a_call_the_preset_would_ask_about`,
+`a_pre_tool_use_ask_asks_the_user_like_any_other_ask`,
+`a_command_rule_deny_runs_no_pre_tool_use_hook`,
+`the_recheck_after_an_answer_runs_no_pre_tool_use_hook`,
+`a_pasted_bash_matcher_runs_for_exec_and_reads_the_command`,
+`the_first_deny_in_catalog_order_is_the_reason`,
+`an_interrupt_while_pre_tool_use_runs_cancels_the_call_and_ends_the_command`,
+`a_hooks_unload_drops_a_pending_pre_tool_use_advice`;
+`runner.rs`'s `pre_tool_use_outcomes_follow_the_protocol` pins A.4's outcomes
+for the event, exit 2 and the `onFailure` mapping included, and that
+`updatedInput` never rewrites the call;
+`a_settled_tool_call_leaves_nothing_behind_in_the_view` pins
 that a settled call's input does not stay in the folded view;
 `a_json_array_on_stdout_is_prompt_context` pins that plain text, other JSON
 values included, is prompt context (A.3's exit-0 row);
