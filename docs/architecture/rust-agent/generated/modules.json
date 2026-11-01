@@ -3248,6 +3248,16 @@
       ]
     },
     {
+      "id": "dim_cli::session_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/session_command.rs",
+      "unexpandedMacros": [
+        "json",
+        "println"
+      ]
+    },
+    {
       "id": "dim_cli::session_host",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -23683,6 +23693,7 @@
         "path Action::Recording",
         "path Action::RuntimeInstall",
         "path Action::RuntimeList",
+        "path Action::SessionRename",
         "path Action::Timeline",
         "path Action::Tui",
         "path Action::Version",
@@ -23923,6 +23934,14 @@
       "references": [
         "mod session",
         "path session::chat"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::session_command",
+      "references": [
+        "mod session_command",
+        "path session_command::rename"
       ]
     },
     {
@@ -25994,6 +26013,17 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path RenameReply::Failed",
+        "path RenameReply::Titled",
+        "path RenameReply::Unsupported",
+        "path RenameReply::Untitled",
+        "use crate::model::session::RenameReply"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_cli::permission",
       "references": [
         "path permission::AddRule",
@@ -26036,6 +26066,13 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_cli::session_command",
+      "references": [
+        "path crate::session_command::set_title"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_cli::session_host",
       "references": [
         "path crate::session_host::saved_model_preferences"
@@ -26065,6 +26102,42 @@
         "use crate::wire::Event",
         "use crate::wire::Progress",
         "use dim_client::wire::History"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path RenameReply",
+        "path RenameReply::Failed",
+        "path RenameReply::Titled",
+        "path RenameReply::Unsupported",
+        "path RenameReply::Untitled",
+        "use crate::model::session::RenameReply"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe",
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::session_command",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
       ]
     },
     {
@@ -26242,6 +26315,7 @@
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
         "path Command::Recording",
+        "path Command::Rename",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::RetryApproval",
@@ -26333,6 +26407,7 @@
         "path Update::Providers",
         "path Update::QuestionReply",
         "path Update::Ready",
+        "path Update::Renamed",
         "path Update::Report",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -26450,6 +26525,13 @@
       "to": "dim_cli::sanitize",
       "references": [
         "path crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::session_command",
+      "references": [
+        "path crate::session_command::set_title"
       ]
     },
     {
@@ -32015,6 +32097,7 @@
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
         "path Command::Recording",
+        "path Command::Rename",
         "path Command::ResetIsolation",
         "path Command::Resume",
         "path Command::RetryApproval",
@@ -32043,6 +32126,10 @@
         "path CompactReply::Unsupported",
         "path ContextReading",
         "path DIM_OAUTH_ID",
+        "path RenameReply::Failed",
+        "path RenameReply::Titled",
+        "path RenameReply::Unsupported",
+        "path RenameReply::Untitled",
         "path SessionPort",
         "path SwitchKind",
         "path SwitchKind::Forked",
@@ -32072,6 +32159,7 @@
         "path Update::Providers",
         "path Update::QuestionReply",
         "path Update::Ready",
+        "path Update::Renamed",
         "path Update::Report",
         "path Update::Sessions",
         "path Update::ShellDone",
@@ -32092,6 +32180,7 @@
         "use crate::model::session::ContextReading",
         "use crate::model::session::DIM_OAUTH_ID",
         "use crate::model::session::DraftPart",
+        "use crate::model::session::RenameReply",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update"

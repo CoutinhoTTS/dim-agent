@@ -159,6 +159,14 @@ without fetching child histories. Files are created new, never overwritten, and
 use mode 0600 on Unix or the inherited ACL on Windows. A write error can leave a
 partial new file. Relative paths use the CLI process cwd; `~` is literal.
 
+`dimcode session rename SESSION TITLE` sets the Session's manual title with
+`session.rename` and prints the title the server returns;
+`dimcode session rename SESSION --clear` sends `title: null` and prints that the
+Session is untitled. Exactly one of TITLE and `--clear` is required, so a
+forgotten argument is a usage error and never clears a title. The method is
+Session-scoped, so the client finds it through `session.methods {sessionId}`:
+a Session that does not list it is reported as an unsupported daemon.
+
 Use `dimcode export SESSION_ID [--output PATH] [--database PATH]` for a Session's
 whole Timeline ([ADR 005](../../docs/adr/005-observability.md) D3): every event of
 every branch with its before trace, as versioned JSONL. It runs the App Server binary
@@ -988,6 +996,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` asks, then forks `main` there with `TEXT` in the fork's composer |
 | `/usage` | Reports main's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so, and a failed call is reported alone. With the reading it appends the cache read share of the last `model/usage` request on `main` (` · last request cached {percent}`), rounded down: `100%` only when every prompt token was a cache read, one decimal between `99%` and `100%`, an integer between `1%` and `99%`, `<1%` for a positive share below one percent, and `0%` for a request that reported no cache reads; the prompt token count includes cache writes, so a request that only writes the cache reads `0%`. The segment appears only once `main`'s history has finished loading, so a page that is not the last never reports its older request; after that it shows the newest request, whether it came from the history or a live event. It is absent when that request reported no cache read count or its counters cannot produce a share (cache reads above prompt tokens, or a zero prompt) |
 | `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The transcript row shows the work and its outcome; the reply is reported when the method answers — `completed`, `skipped` with its reason, or the method's failure (`compaction_failed`, `compaction_cancelled`). A daemon without the method says it does not support context compaction |
+| `/rename TITLE`, `/rename --clear` | Sets, or clears, the shown Session's manual title with `session.rename` and reports the stored title or that the Session is untitled. Choosing `/rename` from the palette fills `/rename ` and waits; a bare `/rename` is refused with a notice and sends nothing, so `--clear` is the way to clear it without a title. The text is a command: it is never queued or submitted, also while a turn runs. With no Session shown it says so, and a Session that does not list `session.rename` reports that instead |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
 | Paste of local file paths | An image the model takes becomes an `[Image #N]` token sent as an image block; another file is inserted as its path, and so is an image the model does not take. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |

@@ -11,6 +11,7 @@ Commands:\n\
                                    Run text and/or local images and exit\n\
   exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
+  session rename SESSION TITLE     Set the manual title; --clear removes it\n\
   export SESSION_ID [--output PATH] [--database PATH]\n\
                                    Write a Session's whole Timeline as JSONL;\n\
                                    it holds prompts, code and tool output.\n\
@@ -76,7 +77,7 @@ Options:\n\
   -V, --version                    Show version without starting a daemon\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
-Idle commands: /export <markdown|json> PATH, /exit.\n\
+Idle commands: /export <markdown|json> PATH, /rename TITLE|--clear, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 /permissions (aliases /approvals, /approval) opens separate File access, Tool\n\
   approval (Ask/Bypass), and Process isolation controls in the terminal UI.\n\
@@ -99,6 +100,9 @@ Account commands sign in to every Provider the daemon describes with a login\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval or answer required, 130 interrupted.\n";
 
+/// What `dimcode session` names besides `export`.
+const USAGE_SESSION: &str = "Use session export or session rename; see --help";
+
 #[derive(Clone, Debug)]
 pub enum Action {
     Chat,
@@ -113,6 +117,12 @@ pub enum Action {
         session_id: String,
         format: Format,
         output: Option<PathBuf>,
+    },
+    /// `session rename`: `title` sets the manual title, `clear` sends `null`.
+    SessionRename {
+        session_id: String,
+        title: Option<String>,
+        clear: bool,
     },
     /// `export`: the Session's whole Timeline (ADR 005 D3).
     Timeline {
@@ -324,6 +334,12 @@ impl Options {
                         return Err("Supply the database path only once".into());
                     }
                 }
+                "--clear" => {
+                    let Action::SessionRename { clear, .. } = &mut options.action else {
+                        return Err("--clear requires session rename".into());
+                    };
+                    *clear = true;
+                }
                 "--home" => {
                     options.home = PathBuf::from(value(&mut args)?);
                     options.home_explicit = true;
@@ -418,17 +434,32 @@ impl Options {
                     }
                 }
                 "session" if matches!(options.action, Action::Chat) => {
-                    if value(&mut args)? != "export" {
-                        return Err(
-                            "Use session export SESSION_ID --format markdown|json [--output PATH]"
-                                .into(),
-                        );
+                    match value(&mut args)?.as_str() {
+                        "-h" | "--help" => {
+                            options.action = Action::Help;
+                            return Ok(options);
+                        }
+                        "export" => {
+                            options.action = Action::Export {
+                                session_id: value(&mut args)?,
+                                format: Format::Markdown,
+                                output: None,
+                            };
+                        }
+                        "rename" => {
+                            let session_id = value(&mut args)?;
+                            let title = match args.peek().map(String::as_str) {
+                                Some(next) if !next.starts_with("--") => Some(value(&mut args)?),
+                                _ => None,
+                            };
+                            options.action = Action::SessionRename {
+                                session_id,
+                                title,
+                                clear: false,
+                            };
+                        }
+                        _ => return Err(USAGE_SESSION.into()),
                     }
-                    options.action = Action::Export {
-                        session_id: value(&mut args)?,
-                        format: Format::Markdown,
-                        output: None,
-                    };
                 }
                 "export" if matches!(options.action, Action::Chat) => {
                     options.action = Action::Timeline {
@@ -624,6 +655,13 @@ impl Options {
         }
         if matches!(options.action, Action::Export { .. }) && !export_format {
             return Err("session export requires --format markdown|json".into());
+        }
+        if let Action::SessionRename { title, clear, .. } = &options.action
+            && title.is_some() == *clear
+        {
+            return Err(
+                "Use session rename SESSION TITLE or session rename SESSION --clear".into(),
+            );
         }
         if options.clear_preferences.is_some()
             && (!matches!(options.action, Action::Models(_)) || options.refresh)

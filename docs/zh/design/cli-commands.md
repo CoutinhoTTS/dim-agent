@@ -24,6 +24,7 @@ Commands
   app     /exit        exit
   app     /keys        show the key bindings
   model   /permissions   file access, tool approval and process isolation
+  session /rename      rename this session
 
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
@@ -150,6 +151,9 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | 运行文本和/或本地图片后退出；没有 `-p` 时读取重定向的 stdin。 |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
+| `dimcode session rename SESSION TITLE` | 经 `session.rename` 设置该 Session 的手动标题，并打印服务端返回的标题。 |
+| `dimcode session rename SESSION --clear` | 清除手动标题，Session 回到无标题状态。 |
+| `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode hooks list [--cwd DIR]` | 经 `hooks.catalog` 列出生效的 Hook 目录（[Hooks](plugins/Hooks.md#a7-管理方法)）：每个来源的路径、启用状态与状态，以及每个处理器的事件、匹配器、命令与状态。 |
@@ -178,6 +182,27 @@ login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `-
 交互式导出解析器读取格式词，把行的其余部分当作字面路径（包括空格），不做 shell 求值或引号展开。
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。
+
+### 会话标题
+
+手动标题是 Session 自己的状态：`session.list` 与 `session.summaries` 以 `manual` 来源报告它，
+之后的自动生成永不替换它（[标题元数据](appserver/session-title-metadata.md)、
+[SessionTitle](plugins/SessionTitle.md)）。`session.rename {sessionId, title}` 设置它，
+`title: null` 清除它。标题文本不属于任何线，也不产生 Timeline 事件，所以重命名不增添模型读到的内容。
+
+`session.rename` 是 Session 方法：客户端经 `session.methods {sessionId}` 发现它，`hello.features`
+并不列出它。Session 未列出 `session.rename` 的守护进程得到不支持的守护进程错误，输入的文字绝不
+作为替代被提交。尚未附加 Session 时同理：没有显示中的 Session，`/rename` 直接说明并不发送任何内容。
+
+`dimcode session rename SESSION TITLE` 打印服务端返回的标题，`--clear` 打印该 Session 已无标题。
+TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误，绝不因此清除标题。
+`/rename TITLE` 与 `/rename --clear` 对所显示的 Session 做同样的事，并用一行状态说明发生了
+哪一种。命令面板的这一行声明了标题参数，所以从面板选中 `/rename` 只是填入 `/rename ` 并等待
+输入；对空的 `/rename` 回车会得到 `needs <title>` 提示且不发送任何内容，`--clear` 是唯一
+无需标题即可清除的形式。两种形式都是客户端处理的命令：文本从不入队、从不提交，模型回合进行
+中也是如此。`/resume` 列表每次打开都读取 `session.summaries`，因此显示新标题；页头显示的是
+首条消息的主题，不受影响。空闲的行式客户端读取同样的两种形式，对空的 `/rename` 打印
+`Use /rename TITLE or /rename --clear`。
 
 P1 shell 前缀只用于交互输入。其执行、记录、进度、取消和生命周期遵循 [ShellInput](plugins/ShellInput.md)。
 CLI 在发送请求前生成 `runId`，从不重试一次运行。前缀之后的命令原样传递；空命令打印用法。

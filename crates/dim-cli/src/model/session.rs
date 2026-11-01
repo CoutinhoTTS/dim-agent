@@ -202,6 +202,9 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
+    /// `/rename`: set the shown Session's manual title, or clear it when the
+    /// text is empty. Nothing here reaches the model.
+    Rename(Option<String>),
     SetPermission(crate::permission::Change),
     /// List the providers of the `/connect` panel.
     ListProviders,
@@ -596,6 +599,19 @@ pub enum CompactReply {
     Unsupported,
 }
 
+/// A `session.rename` reply as `/rename` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameReply {
+    /// The manual title the server stored.
+    Titled(String),
+    /// The Session has no title again.
+    Untitled,
+    /// The daemon serves no `session.rename` for this Session.
+    Unsupported,
+    /// The call failed, with its message.
+    Failed(String),
+}
+
 #[allow(dead_code)]
 pub enum Update {
     /// The session's adopted configuration: `provider / model`, and the
@@ -692,6 +708,8 @@ pub enum Update {
     Context(Option<ContextReading>),
     /// What a `/compact` came to, localized by the interface.
     Compacted(CompactReply),
+    /// What a `/rename` came to, localized by the interface.
+    Renamed(RenameReply),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

@@ -31,6 +31,7 @@ Commands
   app     /exit        exit
   app     /keys        show the key bindings
   model   /permissions   file access, tool approval and process isolation
+  session /rename      rename this session
 
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
@@ -179,6 +180,9 @@ a user can through this control; that write creates no grant and changes no runn
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | Run text and/or local images and exit; read redirected stdin when `-p` is absent. |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
+| `dimcode session rename SESSION TITLE` | Set the Session's manual title through `session.rename` and print the title the server returns. |
+| `dimcode session rename SESSION --clear` | Clear the manual title, so the Session is untitled again. |
+| `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
@@ -216,6 +220,35 @@ quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
+
+### Session titles
+
+The manual title is the Session's own state: `session.list` and
+`session.summaries` report it with its `manual` source, and later automatic
+generation never replaces it ([title metadata](appserver/session-title-metadata.md),
+[SessionTitle](plugins/SessionTitle.md)). `session.rename {sessionId, title}` sets
+it and `title: null` clears it. Title text belongs to no branch and to no Timeline
+event, so a rename adds nothing the model reads.
+
+`session.rename` is a Session method: a client discovers it through
+`session.methods {sessionId}` and `hello.features` does not list it. A daemon whose
+Session lists no `session.rename` gets the unsupported-daemon error, and the typed
+text is never submitted in its place. The same holds for a Session that is not
+attached yet: with no Session shown, `/rename` reports that and sends nothing.
+
+`dimcode session rename SESSION TITLE` prints the title the server returns and
+`--clear` prints that the Session is untitled. Exactly one of TITLE and `--clear`
+is required, so a forgotten argument is a usage error and never clears a title.
+`/rename TITLE` and `/rename --clear` do the same for the shown Session and report
+which happened in one status line. The palette row declares the title argument, so
+choosing `/rename` from the palette fills `/rename ` and waits for it; Enter on a
+bare `/rename` is refused with a `needs <title>` notice and sends nothing, and
+`--clear` is the only form that clears without one. Every form is a command the
+client handles: the text is never queued and never submitted, including while a turn
+runs. The `/resume` list reads `session.summaries` each time it opens, so it shows
+the new title; the header shows the first message's topic and is unaffected. The
+idle line client reads the same two forms and prints
+`Use /rename TITLE or /rename --clear` for a bare `/rename`.
 
 ### Migration interaction
 

@@ -26,6 +26,7 @@ mod question;
 mod recording;
 mod sanitize;
 mod session;
+mod session_command;
 mod session_host;
 mod ui;
 mod update;
@@ -647,6 +648,15 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             output,
         } => {
             export::write(&mut client, session_id, *format, output.as_deref()).await?;
+            Ok(0)
+        }
+        Action::SessionRename {
+            session_id,
+            title,
+            clear,
+        } => {
+            let title = if *clear { None } else { title.as_deref() };
+            session_command::rename(&mut client, session_id, title).await?;
             Ok(0)
         }
         Action::Login(provider) => login::login(&mut client, &options, provider.as_deref()).await,
