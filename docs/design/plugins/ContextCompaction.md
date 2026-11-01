@@ -430,7 +430,7 @@ Every compaction that reached the strategy carries this common record. One that 
 validation carries the strategy's record and, when its candidate request was projected, its
 after-size in `estimatedOutputTokens`; no candidate is adopted and `entriesReplaced` stays zero.
 A candidate that does not reduce input reports that condition separately from a smaller candidate
-that still exceeds the model window. One whose strategy failed carries
+that still does not fit the model window. One whose strategy failed carries
 it too, with no after-size: a failure is an outcome that carries its diagnostics (§4.2), so
 `modelCallCount`, `modelUsage` and `durationMs` are reported as on a completion. Only a manual
 compaction that never built a request has no diagnostics.
