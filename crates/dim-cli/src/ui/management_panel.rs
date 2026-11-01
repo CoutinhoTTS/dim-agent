@@ -1006,6 +1006,52 @@ mod tests {
         ));
     }
 
+    /// The Command rules area is titled for what it lists, and its hint
+    /// names the kinds it has.
+    #[test]
+    fn the_command_rules_area_names_its_title_and_kinds() {
+        let mut panel = ManagementPanel::new(Area::Permissions);
+        panel.set_result(&view_reply(
+            Area::Permissions,
+            ManagementAction::List,
+            ManagementView {
+                revision: Some("r1".into()),
+                document: None,
+                create: Some(
+                    serde_json::json!({"command":"cargo test","match":"prefix","decision":"deny"}),
+                ),
+                actions: vec![ActionKind::Reload, ActionKind::Add],
+                groups: vec![ManagementGroup {
+                    heading: "user".into(),
+                    entries: vec![entry(
+                        "deny prefix git push",
+                        "deny prefix git push",
+                        None,
+                        Vec::new(),
+                        vec![ActionKind::Remove],
+                    )],
+                }],
+                issues: Vec::new(),
+            },
+        ));
+        let text = shown(&panel, 80, 20).join("\n");
+        assert!(text.contains("Command rules"), "{text}");
+        assert!(text.contains("user"), "{text}");
+        assert!(
+            text.contains("Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Esc close"),
+            "{text}"
+        );
+        // A rule has a decision, not an on/off state.
+        let row = text
+            .lines()
+            .find(|line| line.contains("deny prefix git push"))
+            .expect("the rule has a row");
+        assert!(
+            !row.contains("enabled") && !row.contains("disabled"),
+            "{row}"
+        );
+    }
+
     /// A panel with nothing to show says so, and a failed read keeps the
     /// error rather than an empty list.
     #[test]

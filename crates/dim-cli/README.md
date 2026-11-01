@@ -356,14 +356,21 @@ See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-require
 ## Permission presets and approvals
 
 The App Server decides each tool call; the CLI selects settings and never decides a call itself.
-`/permissions` opens three independent controls, also available under `/settings`:
+`/permissions` opens three independent controls, also available under `/settings`, and the
+Command rules area:
 
 ```text
 Permissions
   File access         Read only / Workspace read/write / Unrestricted
   Tool approval       Ask / Bypass
   Process isolation   Off / Sandboxed · No network / Sandboxed · Network allowed
+  Command rules       List, add and remove the user's command rules
 ```
+
+The Command rules row opens the management panel of `Area::Permissions`: one entry per rule,
+whose id and label are the rule's value (`DECISION MATCH COMMAND`), with `Ctrl+R` reload, `Ctrl+N`
+add and `Ctrl+X` remove. A rule has a decision, not an on/off state. Esc returns to the Permissions
+panel.
 
 Choosing File access writes only `fileAccess`; choosing Tool approval writes only `toolApproval`.
 The UI preserves the branch's legacy preset and tool lists, and saves the chosen field alone in
@@ -1165,13 +1172,16 @@ The panel reads and writes the Session's workspace, not the directory the client
 and holds no area's vocabulary: an area's entries, kinds, documents and detail arrive from its
 adapter.
 
-Three areas use it, over the same kinds: Skills (`/skills`, `dimcode skills ...`) lists
-and toggles, Hooks (`/hooks`, `dimcode hooks ...`) adds the user document's edit, and the
+Four areas use it, over the same kinds: Skills (`/skills`, `dimcode skills ...`) lists
+and toggles, Hooks (`/hooks`, `dimcode hooks ...`) adds the user document's edit, the
 Scheduler (`/scheduled`, `/schedule`, `dimcode scheduled ...`) is the area that introduces add,
 remove, run and inspect — a job per entry from `schedule.list`, with `schedule.set_enabled`,
 `schedule.save` for the edit and the create, `schedule.delete`, `schedule.run_now` and
 `schedule.history`. Its subcommands are `dimcode scheduled list`, `enable ID`, `disable ID`,
-`edit ID`, `set ID PATH`, `add PATH`, `remove ID`, `run ID` and `history ID`.
+`edit ID`, `set ID PATH`, `add PATH`, `remove ID`, `run ID` and `history ID`. Command rules
+(`/permissions`'s Command rules row, `dimcode permissions ...`) is a rule per entry from
+`permission.rules` with `Ctrl+R`, `Ctrl+N` and `Ctrl+X`, writing through `permission.set_rules`;
+its subcommands are `dimcode permissions list`, `add PATH` and `remove 'DECISION MATCH COMMAND'`.
 
 The external editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows), run on Unix
 through `sh -c '<editor> "$@"' <editor> <file>` as git does, so a quoted path with a space

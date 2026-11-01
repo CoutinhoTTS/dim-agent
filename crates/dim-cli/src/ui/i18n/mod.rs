@@ -201,6 +201,19 @@ mod tests {
         }
     }
 
+    /// `/permissions` with arguments in the terminal UI says where they work,
+    /// in every locale.
+    #[test]
+    fn every_locale_translates_the_permissions_argument_notice() {
+        let key = "Use the line prompt or dimcode permissions.";
+        for (code, lookup) in tables() {
+            assert!(
+                lookup(key).is_some(),
+                "{code} lacks the permissions argument notice"
+            );
+        }
+    }
+
     /// `/settings` names the execution row.
     #[test]
     fn every_locale_translates_execution_settings() {

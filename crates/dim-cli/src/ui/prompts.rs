@@ -123,6 +123,8 @@ pub enum Effect {
     LanguageRestore(Option<crate::ui::i18n::Locale>),
     /// Flip or open a `/settings` row.
     Setting(crate::ui::settings_panel::Setting),
+    /// Open a management area's panel and read it.
+    OpenArea(crate::model::session::Area),
     /// Change a plugin (`/plugins`).
     Plugin(crate::model::session::PluginAction),
     /// One request to a management area (`/skills`, `/hooks`).

@@ -28199,6 +28199,14 @@
     },
     {
       "from": "dim_cli::ui::approvals_panel",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Area::Permissions",
+        "use crate::model::session::Area"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::approvals_panel",
       "to": "dim_cli::permission",
       "references": [
         "path Change::FileAccess",
@@ -28232,6 +28240,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::OpenArea",
         "path Effect::SetPermission",
         "path Effect::Setting",
         "use crate::ui::prompts::Effect"
@@ -30074,6 +30083,7 @@
         "path ActionKind",
         "path Area",
         "path Area::Hooks",
+        "path Area::Permissions",
         "path Area::Skills",
         "path EntryState",
         "path ManagementAction",
@@ -33921,6 +33931,7 @@
         "path Effect::OauthCancel",
         "path Effect::OauthPaste",
         "path Effect::OauthStart",
+        "path Effect::OpenArea",
         "path Effect::OpenModels",
         "path Effect::OpenPermissions",
         "path Effect::OpenUrl",

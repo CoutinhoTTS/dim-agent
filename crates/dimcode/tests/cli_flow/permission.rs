@@ -1423,3 +1423,341 @@ fn permissions_needs_the_rule_methods() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The requests a terminal UI makes before its management panel opens: the
+/// Session attach, then the readings the interface asks for when it enters.
+fn rules_start(wire: &mut Wire) {
+    wire.hello(&RULE_METHODS);
+    wire.created();
+    let attach = wire.read("session.attach");
+    wire.reply(&attach, attach_record(&attach));
+    let history = wire.read("session.history");
+    wire.reply(
+        &history,
+        json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+    );
+    for _ in 0..2 {
+        let request = wire.read_any();
+        match request["method"].as_str() {
+            Some("account.providers") => wire.reply(&request, json!([])),
+            Some("session.context.usage") => wire
+                .send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+            method => panic!("unexpected request {method:?}"),
+        }
+    }
+}
+
+fn rules_drain(wire: &mut Wire) {
+    let mut line = String::new();
+    while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+        line.clear();
+    }
+}
+
+/// Opens the Permissions panel and walks to its Command rules row.
+fn open_command_rules(terminal: &mut Terminal) {
+    terminal.write(b"/permissions\r");
+    terminal.until("Process isolation");
+    terminal.until("Command rules");
+    for _ in 0..3 {
+        terminal.raw(b"\x1b[B");
+    }
+    terminal.raw(b"\r");
+}
+
+/// An editor that turns the one-rule document into `git status`.
+fn rules_editor(home: &Home) -> PathBuf {
+    let path = home.0.join("rules-editor.sh");
+    fs::write(
+        &path,
+        "#!/bin/sh\nprintf '%s' '{\"command\":\"git status\",\"match\":\"exact\",\"decision\":\"deny\"}' > \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// `/permissions` reaches the Command rules area, which lists the rules with
+/// their states and detail, and Esc returns to the Permissions panel.
+#[test]
+fn tui_permissions_panel_lists_command_rules_and_returns() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            rules_start(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("permission.rules");
+            wire.reply(
+                &request,
+                rules_reply(
+                    "r1",
+                    json!([
+                        command_rule("allow", "exact", "cargo test -p dim-cli"),
+                        command_rule("deny", "prefix", "git push"),
+                    ]),
+                ),
+            );
+            rules_drain(wire);
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        open_command_rules(&mut terminal);
+        terminal.until("allow exact cargo test -p dim-cli");
+        terminal.until("deny prefix git push");
+        terminal.until("Matches only this command.");
+        terminal.until("Allows a simple command that would otherwise ask.");
+        terminal.until("Applies in every Session, in every workspace.");
+        // The hint paints each key and its label as separate spans.
+        terminal.until("Ctrl+N");
+        terminal.until("Ctrl+X");
+        // Esc returns to the Permissions panel the row was opened from.
+        terminal.raw(b"\x1b");
+        terminal.until("File access");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// Ctrl+N opens one rule in the editor and appends it; Ctrl+X asks, then
+/// removes the selected rule.
+#[test]
+fn tui_permissions_panel_adds_and_removes_command_rules() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let program = rules_editor(&home);
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            rules_start(wire);
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            let request = wire.read("permission.rules");
+            wire.reply(
+                &request,
+                rules_reply(
+                    "r1",
+                    json!([
+                        command_rule("allow", "exact", "cargo test -p dim-cli"),
+                        command_rule("deny", "prefix", "git push"),
+                    ]),
+                ),
+            );
+            // The create reads the list immediately before the append.
+            let request = wire.read("permission.rules");
+            wire.reply(
+                &request,
+                rules_reply(
+                    "r1",
+                    json!([
+                        command_rule("allow", "exact", "cargo test -p dim-cli"),
+                        command_rule("deny", "prefix", "git push"),
+                    ]),
+                ),
+            );
+            let request = wire.read("permission.set_rules");
+            assert_eq!(request["params"]["expectedRevision"], "r1");
+            assert_eq!(
+                request["params"]["commandRules"],
+                json!([
+                    command_rule("allow", "exact", "cargo test -p dim-cli"),
+                    command_rule("deny", "prefix", "git push"),
+                    command_rule("deny", "exact", "git status"),
+                ])
+            );
+            wire.reply(&request, json!({"revision": "r2"}));
+            // The remove reads the list it names the rule from.
+            let request = wire.read("permission.rules");
+            wire.reply(
+                &request,
+                rules_reply(
+                    "r2",
+                    json!([
+                        command_rule("allow", "exact", "cargo test -p dim-cli"),
+                        command_rule("deny", "prefix", "git push"),
+                        command_rule("deny", "exact", "git status"),
+                    ]),
+                ),
+            );
+            let request = wire.read("permission.set_rules");
+            assert_eq!(request["params"]["expectedRevision"], "r2");
+            assert_eq!(
+                request["params"]["commandRules"],
+                json!([
+                    command_rule("deny", "prefix", "git push"),
+                    command_rule("deny", "exact", "git status"),
+                ])
+            );
+            wire.reply(&request, json!({"revision": "r3"}));
+            rules_drain(wire);
+        });
+        let mut command = home.command();
+        command.env_remove("VISUAL").env("EDITOR", &program);
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("test / model");
+        shown.send(()).unwrap();
+        open_command_rules(&mut terminal);
+        terminal.until("allow exact cargo test -p dim-cli");
+        terminal.raw(b"\x0e");
+        // The list is drawn before the footer that names the addition.
+        terminal.until("deny exact git status");
+        terminal.until("Rule added: deny exact `git status`.");
+        // Ctrl+X asks about the selected rule first.
+        terminal.raw(b"\x18");
+        terminal.until("allow exact cargo test -p dim-cli? Enter confirm");
+        terminal.raw(b"\r");
+        terminal.until("Rule removed: allow exact `cargo test -p dim-cli`.");
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.raw(b"\x1b");
+        thread::sleep(Duration::from_millis(200));
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+/// A raced write writes nothing: the panel reports the conflict and shows
+/// the list read when it was found.
+#[test]
+fn tui_permissions_panel_reports_a_raced_remove() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        rules_start(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
+        );
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply("r1", json!([command_rule("deny", "prefix", "git push")])),
+        );
+        let write = wire.read("permission.set_rules");
+        fail(wire, &write, "permission_rules_conflict");
+        let request = wire.read("permission.rules");
+        wire.reply(&request, rules_reply("r2", json!([])));
+        rules_drain(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    open_command_rules(&mut terminal);
+    terminal.until("deny prefix git push");
+    terminal.raw(b"\x18");
+    terminal.until("deny prefix git push? Enter confirm");
+    terminal.raw(b"\r");
+    // The list is drawn before the footer that reports the conflict.
+    terminal.until("No entries.");
+    terminal.until("Command rules changed since they were read; nothing was removed.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A rule another surface writes appears on the next read, not before it.
+#[test]
+fn tui_permissions_panel_shows_a_rule_written_elsewhere_on_the_next_read() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        rules_start(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply(
+                "r1",
+                json!([command_rule("allow", "exact", "cargo test -p dim-cli")]),
+            ),
+        );
+        // Allow always, the line prompt or Web wrote a second rule.
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply(
+                "r1",
+                json!([
+                    command_rule("allow", "exact", "cargo test -p dim-cli"),
+                    command_rule("deny", "prefix", "npm publish"),
+                ]),
+            ),
+        );
+        rules_drain(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    open_command_rules(&mut terminal);
+    terminal.until("allow exact cargo test -p dim-cli");
+    let mark = terminal.transcript.len();
+    assert!(
+        !terminal.transcript[mark..].contains("deny prefix npm publish"),
+        "the panel does not read the list without a reload: {}",
+        terminal.transcript
+    );
+    terminal.raw(b"\x12");
+    terminal.until("deny prefix npm publish");
+    terminal.until("Reloaded.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// `/permissions` with arguments opens the panel and says where arguments
+/// work; it sends no rule write.
+#[test]
+fn tui_permissions_arguments_open_the_panel_and_are_not_ignored() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        rules_start(wire);
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(
+                !line.contains("\"permission.rules\"")
+                    && !line.contains("\"permission.set_rules\""),
+                "unexpected rule request: {line}"
+            );
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/permissions allow prefix npm test\r");
+    terminal.until("File access");
+    terminal.until("Use the line prompt or dimcode permissions.");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}

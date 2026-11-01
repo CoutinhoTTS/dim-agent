@@ -30,7 +30,7 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 Commands
   app     /exit        exit
   app     /keys        show the key bindings
-  model   /permissions   file access, tool approval and process isolation
+  model   /permissions   file access, tool approval, process isolation and command rules
 
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
@@ -405,7 +405,9 @@ adapter and the methods its kinds call, and names here the kinds it adds.
   create shape, filled with example values — and writes it with the area's create method. An
   unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
   reopens, as Ctrl+E does for an edit. A conflict keeps it too: a create has no revision, so
-  dropping the draft's link to a stale revision is an edit's rule, not a create's.
+  dropping the draft's link to a stale revision is an edit's rule, not a create's. An add that
+  appends an entry to a list it read, as the command rules area's does, retries the conflict
+  instead, because an append overwrites nothing.
   `dimcode <area> add PATH` (`-` for stdin) is the same write without an editor.
 - remove asks in the hint first: it becomes `Remove <label>? Enter confirm · Esc cancel`, and
   every key but Enter cancels without changing anything. Enter sends the area's delete method
@@ -484,8 +486,9 @@ Writes follow [Execution settings](#execution-settings):
   message state live in one place.
 - Adding an area means an adapter, its command menu rows, its subcommand verbs and its design
   rows. It adds no new `Prompt`, `Command` or `Update` variant.
-- Existing panels — `/plugins`, `/permissions` — move onto this structure when they are next
-  changed. This section does not migrate them, and they keep their own keys until then.
+- `/plugins` keeps its own panel. `/permissions` keeps its panel and its keys, and its Command
+  rules row opens the area below; the three controls are choices among values, not entries, so
+  they stay pages of the one panel.
 
 ```text
 /skills ──► Command::Management { area, List } ──► adapter
@@ -572,11 +575,37 @@ the panel's confirmation.
 
 ### The command rules area
 
-Command rules (#819): `dimcode permissions list|add PATH|remove RULE` over the user's command
-rules ([permission controls](#permission-controls),
-[command rules](appserver/permission-command-rules.md)). The owner reports the list and its
-Settings revision with `permission.rules`, and replaces the whole list at that revision with
-`permission.set_rules`; a stale revision is `permission_rules_conflict`.
+Command rules (#819): the Permissions panel's Command rules row and `dimcode permissions
+list|add PATH|remove RULE` over the user's command rules ([permission
+controls](#permission-controls), [command rules](appserver/permission-command-rules.md)). The
+owner reports the list and its Settings revision with `permission.rules`, and replaces the whole
+list at that revision with `permission.set_rules`; a stale revision is
+`permission_rules_conflict`.
+
+The row is appended after Process isolation, so the existing rows keep their positions. It opens
+this area's panel, and Esc there returns to the Permissions panel; the three controls above it
+keep their own pages.
+
+```text
+╭─ Permissions ─────────────────────────────────────────────────╮
+│ >                                                             │
+│   File access          Workspace read/write                 › │
+│   Tool approval        Ask (legacy tool exceptions)         › │
+│   Process isolation                                         › │
+│   Command rules                                             › │
+╰──── ↑↓/Tab move · Enter apply · Esc back ─────────────────────╯
+
+╭─ Command rules ───────────────────────────────────────────────╮
+│ >                                                             │
+│   user                                                        │
+│ › allow exact cargo test -p dim-cli                           │
+│   deny prefix git push                                        │
+│                                                               │
+│   Matches only this command.                                  │
+│   Allows a simple command that would otherwise ask.           │
+│   Applies in every Session, in every workspace.               │
+╰──── Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Esc close ───╯
+```
 
 Every rule is an entry. The owner has no id for one, so the id and the label are the rule's value,
 `DECISION MATCH COMMAND` — `allow exact cargo test -p dim-cli`, `deny prefix git push`. A rule has
@@ -668,7 +697,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
-| `/permissions` | Open independent File access, Tool approval and Process isolation controls; manage command rules while idle ([permission controls](#permission-controls)). |
+| `/permissions` | Open the Permissions panel: independent File access, Tool approval and Process isolation controls, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
 | `/approvals`, `/approval` | Compatibility aliases for `/permissions`; legacy preset arguments remain supported. |
 
 `dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
@@ -1240,11 +1269,19 @@ same controls as compatibility aliases, not a second preset chooser. The control
 `main`; each field selection writes only its dimension using the current whole policy and
 version. A failed save neither changes remembered choices nor falls back to a legacy preset.
 
+Process isolation opens the execution settings. The Command rules row opens the management panel
+of [The command rules area](#the-command-rules-area), where the rules are listed, added and
+removed; Esc there returns to this panel, and the three controls above the row keep their pages.
+Arguments after `/permissions` in the terminal UI open the panel and say where they work — the
+line prompt and `dimcode permissions` — instead of being ignored; the compact grammar belongs to
+the line prompt.
+
 ```text
 Permissions (main branch)
 > File access          Workspace read/write >
   Tool approval        Ask                  >
   Process isolation    Off                  >
+  Command rules                             >
 
 File access                         Tool approval
   Read only                       > Ask

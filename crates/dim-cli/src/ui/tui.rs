@@ -886,7 +886,9 @@ struct App {
     /// The `/settings` row a picker was opened from: closing the picker
     /// goes back to it.
     settings_return: Option<Setting>,
-    isolation_return_permissions: bool,
+    /// A surface was opened from the Permissions page: closing it goes back
+    /// to the page, as Process isolation and Command rules do.
+    permissions_return: bool,
     /// Fullscreen reads the mouse (`tuiMouseMode`); off leaves selection
     /// and the wheel to the terminal.
     pub mouse: bool,
@@ -1097,7 +1099,7 @@ impl App {
             service_tiers: false,
             jump: None,
             settings_return: None,
-            isolation_return_permissions: false,
+            permissions_return: false,
             mouse,
             notify,
             notifications: Vec::new(),
@@ -2716,6 +2718,12 @@ impl App {
                     &self.permission_policy,
                 )));
             }
+            Effect::OpenArea(area) => {
+                // A surface opened from the Permissions page returns there on
+                // Esc; any other caller opens with no return.
+                self.permissions_return = matches!(self.prompt, Some(Prompt::Approvals(_)));
+                self.open_management(area);
+            }
             Effect::StopTask {
                 session_id,
                 projection_id,
@@ -2783,7 +2791,7 @@ impl App {
                 self.setting(setting);
                 if from_permissions {
                     self.settings_return = None;
-                    self.isolation_return_permissions = true;
+                    self.permissions_return = true;
                 }
             }
             Effect::ThemePreview(id) => self.paint_theme(&id),
@@ -2878,7 +2886,7 @@ impl App {
                 policy,
             }),
         }
-        if self.prompt.is_none() && std::mem::take(&mut self.isolation_return_permissions) {
+        if self.prompt.is_none() && std::mem::take(&mut self.permissions_return) {
             self.open_prompt(Prompt::Approvals(ApprovalsPanel::new(
                 &self.permission_policy,
             )));
@@ -3447,6 +3455,12 @@ impl App {
                 Outcome::Continue
             }
             "permissions" | "approvals" | "approval" => {
+                // Arguments belong to the line prompt and to `dimcode
+                // permissions`; the terminal UI's surface is the panel, so
+                // it says where they work instead of ignoring them.
+                if !args.trim().is_empty() {
+                    self.set_notice(t("Use the line prompt or dimcode permissions."));
+                }
                 let panel = ApprovalsPanel::new(&self.permission_policy);
                 self.open_prompt(Prompt::Approvals(panel));
                 Outcome::Continue
