@@ -1160,6 +1160,32 @@ fn permissions_list_prints_each_rule_and_the_notes_that_read_them() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // The command is one column: an owner's text that carries a newline or a
+    // tab cannot break the row into pieces.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&RULE_METHODS);
+        let request = wire.read("permission.rules");
+        wire.reply(
+            &request,
+            rules_reply(
+                "r1",
+                json!([command_rule("deny", "prefix", "git\npush\tnow")]),
+            ),
+        );
+    });
+    let output = home
+        .command()
+        .args(["permissions", "list"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "deny\tprefix\tgit push now\n"
+    );
 }
 
 #[test]

@@ -429,7 +429,7 @@ async fn run_permissions(client: &mut Client, request: &ManagementRequest) -> Re
     match permissions::apply(client, &request.action).await {
         Ok(permissions::Answer::Rules { rules, note }) => {
             match note {
-                Some(note) => print_report(vec![safe(&note)], Vec::new()),
+                Some(note) => print_report(vec![safe_line(&note)], Vec::new()),
                 None => print_report(rule_rows(&rules), rule_notes(&rules)),
             }
             Ok(0)
@@ -441,7 +441,8 @@ async fn run_permissions(client: &mut Client, request: &ManagementRequest) -> Re
     }
 }
 
-/// One rule: its decision, match and command.
+/// One rule: its decision, match and command. The command is one column, so
+/// the owner's text is kept on one line before it joins the row.
 fn rule_rows(rules: &permission::Rules) -> Vec<String> {
     rules
         .command_rules
@@ -451,7 +452,7 @@ fn rule_rows(rules: &permission::Rules) -> Vec<String> {
                 "{}\t{}\t{}",
                 permission::decision_name(rule.decision),
                 permission::match_name(rule.matching),
-                safe(&rule.command),
+                safe_line(&rule.command),
             )
         })
         .collect()
