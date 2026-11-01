@@ -182,8 +182,8 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
             }
             target = Some((provider.clone(), model.clone()));
         }
-        if let Some(preset) = options.permission {
-            params["permissionPolicy"] = serde_json::json!({ "preset": preset });
+        if let Some(policy) = permission::creation_policy(options) {
+            params["permissionPolicy"] = policy;
         }
         let created: Created = match client.typed("session.create", params).await {
             Ok(created) => created,
@@ -591,6 +591,12 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             options.permission = ui::config::saved_permission(&options.home)
                 .and_then(|preset| permission::parse_preset(&preset).ok());
         }
+        options.file_access = ui::config::read(&options.home, "fileAccess")
+            .map(serde_json::from_value)
+            .transpose()?;
+        options.tool_approval = ui::config::read(&options.home, "toolApproval")
+            .map(serde_json::from_value)
+            .transpose()?;
         return open_tui_leaf(root, &options).await;
     }
     if matches!(options.action, Action::WebInstall) {

@@ -347,14 +347,7 @@ pub async fn chat(
                     draft.clear();
                     continue;
                 }
-                Some("/approval") => {
-                    display.record(
-                        "/approval chooses ask or full access in the terminal UI. At this prompt use /approvals.",
-                    )?;
-                    draft.clear();
-                    continue;
-                }
-                Some("/approvals" | "/permissions") => {
+                Some("/approvals" | "/permissions" | "/approval") => {
                     let text = text.as_deref().expect("plain approvals command");
                     if let Err(error) = permission_command::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {
                         display.record(&format!("Error: {error}"))?;
@@ -1143,12 +1136,14 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             let changed = permission::changed(&params["event"]);
             let notice: EventNotice = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
-                if let Some((sequence, preset)) = changed
+                if let Some((sequence, policy)) = changed
                     && sequence > display.cursor.max(display.permission_seen)
                 {
                     display.record(&format!(
-                        "[permission] main branch preset: {}",
-                        permission::name(preset)
+                        "[permission] main branch preset: {}; File access: {}; Tool approval: {}",
+                        permission::name(policy.preset),
+                        permission::file_label(policy.file_access()),
+                        permission::tool_label(policy.tool_approval())
                     ))?;
                     display.permission_seen = sequence;
                 }

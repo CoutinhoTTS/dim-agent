@@ -197,8 +197,7 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
-    /// Set the default tool-approval mode.
-    SetApprovals(String),
+    SetPermission(crate::permission::Change),
     /// List the providers of the `/connect` panel.
     ListProviders,
     /// Change one provider.
@@ -642,8 +641,8 @@ pub enum Update {
     IsolationBackend(Result<SandboxBackend, String>),
     /// A transient status-line message.
     Toast(String),
-    /// The default tool-approval mode (wire name).
-    Approvals(Result<String, String>),
+    Permissions(Result<dim_agent_types::PermissionPolicy, String>),
+    PermissionSelected(crate::permission::Change),
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.
     ProviderResult {

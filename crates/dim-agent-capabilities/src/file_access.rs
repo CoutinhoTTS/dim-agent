@@ -9,7 +9,7 @@ use crate::{
     workspace_tools::files::canonical_prefix,
 };
 use dim_agent_runtime::{AgentBuilder, Feature, Names, SessionConfig};
-use dim_agent_types::{PermissionPreset, grant::GrantMode};
+use dim_agent_types::{FileAccess, grant::GrantMode};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
@@ -38,7 +38,7 @@ pub trait ReadFileAccessFacts: Send + Sync + 'static {
     fn facts(
         &self,
         session_id: &str,
-        preset: PermissionPreset,
+        access: FileAccess,
         path: &Path,
         mode: GrantMode,
     ) -> HostFuture<'_, FileFacts>;
@@ -69,7 +69,7 @@ impl ReadFileAccessFacts for Facts {
     fn facts(
         &self,
         session_id: &str,
-        preset: PermissionPreset,
+        access: FileAccess,
         path: &Path,
         mode: GrantMode,
     ) -> HostFuture<'_, FileFacts> {
@@ -92,7 +92,7 @@ impl ReadFileAccessFacts for Facts {
             let grants = self.grants.0.grants(CancellationToken::new()).await?;
             let grant = grants.iter().any(|grant| match mode {
                 GrantMode::Write => {
-                    preset == PermissionPreset::WorkspaceWrite && grant.matches(&path, mode)
+                    access == FileAccess::WorkspaceReadWrite && grant.matches(&path, mode)
                 }
                 GrantMode::Read => grant.matches(&path, mode),
             });

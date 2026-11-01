@@ -360,6 +360,61 @@ async fn launch_policy_cap_matches_the_shared_scheduler_contract() {
                 .await,
         );
     }
+    for (bound, requested, access, approval) in [
+        (
+            json!({"preset":"full-access","fileAccess":"read-only","toolApproval":"bypass"}),
+            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}),
+            json!("read-only"),
+            json!("bypass"),
+        ),
+        (
+            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"ask"}),
+            json!({"preset":"full-access","fileAccess":"workspace-read-write","toolApproval":"bypass"}),
+            json!("workspace-read-write"),
+            json!("ask"),
+        ),
+        (
+            json!({"preset":"workspace-write"}),
+            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}),
+            json!("workspace-read-write"),
+            json!("ask"),
+        ),
+        (
+            json!({"preset":"read-only"}),
+            json!({"preset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}),
+            json!("read-only"),
+            Value::Null,
+        ),
+    ] {
+        let starter = client_session(&mut client, &agent, bound).await;
+        let launched = sessions.ok("launch", json!({
+            "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+            "policy":requested
+        })).await;
+        assert_eq!(launched["policy"]["fileAccess"], access);
+        assert_eq!(launched["policy"]["toolApproval"], approval);
+        assert_launched(&mut client, &agent, &launched, launched["policy"].clone()).await;
+        for id in [launched["sessionId"].as_str().unwrap(), starter.id()] {
+            assert_ok(&client.rpc("session.close", json!({"sessionId":id})).await);
+        }
+    }
+    for (bound, requested) in [
+        (json!({"preset":"read-only"}), json!({"toolApproval":"ask"})),
+        (json!({"toolApproval":"ask"}), json!({"preset":"read-only"})),
+    ] {
+        let starter = client_session(&mut client, &agent, bound).await;
+        let before = agent.sessions().len();
+        assert_eq!(sessions.error("launch", json!({
+            "cwd":std::env::temp_dir(),"starter":{"sessionId":starter.id(),"branchId":"main"},
+            "policy":requested
+        })).await, "rejected");
+        assert_eq!(agent.sessions().len(), before);
+        assert_ok(
+            &client
+                .rpc("session.close", json!({"sessionId":starter.id()}))
+                .await,
+        );
+    }
     for case in fixtures["reuse"].as_array().unwrap() {
         for (bound, expected) in [
             ("savedEffective", "withinSaved"),
