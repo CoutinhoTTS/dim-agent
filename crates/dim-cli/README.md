@@ -167,6 +167,20 @@ forgotten argument is a usage error and never clears a title. The method is
 Session-scoped, so the client finds it through `session.methods {sessionId}`:
 a Session that does not list it is reported as an unsupported daemon.
 
+`dimcode session delete SESSION` permanently deletes the Session through
+`session.delete`, and `dimcode session cleanup (--older-than DURATION | --keep N)
+[--yes]` deletes the Sessions a selector matches. Cleanup reads
+`session.summaries`, orders and filters by `updatedAt` (the last activity), and
+prints its selection before anything is deleted: the id, the title and how long
+ago the Session was active, one tab-separated line each. On a terminal only `y`
+or `yes` confirms and `--yes` skips the prompt; without a terminal nothing
+confirms, so a script passes `--yes`. A confirmed run deletes every selected id:
+each failure is printed with its id and the method's error, `dimcode session
+delete ID` is printed to retry it, and the run exits non-zero. `DURATION` is a
+count with a unit `d`, `h` or `m`. Because `session.delete` answers `{}` for an id
+its store holds no rows of, both verbs read the summaries first and report an id
+the daemon does not hold as an error with a non-zero exit.
+
 Use `dimcode export SESSION_ID [--output PATH] [--database PATH]` for a Session's
 whole Timeline ([ADR 005](../../docs/adr/005-observability.md) D3): every event of
 every branch with its before trace, as versioned JSONL. It runs the App Server binary

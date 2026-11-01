@@ -659,6 +659,15 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             session_command::rename(&mut client, session_id, title).await?;
             Ok(0)
         }
+        Action::SessionDelete { session_id } => {
+            session_command::delete(&mut client, session_id).await?;
+            Ok(0)
+        }
+        Action::SessionCleanup {
+            older_than,
+            keep,
+            yes,
+        } => session_command::cleanup(&mut client, *older_than, *keep, *yes).await,
         Action::Login(provider) => login::login(&mut client, &options, provider.as_deref()).await,
         Action::Account(provider) => login::account(&mut client, provider).await,
         Action::Logout(provider) => login::logout(&mut client, provider).await,

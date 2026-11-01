@@ -182,6 +182,8 @@ a user can through this control; that write creates no grant and changes no runn
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `dimcode session rename SESSION TITLE` | Set the Session's manual title through `session.rename` and print the title the server returns. |
 | `dimcode session rename SESSION --clear` | Clear the manual title, so the Session is untitled again. |
+| `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
+| `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
@@ -239,6 +241,7 @@ attached yet: with no Session shown, `/rename` reports that and sends nothing.
 `dimcode session rename SESSION TITLE` prints the title the server returns and
 `--clear` prints that the Session is untitled. Exactly one of TITLE and `--clear`
 is required, so a forgotten argument is a usage error and never clears a title.
+
 `/rename TITLE` and `/rename --clear` do the same for the shown Session and report
 which happened in one status line. The palette row declares the title argument, so
 choosing `/rename` from the palette fills `/rename ` and waits for it; Enter on a
@@ -249,6 +252,46 @@ runs. The `/resume` list reads `session.summaries` each time it opens, so it sho
 the new title; the header shows the first message's topic and is unaffected. The
 idle line client reads the same two forms and prints
 `Use /rename TITLE or /rename --clear` for a bare `/rename`.
+
+### Session deletion and cleanup
+
+`dimcode session delete SESSION` removes the Session and everything its store keeps
+([session deletion](appserver/session-deletion-and-fork.md)). There is no prompt: the
+id on the command line is the intent. `session.delete` answers `{}` for an id its store
+holds no rows of, so the command reads `session.summaries` first and reports an id the
+daemon does not hold as an error with a non-zero exit, instead of reading as a delete.
+That is not a usage error; a malformed command line is.
+
+`dimcode session cleanup` composes deletion from the same two methods, as
+[§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) requires. It
+selects with one of two selectors and reads both from the `updatedAt` of
+`session.summaries`, the Session's last activity:
+
+| Selector | Selection |
+| --- | --- |
+| `--older-than DURATION` | Every Session whose `updatedAt` is at least `DURATION` ago. `DURATION` is a count and a unit `d`, `h` or `m`, such as `30d`. |
+| `--keep N` | The N most recently active Sessions stay; every other Session is selected. |
+
+Exactly one selector is required. The command prints the selection before it reads a
+key — the id, the title (`-` when untitled) and how long ago the Session was last
+active, as one tab-separated line each, drawn here with spaces — and deletes only
+after confirmation:
+
+```text
+$ dimcode session cleanup --keep 3
+a1b2c3d4-…  Notes on the build  3d ago
+5e6f7a8b-…  -                   12d ago
+Delete 2 Sessions? [y/N] y
+Deleted a1b2c3d4-…
+Deleted 5e6f7a8b-…
+```
+
+On a terminal, only `y` or `yes` confirms. Without a terminal nothing confirms, so a
+script passes `--yes`, which also skips the prompt; otherwise the command refuses and
+names `--yes`. A confirmed run deletes every selected id even when one fails: each
+failure is reported with its id and the method's error, the command that retries it
+(`dimcode session delete ID`) is printed for each failed id, and the run exits
+non-zero. An empty selection prints that nothing matched and exits 0.
 
 ### Migration interaction
 

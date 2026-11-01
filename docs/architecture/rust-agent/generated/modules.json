@@ -3253,7 +3253,11 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/session_command.rs",
       "unexpandedMacros": [
+        "eprint",
+        "eprintln",
+        "format",
         "json",
+        "matches",
         "println"
       ]
     },
@@ -23693,6 +23697,8 @@
         "path Action::Recording",
         "path Action::RuntimeInstall",
         "path Action::RuntimeList",
+        "path Action::SessionCleanup",
+        "path Action::SessionDelete",
         "path Action::SessionRename",
         "path Action::Timeline",
         "path Action::Tui",
@@ -23941,6 +23947,8 @@
       "to": "dim_cli::session_command",
       "references": [
         "mod session_command",
+        "path session_command::cleanup",
+        "path session_command::delete",
         "path session_command::rename"
       ]
     },

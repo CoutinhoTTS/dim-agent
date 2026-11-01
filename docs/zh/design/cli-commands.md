@@ -153,6 +153,8 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `dimcode session rename SESSION TITLE` | 经 `session.rename` 设置该 Session 的手动标题，并打印服务端返回的标题。 |
 | `dimcode session rename SESSION --clear` | 清除手动标题，Session 回到无标题状态。 |
+| `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
+| `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
@@ -203,6 +205,39 @@ TITLE 与 `--clear` 必须恰好给出一个，所以漏写参数是用法错误
 中也是如此。`/resume` 列表每次打开都读取 `session.summaries`，因此显示新标题；页头显示的是
 首条消息的主题，不受影响。空闲的行式客户端读取同样的两种形式，对空的 `/rename` 打印
 `Use /rename TITLE or /rename --clear`。
+
+### 会话删除与清理
+
+`dimcode session delete SESSION` 删除该 Session 及其存储为它保留的一切
+（[Session 删除](appserver/session-deletion-and-fork.md)）。不弹出确认：命令行上给出的 id 就是意图。
+`session.delete` 对其存储中没有行的 id 答复 `{}`，所以该命令先读 `session.summaries`，把守护进程
+不持有的 id 报为错误并以非零状态退出，而不是读作一次删除。这不是用法错误；命令行本身写错才是。
+
+`dimcode session cleanup` 用同样的两个方法组合删除，符合
+[§5.1](appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count) 的要求。它用两个选择器之一，
+两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
+
+| 选择器 | 选择范围 |
+| --- | --- |
+| `--older-than DURATION` | `updatedAt` 距今至少 `DURATION` 的每个 Session。`DURATION` 是数字加单位 `d`、`h` 或 `m`，例如 `30d`。 |
+| `--keep N` | 保留最近活跃的 N 个 Session；其余全部选中。 |
+
+必须恰好给出一个选择器。命令在读取按键之前先打印选择结果——id、标题（无标题时 `-`）以及该 Session
+最后活跃距今多久，每个一行——确认之后才删除：
+
+```text
+$ dimcode session cleanup --keep 3
+a1b2c3d4-…  Notes on the build  3d ago
+5e6f7a8b-…  -                   12d ago
+Delete 2 Sessions? [y/N] y
+Deleted a1b2c3d4-…
+Deleted 5e6f7a8b-…
+```
+
+在终端上只有 `y` 或 `yes` 确认。没有终端时任何输入都不算确认，脚本要传 `--yes`，它同时跳过提示；
+否则命令拒绝并点名 `--yes`。确认后的运行即使某个 id 失败也会删除其余每个选中的 id：每个失败都连同
+其 id 和方法错误一起报告，并为每个失败的 id 打印可重试的命令（`dimcode session delete ID`），
+整次运行以非零状态退出。选择为空时打印没有命中并以 0 退出。
 
 P1 shell 前缀只用于交互输入。其执行、记录、进度、取消和生命周期遵循 [ShellInput](plugins/ShellInput.md)。
 CLI 在发送请求前生成 `runId`，从不重试一次运行。前缀之后的命令原样传递；空命令打印用法。

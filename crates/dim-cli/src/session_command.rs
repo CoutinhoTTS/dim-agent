@@ -1,11 +1,18 @@
-//! `dimcode session rename`: the manual title of a Session, as the terminal
-//! UI's `/rename` and the command line both set it.
+//! `dimcode session rename|delete|cleanup`: the manual title of a Session,
+//! permanent deletion, and cleanup composed from `session.summaries` and
+//! `session.delete` ([S5c §5.1](../../../docs/design/appserver/session-deletion-and-fork.md#51-cleanup-by-age-or-count)).
 
 use crate::{Result, client::Client, model::session::RenameReply, sanitize::safe};
 use serde::Deserialize;
 use serde_json::json;
+use std::{
+    io::{IsTerminal, Write},
+    time::Duration,
+};
 
 const RENAME_UNSUPPORTED: &str = "This daemon does not support renaming Sessions";
+const DELETE_UNSUPPORTED: &str = "This daemon does not support deleting Sessions";
+const CLEANUP_UNSUPPORTED: &str = "This daemon does not support cleaning up Sessions";
 
 #[derive(Deserialize)]
 struct Renamed {
@@ -20,6 +27,18 @@ struct Listed {
 #[derive(Deserialize)]
 struct Declared {
     name: String,
+}
+
+/// One stored Session as `session.summaries` reports it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Summary {
+    session_id: String,
+    /// When the Session was last active, in milliseconds since the epoch:
+    /// its newest stored event, or its creation when it has none.
+    updated_at: u64,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 /// `dimcode session rename`: sets the manual title, or clears it when `title`
@@ -82,6 +101,140 @@ async fn serves_rename(client: &mut Client, session_id: &str) -> Result<bool> {
         .methods
         .iter()
         .any(|declared| declared.name == "session.rename"))
+}
+
+/// `dimcode session delete`: permanently deletes the named Session.
+///
+/// `session.delete` answers `{}` for an id its store holds no rows of, so the
+/// summaries are read first: an id this daemon does not hold is reported as
+/// an error here instead of reading as a delete.
+pub async fn delete(client: &mut Client, session_id: &str) -> Result<()> {
+    if !client.supports(&["session.delete", "session.summaries"]) {
+        return Err(DELETE_UNSUPPORTED.into());
+    }
+    if !summaries(client)
+        .await?
+        .iter()
+        .any(|session| session.session_id == session_id)
+    {
+        return Err(format!(
+            "No Session {} is stored here; nothing was deleted",
+            one_line(session_id)
+        )
+        .into());
+    }
+    client
+        .rpc("session.delete", json!({"sessionId": session_id}))
+        .await?;
+    println!("Deleted {}", one_line(session_id));
+    Ok(())
+}
+
+/// `dimcode session cleanup`: shows the Sessions one selector names, asks for
+/// confirmation, then deletes every one of them.
+pub async fn cleanup(
+    client: &mut Client,
+    older_than: Option<Duration>,
+    keep: Option<usize>,
+    yes: bool,
+) -> Result<i32> {
+    if !client.supports(&["session.delete", "session.summaries"]) {
+        return Err(CLEANUP_UNSUPPORTED.into());
+    }
+    let mut sessions = summaries(client).await?;
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    let now = now_ms();
+    let selected: Vec<Summary> = match (older_than, keep) {
+        (Some(age), _) => {
+            let cutoff = now.saturating_sub(age.as_millis().try_into().unwrap_or(u64::MAX));
+            sessions
+                .into_iter()
+                .filter(|session| session.updated_at <= cutoff)
+                .collect()
+        }
+        (None, Some(keep)) => sessions.into_iter().skip(keep).collect(),
+        (None, None) => return Err("session cleanup needs --older-than or --keep".into()),
+    };
+    if selected.is_empty() {
+        println!("No Sessions matched; nothing was deleted.");
+        return Ok(0);
+    }
+    for session in &selected {
+        println!(
+            "{}\t{}\t{}",
+            one_line(&session.session_id),
+            session
+                .title
+                .as_deref()
+                .map(one_line)
+                .unwrap_or_else(|| "-".into()),
+            crate::ui::sessions_panel::relative_time(session.updated_at, now)
+        );
+    }
+    if !yes && !confirmed(selected.len())? {
+        println!("Nothing was deleted.");
+        return Ok(0);
+    }
+    let mut failed = Vec::new();
+    for session in &selected {
+        match client
+            .rpc("session.delete", json!({"sessionId": session.session_id}))
+            .await
+        {
+            Ok(_) => println!("Deleted {}", one_line(&session.session_id)),
+            Err(error) => {
+                eprintln!(
+                    "Cannot delete {}: {}",
+                    one_line(&session.session_id),
+                    crate::sanitize::safe(&error.to_string()).replace('\n', " ")
+                );
+                failed.push(session.session_id.clone());
+            }
+        }
+    }
+    if failed.is_empty() {
+        return Ok(0);
+    }
+    eprintln!("Retry each failed Session:");
+    for id in &failed {
+        eprintln!("dimcode session delete {}", one_line(id));
+    }
+    Ok(1)
+}
+
+/// Asks on the terminal, where only `y` or `yes` confirms; elsewhere the
+/// caller's `--yes` is the only confirmation.
+fn confirmed(count: usize) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Err(
+            "Cleanup deletes Sessions and this is not a terminal; pass --yes to delete without a prompt"
+                .into(),
+        );
+    }
+    eprint!("Delete {count} Sessions? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+/// Every Session of this daemon that `session.summaries` reports.
+async fn summaries(client: &mut Client) -> Result<Vec<Summary>> {
+    client.typed("session.summaries", json!({})).await
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 /// Text a daemon supplies as one printable line.
