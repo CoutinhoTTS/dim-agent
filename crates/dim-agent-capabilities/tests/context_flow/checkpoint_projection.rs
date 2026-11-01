@@ -1307,12 +1307,22 @@ async fn assert_stream_matches_full(name: &str, timeline: &Timeline, through: u6
             compacted,
             "{name} batch {batch} compaction"
         );
+        assert_eq!(
+            streamed.configuration,
+            context_configuration(&full),
+            "{name} batch {batch} configuration"
+        );
+        assert_eq!(
+            streamed.prompt,
+            PromptSnapshot::from_context(&full).revision,
+            "{name} batch {batch} prompt"
+        );
     }
 }
 
-/// The streamed read and the full render agree on entries, messages and the
-/// compaction, at page sizes that cut through outputs, atomic batches and
-/// compaction cuts.
+/// The streamed read and the full render agree on entries, messages,
+/// configuration, prompt and the compaction, at page sizes that cut through
+/// outputs, atomic batches and compaction cuts.
 #[tokio::test]
 async fn streamed_and_full_renders_agree_across_pages() {
     let mut cases = Vec::new();
@@ -1462,6 +1472,59 @@ async fn streamed_and_full_renders_agree_across_pages() {
     step(&timeline, "one", "r2", &["b"]);
     let through = timeline.sequence();
     cases.push(("keyed input blocks", timeline, through));
+
+    let timeline = paged_branch("configured-prompt").await;
+    timeline
+        .append(
+            EventKind::ContextConfigured(ContextConfiguredData {
+                timeline: "main".into(),
+                revision: "config".into(),
+                previous: None,
+                prompt: None,
+                settings: Box::new(ModelConfiguration {
+                    provider_id: "provider".into(),
+                    model_id: "model".into(),
+                    capability_snapshot: None,
+                    tools: None,
+                    tool_sources: Vec::new(),
+                    config: None,
+                    metadata: None,
+                }),
+                system: Some(SystemPrompt::Text("system".into())),
+                system_source: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    let hello = input(&timeline, "hello");
+    consumed(&timeline, &hello);
+    timeline.append(turn_start("one").into()).unwrap();
+    step(&timeline, "one", "r1", &["a"]);
+    timeline
+        .append(
+            EventKind::PromptChanged(PromptChangedData {
+                timeline: "main".into(),
+                revision: "prompt-1".into(),
+                previous: None,
+                reason: PromptChangeReason::Initialize,
+                changes: vec![PromptChange::Set {
+                    entry: PromptEntry {
+                        source: "host".into(),
+                        version: "v1".into(),
+                        body: "rules".into(),
+                        scope: PromptScope::Branch {
+                            timeline: "main".into(),
+                        },
+                        delivery: PromptDelivery::Context,
+                        order: 0,
+                    },
+                }],
+            })
+            .into(),
+        )
+        .unwrap();
+    let through = timeline.sequence();
+    cases.push(("a configured model and prompt", timeline, through));
 
     for (name, timeline, through) in cases {
         assert_stream_matches_full(name, &timeline, through).await;

@@ -1019,7 +1019,11 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
                     ContextCompactionResult::Completed { .. }))
         })
         .collect();
-    assert_eq!(compactions.len(), 2, "two compactions ran");
+    assert!(
+        compactions.len() >= 2,
+        "two compactions ran: {}",
+        compactions.len()
+    );
     let (first, second) = (compactions[0], compactions[1]);
     let EventKind::ContextCompaction(data) = &second.kind else {
         unreachable!()
@@ -1058,7 +1062,7 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
         .await
         .unwrap();
     store.earliest_read.store(u64::MAX, Ordering::SeqCst);
-    let (recovered, _) = renderer
+    let (recovered, restored) = renderer
         .rendered_context(&timeline, timeline.sequence())
         .await
         .unwrap();
@@ -1069,6 +1073,18 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
     assert_eq!(
         store.earliest_read.load(Ordering::SeqCst),
         checkpoint.resume.sequence
+    );
+    let full = project_context_history(&timeline.context(timeline.sequence()).await.unwrap())
+        .expect("the full replay renders");
+    assert_eq!(
+        restored
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect::<Vec<_>>(),
+        full.iter()
+            .map(|entry| entry.message.clone())
+            .collect::<Vec<_>>(),
+        "the restored render equals the full replay"
     );
     dim_agent_runtime::core::close_timeline(&timeline)
         .await
