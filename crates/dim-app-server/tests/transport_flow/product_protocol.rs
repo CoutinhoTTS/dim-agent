@@ -469,6 +469,11 @@ finally:
         )
         .await;
     assert_ok(&tested);
+    assert_eq!(tested["result"]["status"], "connected", "{tested}");
+    assert!(
+        tested["result"]["latencyMs"].as_u64().is_some(),
+        "a probe reports the latency of its attempt: {tested}"
+    );
     assert_eq!(tested["result"]["tools"][0]["name"], "inspect");
     assert_eq!(
         tested["result"]["tools"][0]["description"],
@@ -501,11 +506,26 @@ finally:
     assert_eq!(inspected["result"]["connections"], json!([]));
     assert!(!inspected.to_string().contains("probe-secret-value"));
     let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"command":"missing-probe-secret-command"}})).await;
-    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&failed);
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert_eq!(failed["result"]["reason"], "unavailable", "{failed}");
+    assert!(failed["result"]["tools"].is_null(), "{failed}");
+    assert!(
+        failed["result"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "a failed probe explains itself: {failed}"
+    );
+    assert!(
+        failed["result"]["latencyMs"].as_u64().is_some(),
+        "a failed probe reports its latency: {failed}"
+    );
     assert!(!failed.to_string().contains("missing-probe-secret-command"));
     std::fs::remove_file(marker.with_extension("closed")).unwrap();
     let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"fail-discovery"]}})).await;
-    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&failed);
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert!(failed["result"]["tools"].is_null(), "{failed}");
     assert!(!failed.to_string().contains("discovery-secret-failure"));
     assert!(
         marker.with_extension("closed").exists(),
@@ -513,9 +533,11 @@ finally:
     );
     std::fs::remove_file(marker.with_extension("closed")).unwrap();
     let refused = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"bad-schema"]}})).await;
-    assert_eq!(refused["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&refused);
+    assert_eq!(refused["result"]["status"], "failed", "{refused}");
+    assert_eq!(refused["result"]["reason"], "response", "{refused}");
     assert_eq!(
-        refused["error"]["message"],
+        refused["result"]["message"],
         "invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
     );
     assert!(
@@ -540,6 +562,27 @@ finally:
     );
     let refused = client.rpc("mcp.test", json!({"source":"project","id":"new","cwd":home.join("project"),"configuration":configuration})).await;
     assert_eq!(refused["error"]["data"]["appError"], "invalid_params");
+    for (request, expected) in [
+        (
+            json!({"source":"user","id":" ","configuration":configuration}),
+            "invalid_params",
+        ),
+        (json!({"source":"user","id":"absent"}), "mcp_unknown_server"),
+        (
+            json!({"source":"plugin","id":"kit:docs","patch":{"command":"other"}}),
+            "invalid_params",
+        ),
+        (
+            json!({"source":"user","id":"probe","patch":{"url":"https://example.invalid"}}),
+            "invalid_params",
+        ),
+    ] {
+        let refused = client.rpc("mcp.test", request).await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], expected,
+            "a request refused before contact stays an error: {refused}"
+        );
+    }
     let catalog = client
         .rpc("mcp.catalog", json!({"cwd":home.join("project")}))
         .await;

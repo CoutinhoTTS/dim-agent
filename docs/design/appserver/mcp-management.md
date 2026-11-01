@@ -400,7 +400,7 @@ Flow level, reusing the existing MCP flows:
 | File | What it protects |
 | --- | --- |
 | `crates/dim-app-server/tests/transport_flow/product_protocol.rs` | The wire contract on local v3: the read returns the revision the catalog reports for the same source; creating an entry with the catalog's source revision succeeds and a stale revision is `mcp_settings_conflict`; a plugin entry's read has no revision and a write to it is `invalid_params`; a project entry patched on one unrelated field leaves `.mcp.json` without a resolved `cwd` and without an `enabled` key; no withheld value appears in the read, including after an edit; and a probe reports `connected` with a latency and every tool, or `failed` with `reason`/`message` and no tools, without changing the source revision or creating a Session connection |
-| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd`; a user entry's read carries its declared configuration and revision; a probe returns its report rather than an error when the server refuses |
+| `crates/dim-app-server/tests/mcp_flow.rs` | The service level: a source's read returns its declared entry with the source revision, and a project entry's enablement comes from the user's record, while the effective entry a Session runs resolves the workspace `cwd`; a user entry's read carries its declared configuration and revision |
 | `crates/dim-app-server/tests/mcp_oauth_flow.rs` | A probe of an unauthorized entry reports `authRequired`, with `expired` where Dim's stored credential was rejected and `missingScopes` where the server answered `403 insufficient_scope`; existing evidence that `mcp.inspect` and `mcp.update` keep their replies for an OAuth entry |
 
 The redaction assertions of
@@ -408,9 +408,11 @@ The redaction assertions of
 shape rather than moving to a new test: the same fixture writes argument, environment, header,
 bearer and URL secrets and reads the entry back.
 
-The 30-second deadline is not exercised by a flow test, as today: reaching it costs 30 seconds of
-real time for one outcome. The probe's `cleanup` outcome is covered by the refusal paths that
-already assert the spawned child has closed.
+The probe is asserted through the management method, in the transport flow, because its outcome
+is the reply rather than a service result the fixture can call; its auth outcomes need the OAuth
+fixture. The 30-second deadline is not exercised by a flow test, as today: reaching it costs 30
+seconds of real time for one outcome. The probe's `cleanup` outcome is covered by the refusal
+paths that already assert the spawned child has closed.
 
 ## 11. Rule check
 
