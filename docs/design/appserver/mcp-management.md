@@ -190,11 +190,16 @@ portability is needed.
 While an entry has an overlay, `mcp.configuration` reports `secretsInUserScope: true`.
 `mcp.update` refuses a patch that sets `args`, `env`, `headers`, `bearer`, `url` when the overlay
 holds it, or the hidden OAuth fields with `mcp_credentials_are_user_scoped`; `mcp.save` on the
-entry is refused entirely, because a complete configuration would have to omit or rewrite what
-the overlay holds. A non-secret patch is applied to the merged entry but written back as the
-public skeleton only; the overlay-held fields stay in `mcp-secrets`. Non-secret fields remain
-patchable; moving the entry back to user scope restores full editing. The read still shows the
-merged names, counts and `authConfigured`/`oauthConfigured`.
+entry is refused entirely. `mcp.save` is a complete single-document replacement: splitting it
+across `.mcp.json` and `mcp-secrets` would make a partial save possible, and the client does not
+hold the hidden values it would have to submit. `mcp.update` remains the complete path for every
+non-secret field, and a non-secret patch is applied to the merged entry but written back as the
+public skeleton only; the overlay-held fields stay in `mcp-secrets`. To change a withheld field,
+the one-step recovery is `mcp.move` with `{id, from: "project", to: "user", cwd,
+expectedFromVersion: <project revision>, expectedToVersion: <user revision>}`; the entry is fully
+editable in user scope, and moving it back re-applies the split. The error message names that
+move and the Web page offers it as an action. The read still shows the merged names, counts and
+`authConfigured`/`oauthConfigured`.
 
 ### D13. Overlay life cycle follows the project entry
 
@@ -319,10 +324,12 @@ A project entry with `secretsInUserScope: true` (D11, D12) refuses a patch that 
 `env`, `headers`, `bearer`, `url` when the overlay holds it, or the hidden OAuth fields
 (`authServerMetadataUrl`, unknown `oauth` extension fields) with
 `mcp_credentials_are_user_scoped`; `mcp.save` on that entry is refused entirely. The message
-says to move the entry back to user scope. `command`, `cwd`, `oauth.clientId`,
-`oauth.callbackPort` and `oauth.scopes` remain editable. A non-secret patch is applied to the
-merged entry and written back to `.mcp.json` as the public skeleton only; the overlay-held fields
-stay in `mcp-secrets` and are never copied into the file.
+names the one-step recovery: `mcp.move {id, from: "project", to: "user", cwd,
+expectedFromVersion: <project revision>, expectedToVersion: <user revision>}`. After the move
+the entry is fully editable; moving it back re-applies the overlay split. `command`, `cwd`,
+`oauth.clientId`, `oauth.callbackPort` and `oauth.scopes` remain editable without a move. A
+non-secret patch is applied to the merged entry and written back to `.mcp.json` as the public
+skeleton only; the overlay-held fields stay in `mcp-secrets` and are never copied into the file.
 
 ### 4.4 Errors
 
@@ -400,6 +407,20 @@ destination and retrying is safe and avoids guessing whether the overlay is pres
 destination entry exists, the client retries the move; the enablement clear alone is harmless.
 The into-user recovery is safe at every phase after the user entry commit.
 
+Retrying `mcp.move` unchanged is not idempotent after a destination-side write: the destination
+source now holds the id and the retry answers `mcp_move_conflict`. The deterministic finish is:
+
+- into project: remove the destination with `mcp.remove`, using the destination revision from
+  `mcp.catalog`; then resend `mcp.move` with the unchanged source revision and the destination
+  revision the catalog reports after the removal. Do not resend before the removal.
+- into user: remove the project source with `mcp.remove`; the user entry is complete. Do not
+  resend the move.
+- A partial that only cleared enablement has no destination entry; resending the move with the
+  current revisions is safe.
+
+The `mcp_move_partial` message names the direction and the next operation, and the Web page
+offers it as an action. There is no resume flag and no skip-a-step mode.
+
 The source and destination revisions are checked once before the first write, and every write is
 CAS. A concurrent write to either source, the overlay or the enablement record makes that write
 fail (`mcp_settings_conflict`, or `mcp_move_partial` if a destination write already committed).
@@ -449,6 +470,55 @@ absent, never an enabled entry without its secrets; the caller retries. `mcp.sav
 entry with an overlay is refused with `mcp_credentials_are_user_scoped`; use `mcp.update` for its
 non-secret fields or move it back to user scope. Moving back to user deletes the overlay in the
 same operation.
+
+### 4.6 The `mcp-secrets` document
+
+`mcp-secrets` is a user-scope-only Settings source (`mcp-secrets.json`; no project file) owned by
+Mcp. It is a `BusinessDocument` with one opaque revision for the whole document; every move or
+remove that changes it takes that revision as CAS. The client never supplies it
+and no client method reads the document; as a Rust source, `settings.read` answers
+`settings_unknown_source`, and the MCP methods return only redacted projections. Settings'
+user-scope storage and access rules apply (0600 file on Unix or the native row), so the overlay
+has the same protection as the other MCP documents.
+
+The document is:
+
+```json
+{
+  "entries": {
+    "/canonical/workspace": {
+      "github": {
+        "args": ["--stdio"],
+        "env": {"TOKEN": "…"},
+        "headers": {"Authorization": "…"},
+        "auth": {"type": "bearer", "token": "…"},
+        "url": "https://user:pass@host/mcp?key=…",
+        "oauth": {"authServerMetadataUrl": "…", "extra": {}},
+        "extra": {}
+      }
+    }
+  }
+}
+```
+
+Validation at the Settings boundary rejects unknown fields at every level except the two
+designated extension maps (`extra` on the record and on `oauth`), a non-absolute or empty
+workspace, an empty id, empty environment/header names, an empty bearer token, and a `url` that
+is not an absolute URL. A record may carry only the members of its entry's transport; a stdio
+record with `url`/`headers`/`auth` or a remote record with `args`/`env` is invalid. The merged
+entry is validated again as a whole before use.
+
+The key is the canonical workspace path at move time, the same key `mcp-projects` uses; the two
+documents are independent (one holds enablement, the other hidden values) and both are written by
+the move. A renamed or moved workspace therefore changes the key: the old record is inert, the
+new path has no overlay and reports `secretsInUserScope: false`, and the user re-runs the move or
+re-enters the values. Deleting a workspace leaves an inert record; it is never applied to another
+workspace. There is no background scavenger; `mcp.remove` or a move back to user deletes the
+record while the workspace is still reachable.
+
+No format version is added: this is a new Settings document validated at its boundary, not a
+binary store. A missing file reads as empty, and a future incompatible shape changes the source
+name or adds a version rather than silently reusing this one.
 
 ## 5. What changes for a client
 

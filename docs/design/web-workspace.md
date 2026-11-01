@@ -372,11 +372,16 @@ removed.
 After a move the page reloads the catalog and opens the destination entry. When
 `mcp.configuration` reports `secretsInUserScope`, the withheld editors (`args`,
 environment, headers, bearer, URL and the metadata URL) are disabled with the
-reason that they are edited in user scope; the owner refuses those patch fields
-regardless. On `mcp_move_conflict` or `mcp_settings_conflict` the page keeps the
-form and rereads. On `mcp_move_partial` it follows the direction's recovery: into
-project remove the destination and retry, into user remove the project source; it
-never removes the source while the destination may be incomplete.
+reason that they are edited in user scope; `mcp.save` is not offered, and
+non-secret fields save through `mcp.update`. The page offers “Move to user to
+edit” as the one-step action for a withheld field: it calls `mcp.move` from
+project to user with the current revisions, then the entry is fully editable; the
+same action is offered when `mcp_credentials_are_user_scoped` answers. On
+`mcp_move_conflict` or `mcp_settings_conflict` the page keeps the form and
+rereads. On `mcp_move_partial` it follows the direction's recovery: into project
+remove the destination and retry, into user remove the project source; it never
+removes the source while the destination may be incomplete, and it never resends
+the move blindly because the destination id would answer `mcp_move_conflict`.
 
 ```text
 ┌ MCP · github ────────────────────────────────────────────┐
