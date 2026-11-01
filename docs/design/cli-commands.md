@@ -489,7 +489,9 @@ select neither counts toward `--keep N` nor appears in the preview.
 A Session with a running turn or an attached client is kept: the preview lists the
 skipped Sessions after the selection under `Kept (active):`, in the same columns
 followed by the reason (`running`, `N clients attached`), and no such Session is
-deleted, `--yes` included. `--keep N`
+deleted, `--yes` included. A line that failed or is closing is not a reason to keep
+one: nothing runs on it, and the delete's own close settles it, so cleanup deletes such
+a Session when nothing else uses it. `--keep N`
 still keeps the N most recently active Sessions, and an active Session older than those
 is kept as well without its consuming one of the N. `dimcode session delete ID` still
 deletes an active Session on purpose: the server permits it, and this is the bulk

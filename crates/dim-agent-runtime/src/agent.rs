@@ -389,13 +389,15 @@ impl Agent {
     }
 }
 /// What uses a Session: an owner of accepted detached work holding it, or a
-/// line that is not idle. [`Session::in_use`] reports it.
+/// line with a turn running or work its dispatch has not reached.
+/// [`Session::in_use`] reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InUse {
     /// A [`SessionHold`] exists.
     Held,
-    /// A line that has not finished its own close is not idle.
-    Line,
+    /// A line has a turn running, or accepted work its dispatch has not
+    /// reached. A line that failed or is closing has neither.
+    Running,
 }
 #[derive(Clone)]
 pub struct Session(Arc<SessionInner>);
@@ -690,9 +692,11 @@ impl Session {
         self.0.close.wait()
     }
     /// What uses this Session, or `None` when nothing does: a [`SessionHold`],
-    /// or a line that has not finished its own close and is not idle. A query
-    /// that freezes, refuses and unloads nothing; [`Self::unload_if_idle`]
-    /// reads the same answer before it releases the instance.
+    /// or a line with a turn running or work its dispatch has not reached. A
+    /// line that failed or is closing keeps nothing. A query that freezes,
+    /// refuses and unloads nothing; [`Self::unload_if_idle`] takes its own,
+    /// stricter reading under each branch's commit lock before it releases
+    /// the instance.
     pub fn in_use(&self) -> Option<InUse> {
         if self.0.owner.lifecycle.held() {
             return Some(InUse::Held);
@@ -703,9 +707,9 @@ impl Session {
                 self.0
                     .tree
                     .get(&info.id)
-                    .is_none_or(|branch| !branch.0.is_closed() && !branch.0.is_idle())
+                    .is_none_or(|branch| branch.0.is_running())
             })
-            .then_some(InUse::Line)
+            .then_some(InUse::Running)
     }
     /// The host must exclude new uses while checking and releasing an instance.
     /// Idle release records no stop events and emits no business close notice.

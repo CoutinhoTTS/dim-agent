@@ -1,7 +1,9 @@
 //! `session.delete` through the wire (S5c §3, acceptance 1, 2 and 9) on
 //! disposable native stores.
 use super::*;
+use dim_agent_runtime::{Dispatcher, Names};
 use rusqlite::Connection;
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -448,6 +450,111 @@ async fn require_inactive_deletes_an_idle_loaded_and_an_unloaded_session() {
         );
         assert!(store.rows(id).is_empty(), "{id}: {:?}", store.rows(id));
     }
+    drop((client, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Holds a line's Dispatcher so the test can fail it, as a capability fault
+/// does. The runtime tests fail a dispatcher with a subscriber that panics
+/// (`dim-agent-capabilities`' `dispatch_flow`); a transport test cannot
+/// subscribe into a loaded branch, so this probe records the Dispatcher of
+/// the branch it is applied to and the test calls [`Dispatcher::fail`].
+struct LineProbe {
+    dispatcher: Arc<std::sync::Mutex<Option<Arc<Dispatcher>>>>,
+    key: Key<Dispatcher>,
+}
+impl LineProbe {
+    fn new(
+        names: &Names<'_>,
+        dispatcher: &Arc<std::sync::Mutex<Option<Arc<Dispatcher>>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: dispatcher.clone(),
+            key: names.key()?,
+        })
+    }
+}
+impl DynPlugin for LineProbe {
+    fn name(&self) -> &str {
+        "deletion-line-probe"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.key.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            *self.dispatcher.lock().unwrap() = Some(ctx.require_at(&self.key)?);
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// §3.2 step 1 and §5.1: a line that failed is not in use. The summaries
+/// report the Session not running, so cleanup selects it, and the delete
+/// removes it instead of refusing it with "a turn is running". An idle
+/// unload still refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn require_inactive_deletes_a_session_whose_line_failed() {
+    let store = Store::new();
+    let dispatcher = Arc::new(std::sync::Mutex::new(None));
+    let captured = dispatcher.clone();
+    let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
+        builder.require_feature(
+            Feature::new("deletion-line-probe").branch("deletion-line-probe", move |names| {
+                Ok(Box::new(LineProbe::new(names, &captured)?))
+            }),
+        );
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let sid = session(&mut client).await;
+    eventually("line probe", || dispatcher.lock().unwrap().is_some()).await;
+    dispatcher
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .fail(dim_agent_runtime::AgentError::fault(
+            "deletion test",
+            "line failed",
+        ));
+    let loaded = agent.get_session(&sid).unwrap();
+    eventually("failed line", || {
+        loaded
+            .state("main")
+            .is_ok_and(|state| state.failure.is_some() && !state.running)
+    })
+    .await;
+    let summaries = client.rpc("session.summaries", json!({})).await;
+    let row = summaries["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == sid)
+        .unwrap_or_else(|| panic!("the failed Session is listed: {summaries}"))
+        .clone();
+    assert_eq!(
+        row["running"], false,
+        "the failed line is not running: {row}"
+    );
+    assert!(
+        !loaded.unload_if_idle().await.unwrap(),
+        "a failed line still refuses an idle unload"
+    );
+
+    let deleted = client
+        .rpc(
+            "session.delete",
+            json!({"sessionId":sid,"requireInactive":true}),
+        )
+        .await;
+    assert_eq!(
+        deleted["result"],
+        json!({"deleted": true}),
+        "a failed line does not keep the Session: {deleted}"
+    );
+    assert!(store.rows(&sid).is_empty(), "{:?}", store.rows(&sid));
     drop((client, agent));
     server.shutdown();
     server.join().await.unwrap();

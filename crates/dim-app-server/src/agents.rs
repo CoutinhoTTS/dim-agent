@@ -1349,7 +1349,7 @@ impl AgentIndex {
         if let Some((_, session)) = self.session(id) {
             match session.in_use() {
                 Some(InUse::Held) => reasons.push("a background task holds it".to_owned()),
-                Some(InUse::Line) => reasons.push("a turn is running".to_owned()),
+                Some(InUse::Running) => reasons.push("a turn is running".to_owned()),
                 None => {}
             }
         }

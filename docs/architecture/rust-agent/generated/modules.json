@@ -15634,7 +15634,7 @@
       "references": [
         "path Agent",
         "path InUse::Held",
-        "path InUse::Line",
+        "path InUse::Running",
         "path Session",
         "use dim_agent_runtime::Agent",
         "use dim_agent_runtime::InUse",

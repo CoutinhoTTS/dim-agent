@@ -110,8 +110,9 @@ are Rust methods over the native store, not services: only Agents calls them.
    pass for every Session it would remove with S (its led members, recursively), that nothing uses them. A Session is
    in use when a `SessionUse` is held, which every accepted request and every subscription holds, so an attached
    client counts; when a `SessionHold` exists, which accepted detached work takes; or when it is loaded and one of its
-   lines is not idle, by the same reading the idle unloader takes (`Session::in_use`, every line). An unloaded Session
-   has no line and no hold, so only its uses can make it in use. A refusal is `session_active` (§3.5) and removes
+   lines has a turn running or accepted work its dispatch has not reached (`Session::in_use`, every line). A line
+   that failed or is closing keeps no Session: nothing runs on it, and the delete's own close settles what it holds.
+   An unloaded Session has no line and no hold, so only its uses can make it in use. A refusal is `session_active` (§3.5) and removes
    nothing; the message says what uses the Session. Only the owner can answer this: it alone sees the uses, holds and
    lines of the moment, and a client's read of the summaries can only date from before the delete. Because the gate
    stays held until S is forgotten, no new use of S is admitted after the check. A led member is read without its own
@@ -202,7 +203,7 @@ Every step tolerates an absent target, so a delete can be retried after any fail
 | `unknown_method` (-32601) | Protocol v1 or v2 | Unchanged |
 | `invalid_params` (-32602) | `sessionId` missing or not a string | Unchanged |
 | `session_protocol_version` | S belongs to another protocol version | Unchanged |
-| `session_active` (-32000) | `requireInactive` and S, or a Session the delete would remove with it, is in use (§3.2 step 1) | Unchanged: nothing is removed and nothing is closed. The message says why: a turn is running, a background task holds it, or how many requests and subscriptions use it |
+| `session_active` (-32000) | `requireInactive` and S, or a Session the delete would remove with it, is in use (§3.2 step 1) | Unchanged: nothing is removed and nothing is closed. The message says why: a turn is running, a background task holds it, or how many requests and subscriptions use it. A line that failed or is closing is not a reason: it keeps no Session |
 | `product_integration_pending` | The profile does not serve Session execution | Unchanged |
 | `-32603` "Session operation failed" | Step 3 failed (`Locked`, `DirectoryNotEmpty`, `Unsynced`, I/O, node unavailable) or step 4 failed (SQLite) | If step 2 closed S, S is closed but not deleted, as after `session.close`: its rows remain, it is neither listed nor loaded again in this process, and the relations its close ended stay ended. After a restart it loads, possibly with part of its command output gone. A Session that was not loaded is unchanged. Retry |
 | No reply | The connection or Rpc ended before the reply | Either state. Retry |

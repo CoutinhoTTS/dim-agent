@@ -186,8 +186,9 @@ and cleanup then stops before any delete with
 before anything is deleted: the id, the title and how long ago the Session was active,
 one tab-separated line each. A Session with a running turn or an attached client is
 kept, listed after the selection under `Kept (active):` with its reason, and `--keep N`
-keeps it without its consuming one of the N. Every delete carries
-`requireInactive: true`, so the daemon checks the Session again at the delete; a
+keeps it without its consuming one of the N; a failed or closing line is not a reason
+to keep one, so such a Session is deleted when nothing else uses it. Every delete
+carries `requireInactive: true`, so the daemon checks the Session again at the delete; a
 `session_active` refusal is listed under `Kept (active):` after the deletes with the
 daemon's reason and is not a failure. When nothing was deleted because every matching
 Session is active, the command prints `Nothing to delete: every matching Session is

@@ -400,7 +400,9 @@ TITLE 视为缺失，也按同样方式拒绝。
 
 轮次正在运行或仍有客户端附着的 Session 会被保留：预览在选择结果之后以 `Kept (active):` 列出这些
 被跳过的 Session，列与选择结果相同，其后是原因（`running`、`N clients attached`），这样的 Session
-一律不删除，`--yes` 也一样。`--keep N` 仍然保留最近活跃的 N 个 Session；比这 N 个更旧的活跃 Session
+一律不删除，`--yes` 也一样。失败或正在关闭的线不是保留的理由：线上没有工作，删除自身的关闭会结算它，
+所以没有别的使用在用时，清理会删除这样的 Session。`--keep N` 仍然保留最近活跃的 N 个 Session；
+比这 N 个更旧的活跃 Session
 也保留，且不占用 N 中的一个名额。`dimcode session delete ID` 仍可有意删除一个活跃 Session：服务端
 允许，这条规则属于批量命令。这个划分是预览对 `running`（只覆盖 `main`）与 `attachedClients` 的读取；
 每个删除都带 `requireInactive: true`，所以所有者在删除时再查一次，逐条线，并把使用与 hold 都算进去。

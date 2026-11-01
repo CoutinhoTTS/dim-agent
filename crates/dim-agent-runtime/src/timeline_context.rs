@@ -563,22 +563,36 @@ impl TimelineContext {
             tokio::time::sleep(LOOP_RETURN_POLL).await;
         }
     }
-    /// Whether the line is idle: it is not closing or failed, it accepts
-    /// appends, dispatch has reached the tail and Loop is between turns. A
-    /// read that takes no commit lock and changes nothing;
-    /// [`Self::lock_idle`] takes the same reading under that lock.
-    pub(crate) fn is_idle(&self) -> bool {
-        self.timeline
-            .open_tail()
-            .is_some_and(|tail| self.idle_at(tail))
+    /// Whether this line has work going on: a turn running, or accepted work
+    /// dispatch has not reached yet. A line that is closing or failed has
+    /// none: nothing runs on it, and its own close settles what it holds.
+    pub(crate) fn is_running(&self) -> bool {
+        if self.is_closing() || self.dispatcher.failure().is_some() {
+            return false;
+        }
+        !self.turn_idle()
+            || self
+                .timeline
+                .open_tail()
+                .is_some_and(|tail| !self.dispatched(tail))
     }
+    /// Loop is idle at `tail`: not closing or failed, dispatch has reached it
+    /// and Loop is between turns.
     fn idle_at(&self, tail: u64) -> bool {
         !self.is_closing()
             && self.dispatcher.failure().is_none()
-            && self.dispatcher.sequence() == tail
-            && self
-                .loop_state()
-                .is_ok_and(|state| state.state().phase == LoopPhase::Idle)
+            && self.dispatched(tail)
+            && self.turn_idle()
+    }
+    /// Loop is between turns; `false` while it runs one, and while Loop is
+    /// being replaced.
+    fn turn_idle(&self) -> bool {
+        self.loop_state()
+            .is_ok_and(|state| state.state().phase == LoopPhase::Idle)
+    }
+    /// Dispatch has reached `tail`.
+    fn dispatched(&self, tail: u64) -> bool {
+        self.dispatcher.sequence() == tail
     }
     /// Holds the commit lock and returns it when Loop is idle, nothing is
     /// pending and dispatch has reached the tail; `None` otherwise, without
