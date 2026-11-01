@@ -510,6 +510,10 @@ when `--permission` was given, so its existing diagnostics are otherwise unchang
 `permission/changed` event that arrives live on `main`, from this or another client such as a
 paired device, prints one record with the independent values and any legacy tool exceptions.
 
+The overview and Settings use `Ask (legacy tool exceptions)`. The compact TUI scrollback status
+uses `Ask (legacy)` so saved-setting notices still fit 80 columns; this is the same legacy policy,
+not explicit Ask or another option.
+
 ```text
 $ dimcode --permission read-only
 dimcode · model: provider/model
@@ -825,6 +829,11 @@ authorizes a write, and a fork starts without the source's grants.
 | Shift+Tab cycle | CLI only: an editor action result and a confirmation path (decision 4) |
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
 | `/permissions` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
+
+ACP, Hooks and Web remain legacy/preset-only clients for permission selection in this change.
+Their existing preset controls do not select explicit File access or Tool approval, and their
+omitted overrides retain legacy risk decisions. Extending those UIs is separate work, not a
+second implementation of the TUI controls; Web's existing execution settings remain host settings.
 
 ### Rule check
 

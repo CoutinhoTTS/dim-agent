@@ -469,6 +469,29 @@ async fn tool_approval_and_file_access_are_independent() {
                 session.close().await.unwrap();
             }
         }
+        for access in [FileAccess::WorkspaceReadWrite, FileAccess::Unrestricted] {
+            let session = agent
+                .create_session(config_in(
+                    &work,
+                    PermissionPolicy {
+                        preset: PermissionPreset::ReadOnly,
+                        file_access: Some(access),
+                        ..Default::default()
+                    },
+                ))
+                .await
+                .unwrap();
+            let permission = session.service::<Permission>("main").unwrap();
+            for path in [&inside, &outside, &granted] {
+                assert_eq!(
+                    write_verdict(&permission, path).await,
+                    "deny",
+                    "{access:?} must retain legacy tool denials: {}",
+                    path.display()
+                );
+            }
+            session.close().await.unwrap();
+        }
         let session = agent
             .create_session(config_in(
                 &work,
@@ -524,33 +547,35 @@ async fn tool_approval_and_file_access_are_independent() {
         permission.update(0, policy).await.unwrap();
         assert_eq!(write_verdict(&permission, &inside).await, "deny");
         session.close().await.unwrap();
-        let session = agent
-            .create_session(config_in(
-                &work,
-                PermissionPolicy {
-                    preset: PermissionPreset::ReadOnly,
-                    tool_approval: Some(ToolApproval::Bypass),
-                    allowed_tools: vec!["write".into()],
-                    ..Default::default()
-                },
-            ))
-            .await
-            .unwrap();
-        let permission = session.service::<Permission>("main").unwrap();
-        assert_eq!(write_verdict(&permission, &inside).await, "allow");
-        permission
-            .update(
-                0,
-                PermissionPolicy {
-                    preset: PermissionPreset::ReadOnly,
-                    tool_approval: Some(ToolApproval::Bypass),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(write_verdict(&permission, &inside).await, "deny");
-        session.close().await.unwrap();
+        for approval in [ToolApproval::Ask, ToolApproval::Bypass] {
+            let session = agent
+                .create_session(config_in(
+                    &work,
+                    PermissionPolicy {
+                        preset: PermissionPreset::ReadOnly,
+                        tool_approval: Some(approval),
+                        allowed_tools: vec!["write".into()],
+                        ..Default::default()
+                    },
+                ))
+                .await
+                .unwrap();
+            let permission = session.service::<Permission>("main").unwrap();
+            assert_eq!(write_verdict(&permission, &inside).await, "allow");
+            permission
+                .update(
+                    0,
+                    PermissionPolicy {
+                        preset: PermissionPreset::ReadOnly,
+                        tool_approval: Some(approval),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(write_verdict(&permission, &inside).await, "deny");
+            session.close().await.unwrap();
+        }
         agent.close().await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     })
@@ -576,6 +601,18 @@ async fn a_composition_without_facts_builds_and_asks() {
         decide_write(&permission, &target).await,
         Decision::Ask { .. }
     ));
+    permission
+        .update(
+            0,
+            PermissionPolicy {
+                preset: PermissionPreset::ReadOnly,
+                file_access: Some(FileAccess::WorkspaceReadWrite),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(write_verdict(&permission, &target).await, "deny");
     session.close().await.unwrap();
     agent.close().await.unwrap();
     let _ = std::fs::remove_dir_all(work);
@@ -1402,6 +1439,33 @@ async fn allow_rules_answer_approval_only_for_simple_commands_within_the_preset(
         );
         assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
         session.close().await.unwrap();
+        for approval in [ToolApproval::Ask, ToolApproval::Bypass] {
+            let session = agent
+                .create_session(config(PermissionPolicy {
+                    preset: PermissionPreset::ReadOnly,
+                    tool_approval: Some(approval),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+            assert_eq!(text(&exec(&session, "cargo test -p x").await), "exec ran");
+            submit_exec(&session, "cargo test; rm x").await;
+            if approval == ToolApproval::Ask {
+                let id = approval_request(&session, "cargo test; rm x").await;
+                session
+                    .service::<Approval>("main")
+                    .unwrap()
+                    .respond(&id, ApprovalDecision::Deny)
+                    .await
+                    .unwrap();
+            }
+            session.idle("main").await.unwrap();
+            assert_eq!(
+                approval_requests(&session).await,
+                usize::from(approval == ToolApproval::Ask)
+            );
+            session.close().await.unwrap();
+        }
         agent.close().await.unwrap();
     })
     .await
@@ -1436,6 +1500,24 @@ async fn deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_tim
         assert_eq!(text(&exec(&session, "git status").await), "exec ran");
         assert_eq!(tools.calls.load(Ordering::SeqCst), 2);
         session.close().await.unwrap();
+        for approval in [ToolApproval::Ask, ToolApproval::Bypass] {
+            let session = agent
+                .create_session(config(PermissionPolicy {
+                    preset: PermissionPreset::FullAccess,
+                    tool_approval: Some(approval),
+                    allowed_tools: vec!["exec".into()],
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                exec(&session, "echo ok && git push").await.is_error,
+                Some(true)
+            );
+            assert_eq!(approval_requests(&session).await, 0);
+            session.close().await.unwrap();
+        }
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 2);
         agent.close().await.unwrap();
     })
     .await

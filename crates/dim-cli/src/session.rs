@@ -11,7 +11,7 @@ use crate::{
     mcp, permission, permission_command,
     question::line::Questions,
 };
-use dim_agent_types::{ApprovalCallData, ContentBlock, ModelId, UserInput};
+use dim_agent_types::{ApprovalCallData, ContentBlock, ModelId, PermissionPolicy, UserInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -243,16 +243,20 @@ pub async fn chat(
         }
         created.session_id
     };
-    if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
+    let selected = if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
         if !client.supports(&permission::PRESET_METHODS) {
             return Err(
                 "This daemon cannot change a Session's permission preset; omit --permission".into(),
             );
         }
-        permission::select(client, &session_id, preset)
-            .await
-            .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
-    }
+        Some(
+            permission::select(client, &session_id, preset)
+                .await
+                .map_err(|error| format!("Cannot set the permission preset: {error}"))?,
+        )
+    } else {
+        None
+    };
     display.record(&format!(
         "{}: {}\nsession: {}",
         if interactive {
@@ -263,17 +267,28 @@ pub async fn chat(
         options.cwd.display(),
         session_id
     ))?;
-    let preset = match options.permission {
-        Some(preset) => Some(Ok(preset)),
-        None if interactive && client.supports(&["session.permission.get"]) => Some(
+    let policy = match (selected, options.permission) {
+        (Some(policy), _) => Some(Ok(policy)),
+        (None, Some(preset)) => Some(Ok(PermissionPolicy {
+            preset,
+            ..Default::default()
+        })),
+        (None, None) if interactive && client.supports(&["session.permission.get"]) => Some(
             permission::read(client, &session_id)
                 .await
-                .map(|state| state.policy.preset),
+                .map(|state| state.policy),
         ),
-        None => None,
+        (None, None) => None,
     };
-    match preset {
-        Some(Ok(preset)) => display.record(&format!("permission: {}", permission::name(preset)))?,
+    match policy {
+        Some(Ok(policy)) => {
+            display.record(&format!("permission: {}", permission::name(policy.preset)))?;
+            display.record(&format!(
+                "File access: {}; Tool approval: {}",
+                permission::file_label(policy.file_access()),
+                permission::tool_policy_label(&policy)
+            ))?;
+        }
         Some(Err(error)) => display.record(&format!("permission: unavailable ({error})"))?,
         None => {}
     }
@@ -1143,7 +1158,7 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
                         "[permission] main branch preset: {}; File access: {}; Tool approval: {}",
                         permission::name(policy.preset),
                         permission::file_label(policy.file_access()),
-                        permission::tool_label(policy.tool_approval())
+                        permission::tool_policy_label(&policy)
                     ))?;
                     display.permission_seen = sequence;
                 }

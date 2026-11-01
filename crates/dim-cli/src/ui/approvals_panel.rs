@@ -7,9 +7,9 @@
 //!   Process isolation    ›
 //! ```
 
-use dim_agent_types::{FileAccess, PermissionPolicy, ToolApproval};
+use dim_agent_types::{FileAccess, PermissionPolicy, PermissionPreset, ToolApproval};
 
-use crate::permission::{Change, file_label, tool_label};
+use crate::permission::{Change, file_label, tool_policy_label};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
 use crate::ui::settings_panel::Setting;
@@ -74,7 +74,7 @@ impl ApprovalsPanel {
                     Item::new(
                         "tool",
                         "Tool approval",
-                        format!("{} ›", tool_label(self.policy.tool_approval())),
+                        format!("{} ›", tool_policy_label(&self.policy)),
                     ),
                     Item::new("isolation", "Process isolation", "›"),
                 ],
@@ -122,10 +122,25 @@ impl ApprovalsPanel {
                     "Bypass: skip tool prompts, not file limits, deny rules or isolation.".into(),
                 ];
                 if self.policy.tool_approval.is_none() {
-                    notes.push("Legacy rules apply until you choose Ask or Bypass.".into());
+                    notes.push(
+                        match self.policy.preset {
+                            PermissionPreset::ReadOnly => {
+                                "Legacy defaults: allow reads; deny writes/commands."
+                            }
+                            PermissionPreset::WorkspaceWrite => {
+                                "Legacy defaults: allow reads/writes; ask for commands."
+                            }
+                            PermissionPreset::FullAccess => "Legacy default: bypass tool approval.",
+                        }
+                        .into(),
+                    );
                 }
                 let items = vec![
-                    Item::new("ask", "Ask", badge(current == ToolApproval::Ask)),
+                    Item::new(
+                        "ask",
+                        "Ask",
+                        badge(self.policy.tool_approval == Some(ToolApproval::Ask)),
+                    ),
                     Item::new("bypass", "Bypass", badge(current == ToolApproval::Bypass)),
                 ];
                 (

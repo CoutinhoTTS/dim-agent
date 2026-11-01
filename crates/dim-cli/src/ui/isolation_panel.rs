@@ -90,9 +90,7 @@ impl IsolationPanel {
         if let (Some(_snapshot), Some(draft)) = (&self.snapshot, &self.draft) {
             notes.push("Applies to new processes and shells.".into());
             if !draft.sandbox {
-                notes.push(
-                    "Off: commands use your OS permissions. File-tool limits do not apply.".into(),
-                );
+                notes.push("Off: commands use your OS permissions, not file-tool limits.".into());
             }
             for (id, label, selected) in [
                 ("off", "Off", !draft.sandbox),

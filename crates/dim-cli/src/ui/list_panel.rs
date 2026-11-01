@@ -245,11 +245,11 @@ impl ListPanel {
                 self.loading = true;
                 Event::Refresh
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::BackTab => {
                 self.selected = self.selected.saturating_sub(1);
                 Event::None
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Tab => {
                 if self.selected + 1 < count {
                     self.selected += 1;
                 }

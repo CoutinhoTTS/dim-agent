@@ -25801,6 +25801,14 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "use dim_agent_types::PermissionPolicy"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -26927,10 +26935,14 @@
         "path FileAccess::Unrestricted",
         "path FileAccess::WorkspaceReadWrite",
         "path PermissionPolicy",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
         "path ToolApproval::Ask",
         "path ToolApproval::Bypass",
         "use dim_agent_types::FileAccess",
         "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset",
         "use dim_agent_types::ToolApproval"
       ]
     },
@@ -26943,7 +26955,7 @@
         "path file_label",
         "use crate::permission::Change",
         "use crate::permission::file_label",
-        "use crate::permission::tool_label"
+        "use crate::permission::tool_policy_label"
       ]
     },
     {
@@ -28487,6 +28499,7 @@
       "from": "dim_cli::ui::list_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
+        "path KeyCode::BackTab",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::End",
@@ -28495,6 +28508,7 @@
         "path KeyCode::Home",
         "path KeyCode::PageDown",
         "path KeyCode::PageUp",
+        "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
         "path Modifiers::CTRL",
@@ -31792,6 +31806,7 @@
       "references": [
         "path dim_agent_types::PermissionPolicy",
         "path dim_agent_types::PermissionPreset::WorkspaceWrite",
+        "path dim_agent_types::ToolApproval::Ask",
         "path dim_agent_types::ToolApproval::Bypass"
       ]
     },
@@ -32008,9 +32023,10 @@
         "path crate::permission::Change::FileAccess",
         "path crate::permission::Change::ToolApproval",
         "path file_label",
-        "path tool_label",
+        "path tool_policy_label",
         "use crate::permission::file_label",
-        "use crate::permission::tool_label"
+        "use crate::permission::tool_label",
+        "use crate::permission::tool_policy_label"
       ]
     },
     {
@@ -32807,6 +32823,13 @@
       "references": [
         "path crate::ui::render::testterm::Emu",
         "path crate::ui::render::testterm::Emu::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::settings_panel",
+      "references": [
+        "path Setting::Approvals"
       ]
     },
     {
@@ -35242,6 +35265,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "FileAccess::ReadOnly"
     },
     {
       "module": "dim_cli::ui::tui::tests",

@@ -158,10 +158,16 @@ impl SettingsPanel {
         self.list.paste(text);
     }
 
+    pub fn selected(&self) -> Setting {
+        self.list
+            .selected_id()
+            .and_then(|id| Setting::of(&id))
+            .unwrap()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
-        let selected = self.list.selected_id().and_then(|id| Setting::of(&id));
-        if let Some(setting) = selected
-            && setting.switch()
+        let setting = self.selected();
+        if setting.switch()
             && key.mods.0 == 0
             && matches!(
                 key.code,

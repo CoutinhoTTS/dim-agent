@@ -56,6 +56,8 @@ fn line_permission_controls_preserve_other_fields_retry_conflicts_and_surface_ol
         }
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":3,"policy":current}));
+        let read = wire.read("session.permission.get");
+        wire.reply(&read, json!({"version":3,"policy":current}));
         let write = wire.read("session.permission.update");
         let mut expected = current.clone();
         expected["fileAccess"] = json!("unrestricted");
@@ -68,12 +70,77 @@ fn line_permission_controls_preserve_other_fields_retry_conflicts_and_surface_ol
     terminal.write(b"/permissions tool-approval ask\n");
     terminal.until("File access: Workspace read/write; Tool approval: Ask");
     terminal.until("\n> ");
+    terminal.write(b"/permissions tool-approval ask\n");
+    terminal.until("File access: Workspace read/write; Tool approval: Ask");
+    terminal.until("\n> ");
     terminal.write(b"/approval file-access unrestricted\n");
     terminal.until("fixture invalid_params");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+}
+
+#[test]
+fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored() {
+    for fullscreen in [false, true] {
+        for explicit in [false, true] {
+            let home = Home::new();
+            fs::write(
+                home.0.join("config.json"),
+                if explicit {
+                    r#"{"locale":"en","permissionPreset":"full-access","fileAccess":"unrestricted","toolApproval":"bypass"}"#
+                } else {
+                    r#"{"locale":"en","permissionPreset":"workspace-write","fileAccess":false,"toolApproval":"unknown"}"#
+                },
+            )
+            .unwrap();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&PRESET_METHODS);
+                let create = wire.created();
+                let preset = if explicit {
+                    "read-only"
+                } else {
+                    "workspace-write"
+                };
+                assert_eq!(
+                    create["params"]["permissionPolicy"],
+                    json!({"preset":preset})
+                );
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                );
+                let read = wire.read("session.permission.get");
+                wire.reply(
+                    &read,
+                    json!({"version":1,"policy":policy(preset, &[], &[])}),
+                );
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                let mut line = String::new();
+                while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                    line.clear();
+                }
+            });
+            let mut command = home.command();
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            if explicit {
+                command.args(["--permission", "read-only"]);
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("test / model");
+            terminal.signal(libc::SIGKILL);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
+    }
 }
 
 #[test]
@@ -233,16 +300,20 @@ fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
         );
         fail(wire, &update, "permission_conflict");
         let get = wire.read("session.permission.get");
+        let mut current = policy("read-only", &[], &[]);
+        current["fileAccess"] = json!("read-only");
+        current["toolApproval"] = json!("ask");
         wire.reply(
             &get,
-            json!({"version":6,"policy":policy("read-only", &[], &[])}),
+            json!({"version":6,"policy":current}),
         );
         let update = wire.read("session.permission.update");
         assert_eq!(update["params"]["expectedVersion"], 6);
-        assert_eq!(update["params"]["policy"], policy("full-access", &[], &[]));
+        current["preset"] = json!("full-access");
+        assert_eq!(update["params"]["policy"], current);
         wire.reply(
             &update,
-            json!({"version":9,"policy":policy("full-access", &[], &[])}),
+            json!({"version":9,"policy":current}),
         );
         wire.attached();
         quiet_turn(wire);
@@ -267,6 +338,10 @@ fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("permission: full-access"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("File access: Read only; Tool approval: Ask")
+    );
 
     let home = Home::new();
     let daemon = home.daemon(|wire| {

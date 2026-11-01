@@ -577,9 +577,9 @@ and F5 ([#76](https://github.com/arcships/dim/issues/76)) isolates processes at 
 generic file-access need, not a Session-files exception: WorkspaceTools' command output has the
 same shape, data a Session's own capabilities hand to its model by path, outside the workspace.
 
-1. **Owned files are read without asking.** A Session reads the Session files it owns with no
-   approval and no recorded decision, so Attachments never prompts. No grant is derived from
-   such a read.
+1. **Owned files need no scope approval.** Ownership satisfies read scope without a recorded
+   grant; it does not answer an independent tool-approval question (§11.1). No grant is derived
+   from such a read.
 2. **Ownership, not location, decides.** Session S may read `<db>.session-files/<fileId>/` for
    each file S owns in SessionStore's rows when access is decided, or when an isolated process
    starts. The set never covers `<db>.session-files/` as a whole, the database directory or the
@@ -659,7 +659,7 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 | App Server assembly (`serve` in lib.rs) | Register the database directory as a FileStorage root when it is not one, and pass its index to `SessionStorePlugin` (§3.1) | A few lines in S5a's implementation, appended after the assembly lane's work like other registrations |
 | Attachments (P2 design refinement) | Map `sessionFiles` `storage` to an `attachment.put` code. Attachments lists none today; SessionTitle maps SessionStore `storage` to `storage_failed` | Decided: `storage_failed`, recorded in [#66](https://github.com/arcships/dim/issues/66); applied in P2's design review |
 | S5c | Delete owner rows inside the delete transaction, after closing the Session and before `agent_sessions`; copy owner rows inside the fork transaction; schedule a sweep after a delete | Contract for S5c (§5.2, §5.3) |
-| The item that first scopes file access by path (F5 [#76](https://github.com/arcships/dim/issues/76) for processes; [ADR 014](../adr/014-file-access-facts.md) for in-process file tools) | §11.2: a Session reads the files it owns without asking, and ownership decides, never the Session-files directory as a whole, the database directory or the product home | S5a needed none. ADR 014 reads `sessionFiles.owns` for reads and writes; §11.1 admits a file-tool read by path |
+| The item that first scopes file access by path (F5 [#76](https://github.com/arcships/dim/issues/76) for processes; [ADR 014](../../adr/014-file-access-facts.md) for in-process file tools) | §11.2: a Session's owned files need no scope approval; ownership decides, never the Session-files directory as a whole, the database directory or the product home. Tool approval remains independent | S5a needed none. ADR 014 reads `sessionFiles.owns` for reads and writes; §11.1 admits a file-tool read by path |
 
 ## 16. Acceptance (flow tests)
 

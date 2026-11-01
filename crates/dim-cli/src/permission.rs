@@ -41,10 +41,10 @@ pub enum Change {
 }
 
 impl Change {
-    pub fn apply(self, policy: &mut PermissionPolicy) {
+    pub fn apply(self, policy: &mut PermissionPolicy) -> bool {
         match self {
-            Self::FileAccess(value) => policy.file_access = Some(value),
-            Self::ToolApproval(value) => policy.tool_approval = Some(value),
+            Self::FileAccess(value) => policy.file_access.replace(value) != Some(value),
+            Self::ToolApproval(value) => policy.tool_approval.replace(value) != Some(value),
         }
     }
 
@@ -68,6 +68,14 @@ pub fn tool_label(value: ToolApproval) -> &'static str {
     match value {
         ToolApproval::Ask => "Ask",
         ToolApproval::Bypass => "Bypass",
+    }
+}
+
+pub fn tool_policy_label(policy: &PermissionPolicy) -> &'static str {
+    if policy.tool_approval.is_none() && policy.preset != PermissionPreset::FullAccess {
+        "Ask (legacy tool exceptions)"
+    } else {
+        tool_label(policy.tool_approval())
     }
 }
 
@@ -101,7 +109,9 @@ pub async fn select_control(
     }
     let mut state = read(client, session_id).await?;
     for _ in 0..ATTEMPTS {
-        change.apply(&mut state.policy);
+        if !change.apply(&mut state.policy) {
+            return Ok(state.policy);
+        }
         match client.typed::<Updated>(
             "session.permission.update",
             json!({"sessionId":session_id,"branchId":"main","expectedVersion":state.version,"policy":state.policy}),
@@ -209,12 +219,19 @@ pub async fn switch(
 /// Selects `preset` for `main` whatever it was before, as a startup choice
 /// does: the preset does not depend on the read, so a version conflict reads
 /// again and retries.
-pub async fn select(client: &mut Client, session_id: &str, preset: PermissionPreset) -> Result<()> {
+pub async fn select(
+    client: &mut Client,
+    session_id: &str,
+    preset: PermissionPreset,
+) -> Result<PermissionPolicy> {
     let mut state = read(client, session_id).await?;
     for _ in 0..ATTEMPTS {
         match switch(client, session_id, &state, preset).await? {
             Switch::Conflict(current) => state = current,
-            Switch::Unchanged | Switch::Switched(_) => return Ok(()),
+            Switch::Unchanged | Switch::Switched(_) => {
+                state.policy.preset = preset;
+                return Ok(state.policy);
+            }
         }
     }
     Err("The Session's permission preset kept changing; try again".into())

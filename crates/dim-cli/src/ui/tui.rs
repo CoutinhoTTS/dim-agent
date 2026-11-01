@@ -16,7 +16,7 @@ use crate::model::shell::ShellRun;
 use crate::model::view::{
     CompactionState, LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
 };
-use crate::permission::{file_label, tool_label};
+use crate::permission::{file_label, tool_label, tool_policy_label};
 use crate::ui::Env;
 use crate::ui::approvals_panel::ApprovalsPanel;
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
@@ -1557,6 +1557,9 @@ impl App {
                         panel.set_policy(&policy);
                     }
                     self.permission_policy = policy;
+                    if let Some(Prompt::Settings(panel)) = &self.prompt {
+                        self.open_settings(panel.selected());
+                    }
                 }
                 Err(error) => self.notices.push(error),
             },
@@ -2343,7 +2346,6 @@ impl App {
                     self.host.send(Command::CloseSessions);
                 }
                 self.prompt = None;
-                self.reopen_upgrade();
             }
             Effect::Exit => return Outcome::Exit(130),
             Effect::Restart { confirmed } => {
@@ -2624,6 +2626,10 @@ impl App {
         {
             self.open_settings(setting);
         }
+        if self.prompt.is_none() {
+            self.sync_prompt();
+            self.reopen_upgrade();
+        }
         Outcome::Continue
     }
 
@@ -2756,7 +2762,7 @@ impl App {
             mouse: self.mouse,
             notify: self.notify,
             file_access: file_label(self.permission_policy.file_access()).to_owned(),
-            approvals: tool_label(self.permission_policy.tool_approval()).to_owned(),
+            approvals: tool_policy_label(&self.permission_policy).to_owned(),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -4428,7 +4434,7 @@ impl App {
             parts.push(fg(&slot, color));
         }
         if self.permission_policy.tool_approval() == dim_agent_types::ToolApproval::Bypass {
-            let mode = tool_label(self.permission_policy.tool_approval());
+            let mode = tool_policy_label(&self.permission_policy);
             parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
         }
         if let Some(context) = self.context_label() {
@@ -4444,11 +4450,14 @@ impl App {
 
     fn status_line(&self, cols: usize) -> String {
         let slot = self.slot();
-        let mut left = format!(
-            "{}AGENT  \u{23f5}\u{23f5} {}",
-            " ".repeat(MARGIN),
-            tool_label(self.permission_policy.tool_approval())
-        );
+        let approval = if self.permission_policy.tool_approval.is_none()
+            && self.permission_policy.tool_approval() == dim_agent_types::ToolApproval::Ask
+        {
+            "Ask (legacy)"
+        } else {
+            tool_policy_label(&self.permission_policy)
+        };
+        let mut left = format!("{}AGENT  \u{23f5}\u{23f5} {}", " ".repeat(MARGIN), approval);
         if let Some(context) = self.context_label() {
             left.push_str("  ");
             left.push_str(&context);
@@ -5685,7 +5694,9 @@ mod tests {
                 |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
             for alias in ["permissions", "approvals", "approval"] {
                 app.run_command(alias, "");
-                app.handle_input(key(KeyCode::Down));
+                app.handle_input(key(KeyCode::Tab));
+                app.handle_input(key(KeyCode::BackTab));
+                app.handle_input(key(KeyCode::Tab));
                 app.handle_input(key(KeyCode::Enter));
                 let rendered = app.frame((64, 40));
                 let frame = rendered
@@ -5782,7 +5793,50 @@ mod tests {
                 saved,
                 serde_json::json!({"permissionPreset":"read-only","toolApproval":"ask","fileAccess":"workspace-read-write","kept":true})
             );
-            app.run_command("permissions", "");
+            app.open_settings(Setting::Approvals);
+            app.apply(Update::Permissions(Ok(PermissionPolicy {
+                preset: PermissionPreset::ReadOnly,
+                file_access: Some(FileAccess::ReadOnly),
+                tool_approval: Some(ToolApproval::Ask),
+                ..Default::default()
+            })));
+            let rendered = app.frame((112, 40));
+            let frame = rendered
+                .overlay
+                .as_ref()
+                .map_or(&rendered.live, |overlay| &overlay.rows)
+                .join("\n");
+            assert!(frame.contains("Read only") && !frame.contains("Unrestricted"));
+            assert!(frame.contains("Ask") && !frame.contains("Bypass"));
+            app.handle_input(key(KeyCode::Enter));
+            let rendered = app.frame((112, 40));
+            let frame = rendered
+                .overlay
+                .as_ref()
+                .map_or(&rendered.live, |overlay| &overlay.rows)
+                .join("\n");
+            assert!(
+                frame.contains("Bypass"),
+                "Settings retains the Tool approval selection"
+            );
+            app.handle_input(key(KeyCode::Esc));
+            app.handle_input(key(KeyCode::Esc));
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                approvals: vec![crate::model::view::ApprovalView {
+                    member: None,
+                    request_id: "pending-exec".into(),
+                    branch_id: "main".into(),
+                    reason: "shell command".into(),
+                    tool_name: "exec".into(),
+                    tool_input: serde_json::json!({"command":"npm test"}),
+                    always: None,
+                }],
+                ..Default::default()
+            })));
+            app.handle_input(key(KeyCode::BackTab));
+            app.handle_input(key(KeyCode::Enter));
+            assert!(matches!(app.prompt, Some(Prompt::Approvals(_))));
             app.handle_input(key(KeyCode::Down));
             app.handle_input(key(KeyCode::Down));
             app.handle_input(key(KeyCode::Enter));
@@ -5799,13 +5853,26 @@ mod tests {
                 .as_ref()
                 .map_or(&rendered.live, |overlay| &overlay.rows)
                 .join("\n");
-            assert!(frame.contains("commands use your OS permissions."));
-            assert!(frame.contains("File-tool limits do not apply."));
+            assert!(frame.contains("commands use your OS permissions, not file-tool limits."));
             assert!(frame.find("Reload").unwrap() < frame.find("Hint:").unwrap());
             app.handle_input(key(KeyCode::Esc));
             assert!(matches!(app.prompt, Some(Prompt::Approvals(_))));
             app.handle_input(key(KeyCode::Esc));
-            assert!(app.prompt.is_none());
+            let rendered = app.frame((112, 40));
+            let frame = rendered
+                .overlay
+                .as_ref()
+                .map_or(&rendered.live, |overlay| &overlay.rows)
+                .join("\n");
+            assert!(
+                frame.contains("npm test"),
+                "The pending approval returns without another snapshot"
+            );
+            app.handle_input(key(KeyCode::Enter));
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::Approval { request_id, .. }) if request_id == "pending-exec"
+            ));
         }
     }
 

@@ -142,6 +142,9 @@ impl Permission {
                 reason: format!("Tool `{name}` is disallowed by the permission policy"),
             });
         }
+        if write && let decision @ Decision::Deny { .. } = decide(&policy, name, risk) {
+            return Ok(decision);
+        }
         if write
             && access == FileAccess::ReadOnly
             && (policy.file_access.is_some()

@@ -40,7 +40,7 @@ fn print_state(display: &mut Display, state: &State) -> Result<()> {
     ))?;
     display.record(&format!(
         "Tool approval: {}",
-        permission::tool_label(state.policy.tool_approval())
+        permission::tool_policy_label(&state.policy)
     ))?;
     if state.policy.tool_approval.is_none() {
         display.record(
@@ -123,7 +123,7 @@ pub async fn command(
             display.record(&format!(
                 "File access: {}; Tool approval: {}",
                 permission::file_label(policy.file_access()),
-                permission::tool_label(policy.tool_approval())
+                permission::tool_policy_label(&policy)
             ))
         }
         ["remove", number] => {
@@ -221,10 +221,11 @@ async fn switch(
     if !client.supports(&PRESET_METHODS) {
         return Err("This daemon cannot change the permission preset".into());
     }
-    let seen = settle(interrupts, permission::read(client, session_id)).await?;
+    let mut seen = settle(interrupts, permission::read(client, session_id)).await?;
     let name = permission::name(preset);
     if seen.policy.preset == preset {
-        return display.record(&format!("Preset (main branch) is already {name}"));
+        display.record(&format!("Preset (main branch) is already {name}"))?;
+        return print_state(display, &seen);
     }
     if preset == PermissionPreset::FullAccess {
         display.record("The legacy full-access seed allows files and bypasses tool questions only where independent settings are omitted.")?;
@@ -246,17 +247,27 @@ async fn switch(
             ));
         }
     }
-    match settle(interrupts, permission::switch(client, session_id, &seen, preset)).await? {
-        Switch::Unchanged => display.record(&format!("Preset (main branch) is already {name}")),
+    match settle(
+        interrupts,
+        permission::switch(client, session_id, &seen, preset),
+    )
+    .await?
+    {
+        Switch::Unchanged => display.record(&format!("Preset (main branch) is already {name}"))?,
         Switch::Switched(version) => {
             display.permission_seen = display.permission_seen.max(version);
             display.record(&format!(
                 "Preset (main branch): {name}. Child branches and members created later from main inherit it; existing branches and members keep their policies."
-            ))
+            ))?;
+            seen.policy.preset = preset;
         }
-        Switch::Conflict(current) => display.record(&format!(
-            "The preset changed elsewhere and is now {}; nothing was changed. Run the command again to switch.",
-            permission::name(current.policy.preset)
-        )),
+        Switch::Conflict(current) => {
+            display.record(&format!(
+                "The preset changed elsewhere and is now {}; nothing was changed. Run the command again to switch.",
+                permission::name(current.policy.preset)
+            ))?;
+            seen = current;
+        }
     }
+    print_state(display, &seen)
 }
