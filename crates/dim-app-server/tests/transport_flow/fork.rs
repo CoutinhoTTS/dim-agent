@@ -135,15 +135,16 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
             .unwrap(),
         "first"
     );
-    let fork = agent.get_session(&fid).unwrap();
-    assert_eq!(
-        reply["result"]["sequence"].as_u64().unwrap(),
-        at + 2,
-        "the reply names the fork's main head at publication: session/forked at at + 1, branch/resume at at + 2"
-    );
-
     let mut children = vec![done.clone(), running.clone(), steered.clone()];
     children.sort();
+    let fork = agent.get_session(&fid).unwrap();
+    let reply_sequence = reply["result"]["sequence"].as_u64().unwrap();
+    // The reply is read from the published fork after its build returns, so a copied child's
+    // branch/create-failed may already be published; branch/resume at at + 2 is the floor.
+    assert!(
+        (at + 2..=at + 2 + children.len() as u64).contains(&reply_sequence),
+        "the reply names the fork's main head when it is read: {reply_sequence}"
+    );
     let mut copied = vec![];
     for _ in 0..500 {
         copied = history(&fork, "main").await;
