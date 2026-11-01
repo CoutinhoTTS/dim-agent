@@ -65,7 +65,6 @@ pub enum Outcome {
 pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -> Outcome {
     let params = json!({"cwd": cwd.to_string_lossy()});
     let applied = match action {
-        ManagementAction::List => false,
         ManagementAction::Reload => {
             if let Err(error) = client.rpc("skills.refresh", params.clone()).await {
                 return Outcome::Refused(error.to_string());
@@ -81,9 +80,9 @@ pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &Path) -
             }
             true
         }
-        ManagementAction::Save { .. } => {
-            return Outcome::Refused("A Skill has no document to edit.".into());
-        }
+        // A Skill has no document, so `management::supported` refuses a save
+        // before the adapter runs; every other action only reads the area.
+        _ => false,
     };
     match catalog(client, &cwd.to_string_lossy()).await {
         Ok(catalog) => Outcome::Catalog(catalog),

@@ -25377,13 +25377,6 @@
     },
     {
       "from": "dim_cli::management::hooks",
-      "to": "dim_cli",
-      "references": [
-        "path crate::Error"
-      ]
-    },
-    {
-      "from": "dim_cli::management::hooks",
       "to": "dim_cli::management",
       "references": [
         "path Groups::default",
@@ -25450,9 +25443,7 @@
         "path ActionKind",
         "path EntryState::Shadowed",
         "path ManagementAction",
-        "path ManagementAction::List",
         "path ManagementAction::Reload",
-        "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementEntry",
         "path ManagementView",
@@ -25484,7 +25475,6 @@
       "to": "dim_cli",
       "references": [
         "path Result",
-        "path crate::Error",
         "use crate::Result"
       ]
     },
@@ -25555,7 +25545,6 @@
         "path Area::Hooks",
         "path Area::Skills",
         "path ManagementAction::List",
-        "path ManagementAction::Reload",
         "path ManagementAction::Save",
         "path ManagementAction::Toggle",
         "path ManagementRequest",

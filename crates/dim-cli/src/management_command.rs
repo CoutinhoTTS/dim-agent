@@ -45,12 +45,12 @@ pub async fn edit(client: &mut Client, options: &Options, area: Area) -> Result<
         .into());
     }
     // Refuse a write the daemon cannot serve before the user edits.
-    management::supports_kind(client, area, ActionKind::Edit).map_err(failed)?;
+    management::supports_kind(client, area, ActionKind::Edit)?;
     let (revision, document) = read(client, options, area).await?;
     let text = serde_json::to_string_pretty(&document)
         .map(|text| format!("{text}\n"))
         .map_err(|error| error.to_string())?;
-    let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
+    let draft = editor::Draft::open(&options.home, area, &text)?;
     let kept = draft.path().display().to_string();
     let mut command = editor::command(draft.path());
     let program = command.get_program().to_string_lossy().into_owned();
@@ -85,7 +85,7 @@ pub async fn edit(client: &mut Client, options: &Options, area: Area) -> Result<
 pub async fn set(client: &mut Client, options: &Options, area: Area, path: &Path) -> Result<i32> {
     // Refuse a write the daemon cannot serve before the input can hold the
     // call: the same check `edit` makes before it opens the editor.
-    management::supports_kind(client, area, ActionKind::Edit).map_err(failed)?;
+    management::supports_kind(client, area, ActionKind::Edit)?;
     // The input first and the revision second, so the revision is read
     // immediately before the write however long the input takes.
     let text = if path == Path::new("-") {
@@ -97,7 +97,7 @@ pub async fn set(client: &mut Client, options: &Options, area: Area, path: &Path
     };
     let (revision, document) = read(client, options, area).await?;
     if path == Path::new("-") {
-        let draft = editor::Draft::open(&options.home, area, &text).map_err(failed)?;
+        let draft = editor::Draft::open(&options.home, area, &text)?;
         let kept = draft.path().display().to_string();
         let outcome = write(client, options, area, &text, &revision, &document, &kept).await;
         if outcome.is_ok() {
@@ -117,16 +117,15 @@ async fn read(client: &mut Client, options: &Options, area: Area) -> Result<(Str
             area,
             action: ManagementAction::List,
         },
-    )
-    .map_err(failed)?;
+    )?;
     let cwd = options.cwd.to_string_lossy();
     match area {
         Area::Skills => Err("A Skill has no document to edit.".to_owned().into()),
         Area::Hooks => {
-            let catalog = hooks::catalog(client, &cwd).await.map_err(failed)?;
+            let catalog = hooks::catalog(client, &cwd).await?;
             let document = catalog
                 .user_document
-                .ok_or_else(|| failed("The daemon reports no hook document to edit.".to_owned()))?;
+                .ok_or("The daemon reports no hook document to edit.")?;
             Ok((catalog.user_revision, document))
         }
     }
@@ -170,21 +169,18 @@ async fn write(
     Ok(0)
 }
 
-fn failed(message: String) -> crate::Error {
-    message.into()
-}
-
 async fn run_skills(
     client: &mut Client,
     options: &Options,
     request: &ManagementRequest,
 ) -> Result<i32> {
-    management::supported(client, request).map_err(failed)?;
+    management::supported(client, request)?;
     let catalog = match skills::apply(client, &request.action, &options.cwd).await {
         skills::Outcome::Catalog(catalog) => catalog,
         // A toggle or a rescan was applied, so the command did what it was
         // asked; only the report after it failed. The toggle's line names the
-        // id the user gave, since the read is what supplies the name.
+        // id the user gave, since the read is what supplies the name; every
+        // other write here is the rescan.
         skills::Outcome::ReadFailed(error) => {
             let line = match &request.action {
                 ManagementAction::Toggle { id, enabled } => format!(
@@ -192,13 +188,12 @@ async fn run_skills(
                     if *enabled { "Enabled" } else { "Disabled" },
                     safe(id)
                 ),
-                ManagementAction::Reload => "Reloaded.".to_owned(),
-                _ => return Err(failed(error)),
+                _ => "Reloaded.".to_owned(),
             };
             print_report(vec![line], vec![error]);
             return Ok(0);
         }
-        skills::Outcome::Refused(error) => return Err(failed(error)),
+        skills::Outcome::Refused(error) => return Err(error.into()),
     };
     match &request.action {
         ManagementAction::Toggle { id, enabled } => {
@@ -227,14 +222,14 @@ async fn run_hooks(
     options: &Options,
     request: &ManagementRequest,
 ) -> Result<i32> {
-    management::supported(client, request).map_err(failed)?;
+    management::supported(client, request)?;
     let catalog = match hooks::apply(client, &request.action, &options.cwd).await {
         Ok(catalog) => catalog,
         // A toggle was applied; only the report after it failed. Its line
         // names the workspace, not anything the missing read would carry.
         Err(hooks::Failure::ReadFailed(error)) => {
             let ManagementAction::Toggle { enabled, .. } = &request.action else {
-                return Err(failed(error));
+                return Err(error.into());
             };
             let cwd = options.cwd.to_string_lossy();
             print_report(
@@ -247,7 +242,7 @@ async fn run_hooks(
             );
             return Ok(0);
         }
-        Err(error) => return Err(failed(error.to_string())),
+        Err(error) => return Err(error.to_string().into()),
     };
     match &request.action {
         ManagementAction::Toggle { enabled, .. } => {

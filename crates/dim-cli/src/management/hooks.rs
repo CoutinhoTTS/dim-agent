@@ -82,12 +82,6 @@ impl std::fmt::Display for Failure {
     }
 }
 
-/// The owner refused the text for a reason a newer read does not fix; the
-/// client keeps its draft at that revision.
-fn refusal(error: &crate::Error) -> Failure {
-    Failure::Refused(error.to_string())
-}
-
 /// What a write the owner refused over a newer document leaves: nothing was
 /// written, and the area is read again so the next write starts from what is
 /// stored now.
@@ -132,7 +126,7 @@ pub async fn apply(
                 // A conflict is its own case, as for a save: nothing was
                 // written, and the area is read again.
                 if crate::client::app_error(&error) != Some("hooks_conflict") {
-                    return Err(refusal(&error));
+                    return Err(Failure::Refused(error.to_string()));
                 }
                 return Err(
                     conflict(
@@ -160,7 +154,7 @@ pub async fn apply(
                 // the stale revision, and the area is read again so the next
                 // edit starts from the stored document.
                 if crate::client::app_error(&error) != Some("hooks_conflict") {
-                    return Err(refusal(&error));
+                    return Err(Failure::Refused(error.to_string()));
                 }
                 return Err(
                     conflict(
