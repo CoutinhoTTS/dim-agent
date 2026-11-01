@@ -1,7 +1,7 @@
 use crate::{
     history::{
         HistoryEntry, HistoryRenderer, context_compaction, context_configuration, digest_message,
-        projection_checkpoint, truncate_middle, user_message,
+        truncate_middle, user_message,
     },
     host::*,
 };
@@ -933,11 +933,7 @@ impl ContextPolicy {
             let saved = async {
                 let snapshot = match view.context.full() {
                     Some(context) => Some(self.history.snapshot(context, retain_from, &fact)?),
-                    None if std::ptr::eq(
-                        self.history.checkpoint as *const (),
-                        projection_checkpoint as *const (),
-                    ) =>
-                    {
+                    None if self.history.checkpoint.is_builtin() => {
                         let checkpoint = self
                             .history
                             .stream_checkpoint(&self.timeline, view.facts.through, retain_from, 256)

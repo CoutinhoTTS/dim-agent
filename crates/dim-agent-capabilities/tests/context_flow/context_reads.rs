@@ -818,6 +818,156 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
     }
 }
 
+/// The number of events in the context the custom checkpoint builder last
+/// saw: nonzero only after the full-path snapshot builder ran.
+static BUILT_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
+fn recording_projection(
+    context: &ContextHistory,
+    retain_from: &str,
+) -> std::result::Result<ProjectionCheckpoint, String> {
+    BUILT_EVENTS.store(context.events.len(), Ordering::SeqCst);
+    projection_checkpoint(context, retain_from)
+}
+
+/// A replaced checkpoint builder builds the snapshot from the full context and
+/// does not stop the streamed render: the two builder facts are separate.
+#[tokio::test]
+async fn a_custom_checkpoint_builder_takes_the_full_path() {
+    BUILT_EVENTS.store(0, Ordering::SeqCst);
+    let store = Arc::new(CountContextReads::default());
+    let mut builder = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer {
+            checkpoint: CheckpointBuilder::Custom(recording_projection),
+            ..HistoryRenderer::default()
+        },
+        Context {
+            threshold: Some(900.),
+            ..Context::default()
+        },
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    for input in ["x".repeat(1_500), "next".into()] {
+        session
+            .submit(input, InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    assert!(
+        BUILT_EVENTS.load(Ordering::SeqCst) > 0,
+        "the custom builder built the snapshot from the full context"
+    );
+    assert!(
+        !store.pages.lock().unwrap().is_empty(),
+        "a replaced builder does not stop the streamed render"
+    );
+    agent.close().await.unwrap();
+}
+
+/// A replaced renderer renders its own entries, takes no streamed render, and
+/// leaves the built-in checkpoint builder's streamed path available.
+#[tokio::test]
+async fn a_custom_render_renders_its_own_entries_and_keeps_the_streamed_checkpoint() {
+    let store = Arc::new(CountContextReads::default());
+    let mut builder = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer {
+            render: HistoryRender::Custom(external_history),
+            ..HistoryRenderer::default()
+        },
+        Context {
+            threshold: Some(900.),
+            ..Context::default()
+        },
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    for input in ["x".repeat(1_500), "next".into()] {
+        session
+            .submit(input, InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let history = session.history("main", None).await.unwrap();
+    let request = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        request.messages.iter().any(|message| matches!(
+            &message.content,
+            MessageContent::Text(text) if text.starts_with("External: ")
+        )),
+        "the turn renders with its own renderer"
+    );
+    let fact = history
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(&event.kind,
+                EventKind::ContextCompaction(data) if matches!(data.outcome,
+                    ContextCompactionResult::Completed { .. }))
+        })
+        .expect("a completed compaction");
+    let EventKind::ContextCompaction(data) = &fact.kind else {
+        unreachable!()
+    };
+    let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome else {
+        unreachable!()
+    };
+    let key = TimelineKey {
+        session_id: session.id().into(),
+        branch_id: "main".into(),
+    };
+    let default = HistoryRenderer::default();
+    let snapshot = store
+        .memory
+        .latest_snapshot(
+            &key,
+            history.last().unwrap().sequence,
+            default.checkpoint_interpreter,
+        )
+        .await
+        .unwrap()
+        .expect("a snapshot");
+    assert!(
+        (default.decode_checkpoint)(&snapshot, fact).is_some(),
+        "the compaction's snapshot still decodes"
+    );
+    let timeline = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
+        .await
+        .unwrap();
+    let through = timeline.sequence();
+    let checkpoint = HistoryRenderer {
+        render: HistoryRender::Custom(external_history),
+        ..HistoryRenderer::default()
+    }
+    .stream_checkpoint(&timeline, through, retain_from, 256)
+    .await
+    .expect("the built-in builder still streams");
+    assert_eq!(checkpoint.state.retain_from, *retain_from);
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    agent.close().await.unwrap();
+}
+
 /// A compaction prepared from the streamed context saves the snapshot for its
 /// own cut, so the snapshot after a second compaction still decodes and a
 /// restored Timeline resumes from it.

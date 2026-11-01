@@ -7318,7 +7318,6 @@
         "path context_configuration",
         "path crate::history::StreamedContext",
         "path digest_message",
-        "path projection_checkpoint",
         "path truncate_middle",
         "path user_message",
         "use crate::history::HistoryEntry",
@@ -7326,7 +7325,6 @@
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::digest_message",
-        "use crate::history::projection_checkpoint",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
       ]

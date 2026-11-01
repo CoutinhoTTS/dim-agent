@@ -1,7 +1,9 @@
 use super::*;
 use dim_agent_capabilities::{
     context_block,
-    history::{context_configuration, project_context_history, projection_checkpoint},
+    history::{
+        HistoryRender, context_configuration, project_context_history, projection_checkpoint,
+    },
     prompt_state::PromptSnapshot,
 };
 
@@ -272,7 +274,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
             .is_some()
     );
     let renderer = HistoryRenderer {
-        render: external_history,
+        render: HistoryRender::Custom(external_history),
         checkpoint_interpreter: "custom/v1",
         decode_checkpoint: |_, _| panic!("must not decode an incompatible interpreter"),
         ..HistoryRenderer::default()
@@ -286,7 +288,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     assert_eq!(
         dim_agent_capabilities::history::context_messages(
             &replay,
-            &(renderer.render)(&replay).unwrap()
+            &renderer.render.project(&replay).unwrap()
         )
         .into_iter()
         .map(Arc::unwrap_or_clone)
@@ -323,8 +325,8 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     assert_eq!(accelerated.checkpoint, Some(checkpoint.clone()));
     assert!(accelerated.events.iter().any(|event| event.id == fact.id));
     assert_eq!(
-        (renderer.render)(&accelerated).unwrap(),
-        (renderer.render)(&replay).unwrap()
+        renderer.render.project(&accelerated).unwrap(),
+        renderer.render.project(&replay).unwrap()
     );
     let full = timeline.context(fact.sequence).await.unwrap();
     assert!(full.checkpoint.is_none());
@@ -477,7 +479,7 @@ async fn a_checkpoint_whose_render_fails_falls_back_to_full_replay() {
         "the read must use the checkpoint"
     );
     let renderer = HistoryRenderer {
-        render: fail_on_checkpoint,
+        render: HistoryRender::Custom(fail_on_checkpoint),
         ..HistoryRenderer::default()
     };
     let (context, history) = renderer

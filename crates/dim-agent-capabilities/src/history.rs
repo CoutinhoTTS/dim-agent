@@ -25,9 +25,59 @@ pub type BuildProjectionCheckpoint =
     fn(&ContextHistory, &str) -> Result<ProjectionCheckpoint, String>;
 pub type EncodeProjectionCheckpoint =
     fn(&RecoverySnapshot, &ProjectionCheckpoint) -> Result<String, String>;
+/// Which history renderer the renderer has.
+///
+/// Only [`HistoryRender::Projection`] may take the streamed render:
+/// `rendered_stream` rebuilds entries with the built-in projection, so a
+/// replaced renderer renders the full context instead.
+pub enum HistoryRender {
+    /// The built-in renderer, `project_context_history`.
+    Projection,
+    /// A replaced renderer; the stream cannot reproduce it.
+    Custom(RenderHistory),
+}
+impl HistoryRender {
+    pub fn project(&self, context: &ContextHistory) -> Result<Vec<HistoryEntry>, String> {
+        match self {
+            Self::Projection => project_context_history(context),
+            Self::Custom(render) => render(context),
+        }
+    }
+
+    pub(crate) fn is_builtin(&self) -> bool {
+        matches!(self, Self::Projection)
+    }
+}
+/// Which checkpoint builder the renderer has.
+///
+/// Only [`CheckpointBuilder::Projection`] may take the streamed snapshot: the
+/// streamed path builds `ProjectionCheckpoint` state with the built-in replay,
+/// so a replaced builder builds its snapshot from the full context instead.
+pub enum CheckpointBuilder {
+    /// The built-in replay, `projection_checkpoint`.
+    Projection,
+    /// A replaced builder; its state cannot be rebuilt from a stream.
+    Custom(BuildProjectionCheckpoint),
+}
+impl CheckpointBuilder {
+    fn build(
+        &self,
+        context: &ContextHistory,
+        retain_from: &str,
+    ) -> Result<ProjectionCheckpoint, String> {
+        match self {
+            Self::Projection => projection_checkpoint(context, retain_from),
+            Self::Custom(build) => build(context, retain_from),
+        }
+    }
+
+    pub(crate) fn is_builtin(&self) -> bool {
+        matches!(self, Self::Projection)
+    }
+}
 pub struct HistoryRenderer {
-    pub render: RenderHistory,
-    pub checkpoint: BuildProjectionCheckpoint,
+    pub render: HistoryRender,
+    pub checkpoint: CheckpointBuilder,
     /// Identifies the saved projection semantics, independently of store format.
     pub checkpoint_interpreter: &'static str,
     /// Paired codec owned by the interpreter. The encoder receives snapshot
@@ -98,8 +148,8 @@ fn decode_checkpoint(
 impl Default for HistoryRenderer {
     fn default() -> Self {
         Self {
-            render: project_context_history,
-            checkpoint: projection_checkpoint,
+            render: HistoryRender::Projection,
+            checkpoint: CheckpointBuilder::Projection,
             checkpoint_interpreter: "dim/context-projection/v3",
             encode_checkpoint,
             decode_checkpoint,
@@ -115,7 +165,7 @@ impl HistoryRenderer {
         retain_from: &str,
         anchor: &AgentEvent,
     ) -> Result<RecoverySnapshot, String> {
-        let checkpoint = (self.checkpoint)(context, retain_from)?;
+        let checkpoint = self.checkpoint.build(context, retain_from)?;
         let mut snapshot = RecoverySnapshot {
             sequence: anchor.sequence,
             event_id: anchor.id.clone(),
@@ -205,7 +255,7 @@ impl HistoryRenderer {
         let context = timeline
             .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
-        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
+        if context.checkpoint.is_some() && self.render.project(&context).is_err() {
             return timeline.context(through).await;
         }
         Ok(context)
@@ -224,12 +274,14 @@ impl HistoryRenderer {
         let context = timeline
             .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
-        match (self.render)(&context) {
+        match self.render.project(&context) {
             Ok(history) => Ok((context, history)),
             Err(_) if context.checkpoint.is_some() => {
                 let context = timeline.context(through).await?;
-                let history =
-                    (self.render)(&context).map_err(|error| AgentError::fault("History", error))?;
+                let history = self
+                    .render
+                    .project(&context)
+                    .map_err(|error| AgentError::fault("History", error))?;
                 Ok((context, history))
             }
             Err(error) => Err(AgentError::fault("History", error)),
@@ -252,10 +304,7 @@ impl HistoryRenderer {
         if batch == 0 {
             return Ok(StreamedContext::fallback());
         }
-        if !std::ptr::eq(
-            self.render as *const (),
-            project_context_history as *const (),
-        ) {
+        if !self.render.is_builtin() {
             return Ok(StreamedContext::fallback());
         }
         let order = timeline.policy_order(through).await?.events;
