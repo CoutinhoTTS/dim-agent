@@ -1901,6 +1901,110 @@ async fn a_refused_plugin_hook_document_stops_only_its_own_kind() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// PluginManager §3.7: a `hooks` content file PluginManager cannot read is
+/// its own refusal, not only the reply's. A file that is not there fails the
+/// manifest read (`invalid_manifest`), so the persisted case is a document
+/// that is there and does not parse: `plugin.list` shows the refusal right
+/// after the install and after a restart, the plugin's Skill is registered
+/// throughout, and a reload of the fixed file clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_hooks_document_that_cannot_be_read_stays_refused() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let runs = home.join("hook-runs");
+    let server = serve(hooks_builder(&home), config.clone()).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+
+    // A declared hooks file that is not there is refused at install, before
+    // any owner sees the plugin.
+    let absent = home.join("src/absent");
+    std::fs::create_dir_all(&absent).unwrap();
+    std::fs::write(
+        absent.join("dim-plugin.json"),
+        json!({"name": "absent", "hooks": "absent.json"}).to_string(),
+    )
+    .unwrap();
+    let refused = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":absent}}),
+    )
+    .await;
+    assert_eq!(app_error(&refused), "invalid_manifest", "{refused}");
+
+    // A hooks file that is there and does not parse is kept as PluginManager's
+    // refusal of the kind: the reply names it, and `plugin.list` shows it.
+    let source = home.join("src/kit");
+    write_hook_plugin(&source, "kit", &runs, "kit");
+    std::fs::write(source.join("hooks.json"), r#"{"hooks": [],}"#).unwrap();
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    let kinds: Vec<&Value> = installed["result"]["refused"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{installed}"))
+        .iter()
+        .map(|refused| &refused["kind"])
+        .collect();
+    assert_eq!(kinds, [&json!("hooks")], "{installed}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        installed["result"]["refused"],
+        "{list}"
+    );
+    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:review"]);
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"].as_array().unwrap().len(),
+        1,
+        "{catalog}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // Startup registers every plugin in use again, so the refusal and the
+    // plugin's other content survive a restart.
+    let server = serve(hooks_builder(&home), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "kit")["refused"][0]["kind"], "hooks", "{list}");
+    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:review"]);
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"].as_array().unwrap().len(),
+        1,
+        "{catalog}"
+    );
+
+    // The document reads on reload, is handed over, and its handler runs.
+    write_hook_plugin(&source, "kit", &runs, "kit");
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "kit").get("refused").is_none(), "{list}");
+    let catalog = when_served(&mut client, "hooks.catalog", json!({})).await;
+    assert_eq!(
+        catalog["result"]["sources"][1]["source"], "plugin:kit",
+        "{catalog}"
+    );
+    let session = session_in(&mut client, &work).await;
+    turn(&mut client, &session).await;
+    wait_lines(&runs, 1).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// PluginManager §3.3 and §3.7: an absent Hooks owner skips only its kind of
 /// content, and turning HooksSettings on registers that kind for every plugin
 /// in use.
