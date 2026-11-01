@@ -1050,8 +1050,10 @@ pub enum Reply {
     Create(CreateResult),
     Fork(ForkResult),
     List(Vec<SessionInfo>),
-    /// The attached Session's directory record, as `session.list` gives it,
-    /// plus the preferences its adopted configuration sends.
+    /// The attached Session's directory record, with `model` and
+    /// `modelPreferences` from its latest adopted configuration, falling back
+    /// to the creation one; `session.list` items keep the creation model until
+    /// #795.
     Attach(AttachResult),
     Summaries(Vec<SessionSummary>),
     Catalog(CatalogResult),
