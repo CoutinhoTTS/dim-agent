@@ -13,8 +13,9 @@ use std::{
 
 /// The native store format this daemon creates and opens.
 pub const FORMAT: u32 = 29;
-/// The oldest schema the startup transaction upgrades.
-const MIN_FORMAT: u32 = 13;
+/// The oldest schema the startup transaction upgrades: the first step of
+/// `UPGRADES`, which is ordered oldest first.
+const MIN_FORMAT: u32 = UPGRADES[0].0;
 const LEGACY_BY_END: (&str, &str) = (
     "timeline_events_by_end",
     "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
