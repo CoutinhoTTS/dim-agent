@@ -29,7 +29,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Enter toggle" => "Enter umschalten",
         "Ctrl+E edit" => "Ctrl+E bearbeiten",
+        "Ctrl+N add" => "Ctrl+N hinzufügen",
         "Ctrl+R reload" => "Ctrl+R neu laden",
+        "Ctrl+T run" => "Ctrl+T ausführen",
+        "Ctrl+X remove" => "Ctrl+X entfernen",
+        "Tab inspect" => "Tab ansehen",
+        "Remove {name}? Enter confirm · Esc cancel" => {
+            "{name} entfernen? Enter bestätigen · Esc abbrechen"
+        }
+        "↑↓ scroll · Esc back" => "↑↓ scrollen · Esc zurück",
+        "Added." => "Hinzugefügt.",
+        "Removed {name}." => "{name} entfernt.",
+        "Ran {name}." => "{name} ausgeführt.",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "Das Benutzerdokument wurde seit dem Lesen geändert; es wurde nichts geschrieben. Deine nächste Bearbeitung öffnet das aktuelle Dokument."
         }

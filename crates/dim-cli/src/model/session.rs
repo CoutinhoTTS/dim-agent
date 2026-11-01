@@ -289,11 +289,23 @@ pub enum ManagementAction {
     Toggle { id: String, enabled: bool },
     /// Re-read the area, or ask its owner to rescan it.
     Reload,
-    /// Replace the area's document if it is still at `expected_revision`.
+    /// Replace the area's document, or one entry's, if it is still at
+    /// `expected_revision`.
     Save {
+        /// The entry whose document this is, for an area whose documents are
+        /// per entry; `None` writes the area's own document.
+        id: Option<String>,
         expected_revision: String,
         document: serde_json::Value,
     },
+    /// Create an entry from `document`.
+    Add { document: serde_json::Value },
+    /// Remove one entry.
+    Remove { id: String },
+    /// Perform the area's named operation on one entry.
+    Run { id: String },
+    /// Read one entry's detail, in place of the list.
+    Inspect { id: String },
 }
 
 /// One request to a management area, carrying the area and what it asks.
@@ -312,9 +324,12 @@ pub struct ManagementView {
     pub revision: Option<String>,
     /// The area's document, when its owner reports one the client can edit.
     pub document: Option<serde_json::Value>,
+    /// The document a new entry starts from, when the area can create one:
+    /// the owner's create shape, filled with example values.
+    pub create: Option<serde_json::Value>,
     /// The kinds that act on the area itself rather than on one entry, in the
-    /// order a panel offers them. Today only reload: it needs no selection,
-    /// so it works on an empty area and after a failed read.
+    /// order a panel offers them: reload and add, neither of which needs a
+    /// selection, so they work on an empty area and after a failed read.
     pub actions: Vec<ActionKind>,
     /// Entries under the source headings their owner reports.
     pub groups: Vec<ManagementGroup>,
@@ -342,6 +357,16 @@ pub struct ManagementEntry {
     /// What the row names besides on and off.
     pub states: Vec<EntryState>,
     pub actions: Vec<ActionKind>,
+    /// The entry's own document, for an area whose documents are per entry
+    /// and whose entries offer edit.
+    pub document: Option<EntryDocument>,
+}
+
+/// One entry's document and the revision a write of it takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryDocument {
+    pub revision: String,
+    pub document: serde_json::Value,
 }
 
 /// A property of an entry that its row names besides on and off.
@@ -361,16 +386,43 @@ pub enum EntryState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
     Toggle,
-    Reload,
     Edit,
+    Reload,
+    Add,
+    Remove,
+    Run,
+    Inspect,
 }
 
-/// What a management request came to: the area's view after it, or why the
-/// area could not be read or the action refused.
+/// What a management request came to: the area after it, what an inspect
+/// found, or why the area could not be read or the action refused.
 #[derive(Debug, Clone)]
 pub struct ManagementReply {
     pub request: ManagementRequest,
-    pub result: Result<ManagementView, ManagementRefusal>,
+    pub result: Result<ManagementReport, ManagementRefusal>,
+}
+
+/// What a management request came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManagementReport {
+    /// The area as its owner now reports it, and what the owner answered
+    /// when that is more than the view: a run's state, or the entry an add
+    /// created.
+    View {
+        view: Box<ManagementView>,
+        note: Option<String>,
+    },
+    /// What an inspect found: a title and its lines, not a view.
+    Detail(ManagementDetail),
+}
+
+/// One entry's read-only detail, in place of the list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagementDetail {
+    /// What the detail is about, as the panel's title.
+    pub title: String,
+    /// Its lines, in the order the owner reports them.
+    pub lines: Vec<String>,
 }
 
 /// Why a management request did not produce a view.

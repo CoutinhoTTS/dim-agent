@@ -25,7 +25,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Enter toggle" => "Enter 切换",
         "Ctrl+E edit" => "Ctrl+E 编辑",
+        "Ctrl+N add" => "Ctrl+N 新建",
         "Ctrl+R reload" => "Ctrl+R 重新加载",
+        "Ctrl+T run" => "Ctrl+T 运行",
+        "Ctrl+X remove" => "Ctrl+X 删除",
+        "Tab inspect" => "Tab 查看",
+        "Remove {name}? Enter confirm · Esc cancel" => "删除 {name}？Enter 确认 · Esc 取消",
+        "↑↓ scroll · Esc back" => "↑↓ 滚动 · Esc 返回",
+        "Added." => "已新建。",
+        "Removed {name}." => "已删除 {name}。",
+        "Ran {name}." => "已运行 {name}。",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "用户文档在读取后已被修改；本次没有写入。下次编辑会打开当前文档。"
         }

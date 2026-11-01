@@ -20,6 +20,17 @@ use crate::ui::text::{display_width, truncate_cells, wrap_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
+/// What the external editor's draft is written as.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WriteTarget {
+    /// A new entry of the area.
+    Create,
+    /// The area's own document, at the revision it was read at.
+    Area { revision: String },
+    /// One entry's document, at the revision it was read at.
+    Entry { id: String, revision: String },
+}
+
 /// What a key did to a prompt.
 #[derive(Debug, PartialEq)]
 pub enum Effect {
@@ -116,11 +127,11 @@ pub enum Effect {
     Plugin(crate::model::session::PluginAction),
     /// One request to a management area (`/skills`, `/hooks`).
     Management(crate::model::session::ManagementRequest),
-    /// Open a management area's document in the external editor, with the
-    /// revision the panel read it at.
+    /// Open a management document in the external editor: the area's, one
+    /// entry's at the revision the panel read, or a new entry's.
     EditManagement {
         area: crate::model::session::Area,
-        revision: String,
+        target: WriteTarget,
         text: String,
     },
     /// Change a provider (`/connect`).

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::management::editor;
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, SessionPort, SwitchKind, Update,
+    ManagementRefusal, ManagementReport, ManagementRequest, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -31,7 +31,9 @@ use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::OauthView;
 use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
-use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
+use crate::ui::prompts::{
+    AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
+};
 use crate::ui::providers_panel::ProvidersPanel;
 use crate::ui::render::fullscreen::Document;
 use crate::ui::render::fullscreen::MouseOutcome;
@@ -623,15 +625,12 @@ fn run_terminal(
                     title.forget();
                     dirty = true;
                 }
-                Outcome::Edit {
-                    area,
-                    revision,
-                    text,
-                } => {
+                Outcome::Edit { area, target, text } => {
                     // A draft a refused edit kept continues in its own file;
                     // anything else starts from the document the panel read.
-                    let (revision, draft, reopened) = match app.kept_draft(area) {
-                        Some((revision, draft)) => (revision, draft, true),
+                    let creating = matches!(target, WriteTarget::Create);
+                    let (target, draft, reopened) = match app.kept_draft(area, creating) {
+                        Some((target, draft)) => (target, draft, true),
                         None => {
                             let draft = match editor::Draft::open(&app.home, area, &text) {
                                 Ok(draft) => draft,
@@ -643,7 +642,7 @@ fn run_terminal(
                                     continue;
                                 }
                             };
-                            (revision, draft, false)
+                            (target, draft, false)
                         }
                     };
                     let mut command = editor::command(draft.path());
@@ -656,7 +655,7 @@ fn run_terminal(
                             return code;
                         }
                     };
-                    app.write_draft(area, revision, draft, reopened, program, ran);
+                    app.write_draft(area, target, draft, reopened, program, ran);
                     app.request_reflow();
                     status.forget();
                     progress.forget();
@@ -719,11 +718,11 @@ enum Outcome {
     SwitchMode,
     /// `/suspend`: give the terminal to the shell until the job continues.
     Suspend,
-    /// A management panel's edit: the document's text and the revision it
-    /// was read at, for the external editor.
+    /// A management panel's edit: the document's text and what its write
+    /// becomes, for the external editor.
     Edit {
         area: Area,
-        revision: String,
+        target: WriteTarget,
         text: String,
     },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
@@ -947,10 +946,10 @@ struct App {
 }
 
 /// A management area's draft of one document: the text the editor was
-/// given, and the revision it was read at, which its write expects.
+/// given, and the target whose write expects it.
 struct ManagementDraft {
     area: Area,
-    revision: String,
+    target: WriteTarget,
     draft: editor::Draft,
 }
 
@@ -1664,8 +1663,10 @@ impl App {
                 }
             }
             Update::Management(reply) => {
-                let save = matches!(reply.request.action, ManagementAction::Save { .. });
-                if !save {
+                let creating = matches!(reply.request.action, ManagementAction::Add { .. });
+                let write =
+                    creating || matches!(reply.request.action, ManagementAction::Save { .. });
+                if !write {
                     // A read drops the draft's link to the revision it was
                     // taken at; the file itself stays until its owner
                     // removes it.
@@ -1675,12 +1676,17 @@ impl App {
                     panel.set_result(&reply);
                     // The write took it: the file is no longer the user's
                     // text. A refused write keeps it and says where it is;
-                    // after a conflict the area was read again, so the link
-                    // to the stale revision goes and the next edit opens
-                    // the current document.
-                    if save {
+                    // after a conflict on an edit the area was read again, so
+                    // the link to the stale revision goes and the next edit
+                    // opens the current document. A conflict on a create has
+                    // no revision to lose: the next add opens the user's text.
+                    if write {
                         match (&reply.result, self.management_edit.take()) {
                             (Ok(_), Some(kept)) => kept.draft.remove(),
+                            (Err(ManagementRefusal::Conflict { .. }), Some(kept)) if creating => {
+                                panel.kept(&kept.draft.path().display().to_string());
+                                self.management_edit = Some(kept);
+                            }
                             (Err(ManagementRefusal::Conflict { .. }), Some(kept)) => {
                                 panel.kept(&kept.draft.path().display().to_string());
                             }
@@ -1691,7 +1697,7 @@ impl App {
                             (_, None) => {}
                         }
                     }
-                } else if save {
+                } else if write {
                     // Esc closed the panel while the write was in flight;
                     // the reply still settles the draft and says what it
                     // came to.
@@ -1711,7 +1717,7 @@ impl App {
                         (Ok(_), None) => {}
                     }
                 } else if reply.request.action == ManagementAction::Reload {
-                    if let Ok(view) = &reply.result {
+                    if let Ok(ManagementReport::View { view, .. }) = &reply.result {
                         let text = crate::ui::management_panel::reloaded(reply.request.area, view);
                         self.reports.push(Block::Status {
                             text,
@@ -2682,16 +2688,8 @@ impl App {
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
             Effect::Management(request) => self.host.send(Command::Management(request)),
-            Effect::EditManagement {
-                area,
-                revision,
-                text,
-            } => {
-                return Outcome::Edit {
-                    area,
-                    revision,
-                    text,
-                };
+            Effect::EditManagement { area, target, text } => {
+                return Outcome::Edit { area, target, text };
             }
             Effect::OauthStart(start) => self.host.send(Command::OauthStart(start)),
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
@@ -3001,9 +2999,9 @@ impl App {
     /// The draft a refused edit kept for `area`, if its text is still
     /// there: the editor reopens it as it is, so an edit that continues
     /// keeps working in its own file, at the revision that text came from.
-    fn kept_draft(&mut self, area: Area) -> Option<(String, editor::Draft)> {
+    fn kept_draft(&mut self, area: Area, creating: bool) -> Option<(WriteTarget, editor::Draft)> {
         let kept = self.management_edit.as_ref()?;
-        if kept.area != area {
+        if kept.area != area || matches!(kept.target, WriteTarget::Create) != creating {
             return None;
         }
         let kept = self.management_edit.take()?;
@@ -3011,7 +3009,7 @@ impl App {
             self.management_edit = Some(kept);
             return None;
         }
-        Some((kept.revision, kept.draft))
+        Some((kept.target, kept.draft))
     }
 
     /// Says why an edit could not go on, in the panel or as a notice when
@@ -3024,25 +3022,31 @@ impl App {
         }
     }
 
-    /// Keeps a draft file and the revision it came from, and says where the
+    /// Keeps a draft file and the target it was taken for, and says where the
     /// user's text is.
-    fn keep_draft(&mut self, area: Area, revision: String, draft: editor::Draft, message: String) {
+    fn keep_draft(
+        &mut self,
+        area: Area,
+        target: WriteTarget,
+        draft: editor::Draft,
+        message: String,
+    ) {
         self.failed(message);
         self.management_edit = Some(ManagementDraft {
             area,
-            revision,
+            target,
             draft,
         });
     }
 
     /// What the external editor left: a non-zero exit and an unreadable or
     /// unparseable draft write nothing and keep their file, the unchanged
-    /// document writes nothing, and a new document is written with the
-    /// revision the panel read.
+    /// document writes nothing, and a document is written with the revision
+    /// the panel read, or created when the draft is a new entry.
     fn write_draft(
         &mut self,
         area: Area,
-        revision: String,
+        target: WriteTarget,
         draft: editor::Draft,
         reopened: bool,
         program: String,
@@ -3056,7 +3060,7 @@ impl App {
                 // document to write; the file keeps it, as a refusal does.
                 self.keep_draft(
                     area,
-                    revision,
+                    target,
                     draft,
                     format!(
                         "{} Nothing was written. Your text is kept in {path}.",
@@ -3072,7 +3076,7 @@ impl App {
                 if reopened {
                     self.keep_draft(
                         area,
-                        revision,
+                        target,
                         draft,
                         format!("{message} Your text is kept in {path}."),
                     );
@@ -3087,7 +3091,7 @@ impl App {
         enum Next {
             Keep,
             Unchanged,
-            Save(serde_json::Value),
+            Write(serde_json::Value),
         }
         let next = {
             let Some(Prompt::Management(panel)) = &mut self.prompt else {
@@ -3102,18 +3106,18 @@ impl App {
                     panel.kept(&path);
                     Next::Keep
                 }
-                Ok(document) if panel.document() == Some(&document) => {
+                Ok(document) if panel.document(&target) == Some(&document) => {
                     panel.unchanged();
                     Next::Unchanged
                 }
-                Ok(document) => Next::Save(document),
+                Ok(document) => Next::Write(document),
             }
         };
         match next {
             Next::Keep => {
                 self.management_edit = Some(ManagementDraft {
                     area,
-                    revision,
+                    target,
                     draft,
                 })
             }
@@ -3121,22 +3125,30 @@ impl App {
                 self.management_edit = None;
                 draft.remove();
             }
-            Next::Save(document) => {
+            Next::Write(document) => {
                 if let Some(Prompt::Management(panel)) = &mut self.prompt {
                     panel.saving();
                 }
-                self.management_edit = Some(ManagementDraft {
-                    area,
-                    revision: revision.clone(),
-                    draft,
-                });
-                self.host.send(Command::Management(ManagementRequest {
-                    area,
-                    action: ManagementAction::Save {
-                        expected_revision: revision,
+                let action = match &target {
+                    WriteTarget::Create => ManagementAction::Add { document },
+                    WriteTarget::Area { revision } => ManagementAction::Save {
+                        id: None,
+                        expected_revision: revision.clone(),
                         document,
                     },
-                }));
+                    WriteTarget::Entry { id, revision } => ManagementAction::Save {
+                        id: Some(id.clone()),
+                        expected_revision: revision.clone(),
+                        document,
+                    },
+                };
+                self.management_edit = Some(ManagementDraft {
+                    area,
+                    target,
+                    draft,
+                });
+                self.host
+                    .send(Command::Management(ManagementRequest { area, action }));
             }
         }
     }
@@ -8349,21 +8361,19 @@ mod tests {
     /// said as a notice.
     #[test]
     fn a_save_reply_without_its_panel_still_settles_the_draft() {
-        use crate::model::session::{ManagementReply, ManagementView};
-        fn view() -> ManagementView {
-            ManagementView {
-                revision: None,
-                document: None,
-                actions: Vec::new(),
-                groups: Vec::new(),
-                issues: Vec::new(),
+        use crate::model::session::{ManagementReply, ManagementReport};
+        fn report() -> ManagementReport {
+            ManagementReport::View {
+                view: Box::new(crate::model::session::ManagementView::default()),
+                note: None,
             }
         }
-        fn save_reply(result: Result<ManagementView, ManagementRefusal>) -> Update {
+        fn save_reply(result: Result<ManagementReport, ManagementRefusal>) -> Update {
             Update::Management(ManagementReply {
                 request: ManagementRequest {
                     area: Area::Hooks,
                     action: ManagementAction::Save {
+                        id: None,
                         expected_revision: "user:1".into(),
                         document: serde_json::json!({}),
                     },
@@ -8383,7 +8393,9 @@ mod tests {
         let draft = |app: &mut App| {
             app.management_edit = Some(ManagementDraft {
                 area: Area::Hooks,
-                revision: "user:1".into(),
+                target: WriteTarget::Area {
+                    revision: "user:1".into(),
+                },
                 draft: editor::Draft::open(root.path(), Area::Hooks, "{}").unwrap(),
             });
             app.management_edit
@@ -8395,7 +8407,7 @@ mod tests {
         };
         // Written: the file goes and the outcome is a notice.
         let path = draft(&mut app);
-        app.apply(save_reply(Ok(view())));
+        app.apply(save_reply(Ok(report())));
         assert!(!path.exists(), "the written draft is removed");
         assert_eq!(
             app.notice.as_ref().map(|(text, _)| text.as_str()),

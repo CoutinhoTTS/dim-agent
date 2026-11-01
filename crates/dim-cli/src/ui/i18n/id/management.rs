@@ -27,7 +27,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Enter toggle" => "Enter alih",
         "Ctrl+E edit" => "Ctrl+E edit",
+        "Ctrl+N add" => "Ctrl+N tambah",
         "Ctrl+R reload" => "Ctrl+R muat ulang",
+        "Ctrl+T run" => "Ctrl+T jalankan",
+        "Ctrl+X remove" => "Ctrl+X hapus",
+        "Tab inspect" => "Tab periksa",
+        "Remove {name}? Enter confirm · Esc cancel" => {
+            "Hapus {name}? Enter konfirmasi · Esc batal"
+        }
+        "↑↓ scroll · Esc back" => "↑↓ gulir · Esc kembali",
+        "Added." => "Ditambahkan.",
+        "Removed {name}." => "{name} dihapus.",
+        "Ran {name}." => "{name} dijalankan.",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "Dokumen pengguna berubah sejak dibaca; tidak ada yang ditulis. Edit berikutnya membuka dokumen saat ini."
         }

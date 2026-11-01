@@ -151,6 +151,7 @@ async fn write(
     let request = ManagementRequest {
         area,
         action: ManagementAction::Save {
+            id: None,
             expected_revision: revision.to_owned(),
             document,
         },

@@ -193,7 +193,14 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 | run | Ctrl+T | 该领域的具名操作，例如 test、run now 或 start。 |
 | inspect | Tab | 只读的详情视图。 |
 
-Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——目前只有 reload——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。这几个界面最先承载的领域用 toggle、reload 和 edit；之后的领域按需加入它用到的种类的代码，引入该种类的领域设计在此表中写下它。
+Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接收的键，因为筛选会接收所有普通字母。作用于领域本身的种类属于领域的视图而不是某个条目——reload，以及新建条目的 add——所以它不需要选中项：无论是否选中条目，键提示都会列出它，读取失败后 Ctrl+R 会重新读取该领域。最先承载的两个领域用 toggle、reload 和 edit。Scheduler 领域引入 add、remove、run 和 inspect，客户端写的就是这四个种类；之后的领域只需加入自己的适配器以及它所用种类调用的方法，并在此表中写下它新增的种类。
+
+- add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
+- remove 先在键提示里询问：键提示变为 `Remove <label>? Enter confirm · Esc cancel`，除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的删除方法，然后重新读取该领域。`dimcode <area> remove ID` 不提问直接删除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
+- run 对所选条目调用领域的具名操作，然后重新读取该领域，消息报告所有者的答复——所有者跳过的一次运行会说明原因。需要参数的操作是该领域自己的步骤，不属于这个种类。
+- inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
+
+文档按条目分存的领域，其条目为它自己的文档提供 edit：此时 Save 动作携带该条目的 id，适配器保留它与草稿一起读到的 revision。
 
 ### 写入
 
@@ -232,7 +239,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
    │
    ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
    │                                                                                （再次给出视图）
-   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { expectedRevision, document } }
+   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { id?, expectedRevision, document } }
                                 ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► 同一个适配器，用自己的连接

@@ -242,10 +242,31 @@ lists the area's kinds plus the selected entry's kinds, in the table's order.
 
 Esc closes the panel. An action key is a Ctrl chord, or a key the filter never takes, because
 the filter takes every plain letter. A kind that acts on the area itself belongs to the area's
-view rather than to one entry — today only reload — so it needs no selection: the hint lists it
-whether or not an entry is selected, and Ctrl+R reads the area again after a failed read. The
-areas these surfaces first carry use toggle, reload and edit; a later area adds the code of the
-kinds it needs, and the design of the area that introduces one names it here.
+view rather than to one entry — reload, and add, which creates one — so it needs no selection:
+the hint lists it whether or not an entry is selected, and Ctrl+R reads the area again after a
+failed read. The first two areas use toggle, reload and edit. The Scheduler area introduces
+add, remove, run and inspect, and the client's kinds are what it writes; a later area adds its
+adapter and the methods its kinds call, and names here the kinds it adds.
+
+- add opens the external editor on a new-entry document that the adapter supplies — the owner's
+  create shape, filled with example values — and writes it with the area's create method. An
+  unchanged document writes nothing, and a refusal keeps the draft, which the next Ctrl+N
+  reopens, as Ctrl+E does for an edit. `dimcode <area> add PATH` (`-` for stdin) is the same
+  write without an editor.
+- remove asks in the hint first: it becomes `Remove <label>? Enter confirm · Esc cancel`, and
+  every key but Enter cancels without changing anything. Enter sends the area's delete method
+  and reads the area again. `dimcode <area> remove ID` deletes without a prompt, because the id
+  typed on the command line is the intent, as `dimcode logout PROVIDER` signs out without one.
+- run sends the area's named operation for the selected entry, reads the area again, and its
+  message reports what the owner answered — a run the owner skipped says why. An operation that
+  takes parameters is the area's own step, not this kind's.
+- inspect asks the adapter for the entry's detail: a title and lines, not a view. The panel
+  shows it in place of the list, the arrows and PageUp/PageDown scroll it, Esc returns to the
+  list with the selection kept, and a second Esc closes the panel. `dimcode <area> inspect ID`
+  prints the same lines, or the area's own verb where its design names one.
+
+An entry of an area whose documents are per entry offers edit for its own document: the Save
+action then carries the entry's id, and the adapter keeps the revision it read with the draft.
 
 ### Writes
 
@@ -308,7 +329,7 @@ Panel  ◄───────────────────{ area, view 
    │
    ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
    │                                                                                (the view again)
-   └─ Ctrl+E ──► the external editor ──► Command { area, Save { expectedRevision, document } }
+   └─ Ctrl+E ──► the external editor ──► Command { area, Save { id?, expectedRevision, document } }
                                           ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection

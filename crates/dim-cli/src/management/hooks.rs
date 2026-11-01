@@ -115,6 +115,7 @@ pub async fn apply(
         ManagementAction::Save {
             expected_revision,
             document,
+            ..
         } => {
             let saved = client
                 .rpc(
@@ -138,6 +139,13 @@ pub async fn apply(
                     catalog: Box::new(catalog),
                 });
             }
+        }
+        // `supported` refuses a kind this area does not have before `apply`.
+        ManagementAction::Add { .. }
+        | ManagementAction::Remove { .. }
+        | ManagementAction::Run { .. }
+        | ManagementAction::Inspect { .. } => {
+            return Err(Failure::Refused("Hooks has no such action.".into()));
         }
     }
     catalog(client, &cwd).await.map_err(Failure::Refused)
@@ -180,6 +188,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
                     .filter(|kind| available.contains(kind))
                     .copied()
                     .collect(),
+                document: None,
             },
         );
     }
@@ -190,6 +199,7 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
     ManagementView {
         revision: Some(catalog.user_revision.clone()),
         document: catalog.user_document.clone(),
+        create: None,
         actions: super::area_kinds(available),
         groups: groups.into_vec(),
         issues,

@@ -27,7 +27,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Enter toggle" => "Enter 전환",
         "Ctrl+E edit" => "Ctrl+E 편집",
+        "Ctrl+N add" => "Ctrl+N 추가",
         "Ctrl+R reload" => "Ctrl+R 다시 로드",
+        "Ctrl+T run" => "Ctrl+T 실행",
+        "Ctrl+X remove" => "Ctrl+X 삭제",
+        "Tab inspect" => "Tab 상세",
+        "Remove {name}? Enter confirm · Esc cancel" => {
+            "{name}을(를) 삭제할까요? Enter 확인 · Esc 취소"
+        }
+        "↑↓ scroll · Esc back" => "↑↓ 스크롤 · Esc 뒤로",
+        "Added." => "추가했습니다.",
+        "Removed {name}." => "{name}을(를) 삭제했습니다.",
+        "Ran {name}." => "{name}을(를) 실행했습니다.",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "사용자 문서가 읽은 뒤에 변경되었습니다. 아무것도 쓰지 않았습니다. 다음 편집은 현재 문서를 엽니다."
         }

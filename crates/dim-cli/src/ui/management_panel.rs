@@ -18,16 +18,22 @@
 //! ```
 //!
 //! The entry's actions decide the keys it offers: the hint names only those,
-//! and Enter, Space, Ctrl+E and Ctrl+R keep one meaning in every area.
+//! and Enter, Space, Ctrl+E, Ctrl+N, Ctrl+R, Ctrl+T, Ctrl+X and Tab keep one
+//! meaning in every area. A remove asks in the hint before it sends; an
+//! inspect shows the adapter's detail in place of the list.
+
+use std::cell::Cell;
 
 use crate::model::session::{
-    ActionKind, Area, EntryState, ManagementAction, ManagementEntry, ManagementRefusal,
-    ManagementReply, ManagementRequest, ManagementView,
+    ActionKind, Area, EntryState, ManagementAction, ManagementDetail, ManagementEntry,
+    ManagementRefusal, ManagementReply, ManagementReport, ManagementRequest, ManagementView,
 };
+use crate::sanitize::safe;
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
-use crate::ui::prompts::Effect;
-use crate::ui::render::panel::wrap_words;
+use crate::ui::prompts::{Effect, WriteTarget};
+use crate::ui::render::panel::{bordered, key_hints, wrap_words};
+use crate::ui::rows::title_plain;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
@@ -41,7 +47,13 @@ pub const STRINGS: &[&str] = &[
     "Esc close",
     "Enter toggle",
     "Ctrl+E edit",
+    "Ctrl+N add",
     "Ctrl+R reload",
+    "Ctrl+T run",
+    "Ctrl+X remove",
+    "Tab inspect",
+    "Remove {name}? Enter confirm · Esc cancel",
+    "↑↓ scroll · Esc back",
     "Loading...",
     "No entries.",
     "No matching entry.",
@@ -54,6 +66,9 @@ pub const STRINGS: &[&str] = &[
     "Working...",
     "Reloaded.",
     "Saved.",
+    "Added.",
+    "Removed {name}.",
+    "Ran {name}.",
     "No change.",
     "Your text is kept in {path}.",
     "Enabled {name}.",
@@ -70,10 +85,35 @@ pub struct ManagementPanel {
     area: Area,
     list: ListPanel,
     view: Option<ManagementView>,
+    /// The entry a remove waits to confirm.
+    confirming: Option<String>,
+    /// A detail the adapter reported, shown in place of the list.
+    detail: Option<ShownDetail>,
     /// A request is in flight: only Esc answers.
     busy: bool,
     /// What the last request came to.
     message: Option<Result<String, String>>,
+}
+
+/// A detail in place of the list, with the rows it starts at.
+struct ShownDetail {
+    title: String,
+    lines: Vec<String>,
+    /// The first line drawn, kept between frames and clamped to the content.
+    top: Cell<usize>,
+    /// Lines the window shows; set from the screen height while rendering.
+    page: Cell<usize>,
+}
+
+impl ShownDetail {
+    fn new(detail: ManagementDetail) -> Self {
+        Self {
+            title: detail.title,
+            lines: detail.lines,
+            top: Cell::new(0),
+            page: Cell::new(6),
+        }
+    }
 }
 
 impl ManagementPanel {
@@ -89,6 +129,8 @@ impl ManagementPanel {
                 false,
             ),
             view: None,
+            confirming: None,
+            detail: None,
             busy: true,
             message: None,
         }
@@ -100,16 +142,25 @@ impl ManagementPanel {
             return;
         }
         self.busy = false;
+        self.confirming = None;
         match &reply.result {
-            Ok(view) => {
+            Ok(ManagementReport::View { view, note }) => {
+                let view = &**view;
                 // The read that opens a panel says nothing; every later
                 // answer names what it did.
                 self.message = match (&reply.request.action, self.view.is_some()) {
                     (ManagementAction::List, false) => None,
                     (ManagementAction::List, true) => Some(Ok(t("Reloaded.").to_owned())),
-                    (action, _) => Some(Ok(outcome(action, view))),
+                    (action, _) => Some(Ok(match note {
+                        Some(note) => note.clone(),
+                        None => outcome(action, view, self.view.as_ref()),
+                    })),
                 };
                 self.set_view(view.clone());
+            }
+            Ok(ManagementReport::Detail(detail)) => {
+                self.detail = Some(ShownDetail::new(detail.clone()));
+                self.message = None;
             }
             Err(ManagementRefusal::Refused(error)) => {
                 self.message = Some(Err(error.clone()));
@@ -164,7 +215,28 @@ impl ManagementPanel {
                 .is_some_and(|entry| entry.actions.contains(&kind))
     }
 
+    /// Whether the selected entry offers `kind`.
+    fn entry_offers(&self, kind: ActionKind) -> bool {
+        self.selected()
+            .is_some_and(|entry| entry.actions.contains(&kind))
+    }
+
     fn refresh_hint(&mut self) {
+        if let Some(id) = &self.confirming {
+            let label = self
+                .entry(id)
+                .map(|entry| entry.label.clone())
+                .unwrap_or_else(|| id.clone());
+            self.list.set_hint(tf(
+                "Remove {name}? Enter confirm · Esc cancel",
+                &[("name", &label)],
+            ));
+            return;
+        }
+        if self.detail.is_some() {
+            self.list.set_hint(t("↑↓ scroll · Esc back").to_owned());
+            return;
+        }
         let mut kinds = match &self.view {
             Some(view) => view.actions.clone(),
             // Nothing is shown yet: Ctrl+R repeats the read.
@@ -189,9 +261,17 @@ impl ManagementPanel {
         self.message = Some(Err(error));
     }
 
-    /// The document this panel read, which a draft is compared with.
-    pub fn document(&self) -> Option<&serde_json::Value> {
-        self.view.as_ref()?.document.as_ref()
+    /// The document `target` names, which a draft is compared with.
+    pub fn document(&self, target: &WriteTarget) -> Option<&serde_json::Value> {
+        match target {
+            WriteTarget::Create => self.view.as_ref()?.create.as_ref(),
+            WriteTarget::Area { .. } => self.view.as_ref()?.document.as_ref(),
+            WriteTarget::Entry { id, .. } => self
+                .entry(id)?
+                .document
+                .as_ref()
+                .map(|document| &document.document),
+        }
     }
 
     /// The editor left the text as it was, so nothing is written.
@@ -211,6 +291,22 @@ impl ManagementPanel {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if self.detail.is_some() {
+            return self.detail_key(key);
+        }
+        // The confirmation takes every key: Enter removes, anything else
+        // cancels and changes nothing.
+        if let Some(id) = self.confirming.take() {
+            self.refresh_hint();
+            if key.code != KeyCode::Enter {
+                return Effect::None;
+            }
+            self.busy = true;
+            return Effect::Management(ManagementRequest {
+                area: self.area,
+                action: ManagementAction::Remove { id },
+            });
+        }
         if key.code == KeyCode::Esc {
             return match self.list.handle_key(key) {
                 Event::Close => Effect::Close,
@@ -238,6 +334,22 @@ impl ManagementPanel {
         // letter.
         if key.code == KeyCode::Char('e') && key.mods.contains(Modifiers::CTRL) {
             return self.edit();
+        }
+        if key.code == KeyCode::Char('n') && key.mods.contains(Modifiers::CTRL) {
+            return self.add();
+        }
+        if key.code == KeyCode::Char('x') && key.mods.contains(Modifiers::CTRL) {
+            return self.remove();
+        }
+        if key.code == KeyCode::Char('t') && key.mods.contains(Modifiers::CTRL) {
+            return self.send_entry(ActionKind::Run, |id| ManagementAction::Run { id });
+        }
+        if key.code == KeyCode::Tab {
+            // Tab moves the list in other panels; here it opens the entry.
+            if !self.entry_offers(ActionKind::Inspect) {
+                return Effect::None;
+            }
+            return self.send_entry(ActionKind::Inspect, |id| ManagementAction::Inspect { id });
         }
         // Space toggles as Enter does, as in `/settings > Execution`.
         let key = if matches!(key.code, KeyCode::Char(' ')) {
@@ -267,46 +379,137 @@ impl ManagementPanel {
         Effect::Management(request)
     }
 
-    /// The selected entry's document for the external editor, with the
-    /// revision this panel read it at.
+    /// The key an open detail takes: the arrows and PageUp/PageDown scroll
+    /// it, Esc returns to the list with the selection kept.
+    fn detail_key(&mut self, key: KeyEvent) -> Effect {
+        let Some(detail) = &self.detail else {
+            return Effect::None;
+        };
+        let page = detail.page.get().max(1);
+        let top = match key.code {
+            KeyCode::Esc => {
+                self.detail = None;
+                self.refresh_hint();
+                return Effect::None;
+            }
+            KeyCode::Up => detail.top.get().saturating_sub(1),
+            KeyCode::Down => detail.top.get().saturating_add(1),
+            KeyCode::PageUp => detail.top.get().saturating_sub(page),
+            KeyCode::PageDown => detail.top.get().saturating_add(page),
+            _ => return Effect::None,
+        };
+        detail.top.set(top);
+        Effect::None
+    }
+
+    /// Asks for the selected entry's detail, which the adapter answers in
+    /// place of the list.
+    fn send_entry(
+        &mut self,
+        kind: ActionKind,
+        action: impl FnOnce(String) -> ManagementAction,
+    ) -> Effect {
+        let Some(entry) = self.selected() else {
+            return Effect::None;
+        };
+        if !entry.actions.contains(&kind) {
+            return Effect::None;
+        }
+        let request = ManagementRequest {
+            area: self.area,
+            action: action(entry.id.clone()),
+        };
+        self.busy = true;
+        Effect::Management(request)
+    }
+
+    /// Waits for the confirmation the next key answers.
+    fn remove(&mut self) -> Effect {
+        let Some(entry) = self.selected() else {
+            return Effect::None;
+        };
+        if !entry.actions.contains(&ActionKind::Remove) {
+            return Effect::None;
+        }
+        self.confirming = Some(entry.id.clone());
+        self.refresh_hint();
+        Effect::None
+    }
+
+    /// A new entry, from the document the adapter supplies.
+    fn add(&mut self) -> Effect {
+        if !self.offers(ActionKind::Add) {
+            return Effect::None;
+        }
+        let Some(document) = self.view.as_ref().and_then(|view| view.create.clone()) else {
+            return Effect::None;
+        };
+        self.open_editor(WriteTarget::Create, &document)
+    }
+
+    /// The selected entry's document for the external editor, or the area's,
+    /// with the revision this panel read it at.
     fn edit(&mut self) -> Effect {
         if !self.offers(ActionKind::Edit) {
             return Effect::None;
         }
-        let Some((revision, document)) = self
-            .view
-            .as_ref()
-            .and_then(|view| Some((view.revision.clone()?, view.document.clone()?)))
-        else {
-            return Effect::None;
+        let entry = self.selected().and_then(|entry| {
+            let document = entry.document.as_ref()?;
+            Some((
+                WriteTarget::Entry {
+                    id: entry.id.clone(),
+                    revision: document.revision.clone(),
+                },
+                document.document.clone(),
+            ))
+        });
+        let (target, document) = match entry {
+            Some(found) => found,
+            None => {
+                let area = self
+                    .view
+                    .as_ref()
+                    .and_then(|view| Some((view.revision.clone()?, view.document.clone()?)));
+                match area {
+                    Some((revision, document)) => (WriteTarget::Area { revision }, document),
+                    None => return Effect::None,
+                }
+            }
         };
-        let Ok(json) = serde_json::to_string_pretty(&document) else {
+        self.open_editor(target, &document)
+    }
+
+    fn open_editor(&mut self, target: WriteTarget, document: &serde_json::Value) -> Effect {
+        let Ok(json) = serde_json::to_string_pretty(document) else {
             return Effect::None;
         };
         self.busy = true;
         Effect::EditManagement {
             area: self.area,
-            revision,
+            target,
             text: format!("{json}\n"),
         }
     }
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+        if let Some(detail) = &self.detail {
+            return render_detail(detail, width, rows, p);
+        }
         let inner = width.saturating_sub(4).max(1);
         let mut footer = Vec::new();
         if let Some(entry) = self.selected() {
             for line in &entry.detail {
-                for row in wrap_words(line, inner.saturating_sub(2).max(1)) {
+                for row in wrap_words(&safe(line), inner.saturating_sub(2).max(1)) {
                     footer.push(format!("  {}", fg(&row, &p.muted)));
                 }
             }
         }
         if let Some(message) = &self.message {
             let (text, color) = match message {
-                Ok(text) => (text, &p.success),
-                Err(text) => (text, &p.danger),
+                Ok(text) => (safe(text), &p.success),
+                Err(text) => (safe(text), &p.danger),
             };
-            for row in wrap_words(text, inner) {
+            for row in wrap_words(&text, inner) {
                 footer.push(fg(&row, color));
             }
         }
@@ -316,6 +519,33 @@ impl ManagementPanel {
         footer.truncate(rows.saturating_sub(2 + 3 + 1));
         self.list.render_with_footer(width, rows, p, &footer)
     }
+}
+
+/// A detail in place of the list: its title in the border, its lines below.
+fn render_detail(detail: &ShownDetail, width: usize, rows: usize, p: &Palette) -> Vec<String> {
+    let inner = width.saturating_sub(4).max(1);
+    let mut lines = Vec::new();
+    for line in &detail.lines {
+        lines.extend(wrap_words(&safe(line), inner));
+    }
+    let page = rows.saturating_sub(2).max(1);
+    detail.page.set(page);
+    let start = detail.top.get().min(lines.len().saturating_sub(page));
+    detail.top.set(start);
+    let body: Vec<String> = lines
+        .into_iter()
+        .skip(start)
+        .take(page)
+        .map(|line| fg(&line, &p.text))
+        .collect();
+    bordered(
+        &body,
+        width,
+        Some(rows),
+        &p.border,
+        Some(&title_plain(&safe(&detail.title), inner, p)),
+        Some(&key_hints(t("↑↓ scroll · Esc back"), p)),
+    )
 }
 
 /// What a reload with no panel reports: the area's size, then what its owner
@@ -354,16 +584,28 @@ fn label(kind: ActionKind) -> &'static str {
         ActionKind::Toggle => "Enter toggle",
         ActionKind::Edit => "Ctrl+E edit",
         ActionKind::Reload => "Ctrl+R reload",
+        ActionKind::Add => "Ctrl+N add",
+        ActionKind::Remove => "Ctrl+X remove",
+        ActionKind::Run => "Ctrl+T run",
+        ActionKind::Inspect => "Tab inspect",
     }
 }
 
 /// The keys the area and the selected entry offer, as one hint.
 fn hint(kinds: &[ActionKind]) -> String {
-    let mut parts: Vec<&str> = [ActionKind::Toggle, ActionKind::Edit, ActionKind::Reload]
-        .into_iter()
-        .filter(|kind| kinds.contains(kind))
-        .map(label)
-        .collect();
+    let mut parts: Vec<&str> = [
+        ActionKind::Toggle,
+        ActionKind::Edit,
+        ActionKind::Reload,
+        ActionKind::Add,
+        ActionKind::Remove,
+        ActionKind::Run,
+        ActionKind::Inspect,
+    ]
+    .into_iter()
+    .filter(|kind| kinds.contains(kind))
+    .map(label)
+    .collect();
     parts.push("Esc close");
     parts.join(" · ")
 }
@@ -373,12 +615,14 @@ fn hint(kinds: &[ActionKind]) -> String {
 fn items(view: &ManagementView) -> Vec<Item> {
     let mut items = Vec::new();
     for group in &view.groups {
-        items.push(Item::heading(group.heading.clone()));
+        items.push(Item::heading(safe(&group.heading)));
         for entry in &group.entries {
+            // The owner's text is drawn, so it is safe before it is stored:
+            // an escape sequence in a name cannot reach the screen.
             let mut item = Item::new(
                 entry.id.clone(),
-                entry.label.clone(),
-                states(entry).join("  "),
+                safe(&entry.label),
+                safe(&states(entry).join("  ")),
             );
             item.search = format!("{} {}", entry.id, entry.detail.join(" "));
             items.push(item);
@@ -386,7 +630,7 @@ fn items(view: &ManagementView) -> Vec<Item> {
     }
     if !view.issues.is_empty() {
         items.push(Item::heading(t("Issues")));
-        items.extend(view.issues.iter().map(|issue| Item::heading(issue.clone())));
+        items.extend(view.issues.iter().map(|issue| Item::heading(safe(issue))));
     }
     items
 }
@@ -404,11 +648,17 @@ fn states(entry: &ManagementEntry) -> Vec<String> {
     states
 }
 
-/// The notice a successful change leaves.
-fn outcome(action: &ManagementAction, view: &ManagementView) -> String {
+/// The notice a successful change leaves. `previous` names an entry an
+/// action removed, which the area no longer reports.
+fn outcome(
+    action: &ManagementAction,
+    view: &ManagementView,
+    previous: Option<&ManagementView>,
+) -> String {
     let name = |id: &str| {
-        view.groups
-            .iter()
+        std::iter::once(view)
+            .chain(previous)
+            .flat_map(|view| &view.groups)
             .flat_map(|group| &group.entries)
             .find(|entry| entry.id == id)
             .map(|entry| entry.label.clone())
@@ -424,14 +674,21 @@ fn outcome(action: &ManagementAction, view: &ManagementView) -> String {
             &[("name", &name(id))],
         ),
         ManagementAction::Save { .. } => t("Saved.").to_owned(),
+        ManagementAction::Add { .. } => t("Added.").to_owned(),
+        ManagementAction::Remove { id } => tf("Removed {name}.", &[("name", &name(id))]),
+        ManagementAction::Run { id } => tf("Ran {name}.", &[("name", &name(id))]),
         ManagementAction::List | ManagementAction::Reload => t("Reloaded.").to_owned(),
+        // An inspect answers with a detail, never with a view to name.
+        ManagementAction::Inspect { .. } => unreachable!("an inspect answers with a detail"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::session::{ManagementGroup, ManagementReply};
+    use crate::model::session::{
+        EntryDocument, ManagementGroup, ManagementReply, ManagementReport,
+    };
     use crate::ui::render::panel::{strip_escapes, visible_width};
     use crate::ui::theme::{Appearance, ColorMode, palette::terminal_palette};
 
@@ -456,6 +713,7 @@ mod tests {
             enabled,
             states,
             actions,
+            document: None,
         }
     }
 
@@ -463,6 +721,7 @@ mod tests {
         ManagementView {
             revision: None,
             document: None,
+            create: None,
             actions: vec![ActionKind::Reload],
             groups: vec![
                 ManagementGroup {
@@ -502,15 +761,31 @@ mod tests {
         }
     }
 
+    fn reply(
+        area: Area,
+        action: ManagementAction,
+        result: Result<ManagementReport, ManagementRefusal>,
+    ) -> ManagementReply {
+        ManagementReply {
+            request: ManagementRequest { area, action },
+            result,
+        }
+    }
+
+    fn view_reply(area: Area, action: ManagementAction, view: ManagementView) -> ManagementReply {
+        reply(
+            area,
+            action,
+            Ok(ManagementReport::View {
+                view: Box::new(view),
+                note: None,
+            }),
+        )
+    }
+
     fn opened() -> ManagementPanel {
         let mut panel = ManagementPanel::new(Area::Skills);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::List,
-            },
-            result: Ok(view()),
-        });
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::List, view()));
         panel
     }
 
@@ -524,6 +799,10 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, Modifiers::NONE)
+    }
+
+    fn ctrl(code: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(code), Modifiers::CTRL)
     }
 
     /// The rows group entries under their source, name each entry's state,
@@ -575,16 +854,14 @@ mod tests {
             }
             _ => panic!("expected a toggle"),
         }
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::Toggle {
-                    id: "user:commit".into(),
-                    enabled: false,
-                },
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::Toggle {
+                id: "user:commit".into(),
+                enabled: false,
             },
-            result: Ok(view()),
-        });
+            view(),
+        ));
         assert!(
             shown(&panel, 72, 20)
                 .join("\n")
@@ -598,18 +875,12 @@ mod tests {
             text.contains("Enter toggle · Ctrl+R reload · Esc close"),
             "{text}"
         );
-        match panel.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)) {
+        match panel.handle_key(ctrl('r')) {
             Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
             _ => panic!("expected a reload"),
         }
         // A reload keeps the entry the user was on.
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::Reload,
-            },
-            result: Ok(view()),
-        });
+        panel.set_result(&view_reply(Area::Skills, ManagementAction::Reload, view()));
         assert!(shown(&panel, 72, 20).join("\n").contains("Reloaded."));
         // An entry that offers no toggle ignores Enter and says so by its
         // hint.
@@ -639,24 +910,20 @@ mod tests {
     fn an_empty_area_and_a_failed_read_say_so() {
         let mut panel = ManagementPanel::new(Area::Skills);
         assert!(shown(&panel, 40, 10).join("\n").contains("Loading..."));
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::List,
-            },
-            result: Ok(ManagementView::default()),
-        });
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            ManagementView::default(),
+        ));
         assert!(shown(&panel, 40, 10).join("\n").contains("No entries."));
         let mut panel = ManagementPanel::new(Area::Skills);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::List,
-            },
-            result: Err(ManagementRefusal::Refused(
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::List,
+            Err(ManagementRefusal::Refused(
                 "This daemon cannot manage skills.".into(),
             )),
-        });
+        ));
         assert!(
             shown(&panel, 60, 10)
                 .join(" ")
@@ -670,6 +937,7 @@ mod tests {
         ManagementView {
             revision: Some("user:1".into()),
             document: Some(serde_json::json!({"hooks": {}})),
+            create: None,
             actions: vec![ActionKind::Reload],
             groups: vec![ManagementGroup {
                 heading: "sources".into(),
@@ -681,6 +949,7 @@ mod tests {
                         enabled: true,
                         states: Vec::new(),
                         actions: vec![ActionKind::Edit],
+                        document: None,
                     },
                     ManagementEntry {
                         id: "plugin:kit".into(),
@@ -689,6 +958,7 @@ mod tests {
                         enabled: true,
                         states: vec![EntryState::ReadOnly, EntryState::Invalid],
                         actions: vec![],
+                        document: None,
                     },
                 ],
             }],
@@ -696,28 +966,32 @@ mod tests {
         }
     }
 
+    fn opened_hooks() -> ManagementPanel {
+        let mut panel = ManagementPanel::new(Area::Hooks);
+        panel.set_result(&view_reply(
+            Area::Hooks,
+            ManagementAction::List,
+            hooks_view(),
+        ));
+        panel
+    }
+
     /// Ctrl+E opens the document it read, with the revision it read it at;
     /// a read-only source offers no write at all.
     #[test]
     fn edit_offers_the_document_and_a_read_only_source_offers_no_write() {
-        let mut panel = ManagementPanel::new(Area::Hooks);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Hooks,
-                action: ManagementAction::List,
-            },
-            result: Ok(hooks_view()),
-        });
+        let mut panel = opened_hooks();
         let text = shown(&panel, 72, 20).join("\n");
         assert!(text.contains("read-only  invalid"), "{text}");
-        match panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)) {
-            Effect::EditManagement {
-                area,
-                revision,
-                text,
-            } => {
+        match panel.handle_key(ctrl('e')) {
+            Effect::EditManagement { area, target, text } => {
                 assert_eq!(area, Area::Hooks);
-                assert_eq!(revision, "user:1");
+                assert_eq!(
+                    target,
+                    WriteTarget::Area {
+                        revision: "user:1".into()
+                    }
+                );
                 assert_eq!(
                     serde_json::from_str::<serde_json::Value>(&text).unwrap(),
                     serde_json::json!({"hooks": {}})
@@ -740,14 +1014,7 @@ mod tests {
             "{text}"
         );
         // A read-only source ignores Enter and Ctrl+E.
-        let mut panel = ManagementPanel::new(Area::Hooks);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Hooks,
-                action: ManagementAction::List,
-            },
-            result: Ok(hooks_view()),
-        });
+        let mut panel = opened_hooks();
         panel.handle_key(key(KeyCode::End));
         let text = shown(&panel, 72, 20).join("\n");
         assert!(!text.contains("Ctrl+E"), "no edit key is offered: {text}");
@@ -755,10 +1022,7 @@ mod tests {
             panel.handle_key(key(KeyCode::Enter)),
             Effect::None
         ));
-        assert!(matches!(
-            panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)),
-            Effect::None
-        ));
+        assert!(matches!(panel.handle_key(ctrl('e')), Effect::None));
     }
 
     /// An area whose daemon reports no document offers no edit, and a
@@ -769,17 +1033,8 @@ mod tests {
         view.document = None;
         view.groups[0].entries[0].actions = vec![ActionKind::Reload];
         let mut panel = ManagementPanel::new(Area::Hooks);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Hooks,
-                action: ManagementAction::List,
-            },
-            result: Ok(view),
-        });
-        assert!(matches!(
-            panel.handle_key(KeyEvent::new(KeyCode::Char('e'), Modifiers::CTRL)),
-            Effect::None
-        ));
+        panel.set_result(&view_reply(Area::Hooks, ManagementAction::List, view));
+        assert!(matches!(panel.handle_key(ctrl('e')), Effect::None));
         let text = reloaded(Area::Hooks, &hooks_view());
         assert!(
             text.starts_with("Reloaded Hooks: 2 entries, 0 disabled."),
@@ -792,20 +1047,18 @@ mod tests {
     #[test]
     fn reload_works_on_an_empty_area_and_after_a_failed_read() {
         let mut panel = ManagementPanel::new(Area::Skills);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::List,
-            },
-            result: Ok(ManagementView {
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            ManagementView {
                 actions: vec![ActionKind::Reload],
                 ..ManagementView::default()
-            }),
-        });
+            },
+        ));
         let text = shown(&panel, 60, 12).join("\n");
         assert!(text.contains("No entries."), "{text}");
         assert!(text.contains("Ctrl+R reload · Esc close"), "{text}");
-        match panel.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)) {
+        match panel.handle_key(ctrl('r')) {
             Effect::Management(request) => {
                 assert_eq!(request.area, Area::Skills);
                 assert_eq!(request.action, ManagementAction::Reload);
@@ -814,19 +1067,17 @@ mod tests {
         }
         // A read that failed leaves nothing to select; Ctrl+R reads again.
         let mut panel = ManagementPanel::new(Area::Skills);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Skills,
-                action: ManagementAction::List,
-            },
-            result: Err(ManagementRefusal::Refused(
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::List,
+            Err(ManagementRefusal::Refused(
                 "This daemon cannot manage skills.".into(),
             )),
-        });
+        ));
         let text = shown(&panel, 60, 12).join("\n");
         assert!(text.contains("This daemon cannot manage skills."), "{text}");
         assert!(text.contains("Ctrl+R reload"), "{text}");
-        match panel.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)) {
+        match panel.handle_key(ctrl('r')) {
             Effect::Management(request) => assert_eq!(request.action, ManagementAction::Reload),
             _ => panic!("expected a reload"),
         }
@@ -836,23 +1087,15 @@ mod tests {
     /// revision and shows the area as its owner now reports it.
     #[test]
     fn a_conflict_shows_the_newer_document() {
-        let mut panel = ManagementPanel::new(Area::Hooks);
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Hooks,
-                action: ManagementAction::List,
+        let mut panel = opened_hooks();
+        panel.set_result(&reply(
+            Area::Hooks,
+            ManagementAction::Save {
+                id: None,
+                expected_revision: "user:1".into(),
+                document: serde_json::json!({"hooks": {}}),
             },
-            result: Ok(hooks_view()),
-        });
-        panel.set_result(&ManagementReply {
-            request: ManagementRequest {
-                area: Area::Hooks,
-                action: ManagementAction::Save {
-                    expected_revision: "user:1".into(),
-                    document: serde_json::json!({"hooks": {}}),
-                },
-            },
-            result: Err(ManagementRefusal::Conflict {
+            Err(ManagementRefusal::Conflict {
                 message: "The user document changed since it was read.".into(),
                 view: Box::new(ManagementView {
                     revision: Some("user:2".into()),
@@ -861,7 +1104,7 @@ mod tests {
                     ..hooks_view()
                 }),
             }),
-        });
+        ));
         let text = shown(&panel, 72, 20).join(" ");
         assert!(
             text.contains("The user document changed since it was read."),
@@ -871,7 +1114,12 @@ mod tests {
         let text = shown(&panel, 72, 20).join(" ");
         assert!(text.contains("Your text is kept in"), "{text}");
         assert!(text.contains("hooks-1.json"), "{text}");
-        assert_eq!(panel.document(), Some(&serde_json::json!({"hooks": {}})));
+        assert_eq!(
+            panel.document(&WriteTarget::Area {
+                revision: "user:2".into()
+            }),
+            Some(&serde_json::json!({"hooks": {}}))
+        );
     }
 
     /// Filtering keeps the entry's keys: the hint follows the new selection.
@@ -886,5 +1134,343 @@ mod tests {
         assert!(!text.contains("deploy"), "{text}");
         assert!(text.contains("Ctrl+R reload · Esc close"), "{text}");
         assert!(!text.contains("Enter toggle"), "{text}");
+    }
+
+    /// An area whose entries offer every kind, as the Scheduler's jobs do.
+    fn catalogue() -> ManagementView {
+        ManagementView {
+            revision: None,
+            document: None,
+            create: Some(serde_json::json!({"name": "example"})),
+            actions: vec![ActionKind::Reload, ActionKind::Add],
+            groups: vec![ManagementGroup {
+                heading: "jobs".into(),
+                entries: vec![
+                    ManagementEntry {
+                        id: "job-1".into(),
+                        label: "nightly".into(),
+                        detail: vec!["every 60 minutes".into(), "no run yet".into()],
+                        enabled: true,
+                        states: Vec::new(),
+                        actions: vec![
+                            ActionKind::Toggle,
+                            ActionKind::Edit,
+                            ActionKind::Remove,
+                            ActionKind::Run,
+                            ActionKind::Inspect,
+                        ],
+                        document: Some(EntryDocument {
+                            revision: "3".into(),
+                            document: serde_json::json!({"name": "nightly"}),
+                        }),
+                    },
+                    ManagementEntry {
+                        id: "job-2".into(),
+                        label: "release".into(),
+                        detail: vec!["at 2030-01-01T00:00:00Z".into()],
+                        enabled: false,
+                        states: vec![EntryState::Invalid],
+                        actions: vec![ActionKind::Toggle],
+                        document: Some(EntryDocument {
+                            revision: "7".into(),
+                            document: serde_json::json!({"name": "release"}),
+                        }),
+                    },
+                ],
+            }],
+            issues: Vec::new(),
+        }
+    }
+
+    fn opened_catalogue() -> ManagementPanel {
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            catalogue(),
+        ));
+        panel
+    }
+
+    /// A remove asks in the hint first: Enter sends the delete, any other
+    /// key cancels and changes nothing.
+    #[test]
+    fn remove_asks_in_the_hint_and_the_next_key_answers_it() {
+        let mut panel = opened_catalogue();
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(text.contains("Ctrl+X remove"), "{text}");
+        assert!(matches!(panel.handle_key(ctrl('x')), Effect::None));
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(
+            text.contains("Remove nightly? Enter confirm · Esc cancel"),
+            "{text}"
+        );
+        // Any other key cancels: the panel keeps its list and its filter.
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Char('q'))),
+            Effect::None
+        ));
+        let text = shown(&panel, 120, 20).join("\n");
+        assert!(!text.contains("Remove nightly?"), "{text}");
+        assert!(
+            text.contains("release"),
+            "the keys reached no filter: {text}"
+        );
+        // Enter confirms the one the panel asked about.
+        panel.handle_key(ctrl('x'));
+        match panel.handle_key(key(KeyCode::Enter)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Remove { id: "job-1".into() }
+            ),
+            _ => panic!("expected a remove"),
+        }
+    }
+
+    /// Tab and Ctrl+X are the panel's even while the filter holds text: the
+    /// filter takes every plain letter, not those keys.
+    #[test]
+    fn tab_and_ctrl_x_reach_the_panel_past_the_filter() {
+        let mut panel = opened_catalogue();
+        for c in "night".chars() {
+            panel.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(matches!(panel.handle_key(ctrl('x')), Effect::None));
+        assert!(
+            shown(&panel, 120, 20)
+                .join("\n")
+                .contains("Remove nightly? Enter confirm · Esc cancel"),
+            "a filter does not take Ctrl+X"
+        );
+        panel.handle_key(key(KeyCode::Char('z')));
+        match panel.handle_key(key(KeyCode::Tab)) {
+            Effect::Management(request) => {
+                assert!(matches!(request.action, ManagementAction::Inspect { .. }))
+            }
+            _ => panic!("a filter does not take Tab"),
+        }
+    }
+
+    /// Tab asks for the entry's detail and shows it in place of the list;
+    /// the first Esc returns to the list, the second closes the panel.
+    #[test]
+    fn inspect_shows_the_detail_and_the_first_esc_returns_to_the_list() {
+        let mut panel = opened_catalogue();
+        match panel.handle_key(key(KeyCode::Tab)) {
+            Effect::Management(request) => assert_eq!(
+                request.action,
+                ManagementAction::Inspect { id: "job-1".into() }
+            ),
+            _ => panic!("expected an inspect"),
+        }
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Inspect { id: "job-1".into() },
+            Ok(ManagementReport::Detail(ManagementDetail {
+                title: "Recent runs of nightly".into(),
+                lines: vec!["2026-11-01T09:00:12.000Z  completed".into()],
+            })),
+        ));
+        let text = shown(&panel, 60, 12).join("\n");
+        assert!(text.contains("Recent runs of nightly"), "{text}");
+        assert!(
+            text.contains("2026-11-01T09:00:12.000Z  completed"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("release"),
+            "the detail replaces the list: {text}"
+        );
+        assert!(text.contains("↑↓ scroll · Esc back"), "{text}");
+        // Esc returns to the list, with the selection kept.
+        assert!(matches!(panel.handle_key(key(KeyCode::Esc)), Effect::None));
+        let text = shown(&panel, 60, 12).join("\n");
+        assert!(
+            text.contains("nightly") && text.contains("release"),
+            "{text}"
+        );
+        assert!(matches!(panel.handle_key(key(KeyCode::Esc)), Effect::Close));
+    }
+
+    /// A long detail scrolls with the arrows and PageUp/PageDown.
+    #[test]
+    fn a_long_detail_scrolls() {
+        let mut panel = opened_catalogue();
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Inspect { id: "job-1".into() },
+            Ok(ManagementReport::Detail(ManagementDetail {
+                title: "Recent runs of nightly".into(),
+                lines: (0..30).map(|index| format!("run {index}")).collect(),
+            })),
+        ));
+        let first = shown(&panel, 40, 8);
+        assert!(first.join("\n").contains("run 0"));
+        for _ in 0..4 {
+            panel.handle_key(key(KeyCode::Down));
+        }
+        let text = shown(&panel, 40, 8).join("\n");
+        assert!(text.contains("run 4"), "{text}");
+        assert!(!text.contains("run 0"), "{text}");
+        panel.handle_key(key(KeyCode::PageDown));
+        let text = shown(&panel, 40, 8).join("\n");
+        assert!(text.contains("run 10"), "{text}");
+        for _ in 0..40 {
+            panel.handle_key(key(KeyCode::Down));
+        }
+        let last = shown(&panel, 40, 8).join("\n");
+        assert!(
+            last.contains("run 29"),
+            "the window stops at the end: {last}"
+        );
+    }
+
+    /// Add belongs to the area: it needs no selection, so it works on an
+    /// empty area and opens the document the adapter supplied.
+    #[test]
+    fn add_needs_no_selection_and_opens_the_adapters_document() {
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            ManagementView {
+                actions: vec![ActionKind::Reload, ActionKind::Add],
+                create: Some(serde_json::json!({"name": "example"})),
+                ..ManagementView::default()
+            },
+        ));
+        let text = shown(&panel, 60, 12).join("\n");
+        assert!(text.contains("No entries."), "{text}");
+        assert!(
+            text.contains("Ctrl+R reload · Ctrl+N add · Esc close"),
+            "{text}"
+        );
+        match panel.handle_key(ctrl('n')) {
+            Effect::EditManagement { area, target, text } => {
+                assert_eq!(area, Area::Skills);
+                assert_eq!(target, WriteTarget::Create);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                    serde_json::json!({"name": "example"})
+                );
+            }
+            _ => panic!("expected an editor draft"),
+        }
+        // An area with no create document offers no add.
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::List,
+            ManagementView {
+                actions: vec![ActionKind::Add],
+                ..ManagementView::default()
+            },
+        ));
+        assert!(matches!(panel.handle_key(ctrl('n')), Effect::None));
+    }
+
+    /// An entry's own document is what Ctrl+E edits, with the entry's id and
+    /// the revision it was read at.
+    #[test]
+    fn edit_offers_an_entrys_own_document() {
+        let mut panel = opened_catalogue();
+        let target = match panel.handle_key(ctrl('e')) {
+            Effect::EditManagement { target, text, .. } => {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                    serde_json::json!({"name": "nightly"})
+                );
+                target
+            }
+            _ => panic!("expected an edit"),
+        };
+        assert_eq!(
+            target,
+            WriteTarget::Entry {
+                id: "job-1".into(),
+                revision: "3".into()
+            }
+        );
+        assert_eq!(
+            panel.document(&target),
+            Some(&serde_json::json!({"name": "nightly"}))
+        );
+    }
+
+    /// Run sends the area's operation for the selected entry, and the
+    /// adapter's note is the message the panel shows.
+    #[test]
+    fn run_sends_the_entrys_operation_and_shows_what_the_owner_answered() {
+        let mut panel = opened_catalogue();
+        match panel.handle_key(ctrl('t')) {
+            Effect::Management(request) => {
+                assert_eq!(request.action, ManagementAction::Run { id: "job-1".into() })
+            }
+            _ => panic!("expected a run"),
+        }
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Run { id: "job-1".into() },
+            Ok(ManagementReport::View {
+                view: Box::new(catalogue()),
+                note: Some("Run nightly: skipped (overlap).".into()),
+            }),
+        ));
+        let text = shown(&panel, 100, 20).join(" ");
+        assert!(text.contains("Run nightly: skipped (overlap)."), "{text}");
+    }
+
+    /// A remove names the entry the area no longer reports.
+    #[test]
+    fn a_remove_names_the_entry_it_removed() {
+        let mut panel = opened_catalogue();
+        panel.handle_key(ctrl('x'));
+        panel.handle_key(key(KeyCode::Enter));
+        let mut after = catalogue();
+        after.groups[0].entries.retain(|entry| entry.id != "job-1");
+        panel.set_result(&view_reply(
+            Area::Skills,
+            ManagementAction::Remove { id: "job-1".into() },
+            after,
+        ));
+        let text = shown(&panel, 100, 20).join(" ");
+        assert!(text.contains("Removed nightly."), "{text}");
+        assert!(!text.contains("Removed job-1."), "{text}");
+    }
+
+    /// Owner text is made safe before the panel draws it: a heading, a name,
+    /// a detail line, an issue, the note and an inspect's detail cannot carry
+    /// an escape sequence to the screen.
+    #[test]
+    fn owner_text_is_sanitized_before_it_is_drawn() {
+        let mut view = catalogue();
+        view.groups[0].heading = "jobs\u{1b}[2J".into();
+        view.groups[0].entries[0].label = "nightly\u{1b}[2J".into();
+        view.groups[0].entries[0].detail = vec!["every 60 minutes\u{1b}[2J".into()];
+        view.issues = vec!["an issue\u{1b}[2J".into()];
+        let mut panel = ManagementPanel::new(Area::Skills);
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Run { id: "job-1".into() },
+            Ok(ManagementReport::View {
+                view: Box::new(view),
+                note: Some("Run nightly\u{1b}[2J.".into()),
+            }),
+        ));
+        let text = panel.render(100, 20, &palette()).join("\n");
+        assert!(!text.contains("[2J"), "{text}");
+        assert!(text.contains("nightly"), "{text}");
+        // The detail's title and lines are made safe the same way.
+        panel.set_result(&reply(
+            Area::Skills,
+            ManagementAction::Inspect { id: "job-1".into() },
+            Ok(ManagementReport::Detail(ManagementDetail {
+                title: "Recent runs of nightly\u{1b}[2J".into(),
+                lines: vec!["2026-11-01T09:00:12.000Z  completed\u{1b}[2J".into()],
+            })),
+        ));
+        let text = panel.render(60, 12, &palette()).join("\n");
+        assert!(!text.contains("[2J"), "{text}");
+        assert!(text.contains("Recent runs of nightly"), "{text}");
     }
 }

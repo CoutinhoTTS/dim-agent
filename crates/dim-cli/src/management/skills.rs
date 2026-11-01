@@ -71,6 +71,13 @@ pub async fn apply(
         ManagementAction::Save { .. } => {
             return Err("A Skill has no document to edit.".into());
         }
+        // `supported` refuses a kind this area does not have before `apply`.
+        ManagementAction::Add { .. }
+        | ManagementAction::Remove { .. }
+        | ManagementAction::Run { .. }
+        | ManagementAction::Inspect { .. } => {
+            return Err("A Skill has no such action.".into());
+        }
     }
     catalog(client, &cwd.to_string_lossy()).await
 }
@@ -101,12 +108,14 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
                 enabled: entry.enabled,
                 states,
                 actions: super::entry_kinds(actions),
+                document: None,
             },
         );
     }
     ManagementView {
         revision: None,
         document: None,
+        create: None,
         actions: super::area_kinds(actions),
         groups: groups.into_vec(),
         issues: catalog

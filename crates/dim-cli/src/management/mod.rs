@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::client::Client;
 use crate::model::session::{
     ActionKind, Area, ManagementAction, ManagementEntry, ManagementGroup, ManagementRefusal,
-    ManagementRequest, ManagementView,
+    ManagementReport, ManagementRequest,
 };
 
 /// One area's management methods: the read that reports the area, and the
@@ -72,12 +72,16 @@ fn kind(action: &ManagementAction) -> Option<ActionKind> {
         ManagementAction::Toggle { .. } => Some(ActionKind::Toggle),
         ManagementAction::Reload => Some(ActionKind::Reload),
         ManagementAction::Save { .. } => Some(ActionKind::Edit),
+        ManagementAction::Add { .. } => Some(ActionKind::Add),
+        ManagementAction::Remove { .. } => Some(ActionKind::Remove),
+        ManagementAction::Run { .. } => Some(ActionKind::Run),
+        ManagementAction::Inspect { .. } => Some(ActionKind::Inspect),
     }
 }
 
 /// Whether a kind acts on the area itself rather than on one entry.
 fn acts_on_the_area(kind: ActionKind) -> bool {
-    matches!(kind, ActionKind::Reload)
+    matches!(kind, ActionKind::Reload | ActionKind::Add)
 }
 
 /// The kinds of `available` that act on the area, in their order.
@@ -147,12 +151,12 @@ fn unsupported(area: Area) -> String {
     format!("This daemon cannot manage {}.", area.name())
 }
 
-/// Applies `request` to its area and reports the area afterwards.
+/// Applies `request` to its area and reports what it came to.
 pub async fn apply(
     client: &mut Client,
     request: &ManagementRequest,
     cwd: &Path,
-) -> Result<ManagementView, ManagementRefusal> {
+) -> Result<ManagementReport, ManagementRefusal> {
     supported(client, request).map_err(ManagementRefusal::Refused)?;
     let actions = actions(client, request.area);
     match request.area {
@@ -160,10 +164,16 @@ pub async fn apply(
             let catalog = skills::apply(client, &request.action, cwd)
                 .await
                 .map_err(ManagementRefusal::Refused)?;
-            Ok(skills::view(&catalog, &actions))
+            Ok(ManagementReport::View {
+                view: Box::new(skills::view(&catalog, &actions)),
+                note: None,
+            })
         }
         Area::Hooks => match hooks::apply(client, &request.action, cwd).await {
-            Ok(catalog) => Ok(hooks::view(&catalog, &actions)),
+            Ok(catalog) => Ok(ManagementReport::View {
+                view: Box::new(hooks::view(&catalog, &actions)),
+                note: None,
+            }),
             Err(hooks::Failure::Refused(message)) => Err(ManagementRefusal::Refused(message)),
             Err(hooks::Failure::Conflict { message, catalog }) => {
                 Err(ManagementRefusal::Conflict {

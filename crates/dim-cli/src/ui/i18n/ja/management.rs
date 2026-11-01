@@ -29,7 +29,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Enter toggle" => "Enter 切り替え",
         "Ctrl+E edit" => "Ctrl+E 編集",
+        "Ctrl+N add" => "Ctrl+N 作成",
         "Ctrl+R reload" => "Ctrl+R 再読み込み",
+        "Ctrl+T run" => "Ctrl+T 実行",
+        "Ctrl+X remove" => "Ctrl+X 削除",
+        "Tab inspect" => "Tab 詳細",
+        "Remove {name}? Enter confirm · Esc cancel" => {
+            "{name} を削除しますか？Enter で確定 · Esc でキャンセル"
+        }
+        "↑↓ scroll · Esc back" => "↑↓ スクロール · Esc で戻る",
+        "Added." => "作成しました。",
+        "Removed {name}." => "{name} を削除しました。",
+        "Ran {name}." => "{name} を実行しました。",
         "The user document changed since it was read; nothing was written. Your next edit opens the current document." => {
             "ユーザードキュメントは読み取り後に変更されています。今回は何も書き込んでいません。次回の編集では現在のドキュメントを開きます。"
         }
