@@ -238,7 +238,8 @@ impl Agent {
     }
     /// Checks how the live assembly is written, over one diagnostics snapshot:
     /// for every Session and branch this Agent hosts, that its profile's
-    /// required rows and the plugins below them are `Active`, that no plugin
+    /// required rows and the required views its scope handed, with the plugins
+    /// below them, are `Active`, that no plugin
     /// reads an external service it does not declare, that every declared read
     /// is among the reader's resolved dependencies, and that no scoped service
     /// is provided without an instance key. Each plugin is checked once, by the

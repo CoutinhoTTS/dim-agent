@@ -1871,7 +1871,7 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AssemblyRule {
-    /// A required row, or a plugin below one, is not `Active`.
+    /// A required row or view, or a plugin below one, is not `Active`.
     Ready,
     /// A plugin reads an external service it does not declare.
     UndeclaredRead,
