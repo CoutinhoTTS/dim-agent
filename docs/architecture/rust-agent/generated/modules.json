@@ -27124,7 +27124,7 @@
       "to": "dim_cli::ui::atomic",
       "references": [
         "path sibling",
-        "path update_within"
+        "path update"
       ]
     },
     {
