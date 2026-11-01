@@ -190,7 +190,9 @@ impl Wire {
 }
 
 /// The record `session.attach` replies for the Session it names: that
-/// Session's `SessionInfo`, as `session.list` gives it.
+/// Session's `SessionInfo`, whose model follows its latest adopted
+/// configuration rather than the creation model `session.list` reports until
+/// #795 lands.
 fn attach_record(request: &Value) -> Value {
     json!({
         "sessionId": request["params"]["sessionId"],
@@ -2272,6 +2274,13 @@ impl Terminal {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    /// Waits until the terminal has shown `expected` anywhere, for a frame
+    /// whose place among the frames already consumed the flow does not fix.
+    fn until_anywhere(&mut self, expected: &str) {
+        let consumed = std::mem::take(&mut self.consumed);
+        self.until(expected);
+        self.consumed = consumed;
     }
     fn until(&mut self, expected: &str) {
         let deadline = Instant::now() + PATIENCE;
@@ -7464,10 +7473,8 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     daemon.join().unwrap();
 }
 
-/// Switching to full access changes the preset before it allows the calls
-/// already waiting, so none of them keeps asking under the old preset.
 #[test]
-fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
+fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[
@@ -7490,9 +7497,9 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
         let update = wire.read("session.permission.update");
-        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
+        assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}));
         wire.reply(&update, json!({"version":2}));
-        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}}}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
         let rules = wire.read("permission.rules");
         wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
@@ -7506,12 +7513,10 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-3","source":{"kind":"model"},"call":{"name":"write","input":{"path":"notes.md"}},"reason":"file write"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"member","call":{"name":"member_approval_allow","input":{"approvalId":"member-route"}},"reason":"Member requires explicit review"}));
         let detail = wire.read("session.collaboration.approval.get");
-        let read = wire.read("session.permission.get");
-        wire.reply(&read, json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         let mut allowed = Vec::new();
         for _ in 0..2 {
             let respond = wire.read("approval.respond");
-            assert_eq!(respond["params"]["decision"], "allow");
+            assert_eq!(respond["params"]["decision"], "deny");
             allowed.push(respond["params"]["requestId"].as_str().unwrap().to_owned());
             wire.reply(&respond, json!({}));
         }
@@ -7536,21 +7541,19 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approvals\r");
-    terminal.until("Workspace write");
-    terminal.write(b"\x1b[A");
-    terminal.write(b"\r");
-    terminal.until("Confirm Full Access");
-    terminal.write(b"y");
-    terminal.until("Tool approvals: Full access");
+    terminal.until("Process isolation");
+    terminal.write(b"\x1b[B\r");
+    terminal.until("Bypass");
+    terminal.write(b"\x1b[B\r");
+    terminal.until("Tool approval: Bypass (also for new sessions)");
     terminal.until("Permission required");
     terminal.until("Allow always");
     terminal.write(b"a");
     terminal.until("Rule saved: allow exact `npm test`");
     terminal.until("npm run lint");
-    terminal.write(b"\x1b[C\x1b[C\x1b[C\r");
-    terminal.until("Confirm Full Access");
-    terminal.write(b"y");
-    terminal.until("Tool approvals: Full access");
+    terminal.write(b"n");
+    terminal.until("file write");
+    terminal.write(b"n");
     terminal.until("explicit member action");
     terminal.write(b"y");
     terminal.until("both allowed");
@@ -7559,19 +7562,20 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     daemon.join().unwrap();
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
-    assert_eq!(config["permissionPreset"], "full-access");
+    assert_eq!(config["toolApproval"], "bypass");
+    assert!(config.get("permissionPreset").is_none());
     fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.permission.get", "session.permission.update"]);
         let create = wire.read("session.create");
-        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"full-access"}));
+        assert_eq!(create["params"]["permissionPolicy"], json!({"preset":"workspace-write","toolApproval":"bypass"}));
         wire.reply(&create, json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let read = wire.read("session.permission.get");
-        wire.reply(&read, json!({"version":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
+        wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}));
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
@@ -7581,16 +7585,14 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         }
     });
     let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("full access");
+    terminal.until("Bypass");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
 }
 
-/// `/approval` offers ask and full access, writes that preset, and remembers
-/// it for sessions the terminal UI creates later.
 #[test]
-fn tui_approval_menu_sets_ask_or_full_access_and_remembers_it() {
+fn tui_approval_alias_sets_only_tool_approval_and_remembers_it() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&["session.permission.get", "session.permission.update"]);
@@ -7622,23 +7624,24 @@ fn tui_approval_menu_sets_ask_or_full_access_and_remembers_it() {
         let update = wire.read("session.permission.update");
         assert_eq!(
             update["params"],
-            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}})
+            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}})
         );
         wire.reply(&update, json!({"version":2}));
         wire.notice(
             "session.event",
-            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}),
+            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}}}),
         );
         let read = wire.read("session.permission.get");
         wire.reply(
             &read,
-            json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
+            json!({"version":2,"policy":{"preset":"workspace-write","toolApproval":"bypass","allowedTools":[],"disallowedTools":[]}}),
         );
         let update = wire.read("session.permission.update");
         assert_eq!(
             update["params"]["policy"]["preset"],
             json!("workspace-write")
         );
+        assert_eq!(update["params"]["policy"]["toolApproval"], "ask");
         wire.reply(&update, json!({"version":3}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -7648,21 +7651,24 @@ fn tui_approval_menu_sets_ask_or_full_access_and_remembers_it() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/approval\r");
-    terminal.until("Ask before commands");
+    terminal.until("Process isolation");
     terminal.write(b"\x1b[B\r");
-    terminal.until("Confirm Full Access");
-    terminal.write(b"y");
-    terminal.until("Tool approvals: Full access");
+    terminal.until("Bypass");
+    terminal.write(b"\x1b[B\r");
+    terminal.until("Tool approval: Bypass (also for new sessions)");
     terminal.write(b"/approval\r");
-    terminal.until("Ask before commands");
+    terminal.until("Process isolation");
+    terminal.write(b"\x1b[B\r");
+    terminal.until("Bypass");
     terminal.write(b"\x1b[A\r");
-    terminal.until("Tool approvals: Ask");
+    terminal.until("Tool approval: Ask (also for new sessions)");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
-    assert_eq!(config["permissionPreset"], "workspace-write");
+    assert_eq!(config["toolApproval"], "ask");
+    assert!(config.get("permissionPreset").is_none());
 }
 
 /// The terminal's program status (OSC 7501) follows a run through a

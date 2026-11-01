@@ -17,7 +17,7 @@ pub struct IsolationPanel {
 }
 
 impl IsolationPanel {
-    pub fn new(_preset: &str) -> Self {
+    pub fn new() -> Self {
         Self {
             list: Self::list(),
             snapshot: None,
@@ -32,9 +32,9 @@ impl IsolationPanel {
 
     fn list() -> ListPanel {
         ListPanel::new(
-            "Execution",
-            "↑↓ move · Enter/Space toggle · Esc close",
-            "Loading execution settings…",
+            "Process isolation",
+            "↑↓ move · Enter select · Esc close",
+            "Loading process isolation…",
             "",
             "",
             false,
@@ -49,7 +49,7 @@ impl IsolationPanel {
             Ok(snapshot) => {
                 self.draft = Some(snapshot.clone());
                 self.snapshot = Some(snapshot);
-                self.message = Some("Applies to new processes and persistent shells.".into());
+                self.message = None;
             }
             Err(error) => {
                 self.message = Some(error);
@@ -78,6 +78,7 @@ impl IsolationPanel {
 
     fn refresh(&mut self) {
         let mut items = Vec::new();
+        let mut notes = Vec::new();
         if let Some(message) = &self.message {
             items.push(Item::heading(message));
         }
@@ -87,21 +88,25 @@ impl IsolationPanel {
             )));
         }
         if let (Some(_snapshot), Some(draft)) = (&self.snapshot, &self.draft) {
-            items.push(Item::new(
-                "sandbox",
-                "Sandbox",
-                if draft.sandbox { "on" } else { "off" },
-            ));
-            let network = if draft.network { "on" } else { "off" };
-            items.push(Item::new(
-                "network",
-                "Network",
-                if draft.sandbox {
-                    network.to_string()
-                } else {
-                    format!("{network} (ignored while Sandbox is off)")
-                },
-            ));
+            notes.push("Applies to new processes and shells.".into());
+            if !draft.sandbox {
+                notes.push("Off: commands use your OS permissions, not file-tool limits.".into());
+            }
+            for (id, label, selected) in [
+                ("off", "Off", !draft.sandbox),
+                (
+                    "no-network",
+                    "Sandboxed · No network",
+                    draft.sandbox && !draft.network,
+                ),
+                (
+                    "network",
+                    "Sandboxed · Network allowed",
+                    draft.sandbox && draft.network,
+                ),
+            ] {
+                items.push(Item::new(id, label, if selected { "selected" } else { "" }));
+            }
             items.push(Item::new("save", "Save", ""));
             items.push(Item::new("reset", "Reset to defaults", ""));
         }
@@ -110,8 +115,9 @@ impl IsolationPanel {
             "Reload",
             "Discard edits and read the current settings",
         ));
-        self.list = Self::list();
-        self.list.set_items(Ok(items), None);
+        let selected = self.list.selected_id();
+        self.list = Self::list().with_notes(notes);
+        self.list.set_items(Ok(items), selected.as_deref());
     }
 
     pub fn paste(&mut self, _text: &str) {}
@@ -150,14 +156,15 @@ impl IsolationPanel {
                 }
             }
             Event::Pick(id) => match id.as_str() {
-                "sandbox" => {
+                "off" => {
                     if let Some(draft) = &mut self.draft {
-                        draft.sandbox = !draft.sandbox;
+                        draft.sandbox = false;
                     }
                 }
-                "network" => {
+                "no-network" | "network" => {
                     if let Some(draft) = &mut self.draft {
-                        draft.network = !draft.network;
+                        draft.sandbox = true;
+                        draft.network = id == "network";
                     }
                 }
                 "save" => {
@@ -186,7 +193,7 @@ impl IsolationPanel {
     pub fn render(&self, width: usize, rows: usize, palette: &Palette) -> Vec<String> {
         if self.confirm_reset || self.confirm_discard {
             return confirm_panel(
-                "Execution",
+                "Process isolation",
                 &[if self.confirm_reset {
                     "Reset the execution switches to defaults?"
                 } else {

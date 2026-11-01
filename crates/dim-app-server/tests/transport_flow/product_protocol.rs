@@ -607,6 +607,11 @@ finally:
         )
         .await;
     assert_ok(&tested);
+    assert_eq!(tested["result"]["status"], "connected", "{tested}");
+    assert!(
+        tested["result"]["latencyMs"].as_u64().is_some(),
+        "a probe reports the latency of its attempt: {tested}"
+    );
     assert_eq!(tested["result"]["tools"][0]["name"], "inspect");
     assert_eq!(
         tested["result"]["tools"][0]["description"],
@@ -639,11 +644,26 @@ finally:
     assert_eq!(inspected["result"]["connections"], json!([]));
     assert!(!inspected.to_string().contains("probe-secret-value"));
     let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"command":"missing-probe-secret-command"}})).await;
-    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&failed);
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert_eq!(failed["result"]["reason"], "unavailable", "{failed}");
+    assert!(failed["result"]["tools"].is_null(), "{failed}");
+    assert!(
+        failed["result"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "a failed probe explains itself: {failed}"
+    );
+    assert!(
+        failed["result"]["latencyMs"].as_u64().is_some(),
+        "a failed probe reports its latency: {failed}"
+    );
     assert!(!failed.to_string().contains("missing-probe-secret-command"));
     std::fs::remove_file(marker.with_extension("closed")).unwrap();
     let failed = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"fail-discovery"]}})).await;
-    assert_eq!(failed["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&failed);
+    assert_eq!(failed["result"]["status"], "failed", "{failed}");
+    assert!(failed["result"]["tools"].is_null(), "{failed}");
     assert!(!failed.to_string().contains("discovery-secret-failure"));
     assert!(
         marker.with_extension("closed").exists(),
@@ -651,9 +671,11 @@ finally:
     );
     std::fs::remove_file(marker.with_extension("closed")).unwrap();
     let refused = client.rpc("mcp.test", json!({"source":"user","id":"probe","patch":{"args":["-u","-c",script,marker,"bad-schema"]}})).await;
-    assert_eq!(refused["error"]["data"]["appError"], "mcp_unavailable");
+    assert_ok(&refused);
+    assert_eq!(refused["result"]["status"], "failed", "{refused}");
+    assert_eq!(refused["result"]["reason"], "response", "{refused}");
     assert_eq!(
-        refused["error"]["message"],
+        refused["result"]["message"],
         "invalid MCP server response: tool broken: inputSchema.properties.x.type[1]: unknown variant `file`, expected one of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`"
     );
     assert!(
@@ -678,6 +700,27 @@ finally:
     );
     let refused = client.rpc("mcp.test", json!({"source":"project","id":"new","cwd":home.join("project"),"configuration":configuration})).await;
     assert_eq!(refused["error"]["data"]["appError"], "invalid_params");
+    for (request, expected) in [
+        (
+            json!({"source":"user","id":" ","configuration":configuration}),
+            "invalid_params",
+        ),
+        (json!({"source":"user","id":"absent"}), "mcp_unknown_server"),
+        (
+            json!({"source":"plugin","id":"kit:docs","patch":{"command":"other"}}),
+            "invalid_params",
+        ),
+        (
+            json!({"source":"user","id":"probe","patch":{"url":"https://example.invalid"}}),
+            "invalid_params",
+        ),
+    ] {
+        let refused = client.rpc("mcp.test", request).await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], expected,
+            "a request refused before contact stays an error: {refused}"
+        );
+    }
     let catalog = client
         .rpc("mcp.catalog", json!({"cwd":home.join("project")}))
         .await;
@@ -1849,6 +1892,10 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         json!({"modelId":"beta"}),
         json!({"providerId":null,"modelId":null}),
         json!({"modelPreferences":{"reasoningEffort":"unsupported"}}),
+        json!({"modelPreferences":{"reasoningEffort":null}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"set"}}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"clear","value":"high"}}}),
+        json!({"modelPreferences":{"reasoningEffort":{"action":"nope"}}}),
     ] {
         let mut request = branch.clone();
         request
@@ -2142,6 +2189,91 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
         adopted
     );
 
+    // The attach reply names the adopted model and values, not the creation
+    // configuration.
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(attached["result"]["model"]["modelId"], "reasoning");
+    assert_eq!(
+        attached["result"]["modelPreferences"], adopted,
+        "{attached}"
+    );
+
+    // Clearing one field keeps the other.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    let tier_only = json!({"serviceTier":"priority"});
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        tier_only
+    );
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(
+        attached["result"]["modelPreferences"], tier_only,
+        "{attached}"
+    );
+
+    // Repeating the clear changes nothing and publishes no new configured fact.
+    let revision = configured(&mut client, &session_id).await["revision"].clone();
+    let repeated = client
+        .rpc(
+            "session.model.update",
+            json!({"sessionId":session_id,"branchId":"main",
+                "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+        )
+        .await;
+    assert_eq!(repeated["result"]["outcome"], "unchanged", "{repeated}");
+    let data = configured(&mut client, &session_id).await;
+    assert_eq!(data["revision"], revision);
+    assert_eq!(data["model_preferences"], tier_only);
+
+    // A set beside a clear in one request applies both.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":"low",
+                        "serviceTier":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    assert_eq!(
+        configured(&mut client, &session_id).await["model_preferences"],
+        json!({"reasoningEffort":"low"})
+    );
+
+    // Clearing the other field leaves no value, and the attach reply agrees.
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":session_id,"branchId":"main",
+                    "modelPreferences":{"reasoningEffort":{"action":"clear"}}}),
+            )
+            .await,
+    );
+    let data = configured(&mut client, &session_id).await;
+    assert!(data.get("model_preferences").is_none(), "{data}");
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
+    assert_eq!(attached["result"]["model"]["modelId"], "reasoning");
+
     // A model whose configuration carries no preference shows no field.
     assert_ok(
         &client
@@ -2155,6 +2287,17 @@ async fn the_configured_view_reads_back_the_adopted_model_preferences() {
     let data = configured(&mut client, &session_id).await;
     assert_eq!(data["model_id"], "plain");
     assert!(data.get("model_preferences").is_none(), "{data}");
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(
+        attached["result"]["model"]["modelId"], "plain",
+        "{attached}"
+    );
+    assert!(
+        attached["result"].get("modelPreferences").is_none(),
+        "{attached}"
+    );
 
     server.shutdown();
     server.join().await.unwrap();

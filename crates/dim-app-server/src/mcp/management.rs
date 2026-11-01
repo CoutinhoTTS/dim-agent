@@ -569,8 +569,8 @@ pub(super) fn provide(
                         document.mcp_servers.insert(p.id.clone(), configuration);
                         document.validate().map_err(|e| error(e.into()))?;
                         let configuration = document.mcp_servers.remove(&p.id).unwrap();
-                        let tools = directory.test(context, p.id, configuration, &stopping).await.map_err(error)?;
-                        return Ok(serde_json::json!({"tools": tools}));
+                        let probe = directory.test(context, p.id, configuration, &stopping).await.map_err(error)?;
+                        return reply(probe);
                     }
                     "mcp.configuration" => {
                         let p: McpTarget = params(value)?;

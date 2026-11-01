@@ -15,17 +15,30 @@ outside this boundary ([ADR 003 D1](../adr/003-approval-scope.md)). The App Serv
 connections, MCP servers and trusted plugins are outside it. Hooks and MCP commands run because of
 configuration and need no host-local approval ([ADR 003](../adr/003-approval-scope.md)).
 
-## The switches
+## Process isolation
 
-`/settings > Execution` has `Sandbox` and `Network`. Both are off by default.
+The TUI's single `Process isolation` control replaces `Settings > Execution` and any separate
+Sandbox entry ([ADR 017](../adr/017-independent-permission-controls.md)). It reuses the existing
+backend and stored `sandbox`/`network` booleans; it does not introduce another isolation policy.
 
-| Sandbox | Network | Boundary |
+| Choice | Stored sandbox / network | Boundary |
 | --- | --- | --- |
-| off | — | The daemon user's ordinary access: environment, home and network |
-| on | off | The Session workspace writable, system roots read-only, no network |
-| on | on | The same files, plus host networking |
+| Off | false / network ignored | The daemon user's ordinary access: environment, home and network |
+| Sandboxed · No network | true / false | The Session workspace writable, system roots read-only, no network |
+| Sandboxed · Network allowed | true / true | The same files, plus host networking |
 
-Network applies only while the sandbox is on. The two values are user-scope configuration owned by
+```text
+Process isolation
+> Off
+  Sandboxed · No network
+  Sandboxed · Network allowed
+  Applies to new processes and persistent shells.
+```
+
+Both stored booleans default to false. Network applies only while the sandbox is on. Selecting
+Off disables `sandbox`; an existing `network` value is inert while off. Each sandboxed UI choice
+sets `network` explicitly; local management clients still use the stored booleans directly.
+The two values are user-scope configuration owned by
 the App Server's `ExecutionSettings` part; its source, schema and CAS revision are
 [settings service](appserver/settings-service.md)'s contract. A write to that source is a
 user-approved write ([ADR 011 D2](../adr/011-execution-settings.md)).
@@ -167,7 +180,7 @@ fallback. A denied write or a refused socket reaches the command as an ordinary 
 
 The same backend state is readable before a process starts. `HostPlatform::sandbox_backend()`
 reports `Available`, or `Unavailable` with the reason the preparation failure would use; the App
-Server's `ExecutionBackend` part exposes it as `host.execution.backend` to the Execution row. The
+Server's `ExecutionBackend` part exposes it as `host.execution.backend` to the Process isolation control. The
 Linux answer comes from the same captured-`PATH` bubblewrap resolution preparation uses, so a host
 that reports the reason cannot start a different boundary. ADR 010 D1 keeps the preparation failure
 as the enforcement; the row only names it earlier.
@@ -175,7 +188,8 @@ as the enforcement; the row only names it earlier.
 ## Visibility
 
 **Tool declarations.** On macOS and Linux, the `exec` and persistent-shell `execute` declarations
-carry one static line from `HostPlatform`: the user decides in `/settings > Execution` whether
+carry one static line from `HostPlatform`: the user selects Process isolation in `/permissions`
+or `/settings` to decide whether
 commands run sandboxed; when the sandbox is on, commands write only inside the session workspace
 (on macOS also `$TMPDIR`), read only there and in system directories, and have no network unless
 the user also turned Network on; the model cannot change the boundary and retrying or an approval
@@ -187,8 +201,8 @@ switches. Windows declarations carry no line.
 **Failure note.** When a sandboxed command exits unsuccessfully, in the foreground or after the
 background handoff, and the output shown in its result contains a typical denial, the result text
 ends with a note. It says the sandbox the user turned on may have caused the failure, what it
-blocks, that retrying or an approval does not lift it, and that the user changes Sandbox or
-Network in `/settings > Execution`. Typical denials are `Operation not permitted` and dyld's
+blocks, that retrying or an approval does not lift it, and that the user changes Process isolation
+in `/permissions` or `/settings`. Typical denials are `Operation not permitted` and dyld's
 `blocked by sandbox` on macOS, `Read-only file system` and `bwrap:` on Linux, resolver failures and
 `Network is unreachable`. The note is a heuristic: the backends report no denial event, ungranted
 Linux paths are simply absent, and a matching message can have another cause. It is text in the

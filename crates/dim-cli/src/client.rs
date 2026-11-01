@@ -214,6 +214,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
             return Err("Rust home must be private (0700) and owned by the current user".into());
         }
     }
+    let startup_note = native_home.join("dimcode.sqlite.startup");
     #[cfg(unix)]
     let endpoint = native_home.join("daemon.sock");
     #[cfg(windows)]
@@ -245,6 +246,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         Ok(mut client) => {
             let version = client.hello().await?;
             if !(start && server.embedded && version != env!("CARGO_PKG_VERSION")) {
+                let _ = std::fs::remove_file(&startup_note);
                 return Ok(Some(client));
             }
             shutdown(client).await?;
@@ -331,12 +333,14 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000 | 0x00000200);
     }
+    let _ = std::fs::remove_file(&startup_note);
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         match Client::open(&connection, true).await {
             Ok(mut client) => {
                 client.hello().await?;
+                let _ = std::fs::remove_file(&startup_note);
                 return Ok(Some(client));
             }
             Err(error)
@@ -344,13 +348,45 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
             Err(error) => return Err(error.into()),
         }
         if let Some(status) = child.try_wait()? {
-            return Err(format!("App Server exited ({status}); see {}", log_path.display()).into());
+            let cause = startup_failure(&startup_note, child.id());
+            let _ = std::fs::remove_file(&startup_note);
+            return Err(match cause {
+                Some(cause) => format!("{cause}\n  Details: {}", log_path.display()).into(),
+                None => format!("App Server exited ({status}); see {}", log_path.display()).into(),
+            });
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!("App Server startup timed out; see {}", log_path.display()).into());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The storage startup note this child left, if it is a private file owned by
+/// the current user and the header names this child.
+fn startup_failure(path: &std::path::Path, pid: u32) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+    }
+    let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
+    let (header, body) = text.split_once('\n')?;
+    if header != format!("dimcode-startup-failure v1 pid={pid}") {
+        return None;
+    }
+    let body: String = body
+        .chars()
+        .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
+        .collect();
+    let body = body.trim_end();
+    (!body.is_empty()).then(|| body.to_owned())
 }
 
 fn missing(error: &io::Error) -> bool {
