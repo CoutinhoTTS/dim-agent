@@ -337,7 +337,10 @@ and a sequence range, and it is reached from `Connection::history` through
 requires the native store: a host without one (`ServerConfig.database_path:
 None`) advertises no `session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No
-second paging implementation is added.
+second paging implementation is added. Both the forward and the backward page
+are paging reads, so neither rebuilds the request bodies of `context/prepare`
+and `model/call`; those records do not reach the reply
+([request delta storage §7.5](request-delta-storage.md#75-reads-that-do-not-use-request-bodies)).
 
 The runtime, the Session facade and `sessions.history` are untouched;
 `session.attach`, `session.event`, `session.state` and the live delivery path
