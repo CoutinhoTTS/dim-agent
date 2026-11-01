@@ -1945,6 +1945,14 @@ impl App {
     /// A key for the composer: the palette, the shortcuts around it and the
     /// draft editor, with what a submit, a command or a shell line does.
     fn composer_key(&mut self, key: KeyEvent) -> Outcome {
+        let (key, mode) = if self.steers_draft(&key) {
+            (
+                KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
+                SubmitMode::Steer,
+            )
+        } else {
+            (key, SubmitMode::Queue)
+        };
         let ctrl = key.mods.contains(Modifiers::CTRL);
         match key.code {
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
@@ -1971,7 +1979,7 @@ impl App {
                 self.set_notice(t("Wait for the image insertion before sending"));
                 return Outcome::Continue;
             }
-            KeyCode::Char('s') if ctrl && !self.steers_draft(&key) => {
+            KeyCode::Char('s') if ctrl => {
                 self.steer();
                 return Outcome::Continue;
             }
@@ -2015,13 +2023,7 @@ impl App {
             }
             _ => {}
         }
-        let (outcome, mode) = if self.steers_draft(&key) {
-            let enter = KeyEvent::new(KeyCode::Enter, Modifiers::NONE);
-            (self.composer.handle_key(enter), SubmitMode::Steer)
-        } else {
-            (self.composer.handle_key(key), SubmitMode::Queue)
-        };
-        match outcome {
+        match self.composer.handle_key(key) {
             ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
                 self.open_line(&text);
             }
@@ -7665,6 +7667,73 @@ mod tests {
             describe(&sent.borrow()),
             ["submit:queue:queue me", "submit:steer:steer me"]
         );
+    }
+
+    #[test]
+    fn steering_waits_for_pending_clipboard_and_image_insertions() {
+        for fullscreen in [false, true] {
+            for image in [false, true] {
+                let (mut app, sent, home) = session_with_queue(true, &[("a", "queued")]);
+                app.fullscreen = fullscreen;
+                app.composer.set_accepts_images(true);
+                let (clipboard_send, clipboard_receive) = std::sync::mpsc::channel();
+                let (image_send, image_receive) = std::sync::mpsc::channel();
+                let path = home.path().join("screen.png");
+                wide_png(&path, 32);
+                let plan = app.composer.plan_files(&[path]).unwrap();
+                let images = crate::ui::composer::read_planned(&plan).unwrap();
+                if image {
+                    app.image_read = Some(ImageRead {
+                        plan,
+                        receive: image_receive,
+                    });
+                } else {
+                    app.clipboard = Some(ClipboardRead::Native(clipboard_receive));
+                }
+                typed(&mut app, "look");
+                for key in [
+                    KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
+                    KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL),
+                ] {
+                    app.handle(InputEvent::Key(key));
+                    assert!(
+                        sent.borrow().is_empty(),
+                        "pending insertion must hold sending"
+                    );
+                    assert_eq!(app.composer.text(), "look");
+                    let notice = if image {
+                        "Wait for the image insertion before sending"
+                    } else {
+                        "Wait for clipboard insertion before sending"
+                    };
+                    assert_eq!(
+                        app.notice.as_ref().map(|(text, _)| text.as_str()),
+                        Some(notice)
+                    );
+                }
+                if image {
+                    image_send.send(Ok(images)).unwrap();
+                } else {
+                    clipboard_send
+                        .send(Ok(crate::clipboard::Source::Text(" at this".into())))
+                        .unwrap();
+                }
+                app.tick();
+                app.handle(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Char('s'),
+                    Modifiers::CTRL,
+                )));
+                if image {
+                    assert!(matches!(
+                        sent.borrow().as_slice(),
+                        [Command::SubmitDraft(parts, SubmitMode::Steer)]
+                            if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "look ")
+                    ));
+                } else {
+                    assert_eq!(describe(&sent.borrow()), ["submit:steer:look at this"]);
+                }
+            }
+        }
     }
 
     /// Esc withdraws the queue oldest first before the stop, and each text

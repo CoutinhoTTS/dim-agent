@@ -33020,6 +33020,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::composer",
+      "references": [
+        "path crate::ui::composer::read_planned"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "path OauthView::dim"
