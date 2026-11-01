@@ -1771,12 +1771,18 @@ impl Worker {
     }
 
     /// `/goal`: the shown line's goal, written by the method the request
-    /// names. A write is followed by the events it produced, so the report
-    /// shows the state after it; the read shows the fold the interface has.
+    /// names. The line is read before the call is chosen, so a fold the
+    /// interface has not caught up with cannot pick the wrong method; a
+    /// write is followed by the events it produced, so the report shows the
+    /// state after it.
     async fn goal(&mut self, request: crate::goal::Request) {
         let branch = self.focus.clone();
         if !crate::goal::available(&mut self.client, &self.session_id).await {
             self.report(crate::goal::NOT_AVAILABLE.into(), true);
+            return;
+        }
+        if let Err(error) = self.read_branch(&branch).await {
+            self.report(format!("Goal: {error}"), true);
             return;
         }
         let call = crate::goal::call(&request, self.shown().goal().as_ref());

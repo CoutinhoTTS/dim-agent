@@ -17,9 +17,9 @@ fn methods(goal: bool) -> Value {
     json!({"methods": methods})
 }
 
-fn objective(op: &str, text: &str) -> Value {
+fn objective(branch: &str, op: &str, text: &str) -> Value {
     json!({"type":"raw","key":"goal:objective","text":format!(
-        "<dim-goal kind=\"goal\" op=\"{op}\" branch=\"main\">\nObjective:\n{text}\n\nGoal text.\n</dim-goal>"
+        "<dim-goal kind=\"goal\" op=\"{op}\" branch=\"{branch}\">\nObjective:\n{text}\n\nGoal text.\n</dim-goal>"
     )})
 }
 
@@ -27,10 +27,10 @@ fn status(text: &str) -> Value {
     json!({"type":"raw","key":"goal:status","text":text})
 }
 
-fn active() -> Value {
-    status(
-        "<dim-goal kind=\"status\" status=\"active\" branch=\"main\">\nThe goal for branch main is active.\n</dim-goal>",
-    )
+fn active(branch: &str) -> Value {
+    status(&format!(
+        "<dim-goal kind=\"status\" status=\"active\" branch=\"{branch}\">\nThe goal for branch {branch} is active.\n</dim-goal>"
+    ))
 }
 
 /// A change input, as Goal writes it.
@@ -40,11 +40,14 @@ fn change(sequence: u64, blocks: Vec<Value>) -> Value {
 }
 
 fn set(sequence: u64, text: &str) -> Value {
-    change(sequence, vec![objective("set", text), active()])
+    change(
+        sequence,
+        vec![objective("main", "set", text), active("main")],
+    )
 }
 
 fn edit(sequence: u64, text: &str) -> Value {
-    change(sequence, vec![objective("edit", text)])
+    change(sequence, vec![objective("main", "edit", text)])
 }
 
 fn paused(sequence: u64) -> Value {
@@ -102,6 +105,13 @@ fn usage() -> Value {
         "estimatedInputTokens":1849.0,"baselineSource":"estimate"})
 }
 
+/// Fails `request` as a store that cannot be read does.
+fn failed(wire: &mut Wire, request: &Value) {
+    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+        "code":-32000,"message":"the store cannot be read",
+        "data":{"appError":"internal"}}}));
+}
+
 /// A public event of `branch`, live.
 fn emit(wire: &mut Wire, branch: &str, sequence: u64, kind: &str, name: &str, data: Value) {
     wire.notice(
@@ -112,21 +122,25 @@ fn emit(wire: &mut Wire, branch: &str, sequence: u64, kind: &str, name: &str, da
     );
 }
 
-/// Answers what the terminal UI reads while it starts, until the first
-/// `/goal` asks the Session's method table.
-fn started(wire: &mut Wire) {
+/// Answers what the terminal UI reads while it starts and returns the
+/// request for `method`.
+fn until_request(wire: &mut Wire, method: &str) -> Value {
     loop {
         let request = wire.read_any();
         match request["method"].as_str() {
             Some("session.context.usage") => wire.reply(&request, usage()),
             Some("account.providers") => wire.reply(&request, json!([])),
-            Some("session.methods") => {
-                wire.reply(&request, methods(true));
-                return;
-            }
-            method => panic!("unexpected request {method:?}"),
+            Some(found) if found == method => return request,
+            other => panic!("unexpected request {other:?}"),
         }
     }
+}
+
+/// Answers what the terminal UI reads while it starts, until the first
+/// `/goal` asks the Session's method table.
+fn started(wire: &mut Wire) {
+    let request = until_request(wire, "session.methods");
+    wire.reply(&request, methods(true));
 }
 
 fn drained(wire: &mut Wire) {
@@ -144,12 +158,17 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
         wire.created();
         wire.attached();
 
+        // The read form makes no call; it reads the line to its head.
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["after"], 8);
+        wire.reply(&history, page(8, vec![]));
 
-        // The read form makes no call and reads no history.
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
@@ -163,6 +182,8 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
         // A goal is in force: the same form changes only its objective.
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(9, vec![]));
         let write = wire.read("session.goal.edit");
         assert_eq!(
             write["params"],
@@ -174,6 +195,8 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(12, vec![]));
         let write = wire.read("session.goal.pause");
         assert_eq!(
             write["params"],
@@ -185,6 +208,8 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(15, vec![]));
         let write = wire.read("session.goal.resume");
         wire.reply(&write, json!({"sequence":18}));
         let history = wire.read("session.history");
@@ -192,6 +217,8 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(18, vec![]));
         let write = wire.read("session.goal.clear");
         wire.reply(&write, json!({"sequence":21}));
         let history = wire.read("session.history");
@@ -199,6 +226,9 @@ fn line_goal_forms_write_the_machine_they_name_and_show_the_events() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["after"], 21);
+        wire.reply(&history, page(21, vec![]));
         wire.detach();
     });
     let mut terminal = Terminal::launch(home.command());
@@ -248,6 +278,8 @@ fn line_goal_takes_an_objective_spelled_like_a_form_after_set() {
         wire.attached();
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(write["params"]["objective"], "pause");
         wire.reply(&write, json!({"sequence":9}));
@@ -305,6 +337,8 @@ fn line_goal_sets_a_new_goal_after_a_completed_one() {
         wire.attached();
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
@@ -321,6 +355,8 @@ fn line_goal_sets_a_new_goal_after_a_completed_one() {
         // A typed objective after a finished goal starts a new one.
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(10, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
@@ -365,6 +401,9 @@ fn line_goal_shows_no_copied_goal_after_a_fork() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["after"], 10);
+        wire.reply(&history, page(10, vec![]));
         wire.detach();
     });
     let mut terminal = Terminal::launch(home.command());
@@ -391,6 +430,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
         wire.reply(&history, page(8, vec![]));
         started(wire);
 
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
@@ -402,6 +443,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(9, vec![]));
         let write = wire.read("session.goal.edit");
         assert_eq!(
             write["params"],
@@ -413,6 +456,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(12, vec![]));
         let write = wire.read("session.goal.pause");
         wire.reply(&write, json!({"sequence":15}));
         let history = wire.read("session.history");
@@ -420,6 +465,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(15, vec![]));
         let write = wire.read("session.goal.resume");
         wire.reply(&write, json!({"sequence":18}));
         let history = wire.read("session.history");
@@ -427,6 +474,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(18, vec![]));
         let write = wire.read("session.goal.clear");
         wire.reply(&write, json!({"sequence":21}));
         let history = wire.read("session.history");
@@ -434,6 +483,8 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(21, vec![]));
         drained(wire);
     });
     let mut command = home.command();
@@ -485,6 +536,8 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
         wire.reply(&history, page(8, vec![]));
         started(wire);
 
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(write["params"]["branchId"], "main");
         wire.reply(&write, json!({"sequence":9}));
@@ -514,8 +567,14 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
 
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["branchId"], "line-1");
+        wire.reply(&history, page(11, vec![]));
         let read = wire.read("session.methods");
         wire.reply(&read, methods(true));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["branchId"], "line-1");
+        wire.reply(&history, page(11, vec![]));
         let write = wire.read("session.goal.set");
         assert_eq!(
             write["params"],
@@ -524,16 +583,16 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
         wire.reply(&write, json!({"sequence":12}));
         let history = wire.read("session.history");
         assert_eq!(history["params"]["branchId"], "line-1");
-        let line_goal = json!({
-            "id":"goal-12","sequence":12,"create_at":1,"type":"input","name":"message",
-            "data":{"blocks":[
-                {"type":"raw","key":"goal:objective","text":
-                    "<dim-goal kind=\"goal\" op=\"set\" branch=\"line-1\">\nObjective:\nChild goal\n\nGoal text.\n</dim-goal>"},
-                {"type":"raw","key":"goal:status","text":
-                    "<dim-goal kind=\"status\" status=\"active\" branch=\"line-1\">\nThe goal for branch line-1 is active.\n</dim-goal>"}
-            ]}
-        });
-        wire.reply(&history, page(12, vec![line_goal]));
+        wire.reply(
+            &history,
+            page(
+                12,
+                vec![change(
+                    12,
+                    vec![objective("line-1", "set", "Child goal"), active("line-1")],
+                )],
+            ),
+        );
         drained(wire);
     });
     let mut command = home.command();
@@ -557,6 +616,161 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     terminal.write(b"/goal Child goal\r");
     terminal.until("Goal set on line-1 · active");
     terminal.until("  Child goal");
+
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A line whose discovery page has not landed yet. `/goal OBJECTIVE` reads
+/// the line to its head before it picks `set` or `edit`, so an active goal
+/// the interface has not folded yet still gets `edit`.
+#[test]
+fn tui_goal_reads_the_line_before_it_picks_set_or_edit() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.methods"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
+
+        // line-1 carries an active goal; its discovery page is delayed.
+        emit(
+            wire,
+            "main",
+            9,
+            "branch",
+            "create",
+            json!({"branch":"line-1","at":{"kind":"create"},
+                "source":{"kind":"host","operation_id":"op-1"},"prompt":"child work"}),
+        );
+        let delayed = until_request(wire, "session.history");
+        assert_eq!(delayed["params"]["branchId"], "line-1");
+
+        let read = until_request(wire, "session.methods");
+        wire.reply(&read, methods(true));
+        let read = until_request(wire, "session.history");
+        assert_eq!(read["params"]["branchId"], "line-1");
+        assert_eq!(read["params"]["after"], 0);
+        let events = vec![
+            json!({"id":"start-line-1","sequence":11,"create_at":1,
+                "type":"branch","name":"start","data":{"parent":"main"}}),
+            change(
+                12,
+                vec![objective("line-1", "set", "Old goal"), active("line-1")],
+            ),
+        ];
+        wire.reply(&read, page(12, events.clone()));
+        let write = wire.read("session.goal.edit");
+        assert_eq!(
+            write["params"],
+            json!({"sessionId":"session","branchId":"line-1","objective":"New objective"})
+        );
+        wire.reply(&write, json!({"sequence":13}));
+        let read = wire.read("session.history");
+        wire.reply(
+            &read,
+            page(
+                13,
+                vec![change(
+                    13,
+                    vec![objective("line-1", "edit", "New objective")],
+                )],
+            ),
+        );
+
+        // The discovery page lands late; its events predate the edit.
+        wire.reply(&delayed, page(12, events));
+        drained(wire);
+    });
+    let mut command = home.command();
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+
+    terminal.write(b"/lines\r");
+    terminal.until("line-1");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"\r");
+    terminal.until("⑂ main ▸ child work");
+
+    terminal.write(b"/goal New objective\r");
+    terminal.until("Goal edited on line-1 · active");
+    terminal.until("  New objective");
+    assert!(
+        !terminal.transcript.contains("Goal set on line-1"),
+        "the command never decides on a fold it has not read: {}",
+        terminal.transcript
+    );
+
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A read the command needs fails. `/goal OBJECTIVE` reports it and sends no
+/// goal method, instead of deciding from the fold it already has.
+#[test]
+fn tui_goal_reports_a_failed_read_and_sends_nothing() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.methods"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, page(8, vec![]));
+
+        emit(
+            wire,
+            "main",
+            9,
+            "branch",
+            "create",
+            json!({"branch":"line-1","at":{"kind":"create"},
+                "source":{"kind":"host","operation_id":"op-1"},"prompt":"child work"}),
+        );
+        let discovery = until_request(wire, "session.history");
+        failed(wire, &discovery);
+
+        let read = until_request(wire, "session.methods");
+        wire.reply(&read, methods(true));
+        let read = until_request(wire, "session.history");
+        assert_eq!(read["params"]["branchId"], "line-1");
+        failed(wire, &read);
+
+        // No goal method is sent before the client leaves.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_ne!(request["method"], json!("session.goal.set"));
+            assert_ne!(request["method"], json!("session.goal.edit"));
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+
+    terminal.write(b"/lines\r");
+    terminal.until("line-1");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"\r");
+    terminal.until("⑂ main ▸ child work");
+
+    terminal.write(b"/goal New objective\r");
+    terminal.until("Goal: the store cannot be read (RPC -32000, internal)");
+    assert!(
+        !terminal.transcript.contains("Goal set on line-1")
+            && !terminal.transcript.contains("Goal edited on line-1"),
+        "no goal method ran: {}",
+        terminal.transcript
+    );
 
     terminal.write(b"/exit\r");
     terminal.until("Bye!");

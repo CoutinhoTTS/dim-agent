@@ -20,36 +20,53 @@ pub async fn command(
         display.record(goal::USAGE)?;
         return Ok(());
     };
-    let call = goal::call(&request, display.goal.goal().as_ref());
     let operation = async {
         if !goal::available(client, session_id).await {
-            return Ok::<bool, crate::Error>(false);
+            return Ok::<Reply, crate::Error>(Reply::Unavailable);
         }
-        let Some(call) = call else { return Ok(true) };
-        let mut params = serde_json::json!({"sessionId": session_id, "branchId": "main"});
-        if let Some(objective) = goal::objective(&request) {
-            params["objective"] = serde_json::json!(objective);
+        // Read the line before choosing `set` or `edit`: the fold holds only
+        // what earlier reads applied.
+        display.cursor = catch_up(client, session_id, display).await?;
+        let call = goal::call(&request, display.goal.goal().as_ref());
+        if let Some(call) = call {
+            let mut params = serde_json::json!({"sessionId": session_id, "branchId": "main"});
+            if let Some(objective) = goal::objective(&request) {
+                params["objective"] = serde_json::json!(objective);
+            }
+            if let Err(error) = client.rpc(call.method(), params).await {
+                return match crate::client::app_error(&error) {
+                    Some("unknown_method") => Ok(Reply::Unavailable),
+                    _ => Err(error),
+                };
+            }
+            display.cursor = catch_up(client, session_id, display).await?;
         }
-        if let Err(error) = client.rpc(call.method(), params).await {
-            return match crate::client::app_error(&error) {
-                Some("unknown_method") => Ok(false),
-                _ => Err(error),
-            };
-        }
-        read_history(client, session_id, display.cursor, |value| {
-            display.event(serde_json::from_value(value)?, true)
-        })
-        .await?;
-        Ok(true)
+        Ok(Reply::Done(call))
     };
-    if !settle(interrupts, operation).await? {
-        display.record(goal::NOT_AVAILABLE)?;
-        return Ok(());
-    }
-    for line in goal::report("main", call, display.goal.goal().as_ref()) {
-        display.record(&line)?;
+    match settle(interrupts, operation).await? {
+        Reply::Unavailable => display.record(goal::NOT_AVAILABLE)?,
+        Reply::Done(call) => {
+            for line in goal::report("main", call, display.goal.goal().as_ref()) {
+                display.record(&line)?;
+            }
+        }
     }
     Ok(())
+}
+
+enum Reply {
+    /// The daemon serves no Goal.
+    Unavailable,
+    /// The call that ran, none for the read form.
+    Done(Option<goal::Call>),
+}
+
+/// Folds the events `main` holds that `display` has not applied yet.
+async fn catch_up(client: &mut Client, session_id: &str, display: &mut Display) -> Result<u64> {
+    read_history(client, session_id, display.cursor, |value| {
+        display.event(serde_json::from_value(value)?, true)
+    })
+    .await
 }
 
 /// Waits for an operation; interrupts are reported and consumed until it

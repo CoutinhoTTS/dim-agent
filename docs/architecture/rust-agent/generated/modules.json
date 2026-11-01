@@ -24900,6 +24900,7 @@
       "from": "dim_cli::goal_command",
       "to": "dim_cli::goal",
       "references": [
+        "path goal::Call",
         "path goal::NOT_AVAILABLE",
         "path goal::USAGE",
         "path goal::available",
