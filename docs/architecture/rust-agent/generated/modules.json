@@ -2948,6 +2948,41 @@
       ]
     },
     {
+      "id": "dim_cli::goal",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/goal.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "serde_json::json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::goal::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::goal",
+      "file": "crates/dim-cli/src/goal.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json"
+      ]
+    },
+    {
+      "id": "dim_cli::goal_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/goal_command.rs",
+      "unexpandedMacros": [
+        "serde_json::json",
+        "tokio::pin",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_cli::hooks_command",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -23680,6 +23715,20 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::goal",
+      "references": [
+        "mod goal"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::goal_command",
+      "references": [
+        "mod goal_command"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::hooks_command",
       "references": [
         "mod hooks_command",
@@ -24383,6 +24432,14 @@
     },
     {
       "from": "dim_cli::display",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Fold",
+        "path crate::goal::Fold::default"
+      ]
+    },
+    {
+      "from": "dim_cli::display",
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
@@ -24479,6 +24536,108 @@
       "to": "dim_client",
       "references": [
         "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::goal",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputBlock::Raw",
+        "use dim_agent_types::InputBlock"
+      ]
+    },
+    {
+      "from": "dim_cli::goal",
+      "to": "dim_cli::goal::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::goal",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::goal",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event",
+        "path EventContent::BranchStart",
+        "path EventContent::Input",
+        "path EventContent::InputDeleted",
+        "path EventContent::SessionForked",
+        "use crate::wire::Event",
+        "use crate::wire::EventContent"
+      ]
+    },
+    {
+      "from": "dim_cli::goal::tests",
+      "to": "dim_cli::goal",
+      "references": [
+        "path Fold::default",
+        "path Goal",
+        "path OBJECTIVE_KEY",
+        "path Request::Objective",
+        "path STATUS_KEY"
+      ]
+    },
+    {
+      "from": "dim_cli::goal::tests",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "path crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_cli::display",
+      "references": [
+        "path Display",
+        "use crate::display::Display"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_cli::goal",
+      "references": [
+        "path goal::NOT_AVAILABLE",
+        "path goal::USAGE",
+        "path goal::available",
+        "path goal::call",
+        "path goal::objective",
+        "path goal::report",
+        "path goal::request",
+        "use crate::goal"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_cli::session",
+      "references": [
+        "path read_history",
+        "use crate::session::read_history"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path crate::client::app_error",
         "use crate::client::Client"
       ]
     },
@@ -24933,6 +25092,13 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Request"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellResult",
@@ -25003,6 +25169,13 @@
       "to": "dim_agent_types::member_approval",
       "references": [
         "path dim_agent_types::MemberApprovalDescriptor"
+      ]
+    },
+    {
+      "from": "dim_cli::model::view",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Goal"
       ]
     },
     {
@@ -25411,6 +25584,14 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Fold",
+        "path crate::goal::Goal"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::images",
       "references": [
         "path crate::images::marker"
@@ -25574,6 +25755,7 @@
         "path EventContent::ModelUsage",
         "path EventContent::Other",
         "path EventContent::PermissionChanged",
+        "path EventContent::SessionForked",
         "path EventContent::Text",
         "path EventContent::Thinking",
         "path EventContent::ToolCall",
@@ -25826,6 +26008,14 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_cli::goal_command",
+      "references": [
+        "path goal_command::command",
+        "use crate::goal_command"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_cli::input",
       "references": [
         "path Input",
@@ -26026,6 +26216,18 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::NOT_AVAILABLE",
+        "path crate::goal::Request",
+        "path crate::goal::available",
+        "path crate::goal::call",
+        "path crate::goal::objective",
+        "path crate::goal::report"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
         "path mcp::Started",
@@ -26069,6 +26271,7 @@
         "path Command::EndLine",
         "path Command::FocusLine",
         "path Command::Fork",
+        "path Command::Goal",
         "path Command::InputControl",
         "path Command::ListModels",
         "path Command::ListPlugins",
@@ -26358,6 +26561,7 @@
         "path Message::Response",
         "path client::RpcError",
         "path client::app_error",
+        "path crate::client::app_error",
         "use crate::client::Client",
         "use crate::client::Message"
       ]
@@ -26393,6 +26597,7 @@
         "path EventContent::ModelUsage",
         "path EventContent::PermissionChanged",
         "path Progress",
+        "path crate::wire::History",
         "use crate::wire::Configuration",
         "use crate::wire::Event",
         "use crate::wire::EventContent",
@@ -31844,6 +32049,16 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::goal",
+      "references": [
+        "path crate::goal::Status::Active",
+        "path crate::goal::Status::Paused",
+        "path crate::goal::USAGE",
+        "path crate::goal::request"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::images",
       "references": [
         "path crate::images::Attached"
@@ -31864,6 +32079,7 @@
         "path Command::EndLine",
         "path Command::FocusLine",
         "path Command::Fork",
+        "path Command::Goal",
         "path Command::InputControl",
         "path Command::ListModels",
         "path Command::ListPlugins",
@@ -33118,6 +33334,7 @@
         "path ModelOutputEndData",
         "path ModelStartData",
         "path ModelUsageData",
+        "path SessionForkedData",
         "path TextData",
         "path ThinkingData",
         "path ToolCallData",
@@ -34931,6 +35148,10 @@
     },
     {
       "module": "dim_cli::composer",
+      "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::goal",
       "path": "char::is_whitespace"
     },
     {

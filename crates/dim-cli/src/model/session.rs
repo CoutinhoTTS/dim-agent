@@ -197,6 +197,8 @@ pub enum Command {
     Usage,
     /// `/compact`: ask the shown line to compact its context.
     Compact,
+    /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
+    Goal(crate::goal::Request),
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// List the providers of the `/connect` panel.

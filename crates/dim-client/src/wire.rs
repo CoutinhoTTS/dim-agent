@@ -31,6 +31,8 @@ pub enum EventContent {
     BranchCreateFailed(BranchCreateFailedData),
     BranchEnd(BranchEndData),
     BranchEnded(BranchEndedData),
+    /// The fork's own opening: the facts before it are copied from the parent.
+    SessionForked(SessionForkedData),
     Configuration(Configuration),
     Input(InputMessageData),
     /// InputQueue released the input to the turn.
@@ -105,6 +107,7 @@ impl<'de> Deserialize<'de> for Event {
             ("branch", "ended") => EventContent::BranchEnded(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
+            ("session", "forked") => EventContent::SessionForked(SessionForkedData {}),
             ("context", "configured") => EventContent::Configuration(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),

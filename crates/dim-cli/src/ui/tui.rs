@@ -2926,6 +2926,16 @@ impl App {
                 self.host.send(Command::Compact);
                 Outcome::Continue
             }
+            "goal" => {
+                match crate::goal::request(args) {
+                    Some(request) => self.host.send(Command::Goal(request)),
+                    None => self.reports.push(Block::Status {
+                        text: crate::goal::USAGE.to_owned(),
+                        tone: Tone::Muted,
+                    }),
+                }
+                Outcome::Continue
+            }
             "mcp" => {
                 self.host.send(Command::Mcp(args.to_owned()));
                 Outcome::Continue
@@ -4422,6 +4432,16 @@ impl App {
                 >= u128::from(reading.threshold) * u128::from(CONTEXT_WARNING_PERCENT)
     }
 
+    /// The shown line's goal, while the line follows it: a goal that
+    /// continues, or one held paused.
+    fn goal_label(&self) -> Option<&'static str> {
+        match self.snapshot.as_ref()?.goal.as_ref()?.status {
+            crate::goal::Status::Active => Some(t("◎ goal active")),
+            crate::goal::Status::Paused(_) => Some(t("◎ goal paused")),
+            _ => None,
+        }
+    }
+
     /// Fullscreen's bottom border label, the status corner: the run
     /// status, the slot (a notice in the highlight colour), the approvals
     /// mode when it is not the default one and the context use.
@@ -4438,6 +4458,9 @@ impl App {
                 &p.muted
             };
             parts.push(fg(&slot, color));
+        }
+        if let Some(goal) = self.goal_label() {
+            parts.push(fg(goal, &p.muted));
         }
         if self.approvals != "workspace-write" {
             let mode = status_label(&self.approvals);
@@ -4461,6 +4484,10 @@ impl App {
             " ".repeat(MARGIN),
             t(status_label(&self.approvals))
         );
+        if let Some(goal) = self.goal_label() {
+            left.push_str("  ");
+            left.push_str(goal);
+        }
         if let Some(context) = self.context_label() {
             left.push_str("  ");
             left.push_str(&context);

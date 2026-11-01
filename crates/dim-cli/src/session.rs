@@ -6,7 +6,7 @@ use crate::{
     composer::{self, Draft},
     configure,
     display::Display,
-    export,
+    export, goal_command,
     input::Input,
     mcp, permission, permission_command,
     question::line::Questions,
@@ -357,6 +357,16 @@ pub async fn chat(
                 Some("/approvals" | "/permissions") => {
                     let text = text.as_deref().expect("plain approvals command");
                     if let Err(error) = permission_command::command(client, reader, &mut interrupts, &session_id, text, &mut display, &mut listing).await {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    draft.clear();
+                    continue;
+                }
+                Some("/goal") => {
+                    let text = text.as_deref().expect("plain goal command");
+                    if let Err(error) =
+                        goal_command::command(client, &session_id, text, &mut display, &mut interrupts).await
+                    {
                         display.record(&format!("Error: {error}"))?;
                     }
                     draft.clear();

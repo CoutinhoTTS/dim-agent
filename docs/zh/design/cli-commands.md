@@ -63,6 +63,100 @@ End     scroll to the bottom (fullscreen, empty draft)
   [######----------------------------------]
 ```
 
+## 目标
+
+`/goal` 读取当前显示线的目标，并通过 Goal 注册的方法写入它。方法、标记块和读取目标的规则属于
+[Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
+本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
+
+| 形式 | 调用 |
+| --- | --- |
+| `/goal` | 无调用：当前显示线上的目标，或它没有目标 |
+| `/goal OBJECTIVE` | 目标处于进行中或暂停时 `session.goal.edit`，否则 `session.goal.set` |
+| `/goal set OBJECTIVE` | `session.goal.set` |
+| `/goal edit OBJECTIVE` | `session.goal.edit` |
+| `/goal pause` | `session.goal.pause` |
+| `/goal resume` | `session.goal.resume` |
+| `/goal clear` | `session.goal.clear` |
+
+每次调用都把当前显示线写进 `branchId`，并以该输入的 `sequence` 回复。不写其他内容的形式
+（`/goal`、`pause`、`resume`、`clear`）不再接受别的词；否则行内其余内容就是目标文本，含空格。
+`set` 和 `edit` 也显式给出目标，因此恰好是这些形式词之一的目标写成 `/goal set pause`（目标为 "pause"），
+目标为 "set" 时写成 `/goal set set`。
+
+`/goal OBJECTIVE` 只在目标处于进行中或暂停时写 `edit`：状态、裁判和续跑计数保持不变，暂停中的目标仍为暂停。
+没有目标、目标没有状态、或目标已完成/受阻时，它写 `set`：完成的目标不会被编辑回工作状态，完成之后再输入
+新目标就是开始下一个目标——状态为进行中、计数从第一次续跑重新开始，该线会朝它工作。
+
+`judge` 属于 Pursuit，任何形式都不发送它：从终端设置的目标由模型判定；由评审者判定的目标经
+`/goal edit` 保持其裁判不变，因为 `edit` 只写目标文本。`/pursue` 是 Pursuit 的后续选项（§10），
+不属于本契约。
+
+**读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
+`goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
+被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
+打印这个折叠结果。写入之后，客户端先读取该线经过这次写入的事件再打印，因此显示的是事件在回复
+`sequence` 处的状态，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
+或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
+复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
+
+**Goal 未装载时。** Session 会列出它提供的方法（`session.methods`）。其中没有 `session.goal.set` 时，
+`/goal` 打印 `Goal is not available on this daemon.` 并且不做任何调用。不提供 `session.methods` 的守护进程
+按它的话处理，直到某次调用回复 `unknown_method`，那时打印同一行。任何形式都不把输入行当作消息提交：
+会写入的 `/goal` 发送的是 Goal 自己的变更输入，之后由 Goal 决定。
+
+**客户端显示什么。**
+
+```text
+> /goal
+No goal on main.
+
+> /goal Make the CLI tests pass
+Goal set on main · active
+  Make the CLI tests pass
+
+> /goal Keep the CLI tests green
+Goal edited on main · active
+  Keep the CLI tests green
+
+> /goal pause
+Goal paused on main · paused (user)
+  Keep the CLI tests green
+
+> /goal
+Goal on main · paused (user)
+  Keep the CLI tests green
+
+> /goal resume
+Goal resumed on main · active
+  Keep the CLI tests green
+
+> /goal clear
+Goal cleared on main.
+```
+
+第一行给出实际调用的方法、目标所属的线和当前状态；`edited` 表示找到已有目标、只改了目标文本的那种形式。
+目标由 Pursuit 的裁判判定时，状态后跟 `evaluator judge`。暂停状态给出原因：`user`、`interrupted`、
+`limit`、`turn failed` 或 `evaluation failed`。目标文本另起一行，按它自身的换行输出。目标已清除或该线没有目标时只打印一行。
+
+行客户端和两种终端 UI 模式都打印这些行；在终端 UI 里它们是一段报告，因此更早的报告仍能在上方读到。
+当前显示线跟随目标（进行中或暂停）时，状态区带一个短元素，完成、受阻或已清除的目标没有：
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
+  AGENT  ⏵⏵ workspace-write  ◎ goal active  1.8K / 256K              provider/model
+```
+
+fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰──── ◎ goal paused   ⏵⏵ full-access   1.8K / 256K ───── ● main · after message 4 ─╯
+```
+
 ## 执行设置
 
 现有 `/settings` 面板在 `Tool approvals` 旁有一个 `Execution` 行。它是进程边界的唯一用户配置入口：
@@ -121,6 +215,7 @@ revision 冲突；后端原因；保存后 `exec` 在新边界下运行——Net
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
+| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
 | `/approval` | 在终端界面里为当前 Session 和之后的 Session 选择询问（`workspace-write`）或完全访问（[权限控制](#权限控制)）。 |
 | `/approvals`（别名 `/permissions`） | 交互客户端空闲时查看、切换和管理预设与命令规则。 |
 
