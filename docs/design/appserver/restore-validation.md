@@ -37,10 +37,11 @@ process wrote nothing but its own atomic batches in between.
 - **First open.** The first restore of a Session in a process still validates fully, and a new store
   (restart, Agents reload) starts empty. Damage introduced while the process lives is detected by
   the next full pass — the next process, or a directory change — not by every restore.
-- **Effect.** The validation share of a re-acquisition is removed: the issue measured about 14 µs per
-  event on `product`, 30 of 69 ms at 5,008 events. The rest of the restore — branch opening,
-  capability rebuild, the `branch/resume` append, MCP and skill startup — is unchanged, and so is the
-  first open.
+- **Effect.** The validation pass of a re-acquisition is removed: the issue measured it at about
+  14 µs per event on `product`, 30 of 69 ms at 5,008 events. Removing that pass is this change's
+  acceptance; the rest of the restore — branch opening, capability rebuild, the `branch/resume`
+  append, MCP and skill startup — is unchanged and belongs to [#713](https://github.com/arcships/dim/issues/713)
+  and [#588](https://github.com/arcships/dim/issues/588).
 - **Unchanged.** Storage format 29, schema, rows, frozen fixtures, protocol, services, the
   `TimelineStore` signatures, capability rebuild, export (which keeps its full pass), and the
   in-memory store.
@@ -353,34 +354,45 @@ The applicable rules:
 **Measured (reported in the implementation PR, not asserted).**
 
 4. `restore_cost` plain, tools and product at about 1k, 3k and 10k events, against main on the same
-   machine: the first restore of each Session (full pass) and the re-acquisitions after an unload
-   (reuse), with the validation share and the wall time. The first restore stays within noise of
-   main; a re-acquisition saves the validation share, which the issue measured at 30 of 69 ms for
-   5,008 product events. The remaining restore time is not part of this change.
+   machine: `firstRestoreMs`/`firstBranchesMs` for the first restore of each Session (full pass),
+   and `reacquireMedianMs`/`reacquireBranchesMedianMs` for the rest (reuse). Acceptance: on the
+   issue's 5,008-event `product` sample the re-acquisition does not run the pass (about 30 ms of
+   the 69 ms). The first restore stays within noise of main. The remaining restore time — branch
+   opening, capability rebuild, `branch/resume`, product startup — is [#713](https://github.com/arcships/dim/issues/713)
+   and [#588](https://github.com/arcships/dim/issues/588), not a target here.
 5. The record's size per Session (directory rows, not events) and the map after a run over N
    Sessions, from the release build; reported, not asserted.
 
+Measured on this change (release build, one machine, a disposable store, five repetitions per size;
+`restore_cost` reports `firstRestoreMs`, `firstBranchesMs`, `reacquireMedianMs` and
+`reacquireBranchesMedianMs`):
+
+| Mix | Events | First restore | First `branches` | Re-acquisition median | Re-acquisition `branches` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| product | 5,010 | 106.3 ms | 57.8 ms | 50.7 ms | 0.04 ms |
+| plain | 3,016 | 47.0 ms | 22.7 ms | 25.9 ms | 0.04 ms |
+
+The pass is the difference between a first restore and a re-acquisition; the rest is the restore itself
+and is not part of this change. The absolute numbers differ from the issue's machine and sample (30 of
+69 ms at 5,008 product events there); the structural result is the same: `branches` falls to the
+directory read on a reuse.
+
 **Not in this PR.** The cold first `session.attach` after a daemon start (the issue's comment,
 [#713](https://github.com/arcships/dim/issues/713)) keeps its full pass and its measurement; the
-first open's cost is unchanged here.
+first open's cost is unchanged here, and the rest of a re-acquisition after the pass is #713/#588.
 
-## 13. Open questions
+## 13. Review decisions
 
-1. **The issue's acceptance says "a few ms".** The pass is about 30 of 69 ms at 5,008 product events;
-   the rest is the restore after it (branch opening, capability rebuild, `branch/resume`, product
-   startup). This design removes the pass, not the rest. Should the acceptance read "removes the
-   validation pass, measured at ~30 ms on the issue's 5k sample", with the remainder left to the
-   restore path and #713?
-2. **Bound or eviction.** The entries are small and a miss only costs a full pass, so no bound is
-   proposed. If a long-lived process opens many thousands of Sessions, an eviction policy can be
-   added without changing the condition; should it be in this change?
-3. **A created Session's first restore.** It validates, because creation is not validation. Recording
-   at create would make the first restore after a create reuse, but it would treat creation as a
-   validation and contradict "the first open still validates". Kept as proposed; confirm.
-4. **External edits while the daemon lives.** The lease admits one writer and export is read-only, so
-   this is outside the supported mutations. The design detects it on the next full pass, not on every
-   restore. Confirm that this is the intended boundary of the "corruption is still detected on the
-   first open" acceptance.
+1. **Acceptance is the removed pass, not "a few ms".** On the issue's 5,008-event `product` sample the
+   pass is about 30 of 69 ms; the rest of the restore stays with [#713](https://github.com/arcships/dim/issues/713)
+   and [#588](https://github.com/arcships/dim/issues/588). The implementation PR states this split.
+2. **Creation is not validation.** A Session created in this process has no record; its first restore
+   validates fully. No record is written on create.
+3. **Cleanup only.** Delete and rollback remove the entry; there is no eviction or size bound. An
+   entry is one directory row per branch, and a miss only costs one full pass.
+4. **External edits.** An edit to the database while the daemon holds it is detected by the next full
+   pass, not by every restore; the lease admits one writer and export is read-only. This is the
+   boundary of "corruption is still detected on the first open".
 
 ## 14. Changes to other documents
 
