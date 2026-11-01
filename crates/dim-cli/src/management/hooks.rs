@@ -174,7 +174,9 @@ pub(super) fn view(catalog: &Catalog, available: &[ActionKind]) -> ManagementVie
             _ => &[],
         };
         let mut states = Vec::new();
-        if source.state != "ok" {
+        // A source its owner reports as missing has no document to use, which
+        // the detail says; only one it reports as invalid could not be used.
+        if source.state == "invalid" {
             states.push(EntryState::Invalid);
         }
         if !matches!(source.source.as_str(), "user" | PROJECT) {

@@ -867,6 +867,71 @@ fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
     daemon.join().unwrap();
 }
 
+/// A source its owner reports as `missing` has no document yet, which is not
+/// an invalid one: the panel names neither the user's nor the project's row
+/// invalid, and the project's detail says the workspace has no hook file.
+#[test]
+fn tui_hooks_panel_does_not_call_a_missing_source_invalid() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        hello(wire);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        let request = wire.read("hooks.catalog");
+        wire.reply(
+            &request,
+            json!({
+                "userRevision": "missing",
+                "projectsRevision": "missing",
+                "disableAllHooks": false,
+                "sources": [
+                    {"source": "user", "enabled": true, "state": "missing"},
+                    {"source": "project", "enabled": false, "state": "missing"},
+                ],
+                "hooks": [],
+            }),
+        );
+        drains(wire);
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    shown.send(()).unwrap();
+    terminal.write(b"/hooks\r");
+    terminal.until("The user's own document; always in effect.");
+    // Rows are drawn before the footer, so both rows are on screen once the
+    // project's detail is.
+    terminal.raw(b"\x1b[B");
+    terminal.until("No .dimcode/hooks.json in this workspace.");
+    assert!(
+        !terminal.transcript.contains("invalid"),
+        "a missing source is not invalid: {}",
+        terminal.transcript
+    );
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(200));
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// Ctrl+E hands the user document to `$EDITOR` and writes what it leaves
 /// with the revision the panel read, in both terminal modes.
 #[test]
