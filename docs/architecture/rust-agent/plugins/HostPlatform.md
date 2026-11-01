@@ -61,7 +61,12 @@ dependency or assembly changes are needed for these owner operations.
 
 The [process isolation design](../../../design/host-platform-isolation.md) owns the boundary
 contract: the two switches, their defaults, each platform's roots, the temporary
-directory and the failure note. `prepare_isolated_process(spec, workspace, output_dir)` reads
+directory and the failure note. `HostPlatform::current` captures the fixed platform-roots list
+as `platform_roots` when the platform mounts; the sandbox builder filters it to the roots
+installed on this host, and the `FileAccessFacts` service reads the same list, so the system fact
+is non-empty with the sandbox off. The effective developer directory and git's global
+configuration are added by the builder per process and are not facts.
+`prepare_isolated_process(spec, workspace, output_dir)` reads
 the switches through the port at every call, selects the existing environment values and wraps
 the argv in Seatbelt or bubblewrap. The immutable Session workspace, not the command cwd,
 supplies default writes; ShellSession also supplies its owned output directory, WorkspaceTools
@@ -77,6 +82,13 @@ A missing port or an unreadable source fails preparation as `isolation_config_in
 payload starts; it never runs unsandboxed. Sandbox on without a backend fails as
 `isolation_unavailable`: always on Windows, and on Linux when bubblewrap is not on the captured
 `PATH`, whose reason says to install bubblewrap or turn Sandbox off in `/settings > Execution`.
+`HostPlatform::sandbox_backend()` reports the same decision before a process starts: `Available`,
+or `Unavailable` with that reason. On Linux it uses the same captured-`PATH` bubblewrap resolution
+as preparation. The App Server's `ExecutionBackend` part exposes it as `host.execution.backend`;
+the `/settings` and Web Execution rows display the reason. The availability report does not replace
+the preparation failure. The method is a separate part because `ExecutionSettings` provides the
+`ExecutionSettingsHost` port that `HostPlatform` reads; adding `HostPlatform` to
+`ExecutionSettings` would close a dependency cycle.
 There is no policy file, no tier and no fallback. Ordinary user ShellInput does not call this
 operation. No process, task, lock, watcher or Timeline fact is added by preparation.
 
@@ -135,10 +147,14 @@ boundary.
 [host_platform_flow.rs](../../../../crates/dim-agent-capabilities/tests/host_platform_flow.rs):
 `shell_resolution_follows_the_preference_and_never_fails_the_service`,
 `spawn_isolates_the_environment_and_terminate_releases_the_tree`,
-`unchanged_shell_preferences_reuse_detection_and_edits_recover`.
+`unchanged_shell_preferences_reuse_detection_and_edits_recover`, and
+`sandbox_backend_reports_the_bubblewrap_preparation_uses`.
 The unit test `bubblewrap_binds_file_roots_after_the_directories_that_contain_them` in
 [isolation.rs](../../../../crates/dim-agent-capabilities/src/host_platform/isolation.rs) checks
-that file roots are bound after the directories that contain them.
+that file roots are bound after the directories that contain them;
+`bubblewrap_unshares_the_network_only_when_the_switch_is_off` (Linux) and
+`seatbelt_allows_network_only_when_the_switch_is_on` (macOS) cover the platform's network
+flag binding.
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs):
 `the_local_execution_assembly_passes_the_assembly_check` and
 `exec_and_external_shell_callers_use_live_shell_preferences` exercise the real
@@ -153,8 +169,9 @@ shell and current selection after shell exit. `foreground_echo_returns_output` c
 declaration's boundary line.
 [execution_settings.rs](../../../../crates/dim-app-server/tests/transport_flow/execution_settings.rs):
 `execution_settings_decide_the_next_process_boundary` writes the switches over the client
-methods, then runs a sandboxed command that cannot write outside the workspace and the same
-command with the sandbox off.
+methods, checks the backend report against the platform, covers an unreadable source failing
+preparation, then runs a sandboxed command with Network off and on that cannot write outside the
+workspace, and the same command with the sandbox off.
 
 <!-- generated:plugin HostPlatform — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

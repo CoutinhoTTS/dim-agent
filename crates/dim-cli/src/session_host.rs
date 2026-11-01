@@ -23,8 +23,8 @@ use crate::client::{self, Client, Message};
 use crate::model::session::{
     Account, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, EmptyProvider,
     EmptyReason, ExecutionSnapshot, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
-    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem,
-    SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
+    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SandboxBackend,
+    SessionItem, SessionPort, SubagentModelPolicy, SwitchKind, Update, Usage,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -1261,6 +1261,14 @@ impl Worker {
                         .map_err(|error| error.to_string())
                         .and_then(execution_snapshot);
                     self.send(Update::Isolation(result));
+                    if self.client.supports(&["host.execution.backend"]) {
+                        let backend = self
+                            .client
+                            .typed::<SandboxBackend>("host.execution.backend", json!({}))
+                            .await
+                            .map_err(|error| error.to_string());
+                        self.send(Update::IsolationBackend(backend));
+                    }
                 }
             }
             Command::SaveIsolation {

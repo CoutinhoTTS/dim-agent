@@ -1,4 +1,4 @@
-use crate::model::session::ExecutionSnapshot;
+use crate::model::session::{ExecutionSnapshot, SandboxBackend};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
 use crate::ui::render::panel::confirm_panel;
@@ -9,6 +9,7 @@ pub struct IsolationPanel {
     list: ListPanel,
     snapshot: Option<ExecutionSnapshot>,
     draft: Option<ExecutionSnapshot>,
+    backend: Option<SandboxBackend>,
     busy: bool,
     message: Option<String>,
     confirm_reset: bool,
@@ -21,6 +22,7 @@ impl IsolationPanel {
             list: Self::list(),
             snapshot: None,
             draft: None,
+            backend: None,
             busy: true,
             message: None,
             confirm_reset: false,
@@ -56,6 +58,15 @@ impl IsolationPanel {
         self.refresh();
     }
 
+    /// The host's sandbox-backend answer; the read happens with the switches.
+    /// A failed read adds no line and leaves the switches usable.
+    pub fn set_backend(&mut self, result: Result<SandboxBackend, String>) {
+        if let Ok(backend) = result {
+            self.backend = Some(backend);
+            self.refresh();
+        }
+    }
+
     fn dirty(&self) -> bool {
         match (&self.snapshot, &self.draft) {
             (Some(snapshot), Some(draft)) => {
@@ -69,6 +80,11 @@ impl IsolationPanel {
         let mut items = Vec::new();
         if let Some(message) = &self.message {
             items.push(Item::heading(message));
+        }
+        if let Some(SandboxBackend::Unavailable { reason }) = &self.backend {
+            items.push(Item::heading(format!(
+                "Sandbox is unavailable on this host: {reason}"
+            )));
         }
         if let (Some(_snapshot), Some(draft)) = (&self.snapshot, &self.draft) {
             items.push(Item::new(

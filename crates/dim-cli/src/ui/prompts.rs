@@ -441,19 +441,18 @@ impl PermissionPrompt {
         )
     }
 
-    /// The grant a prompt may offer. `write` and `edit` both name a file, so
-    /// the kind does not depend on the client's filesystem: the daemon
-    /// resolves the path against the Session workspace. Reads never ask, so
-    /// they have no grant to offer.
+    /// The grant a prompt may offer. `read`, `write` and `edit` all name a
+    /// file, so the kind does not depend on the client's filesystem: the
+    /// daemon resolves the path against the Session workspace.
     fn grant_for(tool: &str, input: &Value) -> Option<crate::model::session::GrantRequest> {
-        if !matches!(tool, "write" | "edit") {
+        if !matches!(tool, "read" | "write" | "edit") {
             return None;
         }
         let path = input.get("path")?.as_str()?.to_owned();
         Some(crate::model::session::GrantRequest {
             path,
             kind: "file".into(),
-            mode: "write".into(),
+            mode: if tool == "read" { "read" } else { "write" }.into(),
         })
     }
 
@@ -1556,8 +1555,22 @@ mod tests {
             Effect::FullAccess { .. }
         ));
 
-        assert!(PermissionPrompt::grant_for("read", &serde_json::json!({"path": "a"})).is_none());
-        assert!(PermissionPrompt::grant_for("write", &serde_json::json!({"path": "a"})).is_some());
+        let read = PermissionPrompt::grant_for("read", &serde_json::json!({"path": "a"})).unwrap();
+        assert_eq!(
+            (read.path.as_str(), read.kind.as_str(), read.mode.as_str()),
+            ("a", "file", "read")
+        );
+        let write =
+            PermissionPrompt::grant_for("write", &serde_json::json!({"path": "a"})).unwrap();
+        assert_eq!(
+            (
+                write.path.as_str(),
+                write.kind.as_str(),
+                write.mode.as_str()
+            ),
+            ("a", "file", "write")
+        );
+        assert!(PermissionPrompt::grant_for("exec", &serde_json::json!({"path": "a"})).is_none());
     }
 
     #[test]

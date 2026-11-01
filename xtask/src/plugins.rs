@@ -13,7 +13,8 @@ use dim_agent_capabilities::{
     file_storage::FileStorage,
     file_storage::FileStoragePlugin,
     host::{
-        PutSessionFile, SessionFileError, SessionFileErrorCode, SessionFilesHost, StoredSessionFile,
+        SessionFileError, SessionFileErrorCode, SessionFilesHost, SessionFilesService,
+        StoredSessionFile,
     },
     host_platform::{HostPlatform, ShellStatus},
     model_provider::ModelProviderPlugin,
@@ -89,7 +90,7 @@ impl DynPlugin for GraphPlatform {
 /// Graph-only `sessionFiles`, which SessionStore provides in a host with
 /// native storage. The graph stores no files.
 struct GraphFiles;
-impl PutSessionFile for GraphFiles {
+impl SessionFilesService for GraphFiles {
     fn put(
         &self,
         _: String,
@@ -110,6 +111,20 @@ impl PutSessionFile for GraphFiles {
                 message: "Graph generation stores no files".into(),
             })
         })
+    }
+
+    fn owns(
+        &self,
+        _: String,
+        _: std::path::PathBuf,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<bool, SessionFileError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(false) })
     }
 }
 

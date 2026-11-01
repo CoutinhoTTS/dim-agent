@@ -31,6 +31,10 @@ pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellCh
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 
+#[cfg(windows)]
+const WINDOWS_SANDBOX_UNAVAILABLE: &str =
+    "The sandbox has no backend on Windows; turn Sandbox off in /settings > Execution";
+
 /// The declaration line for the tools that start processes; `None` where the
 /// platform has no sandbox backend. It is static because declarations are read
 /// once, while each process start reads the current switches. Only the macOS
@@ -141,6 +145,47 @@ pub enum ShellStatus {
     Unavailable { code: &'static str, reason: String },
 }
 
+/// ADR 014 D1's fixed system roots: the sandbox builder mounts them read-only
+/// and file access treats them as read-only facts. macOS names `/private/etc`
+/// and its `/etc` alias; Windows has no sandbox backend and no roots.
+const PLATFORM_ROOTS: &[&str] = {
+    if cfg!(target_os = "macos") {
+        &[
+            "/System",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/Library/Apple",
+            "/private/etc",
+            "/etc",
+            "/var/select",
+        ]
+    } else if cfg!(unix) {
+        &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
+    } else {
+        &[]
+    }
+};
+
+/// The fixed roots at their requested paths and, where the host resolves a
+/// symlink or firmlink, their canonical forms: the sandbox binds the requested
+/// destination and the facts compare a resolved path.
+fn platform_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for path in PLATFORM_ROOTS {
+        let path = PathBuf::from(path);
+        if !roots.contains(&path) {
+            roots.push(path.clone());
+        }
+        if let Ok(canonical) = std::fs::canonicalize(&path)
+            && !roots.contains(&canonical)
+        {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
 /// Process facts and the source of the exec shell preference.
 #[derive(Clone)]
 pub struct HostPlatform {
@@ -153,6 +198,9 @@ pub struct HostPlatform {
     pub timezone: Option<String>,
     /// Environment of the service process at start; never a client's.
     pub env: Vec<(OsString, OsString)>,
+    /// The fixed system roots, captured when the platform mounts. The sandbox
+    /// and file-access facts read this one list.
+    pub platform_roots: Vec<PathBuf>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<dyn ExecutionSettingsSource>>,
@@ -193,6 +241,14 @@ pub struct ProcessSpec {
 pub struct ProcessSpecError {
     pub code: &'static str,
     pub reason: String,
+}
+
+/// Whether a new process can be sandboxed on this host, or why it cannot. The
+/// Execution row shows this; preparation reads the same backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxBackend {
+    Available,
+    Unavailable { reason: &'static str },
 }
 
 /// What a consumer keeps for a process that
@@ -267,6 +323,7 @@ impl HostPlatform {
             .into(),
             timezone: iana_time_zone::get_timezone().ok(),
             env,
+            platform_roots: platform_roots(),
             shell: Arc::new(Mutex::new(ResolvedShell {
                 config: Ok(None),
                 status: shell,
@@ -337,6 +394,34 @@ impl HostPlatform {
             })
     }
 
+    /// The sandbox backend a new process would use. Preparation reads the same
+    /// backend, so this report and the next process start cannot disagree.
+    #[cfg(windows)]
+    pub fn sandbox_backend(&self) -> SandboxBackend {
+        SandboxBackend::Unavailable {
+            reason: WINDOWS_SANDBOX_UNAVAILABLE,
+        }
+    }
+
+    /// The sandbox backend a new process would use. macOS always has
+    /// `sandbox-exec`.
+    #[cfg(target_os = "macos")]
+    pub fn sandbox_backend(&self) -> SandboxBackend {
+        SandboxBackend::Available
+    }
+
+    /// The sandbox backend a new process would use: the same bubblewrap
+    /// preparation resolves from the captured `PATH`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn sandbox_backend(&self) -> SandboxBackend {
+        match isolation::bubblewrap(&self.env) {
+            Some(_) => SandboxBackend::Available,
+            None => SandboxBackend::Unavailable {
+                reason: isolation::BWRAP_UNAVAILABLE,
+            },
+        }
+    }
+
     #[cfg(windows)]
     pub(crate) async fn prepare_isolated_process(
         &self,
@@ -350,9 +435,7 @@ impl HostPlatform {
         }
         Err(ProcessSpecError {
             code: "isolation_unavailable",
-            reason:
-                "The sandbox has no backend on Windows; turn Sandbox off in /settings > Execution"
-                    .into(),
+            reason: WINDOWS_SANDBOX_UNAVAILABLE.into(),
         })
     }
 }

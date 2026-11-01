@@ -323,6 +323,7 @@ pub fn run_with(
             );
             permission_rules::install(&mut builder);
             crate::session_grants::install(&mut builder);
+            dim_agent_capabilities::file_access::install(&mut builder);
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
