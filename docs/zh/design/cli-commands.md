@@ -175,6 +175,35 @@ login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `-
 `--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
 `--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
 
+### 守护进程启动失败
+
+所有启动守护进程的入口共用 `connect_inner` 里的客户端启动。守护进程是 detached 的，
+stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不解析历史、也不依赖客户端
+可能关闭的管道的通道。启动前 CLI 删除 `<native home>/dimcode.sqlite.startup`；原生 home
+是守护进程自己的 home，即 `<home>/rust`。子进程在客户端连上之前退出时，CLI 读取这份
+说明（最多 16 KiB，且只接受普通文件；Unix 上还要求属于当前用户、组和其他用户都没有
+权限）。Unix 上这套权限就是说明的保护，因为守护进程以 0600 写它；Windows 上 CLI 只
+检查普通文件、大小和首行，边界是 home 目录继承的 ACL。CLI 要求首行是
+`dimcode-startup-failure v1 pid=<child pid>`，去掉正文中除换行和制表符以外的控制字符，
+把正文作为命令的错误返回，并在后面加上 `Details: <native home>/daemon.log`。存储门禁在
+诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
+不符、无法识别还是过旧，以及恢复办法（[原生存储格式 §
+启动不兼容诊断](../../design/appserver/native-storage-format.md#启动不兼容诊断)）。
+没有匹配的说明时保留现有的 `App Server exited (<status>); see ...`。失败的启动读完后
+删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
+改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
+构建或 `--home PATH` 两条路。
+
+```text
+$ dima
+Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
+  Store format: v30
+  Daemon format: v29
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v30, or use --home PATH for a separate environment.
+  Details: /Users/me/.dimcode-alpha/rust/daemon.log
+```
+
 交互式导出解析器读取格式词，把行的其余部分当作字面路径（包括空格），不做 shell 求值或引号展开。
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。

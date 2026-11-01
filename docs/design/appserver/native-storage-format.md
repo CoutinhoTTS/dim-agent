@@ -37,6 +37,93 @@ valid in v29, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
+## 启动不兼容诊断
+
+启动门禁仍然只做拒绝：库被保留，返回的错误文本不变，标记和业务行都不改。为了让
+用户不必打开追加式 `daemon.log` 才知道原因，拒绝时在库旁原子写一份供人阅读的
+启动说明 `<database>.startup`（Unix 上以 0600 创建；Windows 不自定义权限，沿用
+home 目录继承的 ACL；正常打开不写）。说明只描述本次启动看到的路径、标记、当前
+构建支持的格式和恢复办法，不复制历史日志，也不含业务内容或凭据。第一行是
+`dimcode-startup-failure v1 pid=<pid>`，后面是正文。
+
+**为什么是旁路文件，而不是子进程 stderr。** CLI 以 detached 方式启动守护进程：
+`setsid`，stdin/stdout 为 null，stderr 直接追加到 `daemon.log`。守护进程比客户端
+活得久，用管道捕获本次 stderr 会在客户端退出后让守护进程写向已关闭的管道；而
+`daemon.log` 跨多次启动追加，不能可靠地取出“本次启动”的错误。旁路说明是本次启动
+的最小通道：一个私有文件、首行带 PID，CLI 只校验并打印它，不解析日志，也不复制
+业务内容。
+
+“本构建认识的形状”指当前格式的表和索引集合，或某个升级步骤起点的集合：结构完全相符时
+先看标记是否等于该版本，再看是否需要升级。结构不相符时按可读的单一标记分类，下表四行
+互斥。
+
+| 情形 | 判据 | 说明的结论 |
+| --- | --- | --- |
+| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 29） | 本构建读不了这个更新格式的库 |
+| 标记与结构不符 | 结构是本构建认识的形状（当前格式或某个升级起点），但标记行不是该版本的唯一值 | 标记和结构不一致；不诊断为“降级” |
+| 无法识别 | 结构不是本构建认识的形状，且可读的单一标记在本构建接受的范围内（`MIN_FORMAT ≤ version ≤ FORMAT`，已移除的 v14 除外），或没有可读的单一标记 | 结构无法识别；读出标记时一并给出 |
+| 过旧或不再准入 | 结构不是本构建认识的形状，且可读的单一标记低于 `MIN_FORMAT`，或为已移除的 v14 | 该格式不再被这个构建读取 |
+
+正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 29），不写字面量）。
+更新格式：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker>
+  Daemon format: v<format>
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v<marker>, or use --home PATH for a separate environment.
+```
+
+标记与结构不符：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker> (schema is v<schema>)
+  Daemon format: v<format>
+  The store's format marker and schema disagree. Existing data was preserved.
+  Use the build that wrote this store, or use --home PATH for a separate environment.
+```
+
+无法识别（结构不相符，但读出了单一标记）：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker> (unrecognized schema)
+  Daemon format: v<format>
+  The store is not a format this daemon recognizes. Existing data was preserved.
+  Use the build that wrote this store, or use --home PATH for a separate environment.
+```
+
+无法识别（没有可读的单一标记）：
+
+```text
+Cannot open native store <path>.
+  Store format: unrecognized
+  Daemon format: v<format>
+  The store is not a format this daemon recognizes. Existing data was preserved.
+  Use the build that wrote this store, or use --home PATH for a separate environment.
+```
+
+过旧：
+
+```text
+Cannot open native store <path>.
+  Store format: v<marker> (no longer read by this daemon)
+  Daemon format: v<format>
+  This daemon cannot read the store. Existing data was preserved.
+  Use a build that reads v<marker>, or use --home PATH for a separate environment.
+```
+
+`Store format` 行按分支取值的全部情况：标记与结构不符且读出单一标记时写
+`v<marker> (schema is v<schema>)`，否则写 `v<schema> (format marker is missing or ambiguous)`；
+结构不相符时，读出单一标记写 `v<marker>`，读不出则只写 `unrecognized`。
+
+- **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
+- **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
+- **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
+- **验证**：`storage_flow` 用一次性库覆盖全部分支：v30 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v28，以及 v13 结构配 v30 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v29 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+
 ## Current v29 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
