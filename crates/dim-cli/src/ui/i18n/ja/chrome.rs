@@ -233,7 +233,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Nothing is running" => "実行中の処理なし",
         "No queued message" => "キューは空",
         "Only in fullscreen (/tui)" => "全画面のみ（/tui）",
-        "/{name} is not yet available" => "/{name} はまだ利用不可",
         "new session" => "新規セッション",
         "resumed {id} · {count} messages" => "{id} を再開 · {count} 件",
         " · earlier history: /timeline" => " · 過去の履歴：/timeline",
@@ -246,9 +245,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "answer required" => "要回答",
         "permission required" => "要許可",
         "esc interrupt" => "esc 中断",
-        "↑ edit · ctrl+s steer now · /queue" => "↑ 編集 · ctrl+s 今すぐ steer · /queue",
-        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
-            "+{count} 件 · ↑ 編集 · ctrl+s 今すぐ steer · /queue"
+        "shift+← edit last · ctrl+s steer now" => "shift+← 最後をedit · ctrl+s 今すぐ steer",
+        "+{count} more · shift+← edit last · ctrl+s steer now" => {
+            "+{count} 件 · shift+← 最後をedit · ctrl+s 今すぐ steer"
         }
         "Queue ({count})" => "キュー（{count}）",
         "Thinking…" => "思考中…",
@@ -453,14 +452,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Permission needed: {tool}" => "許可が必要：{tool}",
         "Question waiting for your answer" => "回答待ちの質問あり",
         "Notify when agent needs you" => "要対応時に通知",
+        "Show ACP sessions" => "ACP セッションを表示",
         // keys.rs
         "show the key bindings" => "キーバインドを表示",
         "Application keys" => "アプリキー",
-        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
-            "Enter 送信 · Shift+Enter/Ctrl+J 改行 · ↑↓ 履歴"
+        "Enter submit or queue · empty draft: steer first queued · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter 送信またはキュー · 空の下書き: 最初のキューを steer · Shift+Enter/Ctrl+J 改行 · ↑↓ 履歴"
         }
-        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
-            "Ctrl+O/Ctrl+P コマンド · Esc 中断/クリア · Ctrl+S キューを steer · ↑ キューを編集"
+        "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Ctrl+S steer draft or first queued · Shift+← edit last queued" => {
+            "Ctrl+O/Ctrl+P コマンド · Esc 中断、キューのメッセージは入力欄へ戻る · Ctrl+S 下書きまたは最初のキューを steer · Shift+← 最後のキューを編集"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"
@@ -494,6 +494,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "このデーモンはコンテキストの圧縮に対応していません"
         }
         "compact the context of the shown line" => "表示中のラインのコンテキストを圧縮",
+        "follow or change the shown line's goal" => "表示中のラインのゴールを追従または変更",
+        "◎ goal active" => "◎ ゴール実行中",
+        "◎ goal paused" => "◎ ゴール一時停止",
         "Kept verbatim" => "原文のまま保持",
         "Tool effects" => "ツール操作の記録",
         "insufficient space: {parts}" => "空き不足：{parts}",

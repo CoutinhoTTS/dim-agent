@@ -41,6 +41,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `publication` | process | McpPublication | Rust-only | — |
 | `reservedMethods` | process | — | Rust-only | — |
 | `rutis/loader` | process | rutis-loader | yes | `create` async, `reload` async, `remove` async, `status` async |
+| `selectableModelsHost` | process | Provider | Rust-only | — |
 | `serverControl` | process | ServerControl | Rust-only | — |
 | `sessionFilesHost` | process | SessionStore | Rust-only | — |
 | `sessionMetadata` | process | SessionStore | yes | `read` async, `setTitle` async |

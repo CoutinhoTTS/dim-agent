@@ -21,10 +21,10 @@ Exit and suspend require their exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
-remain compatibility aliases when typed directly. Interrupt and steer are reached through
-`Esc` and `Ctrl+S` and are omitted from the menu. The menu only lists slash
-commands: the view actions for picking an earlier message and scrolling to the
-top or bottom are also omitted; `Tab`, `Home` and `End` retain their bindings.
+remain compatibility aliases when typed directly. Run, queue and steer keys are
+omitted from the menu. The menu only lists slash commands: the view actions for
+picking an earlier message and scrolling to the top or bottom are also omitted;
+`Tab`, `Home` and `End` retain their bindings.
 
 ```text
 Commands
@@ -35,13 +35,53 @@ Commands
 / + Enter          -> /exit (completion only)
 /exit + Enter      -> exit
 /permissions + Enter -> permission controls
-
-Esc     interrupt the run
-Ctrl+S  steer with the next queued message
-Tab     pick an earlier message to edit or quote
-Home    scroll to the top (fullscreen, empty draft)
-End     scroll to the bottom (fullscreen, empty draft)
 ```
+
+## Run keys and queue
+
+Queue and steer differ from Codex CLI: `Enter` queues while a run is in progress, and
+`Ctrl+S` steers. The other run keys follow the Codex CLI interaction (checked in its TUI,
+v0.166.0). `Enter` submits when no run is in progress.
+
+```text
+key                 run idle                     run in progress
+Enter               submit                       queue the draft; empty draft:
+                                                 steer the oldest queued message
+Tab                 pick an earlier message      pick an earlier message
+                    (fullscreen)                 (fullscreen)
+Shift+Left          —                            empty draft: take the newest queued
+                                                 message back into the draft
+Esc                 keep the draft               interrupt; every queued message
+                                                 returns to the draft, oldest first
+Ctrl+S              —                            draft not empty: steer the draft;
+                                                 empty: steer the oldest queued message
+Up / Down           input history                input history
+Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
+```
+
+- A queued message runs after the current run ends, one message per run. A
+  steered message joins the current run at its next turn boundary.
+- Taking a message back, and interrupting, withdraw the message through
+  `session.input.withdraw`. The text
+  enters the draft only after the withdrawal is deleted. A message that already left
+  the queue is not put back, and its text is not sent again.
+- Withdrawals of an interrupt are sent before the stop, so the run does not start the
+  next queued message.
+- `Ctrl+C` clears the draft. `Esc` never clears it.
+
+### Queue strip
+
+With a message queued, the strip above the composer draws the queue in a titled border: messages oldest first, the next to run at the top, then a hint naming the keys that act on them. During a run, `Shift+Left` on an empty draft withdraws the newest queued message into the composer to edit. `Ctrl+S` steers the draft, or the oldest queued message when the draft is empty; `Enter` on an empty draft also steers the oldest queued message. Up/Down remain input history. The hint names a command only when the command table has one for the queue, so a typed `/name` it shows runs locally instead of being sent to the model. No command views the queue, so the hint names keys only.
+
+```text
+┌─ Queue (2) ─────────────────────────────────────┐
+│ › fix the failing test in session_host          │
+│ › then update the design note                   │
+│ shift+← edit last · ctrl+s steer now            │
+└────────────────────────────────────────────────┘
+```
+
+A queued message the strip does not show adds its count to the hint: `+3 more · shift+← edit last · ctrl+s steer now`. The strip shows at most five messages and keeps the height it reached while the queue drains.
 
 ## Usage report
 
@@ -72,6 +112,114 @@ below uses synthetic data; an account need not have a 5h window.
 
   Web search  211 / 1,500  14%
   [######----------------------------------]
+```
+
+## Goal
+
+`/goal` reads the goal of the line the client shows and writes it through the methods Goal
+registers. The methods, the marker blocks and the rule that reads the goal belong to
+[Goal](plugins/Goal.md#a2-session-methods) (A.2, A.3) and [Pursuit](plugins/Pursuit.md#3-changes-to-goal);
+this section owns what the native clients do with them. The command is listed in the palette as a
+`session` command, like `/compact`.
+
+| Form | Call |
+| --- | --- |
+| `/goal` | none: the goal in force on the shown line, or that it has none |
+| `/goal OBJECTIVE` | `session.goal.edit` while the goal is active or paused, `session.goal.set` otherwise |
+| `/goal set OBJECTIVE` | `session.goal.set` |
+| `/goal edit OBJECTIVE` | `session.goal.edit` |
+| `/goal pause` | `session.goal.pause` |
+| `/goal resume` | `session.goal.resume` |
+| `/goal clear` | `session.goal.clear` |
+
+Every call names the shown line in `branchId` and replies with its input's `sequence`. A form that
+writes nothing else (`/goal`, `pause`, `resume`, `clear`) takes no further word; otherwise the rest
+of the line is the objective, spaces included. `set` and `edit` also name the objective, so an
+objective that is one of the form words is written after one of them: `/goal set pause` sets the
+objective "pause", and `/goal set set` sets the objective "set".
+
+`/goal OBJECTIVE` writes `edit` only while the goal in force is active or paused: the status, the
+judge and the continuation count stay, and a paused goal stays paused. With no goal, with an
+objective that has no status, or with a goal that completed or blocked, it writes `set`: a finished
+goal is never edited back into work, and a new objective after one starts the next goal — status
+active, the count from the first continuation, and the line works toward it.
+
+`judge` is Pursuit's and no form sends it: a goal set from the terminal is judged by the model, and
+a goal an evaluator judges keeps its judge through `/goal edit`, which writes only the objective.
+A `/pursue` form is Pursuit's later option (§10) and is not part of this contract.
+
+**Reading the goal.** The client folds the goal from the branch events it already reads, by Goal
+A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
+block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
+deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
+arguments prints that fold. Before it picks between `set` and `edit` the client reads the line up
+to its published head, and after a write it reads again before printing: the state shown and the
+method chosen come from the events, never from a guess taken from the reply. The fold starts over
+at the line's own opening — its
+`branch/start`, or the `session/forked` a fork writes after the facts it copied — so a new line has
+no goal and a forked Session's `main` never shows the copied one (Goal §2, A11). A v3 client
+receives that opening, so a fork reads the same here as it does in Goal.
+
+**When Goal is not loaded.** The Session lists the methods it serves (`session.methods`). When
+`session.goal.set` is not among them, `/goal` prints `Goal is not available on this daemon.` and makes
+no call. A daemon that does not advertise `session.methods` is taken at its word until a call
+answers `unknown_method`, which prints the same line. No form submits the typed line as a message:
+a `/goal` that writes sends Goal's own change input, and Goal decides what follows.
+
+**What the clients show.**
+
+```text
+> /goal
+No goal on main.
+
+> /goal Make the CLI tests pass
+Goal set on main · active
+  Make the CLI tests pass
+
+> /goal Keep the CLI tests green
+Goal edited on main · active
+  Keep the CLI tests green
+
+> /goal pause
+Goal paused on main · paused (user)
+  Keep the CLI tests green
+
+> /goal
+Goal on main · paused (user)
+  Keep the CLI tests green
+
+> /goal resume
+Goal resumed on main · active
+  Keep the CLI tests green
+
+> /goal clear
+Goal cleared on main.
+```
+
+The first line names the call that ran, the line the goal belongs to and the status in force;
+`edited` is the form that found a goal and changed only its objective. `evaluator judge` follows
+the status when Pursuit's judge is on the goal. A paused status names its reason: `user`,
+`interrupted`, `limit`, `turn failed` or `evaluation failed`. The objective follows, one line per
+line of it. A cleared goal and a line without one print one line.
+
+The line client and both terminal UI modes print these lines; in the terminal UI they are one
+report in the transcript, so earlier reports stay readable above later ones. The status area
+carries one short element while the shown line follows a goal, and nothing for a completed,
+blocked or cleared one:
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
+  AGENT  ⏵⏵ Ask (legacy)  ◎ goal active  1.8K / 256K              provider/model
+```
+
+Fullscreen draws the same element in the composer's bottom border, beside the run status:
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ › _                                                                          │
+ ╰──── ◎ goal paused   ⏵⏵ Bypass   1.8K / 256K ───── ● main · after message 4 ─╯
 ```
 
 ## Provider accounts
@@ -357,6 +505,7 @@ plugin's source offers neither, and its detail names the plugin.
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
+| `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
@@ -377,6 +526,7 @@ plugin's source offers neither, and its detail names the plugin.
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
+| `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
 | `/permissions` | Open independent File access, Tool approval and Process isolation controls; manage command rules while idle ([permission controls](#permission-controls)). |
 | `/approvals`, `/approval` | Compatibility aliases for `/permissions`; legacy preset arguments remain supported. |
 
@@ -388,12 +538,57 @@ enable|disable` records the workspace in the user-local `hooks-projects`, so a p
 enable itself ([Hooks](plugins/Hooks.md#a7-management-methods)).
 
 Global home, workspace, server and model-profile options retain their current
-meanings and work before or after the command. Existing login/account/logout,
-models, MCP and daemon commands remain available. Existing `--prompt`, piped
-stdin and `--resume` calls retain their behavior; `exec resume` also accepts the
-same existing global options. Supplying the Session twice or the prompt twice
-is an argument error. `--json` serves `exec` and `migration`, and `tui` requires a terminal.
-Help/version and argument errors do not start the daemon.
+meanings and work before or after the command. `--server PATH` names a
+standalone `dim-app-server` binary, which the CLI runs by its own name; the
+default instead runs this executable's `app-server` subcommand, so naming this
+executable is an error. A path that does not exist, a program that exits
+before serving, or one that does not start serving in time is reported with the
+same requirement, unless it left a [startup note](#daemon-startup-failure).
+Existing login/account/logout, models, MCP and daemon commands remain
+available. Existing `--prompt`, piped stdin and `--resume` calls retain their
+behavior; `exec resume` also accepts the same existing global options.
+Supplying the Session twice or the prompt twice is an argument error. `--json`
+serves `exec` and `migration`, and `tui` requires a terminal. Help/version and
+argument errors do not start the daemon.
+
+### Daemon startup failure
+
+All entries that start a daemon share the client startup in `connect_inner`.
+The daemon is detached and its stderr is the append-only `daemon.log`, so a
+per-launch note is the only channel that does not parse history or depend on a
+pipe the client may close. Before spawning, the CLI removes
+`<native home>/dimcode.sqlite.startup`, where the native home is the daemon's
+own home, `<home>/rust`. When the spawned daemon exits before the client
+connects, the CLI reads that note (at most 16 KiB, and only a regular
+file; on Unix it must also be owned by the current user and offer no group or
+other permissions). On Unix that mode is the note's protection, since the
+daemon writes it 0600; on Windows the client checks only the regular file, its
+size and the header, and the private home's inherited ACL is the boundary. It
+requires the `dimcode-startup-failure v1 pid=<child pid>` header, removes
+control characters other than newline and tab from the body, and returns it as
+the command's error followed by `Details: <native home>/daemon.log`. The
+storage gate writes the note on a diagnosed incompatibility and names the
+store, its marker, the daemon's supported format, whether the store is newer,
+mismatched, unrecognized or too old, and the recovery paths ([native storage format §
+startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
+Without a matching note the embedded server reports the existing
+`App Server exited (<status>); see ...`, and a `--server` binary reports that
+the flag must name a standalone `dim-app-server` binary. The failed launch
+removes the note after reading; a successful connection removes any note. The
+CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
+the store, and exits 1.
+Development documentation continues to use `./dev` and its isolated home; the
+terminal note itself names a compatible build or `--home PATH`.
+
+```text
+$ dima
+Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
+  Store format: v30
+  Daemon format: v29
+  This daemon cannot read the store. Existing data was preserved.
+  Run a build supporting v30, or use --home PATH for a separate environment.
+  Details: /Users/me/.dimcode-alpha/rust/daemon.log
+```
 
 The interactive export parser reads the format token and treats the remainder
 of the line as a literal path, including spaces, without shell evaluation or
@@ -776,8 +971,11 @@ Assistant: ...
 [permission] main: File access = Workspace read/write  <- changed by another client
 ```
 
-There is no status line: the scrollback client has no persistent area, and the editor's hint
-line is fixed help text truncated to the terminal width.
+The scrollback client draws a status line under the composer: the agent marker and the
+tool-approval mode (`Ask (legacy)` for the legacy policy), the goal marker, the context use against
+its window, and one slot for the state in force — a notice, a required answer or permission,
+`esc interrupt`, or the background task count. The model, with its effort when both fit, is
+right-aligned on the same line; the line is clipped to the terminal width.
 
 ### Headless execution
 

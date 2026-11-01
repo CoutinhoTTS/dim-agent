@@ -169,8 +169,21 @@ export function readMcpInspection(value: unknown): McpInspection {
     return { state: status, expired: status === "auth_required" ? boolean(state.expired) : undefined, tools: connection.tools === null ? undefined : array(connection.tools, readMcpTool) }
   }) }
 }
-export function readMcpTest(value: unknown): { tools: McpTool[] } {
-  return { tools: array(object(value).tools, readMcpTool) }
+export type McpProbe = {
+  status: "connected" | "authRequired" | "failed"; latencyMs: number
+  tools: McpTool[] | undefined; expired: boolean | undefined; missingScopes: string[] | undefined
+  reason: string | undefined; message: string | undefined
+}
+export function readMcpTest(value: unknown): McpProbe {
+  const source = object(value)
+  return {
+    status: choice(source.status, ["connected", "authRequired", "failed"]),
+    latencyMs: number(source.latencyMs),
+    tools: source.tools === null ? undefined : array(source.tools, readMcpTool),
+    expired: source.expired === undefined ? undefined : boolean(source.expired),
+    missingScopes: source.missingScopes === undefined ? undefined : array(source.missingScopes, string),
+    reason: optionalString(source.reason), message: optionalString(source.message),
+  }
 }
 export function readMcpAuthStart(value: unknown): { attemptId: string; authorizationUrl: string; redirectUri: string; expiresAt: number } {
   const source = object(value)

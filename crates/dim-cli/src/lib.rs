@@ -7,10 +7,13 @@ mod composer;
 mod configure;
 mod display;
 mod export;
+mod goal;
+mod goal_command;
 mod images;
 mod input;
 mod leaf;
 mod login;
+mod maintenance;
 mod management;
 mod management_command;
 mod mcp;
@@ -634,6 +637,10 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         export::timeline(&options, session_id, output.as_deref(), database.as_deref()).await?;
         return Ok(0);
     }
+    if let Action::DaemonVacuum { database } = &options.action {
+        maintenance::vacuum(&options, database.as_deref()).await?;
+        return Ok(0);
+    }
     let images = images::load(&options.images)?;
     let stop = matches!(options.action, Action::DaemonStop);
     let (_, connection) = daemon_link(root, &options, !stop).await?;
@@ -829,6 +836,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::Help
         | Action::Version
         | Action::DaemonStop
+        | Action::DaemonVacuum { .. }
         | Action::Timeline { .. }
         | Action::Web { .. }
         | Action::WebInstall
